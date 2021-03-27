@@ -3,7 +3,6 @@
 #include "Utilities/FindPattern.h"
 #include "../shareddefs.h"
 
-std::vector<Frame> RecordedFrames::Frames;
 Recorder RecordedFrames::recorder;
 Playback RecordedFrames::playback;
 
