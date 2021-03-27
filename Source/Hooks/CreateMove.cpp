@@ -13,22 +13,21 @@ bool __fastcall Hooks::CreateMove(ClientModeShared* thisptr, void* edx, float fr
 	bool is_playback_active = RecordedFrames::playback.IsPlaybackActive();
 	bool is_recording_active = RecordedFrames::recorder.IsRecordingActive();
 
-
+	FrameContainer& recording = RecordedFrames::recorder.GetActiveRecording();
 
 	if (is_recording_active)
-		RecordedFrames::Frames.push_back({ command });
+		recording.push_back({ command });
 
 	if (is_playback_active) {
 		const size_t current_playback_frame = RecordedFrames::playback.GetCurrentFrame();
 
 		try {
-			RecordedFrames::Frames.at(current_playback_frame).Replay(command);
+			recording.at(current_playback_frame).Replay(command);
 			engine->SetViewAngles(command->viewangles);
 
-			if (current_playback_frame + 1 == RecordedFrames::Frames.size()) {
+			if (current_playback_frame + 1 == recording.size()) {
 				RecordedFrames::playback.StopPlayback();
-			}
-			else {
+			} else {
 				RecordedFrames::playback.SetCurrentFrame(current_playback_frame + 1);
 			}
 		}
