@@ -44,7 +44,12 @@ typedef std::vector<Frame> FrameContainer;
 class Recorder {
 private:
 	bool is_recording_active = false;
+	bool is_rerecording_active = false;
+
+	size_t rerecording_start_frame;
+
 	FrameContainer recording_frames;
+	FrameContainer rerecording_frames;
 public:
 	void StartRecording() {
 		this->is_recording_active = true;
@@ -60,6 +65,31 @@ public:
 
 	FrameContainer& GetActiveRecording() {
 		return this->recording_frames;
+	}
+
+	void StartRerecording(size_t start_frame) {
+		this->is_rerecording_active = true;
+		this->rerecording_start_frame = start_frame;
+	}
+
+	void StopRerecording(bool merge = false) {
+		if (merge) {
+			this->recording_frames.erase(this->recording_frames.begin() + (this->rerecording_start_frame + 1), this->recording_frames.end());
+			this->recording_frames.reserve(this->recording_frames.size() + this->rerecording_frames.size());
+			this->recording_frames.insert(this->recording_frames.end(), this->rerecording_frames.begin(), this->rerecording_frames.end());
+		}
+
+		this->is_rerecording_active = false;
+		this->rerecording_start_frame = 0;
+		this->rerecording_frames.clear();
+	}
+
+	bool IsRerecordingActive() const {
+		return this->is_rerecording_active;
+	}
+
+	FrameContainer& GetActiveRerecording() {
+		return this->rerecording_frames;
 	}
 };
 
