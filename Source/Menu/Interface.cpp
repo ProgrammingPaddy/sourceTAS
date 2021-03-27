@@ -9,8 +9,14 @@ void BasehookInterface::OnEndScene() {
 	if (RecordedFrames::recorder.IsRecordingActive()) {
 		if (ImGui::Button("Stop Recording"))
 			RecordedFrames::recorder.StopRecording();
-	}
-	else {
+
+	} else if (RecordedFrames::recorder.IsRerecordingActive()) {
+		if (ImGui::Button("Save Re-recording"))
+			RecordedFrames::recorder.StopRerecording(true);
+
+		if (ImGui::Button("Clear Re-recording"))
+			RecordedFrames::recorder.StopRerecording(false);
+	} else {
 		if (ImGui::Button("Start Recording"))
 			RecordedFrames::recorder.StartRecording();
 
