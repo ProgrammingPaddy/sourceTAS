@@ -35,7 +35,7 @@ void WINAPI basehook_init(LPVOID dll_instance) {
 		FindPattern("shaderapidx9.dll", "A1 ? ? ? ? 50 8B 08 FF 51 0C") + 1
 	);
 	
-	// Initialize our renderer.
+	// Initialize renderer.
 	renderer.Initialize(d3d9_device, FindWindowA("Valve001", NULL));
 }
 
