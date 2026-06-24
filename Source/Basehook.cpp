@@ -75,6 +75,9 @@ DWORD WINAPI basehook_init(LPVOID dll_instance) {
 		clientmode_hook->HookFunction(&Hooks::CreateMove, 21);
 	}
 
+	// Load any previously saved recordings from disk.
+	g_tas.LoadFromDisk();
+
 	// Initialize the renderer on the game window (it finds the device itself).
 	renderer.Initialize(GetGameWindow());
 

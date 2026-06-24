@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 
+#include "Include/cstrike/Structures/Vector.h"   // QAngle, used by CUserCmd
 #include "Include/cstrike/Classes/CUserCmd.h"
 
 // One tick of captured input.
@@ -15,6 +16,8 @@ struct Frame {
 	unsigned char impulse;
 	short mousedx;
 	short mousedy;
+
+	Frame() = default;
 
 	Frame(CUserCmd* cmd) {
 		this->viewangles[0] = cmd->viewangles.X;
@@ -46,6 +49,7 @@ using Segment = std::vector<Frame>;
 
 struct Run {
 	std::string name;
+	std::string filepath;                    // on-disk .tas file ("" if unsaved)
 	std::vector<Segment> segments;
 
 	size_t FrameCount() const {
@@ -73,12 +77,15 @@ enum class TasState {
 //   - Segment edits (save / overwrite / delete-previous) only apply while
 //     recording, and never touch finalized runs (which are immutable).
 //   - Overwrite discards the *current* (active, uncommitted) segment and restarts
-//     it. Delete removes the most recently committed segment, repeatedly.
+//     it. Delete removes the most recently committed segment, repeatably.
 //   - Empty segments are never saved.
 //   - Frames are per-tick, so the run is inherently gapless: deciding what to do
 //     between captures records nothing, and segments replay back to back.
 //   - Playback only writes the CUserCmd; hotkeys come from the keyboard hook, so
 //     replayed input can never drive the engine. Emergency stop always wins.
+//
+// Finalized runs persist to disk (Documents\sourceTAS\recordings\*.tas) and are
+// reloaded on startup. Disk methods live in Source/Recording/RecordingStore.cpp.
 class TasEngine {
 private:
 	TasState state = TasState::Idle;
@@ -130,6 +137,12 @@ public:
 	size_t PlaybackPosition() const { return playback_pos; }
 	size_t PlaybackTotal() const { return playback_total; }
 
+	// --- persistence (defined in RecordingStore.cpp) --------------------
+	void LoadFromDisk();          // populate the library from disk on startup
+	void PersistSelected();       // write the selected run to disk
+	bool RenameSelected(const char* newName);
+	void DeleteSelected();
+
 	// --- selection (run mode only) --------------------------------------
 	void Select(int index) {
 		if (state != TasState::Idle) { status = "Can't change selection now."; return; }
@@ -155,7 +168,6 @@ public:
 		status = "Recording... (Save Segment to split, Stop & Save to finish)";
 	}
 
-	// Commit the active segment as a boundary and keep recording.
 	void SaveSegment() {
 		if (state != TasState::Recording) return;
 		if (active_segment.empty()) {
@@ -167,8 +179,6 @@ public:
 		active_segment.clear();
 	}
 
-	// Discard the current (uncommitted) segment and start it over; committed
-	// segments are untouched, so the replacement lands at the same boundary.
 	void OverwriteCurrentSegment() {
 		if (state != TasState::Recording) return;
 		const size_t discarded = active_segment.size();
@@ -176,7 +186,6 @@ public:
 		status = "Overwriting current segment (discarded " + std::to_string(discarded) + " frames).";
 	}
 
-	// Remove the most recently committed segment; repeatable.
 	void DeletePreviousSegment() {
 		if (state != TasState::Recording) return;
 		if (session_segments.empty()) { status = "No previous segment to delete."; return; }
@@ -186,9 +195,10 @@ public:
 			+ std::to_string(session_segments.size()) + " left).";
 	}
 
-	// Finalize the session into an immutable run and select it.
-	void StopRecordingAndSave() {
-		if (state != TasState::Recording) return;
+	// Finalize the session into an immutable run and select it. Returns true if a
+	// run was created (the caller then persists it to disk).
+	bool StopRecordingAndSave() {
+		if (state != TasState::Recording) return false;
 
 		if (!active_segment.empty()) {
 			session_segments.push_back(active_segment);
@@ -204,7 +214,7 @@ public:
 
 		if (run.segments.empty()) {
 			status = "Stopped - nothing captured, no run saved.";
-			return;
+			return false;
 		}
 
 		run.name = "Run " + std::to_string(++run_counter);
@@ -212,6 +222,7 @@ public:
 			+ std::to_string(run.FrameCount()) + " frames).";
 		library.push_back(run);
 		selected = static_cast<int>(library.size()) - 1;
+		return true;
 	}
 
 	// --- playback --------------------------------------------------------
@@ -230,7 +241,6 @@ public:
 		status = "Playing " + run->name + "...";
 	}
 
-	// Always wins: abort whatever is happening and release held virtual input.
 	void EmergencyStop() {
 		const char* message =
 			state == TasState::Playback ? "Emergency stop - playback aborted." :

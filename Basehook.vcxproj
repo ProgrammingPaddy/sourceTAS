@@ -92,6 +92,7 @@
     <ClCompile Include="Source\Basehook.cpp" />
     <ClCompile Include="Source\Hooks\CreateMove.cpp" />
     <ClCompile Include="Source\Menu\Interface.cpp" />
+    <ClCompile Include="Source\Recording\RecordingStore.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="shareddefs.h" />

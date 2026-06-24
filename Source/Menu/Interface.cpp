@@ -2,6 +2,7 @@
 #include "../../shareddefs.h"
 
 #include <cstdio>
+#include <cstring>
 
 namespace {
 	// A run command, its bound hotkey, and the state(s) it is allowed in.
@@ -23,7 +24,7 @@ namespace {
 		{ "Save Segment", 0, [] { return Recording(); }, [] { g_tas.SaveSegment(); } },
 		{ "Overwrite Current Segment", 0, [] { return Recording(); }, [] { g_tas.OverwriteCurrentSegment(); } },
 		{ "Delete Previous Segment", 0, [] { return Recording(); }, [] { g_tas.DeletePreviousSegment(); } },
-		{ "Stop & Save Recording", 0, [] { return Recording(); }, [] { g_tas.StopRecordingAndSave(); } },
+		{ "Stop & Save Recording", 0, [] { return Recording(); }, [] { if (g_tas.StopRecordingAndSave()) g_tas.PersistSelected(); } },
 		{ "Play Selected Recording", 0, [] { return Idle(); }, [] { g_tas.PlaySelected(); } },
 		{ "Select Next Recording", 0, [] { return Idle(); }, [] { g_tas.SelectNext(); } },
 		{ "Emergency Stop", 0, [] { return true; }, [] { g_tas.EmergencyStop(); } },
@@ -121,6 +122,37 @@ void BasehookInterface::OnEndScene() {
 		}
 	}
 	ImGui::EndChild();
+
+	// Rename / delete the selected run (run mode only; finalized runs are
+	// otherwise immutable). Renaming renames the .tas file on disk.
+	if (g_tas.State() == TasState::Idle && g_tas.Selected() >= 0
+		&& g_tas.Selected() < static_cast<int>(library.size())) {
+		static int synced = -1;
+		static char name_buffer[128] = "";
+		const int sel = g_tas.Selected();
+		if (synced != sel) {
+			synced = sel;
+			strncpy_s(name_buffer, sizeof(name_buffer), library[sel].name.c_str(), _TRUNCATE);
+		}
+
+		ImGui::PushItemWidth(250);
+		if (ImGui::InputText("##rename", name_buffer, sizeof(name_buffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
+			g_tas.RenameSelected(name_buffer);
+			synced = -1;
+		}
+		ImGui::PopItemWidth();
+		ImGui::SameLine();
+		if (ImGui::Button("Rename")) {
+			g_tas.RenameSelected(name_buffer);
+			synced = -1;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Delete")) {
+			g_tas.DeleteSelected();
+			synced = -1;
+		}
+	}
+
 	ImGui::Separator();
 
 	// --- actions + hotkeys ----------------------------------------------
