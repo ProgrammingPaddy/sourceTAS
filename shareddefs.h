@@ -62,27 +62,38 @@ struct Run {
 
 enum class TasState {
 	Idle,        // run mode: nothing capturing or replaying, hotkeys live
-	Recording,   // actively capturing the active segment
+	Recording,   // a continuous capture session is active
 	Playback     // replaying the selected run
 };
 
-// Owns the recording/playback state machine. The rules deliberately favour
-// predictable behaviour: no recording during playback, no playback while
-// recording, and emergency stop always wins. Playback only writes into the
-// CUserCmd; it never feeds hotkeys, so replayed input cannot drive the engine.
+// Owns the recording/playback state machine, mirroring the hardware TAS tool:
+//
+//   - Recording is ONE continuous session. "Save Segment" commits a boundary and
+//     keeps recording; "Stop & Save" finalizes the whole run into the library.
+//   - Segment edits (save / overwrite / delete-previous) only apply while
+//     recording, and never touch finalized runs (which are immutable).
+//   - Overwrite discards the *current* (active, uncommitted) segment and restarts
+//     it. Delete removes the most recently committed segment, repeatedly.
+//   - Empty segments are never saved.
+//   - Frames are per-tick, so the run is inherently gapless: deciding what to do
+//     between captures records nothing, and segments replay back to back.
+//   - Playback only writes the CUserCmd; hotkeys come from the keyboard hook, so
+//     replayed input can never drive the engine. Emergency stop always wins.
 class TasEngine {
 private:
 	TasState state = TasState::Idle;
 
-	std::vector<Run> library;        // saved runs
-	int selected = -1;               // index used by playback / appended to
-	int run_counter = 0;             // for auto-naming new runs
+	// Active recording session (separate from the immutable library until saved).
+	std::vector<Segment> session_segments;   // committed boundaries this session
+	Segment active_segment;                  // current, not-yet-committed capture
 
-	Segment active_segment;          // captured while Recording
+	std::vector<Run> library;                // finalized, immutable runs
+	int selected = -1;                       // run used by playback
+	int run_counter = 0;                     // for auto-naming
 
-	int playback_segment = 0;        // position within the selected run
+	int playback_segment = 0;
 	size_t playback_frame = 0;
-	size_t playback_pos = 0;         // flattened progress, for display
+	size_t playback_pos = 0;                  // flattened progress, for display
 	size_t playback_total = 0;
 
 	std::string status = "Idle.";
@@ -93,7 +104,6 @@ private:
 		return nullptr;
 	}
 
-	// Advance the playback cursor past any empty segments.
 	void SkipEmptyPlaybackSegments(const Run& run) {
 		while (playback_segment < static_cast<int>(run.segments.size())
 			&& playback_frame >= run.segments[playback_segment].size()) {
@@ -116,19 +126,11 @@ public:
 	const std::vector<Run>& Library() const { return library; }
 	int Selected() const { return selected; }
 	size_t ActiveSegmentSize() const { return active_segment.size(); }
+	size_t SessionSegmentCount() const { return session_segments.size(); }
 	size_t PlaybackPosition() const { return playback_pos; }
 	size_t PlaybackTotal() const { return playback_total; }
 
 	// --- selection (run mode only) --------------------------------------
-	void NewRun() {
-		if (state != TasState::Idle) { status = "Finish the current action first."; return; }
-		Run run;
-		run.name = "Run " + std::to_string(++run_counter);
-		library.push_back(run);
-		selected = static_cast<int>(library.size()) - 1;
-		status = "Created " + run.name + ".";
-	}
-
 	void Select(int index) {
 		if (state != TasState::Idle) { status = "Can't change selection now."; return; }
 		if (index >= 0 && index < static_cast<int>(library.size())) {
@@ -144,55 +146,75 @@ public:
 		status = "Selected " + library[selected].name + ".";
 	}
 
-	// --- transitions -----------------------------------------------------
+	// --- recording session ----------------------------------------------
 	void StartRecording() {
 		if (state != TasState::Idle) return;
-		if (selected < 0)
-			NewRun();                       // record into a fresh run
+		session_segments.clear();
 		active_segment.clear();
 		state = TasState::Recording;
-		status = "Recording into " + SelectedRun()->name + "...";
+		status = "Recording... (Save Segment to split, Stop & Save to finish)";
 	}
 
-	void StopSegment() {
+	// Commit the active segment as a boundary and keep recording.
+	void SaveSegment() {
+		if (state != TasState::Recording) return;
+		if (active_segment.empty()) {
+			status = "Active segment is empty - nothing saved.";
+			return;
+		}
+		status = "Segment saved (" + std::to_string(active_segment.size()) + " frames); new segment started.";
+		session_segments.push_back(active_segment);
+		active_segment.clear();
+	}
+
+	// Discard the current (uncommitted) segment and start it over; committed
+	// segments are untouched, so the replacement lands at the same boundary.
+	void OverwriteCurrentSegment() {
+		if (state != TasState::Recording) return;
+		const size_t discarded = active_segment.size();
+		active_segment.clear();
+		status = "Overwriting current segment (discarded " + std::to_string(discarded) + " frames).";
+	}
+
+	// Remove the most recently committed segment; repeatable.
+	void DeletePreviousSegment() {
+		if (state != TasState::Recording) return;
+		if (session_segments.empty()) { status = "No previous segment to delete."; return; }
+		const size_t removed = session_segments.back().size();
+		session_segments.pop_back();
+		status = "Deleted previous segment (" + std::to_string(removed) + " frames; "
+			+ std::to_string(session_segments.size()) + " left).";
+	}
+
+	// Finalize the session into an immutable run and select it.
+	void StopRecordingAndSave() {
 		if (state != TasState::Recording) return;
 
-		if (active_segment.empty()) {
-			status = "Empty segment - nothing saved.";
-		} else if (Run* run = SelectedRun()) {
-			status = "Saved segment (" + std::to_string(active_segment.size()) + " frames, "
-				+ std::to_string(run->segments.size() + 1) + " total).";
-			run->segments.push_back(active_segment);
+		if (!active_segment.empty()) {
+			session_segments.push_back(active_segment);
+			active_segment.clear();
 		}
 
-		active_segment.clear();
+		Run run;
+		for (const Segment& segment : session_segments)
+			if (!segment.empty())
+				run.segments.push_back(segment);
+		session_segments.clear();
 		state = TasState::Idle;
+
+		if (run.segments.empty()) {
+			status = "Stopped - nothing captured, no run saved.";
+			return;
+		}
+
+		run.name = "Run " + std::to_string(++run_counter);
+		status = "Saved " + run.name + " (" + std::to_string(run.segments.size()) + " seg, "
+			+ std::to_string(run.FrameCount()) + " frames).";
+		library.push_back(run);
+		selected = static_cast<int>(library.size()) - 1;
 	}
 
-	void DeletePreviousSegment() {
-		if (state != TasState::Idle) return;
-		Run* run = SelectedRun();
-		if (!run || run->segments.empty()) { status = "No segment to delete."; return; }
-
-		const size_t removed = run->segments.back().size();
-		run->segments.pop_back();
-		status = "Deleted segment (" + std::to_string(removed) + " frames, "
-			+ std::to_string(run->segments.size()) + " left).";
-	}
-
-	void OverwritePreviousSegment() {
-		if (state != TasState::Idle) return;
-		Run* run = SelectedRun();
-		if (!run || run->segments.empty()) { status = "No segment to overwrite."; return; }
-
-		// Discard the target and record its replacement at the same boundary;
-		// the decision time spent here is never captured, so no dead gap forms.
-		run->segments.pop_back();
-		active_segment.clear();
-		state = TasState::Recording;
-		status = "Overwriting last segment - recording replacement...";
-	}
-
+	// --- playback --------------------------------------------------------
 	void PlaySelected() {
 		if (state != TasState::Idle) return;
 		Run* run = SelectedRun();
@@ -210,10 +232,14 @@ public:
 
 	// Always wins: abort whatever is happening and release held virtual input.
 	void EmergencyStop() {
-		const bool was_busy = (state != TasState::Idle);
-		active_segment.clear();              // drop any in-progress capture
+		const char* message =
+			state == TasState::Playback ? "Emergency stop - playback aborted." :
+			state == TasState::Recording ? "Emergency stop - recording discarded." :
+			"Released all.";
+		session_segments.clear();
+		active_segment.clear();
 		state = TasState::Idle;
-		status = was_busy ? "Emergency stop - released all." : "Released all.";
+		status = message;
 	}
 
 	// --- per-tick (called from CreateMove) ------------------------------
@@ -222,8 +248,6 @@ public:
 			active_segment.push_back(Frame(cmd));
 	}
 
-	// Writes the next recorded frame into cmd. Returns true if a frame was
-	// applied (the caller then commits the view angles).
 	bool ReplayFrame(CUserCmd* cmd) {
 		if (state != TasState::Playback)
 			return false;

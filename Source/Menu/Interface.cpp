@@ -5,8 +5,9 @@
 
 namespace {
 	// A run command, its bound hotkey, and the state(s) it is allowed in.
-	// available() gates BOTH the menu button and hotkey dispatch, which is what
-	// enforces the safety rules (e.g. only Emergency Stop is allowed in Playback).
+	// available() gates BOTH the menu button and hotkey dispatch, which enforces
+	// the safety rules (only Emergency Stop in Playback; segment edits only while
+	// recording). The set mirrors the hardware tool's HotkeyAction list.
 	struct TasCommand {
 		const char* name;
 		int key;                 // virtual-key code; 0 = unbound
@@ -14,34 +15,18 @@ namespace {
 		void (*execute)();
 	};
 
+	bool Idle()      { return g_tas.State() == TasState::Idle; }
+	bool Recording() { return g_tas.State() == TasState::Recording; }
+
 	TasCommand g_commands[] = {
-		{ "Start Recording", 0,
-			[] { return g_tas.State() == TasState::Idle; },
-			[] { g_tas.StartRecording(); } },
-
-		{ "Stop / Save Segment", 0,
-			[] { return g_tas.State() == TasState::Recording; },
-			[] { g_tas.StopSegment(); } },
-
-		{ "Delete Previous Segment", 0,
-			[] { return g_tas.State() == TasState::Idle; },
-			[] { g_tas.DeletePreviousSegment(); } },
-
-		{ "Overwrite Previous Segment", 0,
-			[] { return g_tas.State() == TasState::Idle; },
-			[] { g_tas.OverwritePreviousSegment(); } },
-
-		{ "Play Selected Recording", 0,
-			[] { return g_tas.State() == TasState::Idle; },
-			[] { g_tas.PlaySelected(); } },
-
-		{ "Select Next Recording", 0,
-			[] { return g_tas.State() == TasState::Idle; },
-			[] { g_tas.SelectNext(); } },
-
-		{ "Emergency Stop / Release All", 0,
-			[] { return true; },
-			[] { g_tas.EmergencyStop(); } },
+		{ "Start Recording", 0, [] { return Idle(); }, [] { g_tas.StartRecording(); } },
+		{ "Save Segment", 0, [] { return Recording(); }, [] { g_tas.SaveSegment(); } },
+		{ "Overwrite Current Segment", 0, [] { return Recording(); }, [] { g_tas.OverwriteCurrentSegment(); } },
+		{ "Delete Previous Segment", 0, [] { return Recording(); }, [] { g_tas.DeletePreviousSegment(); } },
+		{ "Stop & Save Recording", 0, [] { return Recording(); }, [] { g_tas.StopRecordingAndSave(); } },
+		{ "Play Selected Recording", 0, [] { return Idle(); }, [] { g_tas.PlaySelected(); } },
+		{ "Select Next Recording", 0, [] { return Idle(); }, [] { g_tas.SelectNext(); } },
+		{ "Emergency Stop", 0, [] { return true; }, [] { g_tas.EmergencyStop(); } },
 	};
 
 	constexpr int kCommandCount = static_cast<int>(sizeof(g_commands) / sizeof(g_commands[0]));
@@ -49,13 +34,11 @@ namespace {
 	// Index of the command currently capturing a key, or -1 when not rebinding.
 	int g_binding = -1;
 
-	// Window flags for a small, click-through-ish status overlay.
 	const ImGuiWindowFlags kOverlayFlags =
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
 		ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize |
 		ImGuiWindowFlags_NoSavedSettings;
 
-	// Human-readable name for a virtual-key code.
 	const char* KeyName(int vk) {
 		if (vk == 0)
 			return "Unbound";
@@ -92,7 +75,8 @@ void BasehookInterface::OnEndScene() {
 			ImGui::SetNextWindowPos(ImVec2(12, 12));
 			ImGui::Begin("##stas_indicator", nullptr, kOverlayFlags);
 			if (g_tas.IsRecording())
-				ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "REC   %d frames", static_cast<int>(g_tas.ActiveSegmentSize()));
+				ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "REC   seg %d   +%d frames",
+					static_cast<int>(g_tas.SessionSegmentCount()), static_cast<int>(g_tas.ActiveSegmentSize()));
 			else
 				ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "PLAY   %d / %d",
 					static_cast<int>(g_tas.PlaybackPosition()), static_cast<int>(g_tas.PlaybackTotal()));
@@ -110,7 +94,8 @@ void BasehookInterface::OnEndScene() {
 	ImGui::Text("State: %s", state_name);
 
 	if (g_tas.IsRecording())
-		ImGui::Text("Active segment: %d frames", static_cast<int>(g_tas.ActiveSegmentSize()));
+		ImGui::Text("Session: %d committed segment(s), %d frames in current",
+			static_cast<int>(g_tas.SessionSegmentCount()), static_cast<int>(g_tas.ActiveSegmentSize()));
 	else if (g_tas.IsPlaying())
 		ImGui::Text("Progress: %d / %d frames",
 			static_cast<int>(g_tas.PlaybackPosition()), static_cast<int>(g_tas.PlaybackTotal()));
@@ -118,15 +103,12 @@ void BasehookInterface::OnEndScene() {
 	ImGui::TextWrapped("%s", g_tas.Status());
 	ImGui::Separator();
 
-	// --- recordings library ---------------------------------------------
-	ImGui::Text("Recordings");
-	if (ImGui::Button("New Run"))
-		g_tas.NewRun();
-
-	ImGui::BeginChild("runs", ImVec2(0, 130), true);
+	// --- recordings library (finalized, immutable runs) -----------------
+	ImGui::Text("Recordings  (select one to play)");
+	ImGui::BeginChild("runs", ImVec2(0, 120), true);
 	const std::vector<Run>& library = g_tas.Library();
 	if (library.empty()) {
-		ImGui::TextDisabled("(none yet - press New Run or Start Recording)");
+		ImGui::TextDisabled("(none yet - Start Recording to make one)");
 	} else {
 		for (int i = 0; i < static_cast<int>(library.size()); ++i) {
 			char label[160];
