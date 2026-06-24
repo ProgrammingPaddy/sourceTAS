@@ -1,6 +1,11 @@
 #pragma once
+
+#include <vector>
+#include <string>
+
 #include "Include/cstrike/Classes/CUserCmd.h"
 
+// One tick of captured input.
 struct Frame {
 	float viewangles[2];
 	float forwardmove;
@@ -23,7 +28,7 @@ struct Frame {
 		this->mousedy = cmd->mousedy;
 	}
 
-	void Replay(CUserCmd* cmd) {
+	void Replay(CUserCmd* cmd) const {
 		cmd->viewangles.X = this->viewangles[0];
 		cmd->viewangles.Y = this->viewangles[1];
 		cmd->forwardmove = this->forwardmove;
@@ -34,100 +39,212 @@ struct Frame {
 		cmd->mousedx = this->mousedx;
 		cmd->mousedy = this->mousedy;
 	}
-
 };
 
+// A run is an ordered list of segments; a segment is a contiguous capture.
+using Segment = std::vector<Frame>;
 
+struct Run {
+	std::string name;
+	std::vector<Segment> segments;
 
-typedef std::vector<Frame> FrameContainer;
+	size_t FrameCount() const {
+		size_t total = 0;
+		for (const Segment& segment : segments)
+			total += segment.size();
+		return total;
+	}
 
-class Recorder {
+	bool Empty() const {
+		return FrameCount() == 0;
+	}
+};
+
+enum class TasState {
+	Idle,        // run mode: nothing capturing or replaying, hotkeys live
+	Recording,   // actively capturing the active segment
+	Playback     // replaying the selected run
+};
+
+// Owns the recording/playback state machine. The rules deliberately favour
+// predictable behaviour: no recording during playback, no playback while
+// recording, and emergency stop always wins. Playback only writes into the
+// CUserCmd; it never feeds hotkeys, so replayed input cannot drive the engine.
+class TasEngine {
 private:
-	bool is_recording_active = false;
-	bool is_rerecording_active = false;
+	TasState state = TasState::Idle;
 
-	size_t rerecording_start_frame;
+	std::vector<Run> library;        // saved runs
+	int selected = -1;               // index used by playback / appended to
+	int run_counter = 0;             // for auto-naming new runs
 
-	FrameContainer recording_frames;
-	FrameContainer rerecording_frames;
+	Segment active_segment;          // captured while Recording
+
+	int playback_segment = 0;        // position within the selected run
+	size_t playback_frame = 0;
+	size_t playback_pos = 0;         // flattened progress, for display
+	size_t playback_total = 0;
+
+	std::string status = "Idle.";
+
+	Run* SelectedRun() {
+		if (selected >= 0 && selected < static_cast<int>(library.size()))
+			return &library[selected];
+		return nullptr;
+	}
+
+	// Advance the playback cursor past any empty segments.
+	void SkipEmptyPlaybackSegments(const Run& run) {
+		while (playback_segment < static_cast<int>(run.segments.size())
+			&& playback_frame >= run.segments[playback_segment].size()) {
+			playback_segment++;
+			playback_frame = 0;
+		}
+	}
+
+	void FinishPlayback(const char* message) {
+		state = TasState::Idle;
+		status = message;
+	}
+
 public:
+	// --- queries ---------------------------------------------------------
+	TasState State() const { return state; }
+	bool IsRecording() const { return state == TasState::Recording; }
+	bool IsPlaying() const { return state == TasState::Playback; }
+	const char* Status() const { return status.c_str(); }
+	const std::vector<Run>& Library() const { return library; }
+	int Selected() const { return selected; }
+	size_t ActiveSegmentSize() const { return active_segment.size(); }
+	size_t PlaybackPosition() const { return playback_pos; }
+	size_t PlaybackTotal() const { return playback_total; }
+
+	// --- selection (run mode only) --------------------------------------
+	void NewRun() {
+		if (state != TasState::Idle) { status = "Finish the current action first."; return; }
+		Run run;
+		run.name = "Run " + std::to_string(++run_counter);
+		library.push_back(run);
+		selected = static_cast<int>(library.size()) - 1;
+		status = "Created " + run.name + ".";
+	}
+
+	void Select(int index) {
+		if (state != TasState::Idle) { status = "Can't change selection now."; return; }
+		if (index >= 0 && index < static_cast<int>(library.size())) {
+			selected = index;
+			status = "Selected " + library[index].name + ".";
+		}
+	}
+
+	void SelectNext() {
+		if (state != TasState::Idle) return;
+		if (library.empty()) { status = "No recordings to select."; return; }
+		selected = (selected + 1) % static_cast<int>(library.size());
+		status = "Selected " + library[selected].name + ".";
+	}
+
+	// --- transitions -----------------------------------------------------
 	void StartRecording() {
-		this->is_recording_active = true;
+		if (state != TasState::Idle) return;
+		if (selected < 0)
+			NewRun();                       // record into a fresh run
+		active_segment.clear();
+		state = TasState::Recording;
+		status = "Recording into " + SelectedRun()->name + "...";
 	}
 
-	void StopRecording() {
-		this->is_recording_active = false;
-	}
+	void StopSegment() {
+		if (state != TasState::Recording) return;
 
-	bool IsRecordingActive() const {
-		return this->is_recording_active;
-	}
-
-	FrameContainer& GetActiveRecording() {
-		return this->recording_frames;
-	}
-
-	void StartRerecording(size_t start_frame) {
-		this->is_rerecording_active = true;
-		this->rerecording_start_frame = start_frame;
-	}
-
-	void StopRerecording(bool merge = false) {
-		if (merge) {
-			this->recording_frames.erase(this->recording_frames.begin() + (this->rerecording_start_frame + 1), this->recording_frames.end());
-			this->recording_frames.reserve(this->recording_frames.size() + this->rerecording_frames.size());
-			this->recording_frames.insert(this->recording_frames.end(), this->rerecording_frames.begin(), this->rerecording_frames.end());
+		if (active_segment.empty()) {
+			status = "Empty segment - nothing saved.";
+		} else if (Run* run = SelectedRun()) {
+			status = "Saved segment (" + std::to_string(active_segment.size()) + " frames, "
+				+ std::to_string(run->segments.size() + 1) + " total).";
+			run->segments.push_back(active_segment);
 		}
 
-		this->is_rerecording_active = false;
-		this->rerecording_start_frame = 0;
-		this->rerecording_frames.clear();
+		active_segment.clear();
+		state = TasState::Idle;
 	}
 
-	bool IsRerecordingActive() const {
-		return this->is_rerecording_active;
+	void DeletePreviousSegment() {
+		if (state != TasState::Idle) return;
+		Run* run = SelectedRun();
+		if (!run || run->segments.empty()) { status = "No segment to delete."; return; }
+
+		const size_t removed = run->segments.back().size();
+		run->segments.pop_back();
+		status = "Deleted segment (" + std::to_string(removed) + " frames, "
+			+ std::to_string(run->segments.size()) + " left).";
 	}
 
-	FrameContainer& GetActiveRerecording() {
-		return this->rerecording_frames;
+	void OverwritePreviousSegment() {
+		if (state != TasState::Idle) return;
+		Run* run = SelectedRun();
+		if (!run || run->segments.empty()) { status = "No segment to overwrite."; return; }
+
+		// Discard the target and record its replacement at the same boundary;
+		// the decision time spent here is never captured, so no dead gap forms.
+		run->segments.pop_back();
+		active_segment.clear();
+		state = TasState::Recording;
+		status = "Overwriting last segment - recording replacement...";
+	}
+
+	void PlaySelected() {
+		if (state != TasState::Idle) return;
+		Run* run = SelectedRun();
+		if (!run || run->Empty()) { status = "No recording selected to play."; return; }
+
+		playback_segment = 0;
+		playback_frame = 0;
+		playback_pos = 0;
+		playback_total = run->FrameCount();
+		SkipEmptyPlaybackSegments(*run);
+
+		state = TasState::Playback;
+		status = "Playing " + run->name + "...";
+	}
+
+	// Always wins: abort whatever is happening and release held virtual input.
+	void EmergencyStop() {
+		const bool was_busy = (state != TasState::Idle);
+		active_segment.clear();              // drop any in-progress capture
+		state = TasState::Idle;
+		status = was_busy ? "Emergency stop - released all." : "Released all.";
+	}
+
+	// --- per-tick (called from CreateMove) ------------------------------
+	void RecordFrame(CUserCmd* cmd) {
+		if (state == TasState::Recording)
+			active_segment.push_back(Frame(cmd));
+	}
+
+	// Writes the next recorded frame into cmd. Returns true if a frame was
+	// applied (the caller then commits the view angles).
+	bool ReplayFrame(CUserCmd* cmd) {
+		if (state != TasState::Playback)
+			return false;
+
+		Run* run = SelectedRun();
+		if (!run || playback_segment >= static_cast<int>(run->segments.size())) {
+			FinishPlayback("Playback complete.");
+			return false;
+		}
+
+		run->segments[playback_segment][playback_frame].Replay(cmd);
+
+		playback_frame++;
+		playback_pos++;
+		SkipEmptyPlaybackSegments(*run);
+
+		if (playback_segment >= static_cast<int>(run->segments.size()))
+			FinishPlayback("Playback complete.");
+
+		return true;
 	}
 };
 
-class Playback {
-private:
-	bool is_playback_active = false;
-	size_t current_frame = 0;
-	FrameContainer& active_demo = FrameContainer();
-public:
-	void StartPlayback(FrameContainer& frames) {
-		this->is_playback_active = true;
-		this->active_demo = frames;
-	};
-
-	void StopPlayback() {
-		this->is_playback_active = false;
-		this->current_frame = 0;
-	};
-
-	bool IsPlaybackActive() const {
-		return this->is_playback_active;
-	}
-
-	size_t GetCurrentFrame() const {
-		return this->current_frame;
-	};
-
-	void SetCurrentFrame(size_t frame) {
-		this->current_frame = frame;
-	};
-
-	FrameContainer& GetActiveDemo() const {
-		return this->active_demo;
-	}
-};
-
-class RecordedFrames {
-public:
-	static Recorder recorder;
-	static Playback playback;
-};
+extern TasEngine g_tas;

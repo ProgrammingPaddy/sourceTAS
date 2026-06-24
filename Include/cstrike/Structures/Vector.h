@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 struct Vector {
 	float X, Y, Z;
 
