@@ -1,5 +1,6 @@
 #include "Interface.h"
 #include "../../shareddefs.h"
+#include "../World/WorldDraw.h"
 
 #include <cstdio>
 #include <cstring>
@@ -69,6 +70,10 @@ namespace {
 }
 
 void BasehookInterface::OnEndScene() {
+
+	// Queue in-world overlays every frame, independent of the menu. Self-guards
+	// when out of game, so it's safe to call unconditionally here.
+	WorldDraw::Render();
 
 	// Compact indicator while the menu is closed, so hotkey-only use has feedback.
 	if (!is_menu_visible) {
@@ -186,6 +191,51 @@ void BasehookInterface::OnEndScene() {
 
 	ImGui::Separator();
 	ImGui::TextWrapped("Click a key, then press one to bind it (Escape clears). Hotkeys work with the menu closed. F8 toggles this menu.");
+
+	// --- world draw (Phase 1a dev tools) --------------------------------
+	// Collapsed by default so it doesn't crowd the recording UI. Draws the local
+	// player's collision hull into the 3D scene and exposes the two overlay vtable
+	// indices for a bounded in-game verification (no rebuild needed).
+	ImGui::Separator();
+	if (ImGui::CollapsingHeader("World Draw (Phase 1a)")) {
+		ImGui::Checkbox("Test marker at world origin", &WorldDraw::draw_test_marker);
+		ImGui::Checkbox("Player collision hull", &WorldDraw::draw_player_box);
+		ImGui::Checkbox("Player feet marker (dot)", &WorldDraw::draw_player_marker);
+
+		ImGui::Spacing();
+		ImGui::PushItemWidth(200);
+		ImGui::SliderInt("Hull alpha (0 = wireframe)", &WorldDraw::player_box_alpha, 0, 160);
+		ImGui::SliderFloat("Overlay lifetime (x frame)", &WorldDraw::overlay_life_scale, 0.5f, 4.0f, "%.2f");
+		ImGui::PopItemWidth();
+
+		ImGui::Spacing();
+		ImGui::PushItemWidth(120);
+		ImGui::InputInt("Box overlay index", &g_overlay_box_index);
+		ImGui::InputInt("Line overlay index", &g_overlay_line_index);
+		ImGui::PopItemWidth();
+		ImGui::Checkbox("Line uses alpha form (8-arg)", &g_overlay_line_alpha);
+
+		// Keep indices inside the vtable (20 methods) so a mistap can't dispatch
+		// out of bounds.
+		if (g_overlay_box_index < 0)   g_overlay_box_index = 0;
+		if (g_overlay_box_index > 19)  g_overlay_box_index = 19;
+		if (g_overlay_line_index < 0)  g_overlay_line_index = 0;
+		if (g_overlay_line_index > 19) g_overlay_line_index = 19;
+
+		ImGui::Separator();
+		const WorldDraw::Diagnostics d = WorldDraw::LastDiagnostics();
+		ImGui::Text("interfaces: %s", d.interfaces_ready ? "ready" : "MISSING");
+		ImGui::Text("in game: %s", d.in_game ? "yes" : "no");
+		ImGui::Text("local player index: %d", d.local_index);
+		ImGui::Text("m_vecOrigin offset: %d", d.origin_offset);
+		ImGui::Text("m_fFlags offset: %d", d.flags_offset);
+		if (d.have_player) {
+			ImGui::Text("origin: %.1f  %.1f  %.1f", d.origin.X, d.origin.Y, d.origin.Z);
+			ImGui::Text("flags: 0x%08X  %s", d.flags, d.ducking ? "(ducking)" : "(standing)");
+		} else {
+			ImGui::TextDisabled("no local player entity");
+		}
+	}
 
 	ImGui::End();
 }

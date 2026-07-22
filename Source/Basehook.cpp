@@ -10,6 +10,14 @@ IBaseClientDLL* clientdll = nullptr;
 IVEngineClient* engine = nullptr;
 ISurface* matsurface = nullptr;
 ClientModeShared* clientmode = nullptr;
+IClientEntityList* entitylist = nullptr;
+IVDebugOverlay* debugoverlay = nullptr;
+
+// Overlay vtable indices pinned by static RE (see IVDebugOverlay.h). Adjustable
+// at runtime from the menu so any final in-game verification is a one-click tweak.
+int  g_overlay_box_index  = 1;
+int  g_overlay_line_index = 3;
+bool g_overlay_line_alpha = false;
 
 DX9RenderMgr& renderer = BasehookInterface::GetInstance();
 
@@ -54,6 +62,13 @@ DWORD WINAPI basehook_init(LPVOID dll_instance) {
 	clientdll  = GetInterface<IBaseClientDLL>("client.dll", "VClient017");
 	engine     = GetInterface<IVEngineClient>("engine.dll", "VEngineClient014");
 	matsurface = GetInterface<ISurface>("vguimatsurface.dll", "VGUI_Surface030");
+	entitylist = GetInterface<IClientEntityList>("client.dll", "VClientEntityList003");
+
+	// Debug-overlay interface for in-world drawing; version bumped across builds,
+	// so try the known candidates and keep the first that resolves.
+	debugoverlay = GetInterface<IVDebugOverlay>("engine.dll", "VDebugOverlay003");
+	if (!debugoverlay)
+		debugoverlay = GetInterface<IVDebugOverlay>("engine.dll", "VDebugOverlay004");
 
 	// Recover g_pClientMode from CHLClient::HudUpdate (vtable index 10), which is
 	// a thunk that begins:

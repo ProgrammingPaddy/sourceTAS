@@ -16,3 +16,5 @@
 #include "Interfaces/IVEngineClient.h"
 #include "Interfaces/IBaseClientDLL.h"
 #include "Interfaces/ISurface.h"
+#include "Interfaces/IClientEntityList.h"
+#include "Interfaces/IVDebugOverlay.h"

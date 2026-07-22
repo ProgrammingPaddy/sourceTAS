@@ -93,6 +93,8 @@
     <ClCompile Include="Source\Hooks\CreateMove.cpp" />
     <ClCompile Include="Source\Menu\Interface.cpp" />
     <ClCompile Include="Source\Recording\RecordingStore.cpp" />
+    <ClCompile Include="Source\World\NetVars.cpp" />
+    <ClCompile Include="Source\World\WorldDraw.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="shareddefs.h" />
@@ -106,6 +108,7 @@
     <ClInclude Include="Include\cstrike\Interfaces\IBaseClientDLL.h" />
     <ClInclude Include="Include\cstrike\Interfaces\IClientEntityList.h" />
     <ClInclude Include="Include\cstrike\Interfaces\ISurface.h" />
+    <ClInclude Include="Include\cstrike\Interfaces\IVDebugOverlay.h" />
     <ClInclude Include="Include\cstrike\Interfaces\IVEngineClient.h" />
     <ClInclude Include="Include\cstrike\SDK.h" />
     <ClInclude Include="Include\cstrike\Structures\Vector.h" />
@@ -123,6 +126,8 @@
     <ClInclude Include="Source\Hooks\Hooks.h" />
     <ClInclude Include="Source\Menu\Interface.h" />
     <ClInclude Include="Source\Utilities\FindPattern.h" />
+    <ClInclude Include="Source\World\NetVars.h" />
+    <ClInclude Include="Source\World\WorldDraw.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
