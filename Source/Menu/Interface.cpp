@@ -1,6 +1,7 @@
 #include "Interface.h"
 #include "../../shareddefs.h"
 #include "../World/WorldDraw.h"
+#include "../World/Prediction.h"
 
 #include <cstdio>
 #include <cstring>
@@ -234,6 +235,38 @@ void BasehookInterface::OnEndScene() {
 			ImGui::Text("flags: 0x%08X  %s", d.flags, d.ducking ? "(ducking)" : "(standing)");
 		} else {
 			ImGui::TextDisabled("no local player entity");
+		}
+
+		// --- prediction (Phase 1b) --------------------------------------
+		ImGui::Separator();
+		ImGui::Checkbox("Predict path", &WorldDraw::draw_prediction);
+		ImGui::SameLine();
+		ImGui::Checkbox("Live input", &WorldDraw::pred_live_input);
+
+		ImGui::PushItemWidth(200);
+		ImGui::SliderInt("Predict ticks", &WorldDraw::pred_ticks, 1, 200);
+		if (!WorldDraw::pred_live_input) {
+			ImGui::SliderFloat("Forward move", &WorldDraw::pred_forwardmove, -450.f, 450.f, "%.0f");
+			ImGui::SliderFloat("Side move", &WorldDraw::pred_sidemove, -450.f, 450.f, "%.0f");
+		}
+		ImGui::PopItemWidth();
+		if (!WorldDraw::pred_live_input) {
+			ImGui::Checkbox("Jump", &WorldDraw::pred_jump);
+			ImGui::SameLine();
+			ImGui::Checkbox("Duck", &WorldDraw::pred_duck);
+		}
+
+		const Prediction::Diag pd = Prediction::LastDiag();
+		const char* pred_state =
+			pd.ran       ? "running" :
+			pd.installed ? "installed (idle)" : "not installed";
+		ImGui::Text("prediction: %s", pred_state);
+		ImGui::Text("interval/tick: %.4f   window: %d ticks (%.2f s)",
+			pd.interval_per_tick, pd.ticks, pd.ticks * pd.interval_per_tick);
+		if (pd.fault_count > 0) {
+			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+				"recovered faults: %d   last: client.dll+0x%llX  access 0x%llX",
+				pd.fault_count, pd.last_fault_rva, pd.last_fault_access);
 		}
 	}
 

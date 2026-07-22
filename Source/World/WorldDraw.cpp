@@ -1,7 +1,9 @@
 #include "WorldDraw.h"
 #include "NetVars.h"
+#include "Prediction.h"
 
 #include <cstdint>
+#include <vector>
 #include <windows.h>
 
 #include <cstrike/sdk.h>
@@ -12,9 +14,17 @@ namespace WorldDraw {
 	bool draw_test_marker   = false;
 	bool draw_player_box    = true;
 	bool draw_player_marker = true;
+	bool draw_prediction    = false;
 
 	int   player_box_alpha   = 30;    // low: mostly wireframe, never reads as solid
 	float overlay_life_scale = 1.5f;  // ~one frame of lifetime (see FrameDuration)
+
+	int   pred_ticks       = 66;      // ~1s at 66-tick
+	bool  pred_live_input  = true;    // reflect what you're actually pressing
+	float pred_forwardmove = 450.f;   // override: full forward; movement clamps to maxspeed
+	float pred_sidemove    = 0.f;
+	bool  pred_jump        = false;
+	bool  pred_duck        = false;
 }
 
 namespace {
@@ -30,6 +40,17 @@ namespace {
 	const float  kMarkerHalf  = 1.5f;
 
 	WorldDraw::Diagnostics g_diag;
+
+	// A predicted point is only drawable if it's finite and inside the world. This
+	// keeps a diverged prediction from feeding NaN/huge coords to the overlay
+	// renderer (which isn't fault-guarded).
+	bool FiniteWorldPoint(const Vector& v) {
+		const float kMax = 16384.f;   // Source map coordinate limit
+		return v.X == v.X && v.Y == v.Y && v.Z == v.Z &&   // reject NaN
+		       v.X > -kMax && v.X < kMax &&
+		       v.Y > -kMax && v.Y < kMax &&
+		       v.Z > -kMax && v.Z < kMax;
+	}
 
 	// Adaptive overlay lifetime. A fixed duration leaves a moving "ghost trail":
 	// stale copies from previous positions stay alive while the player moves, and
@@ -114,6 +135,24 @@ void WorldDraw::Render() {
 			const Vector dmax( kMarkerHalf,  kMarkerHalf,  kMarkerHalf);
 			debugoverlay->AddBoxOverlay(d.origin, dmin, dmax, kNoRotation,
 			                            255, 255, 0, 255, duration);
+		}
+
+		// (3) Predicted path (Phase 1b): the look-ahead computed once per tick inside
+		// the engine's prediction pass (see Prediction.cpp); we just draw the cached
+		// per-tick feet dots as a green line starting at the live origin.
+		if (draw_prediction) {
+			std::vector<Vector> path;
+			Prediction::GetPath(path);
+			const Vector dmin(-1.f, -1.f, -1.f);
+			const Vector dmax( 1.f,  1.f,  1.f);
+			Vector prev = d.origin;
+			for (const Vector& p : path) {
+				if (!FiniteWorldPoint(p))
+					break;   // prediction diverged; stop before feeding garbage to the overlay
+				debugoverlay->AddLineOverlay(prev, p, 40, 220, 90, false, duration);
+				debugoverlay->AddBoxOverlay(p, dmin, dmax, kNoRotation, 40, 255, 90, 255, duration);
+				prev = p;
+			}
 		}
 	}
 

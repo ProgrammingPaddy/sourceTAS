@@ -1,5 +1,6 @@
 #include "Hooks/Hooks.h"
 #include "Menu/Interface.h"
+#include "World/Prediction.h"
 #include "../shareddefs.h"
 
 #include <cstdint>
@@ -89,6 +90,10 @@ DWORD WINAPI basehook_init(LPVOID dll_instance) {
 		clientmode_hook = std::make_unique<VMTHook>(clientmode);
 		clientmode_hook->HookFunction(&Hooks::CreateMove, 21);
 	}
+
+	// Install the movement look-ahead (hooks IPrediction::FinishMove so it runs
+	// inside the engine's own prediction context).
+	Prediction::Install();
 
 	// Load any previously saved recordings from disk.
 	g_tas.LoadFromDisk();

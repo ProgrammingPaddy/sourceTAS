@@ -11,10 +11,19 @@ namespace WorldDraw {
 	extern bool draw_test_marker;    // fixed world-origin marker (validates the call)
 	extern bool draw_player_box;     // local player's collision AABB
 	extern bool draw_player_marker;  // single dot at the player's feet origin
+	extern bool draw_prediction;     // predicted path for a held input (Phase 1b)
 
 	// Menu-controlled tuning.
 	extern int   player_box_alpha;   // hull fill alpha; 0 = wireframe only
 	extern float overlay_life_scale; // overlay lifetime as a multiple of frame time
+
+	// Prediction input (held for the whole predicted window).
+	extern int   pred_ticks;         // number of ticks to predict
+	extern bool  pred_live_input;    // use the live command's input (else the overrides below)
+	extern float pred_forwardmove;   // override wish forward move (units/s)
+	extern float pred_sidemove;      // override wish side move (units/s)
+	extern bool  pred_jump;          // override: hold IN_JUMP
+	extern bool  pred_duck;          // override: hold IN_DUCK
 
 	// Queue overlays for whatever is enabled. Safe to call every frame; it
 	// no-ops when out of game or when an interface is missing.
