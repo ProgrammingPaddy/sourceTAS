@@ -1,6 +1,7 @@
 #include "WorldDraw.h"
 #include "NetVars.h"
 #include "Prediction.h"
+#include "../Editor/TasEditor.h"
 
 #include <cstdint>
 #include <vector>
@@ -21,6 +22,7 @@ namespace WorldDraw {
 
 	int   pred_ticks       = 66;      // ~1s at 66-tick
 	bool  pred_live_input  = true;    // reflect what you're actually pressing
+	bool  pred_autobhop    = false;   // jump on ticks that start grounded
 	float pred_forwardmove = 450.f;   // override: full forward; movement clamps to maxspeed
 	float pred_sidemove    = 0.f;
 	bool  pred_jump        = false;
@@ -152,6 +154,98 @@ void WorldDraw::Render() {
 				debugoverlay->AddLineOverlay(prev, p, 40, 220, 90, false, duration);
 				debugoverlay->AddBoxOverlay(p, dmin, dmax, kNoRotation, 40, 255, 90, 255, duration);
 				prev = p;
+			}
+		}
+	}
+
+	// (4) TAS editor run line (Phase 2): the simulated run drawn as an absolute
+	// polyline. The playhead is the edit boundary: ticks before it draw gray
+	// (locked history); the selected segment is colored by strafe efficiency
+	// (green = at/above the min-eff threshold, orange = below); other future
+	// segments blue; boundary markers white; ghost hull at the cursor tick.
+	// Decimated so long runs stay within the overlay system's budget.
+	TasEditor::DrawData ed;
+	if (TasEditor::GetDrawData(ed)) {
+		if (ed.anchor.valid && FiniteWorldPoint(ed.anchor.origin))
+			debugoverlay->AddBoxOverlay(ed.anchor.origin, Vector(-3.f, -3.f, 0.f), Vector(3.f, 3.f, 8.f),
+			                            kNoRotation, 60, 255, 60, 140, duration);
+
+		const int stride = ed.count > 400 ? ed.count / 400 : 1;
+		Vector prev = ed.anchor.origin;
+		bool prev_ok = FiniteWorldPoint(prev);
+		int next_seg = 0;
+		for (int i = 0; i < ed.count; ++i) {
+			bool boundary = false;
+			while (next_seg < ed.seg_count && i == ed.seg_starts[next_seg]) {
+				boundary = true;
+				next_seg++;
+			}
+			if (!boundary && (i % stride) != 0 && i != ed.count - 1 && i != ed.cursor)
+				continue;
+
+			const Vector p = ed.states[i].origin;
+			if (!FiniteWorldPoint(p))
+				break;
+
+			// The whole future path is colored by strafe efficiency (the line is
+			// always the exact simulated path; color is information, not a
+			// constraint). The selected segment draws at full brightness, the
+			// rest dimmed; ticks before the playhead are locked history.
+			int r, g, b;
+			if (i < ed.cursor) {
+				r = 120; g = 120; b = 120;
+			} else {
+				if (ed.eff && ed.maxgain && ed.maxgain[i] > 0.001f) {
+					if (ed.eff[i] >= ed.min_eff) { r = 60; g = 255; b = 120; }   // optimal enough
+					else                          { r = 255; g = 140; b = 30; }  // below threshold
+				} else {
+					r = 50; g = 190; b = 110;                    // not scoreable (ground/landing)
+				}
+				const bool selected = (i >= ed.sel_start && i < ed.sel_end);
+				if (!selected) { r = (r * 11) / 20; g = (g * 11) / 20; b = (b * 11) / 20; }
+			}
+			if (prev_ok)
+				debugoverlay->AddLineOverlay(prev, p, r, g, b, false, duration);
+			prev = p;
+			prev_ok = true;
+
+			if (boundary)
+				debugoverlay->AddBoxOverlay(p, Vector(-1.5f, -1.5f, -1.5f), Vector(1.5f, 1.5f, 1.5f),
+				                            kNoRotation, 255, 255, 255, 255, duration);
+		}
+
+		if (ed.cursor >= 0 && ed.cursor < ed.count) {
+			const Vector cp = ed.states[ed.cursor].origin;
+			if (FiniteWorldPoint(cp)) {
+				// Origin marker always draws at the playhead; the hull is a toggle.
+				debugoverlay->AddBoxOverlay(cp, Vector(-1.5f, -1.5f, -1.5f), Vector(1.5f, 1.5f, 1.5f),
+				                            kNoRotation, 255, 255, 0, 255, duration);
+				if (ed.show_hull) {
+					const float h = (ed.states[ed.cursor].flags & FL_DUCKING) ? 54.f : 72.f;
+					debugoverlay->AddBoxOverlay(cp, Vector(-16.f, -16.f, 0.f), Vector(16.f, 16.f, h),
+					                            kNoRotation, 255, 255, 0, 40, duration);
+				}
+
+				// View-direction arrow out of the origin (for lining up ramps).
+				if (ed.have_view) {
+					const float deg2rad = 3.14159265f / 180.f;
+					const float pr = ed.view_pitch * deg2rad;   // Source pitch: + = down
+					const float yr = ed.view_yaw * deg2rad;
+					const Vector dir(cosf(pr) * cosf(yr), cosf(pr) * sinf(yr), -sinf(pr));
+					const float len = 48.f;
+					const Vector tip(cp.X + dir.X * len, cp.Y + dir.Y * len, cp.Z + dir.Z * len);
+					debugoverlay->AddLineOverlay(cp, tip, 0, 220, 255, false, duration);
+
+					// Arrowhead barbs, perpendicular in the horizontal plane.
+					const Vector perp(-sinf(yr), cosf(yr), 0.f);
+					const Vector base(tip.X - dir.X * 10.f, tip.Y - dir.Y * 10.f, tip.Z - dir.Z * 10.f);
+					debugoverlay->AddLineOverlay(tip,
+						Vector(base.X + perp.X * 6.f, base.Y + perp.Y * 6.f, base.Z),
+						0, 220, 255, false, duration);
+					debugoverlay->AddLineOverlay(tip,
+						Vector(base.X - perp.X * 6.f, base.Y - perp.Y * 6.f, base.Z),
+						0, 220, 255, false, duration);
+				}
 			}
 		}
 	}

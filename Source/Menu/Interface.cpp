@@ -2,7 +2,10 @@
 #include "../../shareddefs.h"
 #include "../World/WorldDraw.h"
 #include "../World/Prediction.h"
+#include "../World/NetVars.h"
+#include "../Editor/TasEditor.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -30,12 +33,19 @@ namespace {
 		{ "Play Selected Recording", 0, [] { return Idle(); }, [] { g_tas.PlaySelected(); } },
 		{ "Select Next Recording", 0, [] { return Idle(); }, [] { g_tas.SelectNext(); } },
 		{ "Emergency Stop", 0, [] { return true; }, [] { g_tas.EmergencyStop(); } },
+		{ "Editor: Step Back", 0, [] { return true; }, [] { TasEditor::StepCursor(-1); } },
+		{ "Editor: Step Forward", 0, [] { return true; }, [] { TasEditor::StepCursor(1); } },
+		{ "Editor: Prev Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(-1); } },
+		{ "Editor: Next Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(1); } },
 	};
 
 	constexpr int kCommandCount = static_cast<int>(sizeof(g_commands) / sizeof(g_commands[0]));
 
 	// Index of the command currently capturing a key, or -1 when not rebinding.
 	int g_binding = -1;
+
+	// Non-interactive status HUD shown while a run replays.
+	bool g_show_replay_hud = true;
 
 	const ImGuiWindowFlags kOverlayFlags =
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -72,9 +82,49 @@ namespace {
 
 void BasehookInterface::OnEndScene() {
 
-	// Queue in-world overlays every frame, independent of the menu. Self-guards
-	// when out of game, so it's safe to call unconditionally here.
+	// Editor sim orchestration + in-world overlays run every frame, independent
+	// of the menu. Both self-guard when out of game.
+	TasEditor::Update();
 	WorldDraw::Render();
+
+	// Replay diagnostics HUD: non-interactive status while a run plays back,
+	// shown whether or not the menu is open.
+	if (g_show_replay_hud && g_tas.IsPlaying()) {
+		ImGui::SetNextWindowPos(ImVec2(12, 52));
+		ImGui::Begin("##stas_replay_hud", nullptr, kOverlayFlags | ImGuiWindowFlags_NoInputs);
+
+		const std::vector<Run>& lib = g_tas.Library();
+		const int sel = g_tas.Selected();
+		if (g_tas.IsTestPlayback())
+			ImGui::Text("run: (editor test)   segment %d", g_tas.PlaybackSegment() + 1);
+		else if (sel >= 0 && sel < static_cast<int>(lib.size()))
+			ImGui::Text("run: %s   segment %d / %d", lib[sel].name.c_str(),
+				g_tas.PlaybackSegment() + 1, static_cast<int>(lib[sel].segments.size()));
+		ImGui::Text("tick %d / %d", static_cast<int>(g_tas.PlaybackPosition()),
+			static_cast<int>(g_tas.PlaybackTotal()));
+
+		if (engine && entitylist && engine->IsInGame()) {
+			void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
+			const int vel_off = NetVars::Offset("DT_CSPlayer", "m_vecVelocity[0]");
+			const int org_off = NetVars::Offset("DT_CSPlayer", "m_vecOrigin");
+			const int flags_off = NetVars::Offset("DT_CSPlayer", "m_fFlags");
+			if (player && vel_off) {
+				const Vector v = NetVars::Get<Vector>(player, vel_off);
+				ImGui::Text("speed %.1f u/s 2D   %.1f 3D",
+					sqrtf(v.X * v.X + v.Y * v.Y), v.Length());
+			}
+			if (player && org_off) {
+				const Vector o = NetVars::Get<Vector>(player, org_off);
+				ImGui::Text("pos %.1f %.1f %.1f", o.X, o.Y, o.Z);
+			}
+			if (player && flags_off) {
+				const int fl = NetVars::Get<int>(player, flags_off);
+				ImGui::Text("%s%s", (fl & FL_ONGROUND) ? "ground" : "air",
+					(fl & FL_DUCKING) ? " +duck" : "");
+			}
+		}
+		ImGui::End();
+	}
 
 	// Compact indicator while the menu is closed, so hotkey-only use has feedback.
 	if (!is_menu_visible) {
@@ -191,6 +241,12 @@ void BasehookInterface::OnEndScene() {
 	}
 
 	ImGui::Separator();
+	if (ImGui::Button(TasEditor::IsOpen() ? "Close TAS Editor" : "Open TAS Editor", ImVec2(250, 0)))
+		TasEditor::Toggle();
+	ImGui::SameLine();
+	ImGui::Checkbox("Replay HUD", &g_show_replay_hud);
+
+	ImGui::Separator();
 	ImGui::TextWrapped("Click a key, then press one to bind it (Escape clears). Hotkeys work with the menu closed. F8 toggles this menu.");
 
 	// --- world draw (Phase 1a dev tools) --------------------------------
@@ -233,6 +289,15 @@ void BasehookInterface::OnEndScene() {
 		if (d.have_player) {
 			ImGui::Text("origin: %.1f  %.1f  %.1f", d.origin.X, d.origin.Y, d.origin.Z);
 			ImGui::Text("flags: 0x%08X  %s", d.flags, d.ducking ? "(ducking)" : "(standing)");
+
+			// Basis check for the sim/preview: the movement pipeline's origin vs
+			// the netvar origin. Read STANDING STILL - any persistent dz here
+			// means the preview and live hull really do use different bases.
+			Vector move_origin;
+			if (Prediction::LastRealMoveOrigin(move_origin))
+				ImGui::Text("basis delta (net - movedata): %.2f  %.2f  %.2f",
+					d.origin.X - move_origin.X, d.origin.Y - move_origin.Y,
+					d.origin.Z - move_origin.Z);
 		} else {
 			ImGui::TextDisabled("no local player entity");
 		}
@@ -242,6 +307,8 @@ void BasehookInterface::OnEndScene() {
 		ImGui::Checkbox("Predict path", &WorldDraw::draw_prediction);
 		ImGui::SameLine();
 		ImGui::Checkbox("Live input", &WorldDraw::pred_live_input);
+		ImGui::SameLine();
+		ImGui::Checkbox("Auto-bhop", &WorldDraw::pred_autobhop);
 
 		ImGui::PushItemWidth(200);
 		ImGui::SliderInt("Predict ticks", &WorldDraw::pred_ticks, 1, 200);
@@ -271,6 +338,9 @@ void BasehookInterface::OnEndScene() {
 	}
 
 	ImGui::End();
+
+	// The editor is its own window (needs the cursor, so menu-visible only).
+	TasEditor::DrawWindow();
 }
 
 
@@ -290,7 +360,11 @@ bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param
 	const bool key_down = (type == WM_KEYDOWN || type == WM_SYSKEYDOWN);
 	const bool first_press = key_down && !(l_param & (1 << 30));
 
-	if (first_press) {
+	// While a text field has focus (e.g. the editor's project name), keys are
+	// typing, not hotkeys or bind captures.
+	const bool typing = is_menu_visible && ImGui::GetIO().WantTextInput;
+
+	if (first_press && !typing) {
 		if (g_binding >= 0) {
 			// Assign the pressed key (Escape clears it), then stop capturing.
 			g_commands[g_binding].key = (w_param == VK_ESCAPE) ? 0 : static_cast<int>(w_param);

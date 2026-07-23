@@ -3,20 +3,57 @@
 #include <cstrike/Structures/Vector.h>
 #include <vector>
 
-// Phase 1b: observational movement prediction, run from INSIDE the engine's own
-// prediction pass. We hook IPrediction::FinishMove; once per frame (on the newest,
-// first-time-predicted command) the local player is in a fully valid movement
-// context, so we snapshot it, run N hypothetical ticks of the real
-// SetupMove -> ProcessMovement -> FinishMove holding the current input, read each
-// tick's feet origin, then restore the player, the move-helper touch list, and the
-// touched globals byte-for-byte. It watches the real prediction; it changes nothing.
+#include "../../shareddefs.h"   // Frame, StartState
+
+// Observational movement prediction, run from INSIDE the engine's own
+// prediction pass. We hook IPrediction::FinishMove; once per frame (on the
+// newest, first-time-predicted command) the local player is in a fully valid
+// movement context. From there we can run hypothetical ticks of the real
+// SetupMove -> ProcessMovement -> FinishMove pipeline and read the results,
+// then restore the player, move-helper touch list, and globals byte-for-byte.
+// It watches the real prediction; it changes nothing.
+//
+// Two consumers:
+//   - Live look-ahead (Phase 1b): N ticks of the current/overridden input from
+//     the live player state, drawn as the green path.
+//   - Editor simulation (Phase 2): N ticks of authored input from an ABSOLUTE
+//     StartState anchor, with a per-tick provider callback so closed-loop
+//     generators (auto-strafe, auto-bhop) can react to the simulated state.
 namespace Prediction {
-	// Resolve interfaces and install the FinishMove hook. Call once from
-	// basehook_init after the engine interfaces are up.
+	constexpr int kMaxSimTicks = 4096;
+
+	struct SimState {
+		Vector origin;     // feet origin after the tick
+		Vector velocity;   // velocity after the tick
+		int    flags;      // player m_fFlags after the tick (FL_ONGROUND etc.)
+	};
+
+	// Fills `out` with the input for `tick`, given the simulated state after the
+	// previous tick. Runs on the game thread inside the sim; must be pure math.
+	using SimFrameFn = void(*)(int tick, const SimState& prev, Frame* out);
+
+	// Resolve interfaces and install the FinishMove hook (from basehook_init).
 	void Install();
 
-	// Copy the latest predicted path (per-tick feet origins) for drawing.
+	// Live look-ahead path (per-tick feet origins) for drawing.
 	void GetPath(std::vector<Vector>& out);
+
+	// --- editor simulation (async request -> next prediction pass) ----------
+	bool RequestSim(const StartState& anchor, int ticks, SimFrameFn provider);
+	bool SimBusy();       // a request is pending execution
+	bool SimReady();      // a result is waiting to be taken
+	bool SimFaulted();    // last sim recovered from a fault (result empty)
+	int  SimCount();      // ticks in the waiting result
+	void TakeSim(Frame* frames, SimState* states);   // copies SimCount() items
+
+	// Capture the live local player as a StartState (netvar reads; callable
+	// from the render thread). Returns false when not in game.
+	bool CaptureStartState(StartState& out);
+
+	// Origin of the newest real command's movedata. Compared against the netvar
+	// origin in the menu to verify both draw paths share one basis (read it
+	// standing still - in motion they differ by one tick of movement).
+	bool LastRealMoveOrigin(Vector& out);
 
 	// Live diagnostics for the menu.
 	struct Diag {
@@ -24,9 +61,9 @@ namespace Prediction {
 		bool  ran = false;
 		int   ticks = 0;
 		float interval_per_tick = 0.f;
-		// The look-ahead keeps a minimal fault net (engine physics can hit untested
-		// states: water, ladders, other maps). These stay 0 in normal use; if one
-		// ever trips, the RVA/access pinpoint it for a quick fix.
+		float sim_ms = 0.f;            // wall time of the last editor sim
+		// Minimal fault net (engine physics can hit untested states). These stay
+		// 0 in normal use; if one trips, the RVA/access pinpoint it.
 		int                fault_count = 0;
 		unsigned long long last_fault_rva = 0;
 		unsigned long long last_fault_access = 0;

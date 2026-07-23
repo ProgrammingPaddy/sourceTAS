@@ -47,9 +47,23 @@ struct Frame {
 // A run is an ordered list of segments; a segment is a contiguous capture.
 using Segment = std::vector<Frame>;
 
+// Absolute starting state of a run, in world coordinates. Captured on the first
+// recorded tick (or set as the editor's anchor), so a run is pinned to a fixed
+// point in virtual space and can be re-simulated/replayed across sessions.
+struct StartState {
+	bool valid = false;
+	Vector origin;
+	Vector velocity;
+	float pitch = 0.f;
+	float yaw = 0.f;
+	bool ducked = false;
+	float stamina = 0.f;
+};
+
 struct Run {
 	std::string name;
 	std::string filepath;                    // on-disk .tas file ("" if unsaved)
+	StartState start;                        // absolute anchor (v2 files; may be invalid)
 	std::vector<Segment> segments;
 
 	size_t FrameCount() const {
@@ -94,6 +108,12 @@ private:
 	std::vector<Segment> session_segments;   // committed boundaries this session
 	Segment active_segment;                  // current, not-yet-committed capture
 
+	// One anchor per segment, captured on each segment's FIRST tick. The run's
+	// anchor is the first surviving segment's - so overwriting or deleting back
+	// to an empty session re-captures instead of keeping a stale start.
+	std::vector<StartState> session_starts;  // parallel to session_segments
+	StartState active_start;                 // anchor for the active segment
+
 	std::vector<Run> library;                // finalized, immutable runs
 	int selected = -1;                       // run used by playback
 	int run_counter = 0;                     // for auto-naming
@@ -102,6 +122,12 @@ private:
 	size_t playback_frame = 0;
 	size_t playback_pos = 0;                  // flattened progress, for display
 	size_t playback_total = 0;
+
+	// Editor test playback: a scratch run played without touching the library.
+	Run scratch;
+	bool scratch_active = false;
+	int playback_delay = 0;                   // ticks to wait before feeding input
+	                                          // (lets a teleport-to-anchor settle)
 
 	std::string status = "Idle.";
 
@@ -121,6 +147,8 @@ private:
 
 	void FinishPlayback(const char* message) {
 		state = TasState::Idle;
+		scratch_active = false;
+		playback_delay = 0;
 		status = message;
 	}
 
@@ -136,6 +164,33 @@ public:
 	size_t SessionSegmentCount() const { return session_segments.size(); }
 	size_t PlaybackPosition() const { return playback_pos; }
 	size_t PlaybackTotal() const { return playback_total; }
+	int PlaybackSegment() const { return playback_segment; }
+
+	// --- per-segment anchor capture (called from the CreateMove hook) ----
+	// True exactly when the next recorded frame starts a segment, so the hook
+	// captures the world state that precedes that segment's first input.
+	bool NeedsStartCapture() const {
+		return state == TasState::Recording && active_segment.empty();
+	}
+	void SetPendingStart(const StartState& s) {
+		if (state == TasState::Recording && active_segment.empty())
+			active_start = s;
+	}
+
+	// --- editor export ----------------------------------------------------
+	// Add a finalized run to the library and select it (run mode only). The
+	// caller persists it with PersistSelected(). Returns the index or -1.
+	int AddRun(Run run) {
+		if (state != TasState::Idle) { status = "Can't add a run now."; return -1; }
+		if (run.segments.empty()) return -1;
+		if (run.name.empty())
+			run.name = "Run " + std::to_string(++run_counter);
+		library.push_back(std::move(run));
+		selected = static_cast<int>(library.size()) - 1;
+		status = "Added " + library.back().name + " ("
+			+ std::to_string(library.back().FrameCount()) + " frames).";
+		return selected;
+	}
 
 	// --- persistence (defined in RecordingStore.cpp) --------------------
 	void LoadFromDisk();          // populate the library from disk on startup
@@ -164,6 +219,8 @@ public:
 		if (state != TasState::Idle) return;
 		session_segments.clear();
 		active_segment.clear();
+		session_starts.clear();
+		active_start = StartState();
 		state = TasState::Recording;
 		status = "Recording... (Save Segment to split, Stop & Save to finish)";
 	}
@@ -176,13 +233,16 @@ public:
 		}
 		status = "Segment saved (" + std::to_string(active_segment.size()) + " frames); new segment started.";
 		session_segments.push_back(active_segment);
+		session_starts.push_back(active_start);
 		active_segment.clear();
+		active_start = StartState();   // next segment re-captures on its first tick
 	}
 
 	void OverwriteCurrentSegment() {
 		if (state != TasState::Recording) return;
 		const size_t discarded = active_segment.size();
 		active_segment.clear();
+		active_start = StartState();   // restart means a fresh anchor too
 		status = "Overwriting current segment (discarded " + std::to_string(discarded) + " frames).";
 	}
 
@@ -191,6 +251,7 @@ public:
 		if (session_segments.empty()) { status = "No previous segment to delete."; return; }
 		const size_t removed = session_segments.back().size();
 		session_segments.pop_back();
+		session_starts.pop_back();
 		status = "Deleted previous segment (" + std::to_string(removed) + " frames; "
 			+ std::to_string(session_segments.size()) + " left).";
 	}
@@ -202,14 +263,21 @@ public:
 
 		if (!active_segment.empty()) {
 			session_segments.push_back(active_segment);
+			session_starts.push_back(active_start);
 			active_segment.clear();
+			active_start = StartState();
 		}
 
 		Run run;
-		for (const Segment& segment : session_segments)
-			if (!segment.empty())
-				run.segments.push_back(segment);
+		for (size_t i = 0; i < session_segments.size(); ++i) {
+			if (session_segments[i].empty())
+				continue;
+			if (run.segments.empty())
+				run.start = session_starts[i];   // anchor of the first surviving segment
+			run.segments.push_back(session_segments[i]);
+		}
 		session_segments.clear();
+		session_starts.clear();
 		state = TasState::Idle;
 
 		if (run.segments.empty()) {
@@ -241,6 +309,27 @@ public:
 		status = "Playing " + run->name + "...";
 	}
 
+	// Editor test playback: play a scratch run that never enters the library.
+	// delay_ticks holds off input feeding so a teleport-to-anchor can settle.
+	bool PlayEphemeral(Run run, int delay_ticks) {
+		if (state != TasState::Idle || run.Empty()) return false;
+
+		scratch = std::move(run);
+		scratch_active = true;
+		playback_segment = 0;
+		playback_frame = 0;
+		playback_pos = 0;
+		playback_total = scratch.FrameCount();
+		SkipEmptyPlaybackSegments(scratch);
+		playback_delay = delay_ticks > 0 ? delay_ticks : 0;
+
+		state = TasState::Playback;
+		status = "Test playing (editor run)...";
+		return true;
+	}
+
+	bool IsTestPlayback() const { return scratch_active; }
+
 	void EmergencyStop() {
 		const char* message =
 			state == TasState::Playback ? "Emergency stop - playback aborted." :
@@ -248,6 +337,10 @@ public:
 			"Released all.";
 		session_segments.clear();
 		active_segment.clear();
+		session_starts.clear();
+		active_start = StartState();
+		scratch_active = false;
+		playback_delay = 0;
 		state = TasState::Idle;
 		status = message;
 	}
@@ -262,7 +355,14 @@ public:
 		if (state != TasState::Playback)
 			return false;
 
-		Run* run = SelectedRun();
+		// Grace period after a test-play teleport: pass user input through
+		// until the setpos has settled.
+		if (playback_delay > 0) {
+			playback_delay--;
+			return false;
+		}
+
+		Run* run = scratch_active ? &scratch : SelectedRun();
 		if (!run || playback_segment >= static_cast<int>(run->segments.size())) {
 			FinishPlayback("Playback complete.");
 			return false;

@@ -91,6 +91,7 @@
     <ClCompile Include="Include\renderer\Renderer.cpp" />
     <ClCompile Include="Source\Basehook.cpp" />
     <ClCompile Include="Source\Hooks\CreateMove.cpp" />
+    <ClCompile Include="Source\Editor\TasEditor.cpp" />
     <ClCompile Include="Source\Menu\Interface.cpp" />
     <ClCompile Include="Source\Recording\RecordingStore.cpp" />
     <ClCompile Include="Source\World\NetVars.cpp" />
@@ -124,6 +125,7 @@
     <ClInclude Include="Include\imgui\stb_truetype.h" />
     <ClInclude Include="Include\renderer\Renderer.h" />
     <ClInclude Include="Include\vmthook\vmthook.h" />
+    <ClInclude Include="Source\Editor\TasEditor.h" />
     <ClInclude Include="Source\Hooks\Hooks.h" />
     <ClInclude Include="Source\Menu\Interface.h" />
     <ClInclude Include="Source\Utilities\FindPattern.h" />

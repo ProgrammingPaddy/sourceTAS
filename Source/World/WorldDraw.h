@@ -20,6 +20,7 @@ namespace WorldDraw {
 	// Prediction input (held for the whole predicted window).
 	extern int   pred_ticks;         // number of ticks to predict
 	extern bool  pred_live_input;    // use the live command's input (else the overrides below)
+	extern bool  pred_autobhop;      // press jump on ticks that start grounded
 	extern float pred_forwardmove;   // override wish forward move (units/s)
 	extern float pred_sidemove;      // override wish side move (units/s)
 	extern bool  pred_jump;          // override: hold IN_JUMP

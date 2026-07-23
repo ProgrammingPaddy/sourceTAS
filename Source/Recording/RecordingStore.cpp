@@ -11,7 +11,8 @@
 
 namespace {
 	constexpr char kMagic[4] = { 'S', 'T', 'A', 'S' };
-	constexpr uint32_t kVersion = 1;
+	// v1: segments only. v2: adds the StartState anchor block after the version.
+	constexpr uint32_t kVersion = 2;
 
 	// Documents\sourceTAS\recordings (created if missing); "" on failure.
 	std::string Directory() {
@@ -81,6 +82,17 @@ namespace {
 		out.write(kMagic, sizeof(kMagic));
 		out.write(reinterpret_cast<const char*>(&kVersion), sizeof(kVersion));
 
+		// v2 anchor block.
+		const uint8_t start_valid = run.start.valid ? 1 : 0;
+		const uint8_t start_ducked = run.start.ducked ? 1 : 0;
+		out.write(reinterpret_cast<const char*>(&start_valid), sizeof(start_valid));
+		out.write(reinterpret_cast<const char*>(&run.start.origin), sizeof(float) * 3);
+		out.write(reinterpret_cast<const char*>(&run.start.velocity), sizeof(float) * 3);
+		out.write(reinterpret_cast<const char*>(&run.start.pitch), sizeof(run.start.pitch));
+		out.write(reinterpret_cast<const char*>(&run.start.yaw), sizeof(run.start.yaw));
+		out.write(reinterpret_cast<const char*>(&start_ducked), sizeof(start_ducked));
+		out.write(reinterpret_cast<const char*>(&run.start.stamina), sizeof(run.start.stamina));
+
 		const uint32_t segment_count = static_cast<uint32_t>(run.segments.size());
 		out.write(reinterpret_cast<const char*>(&segment_count), sizeof(segment_count));
 
@@ -112,16 +124,31 @@ namespace {
 		uint32_t version = 0;
 		if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, kMagic, sizeof(magic)) != 0)
 			return false;
-		if (!in.read(reinterpret_cast<char*>(&version), sizeof(version)) || version != kVersion)
-			return false;
-
-		uint32_t segment_count = 0;
-		if (!in.read(reinterpret_cast<char*>(&segment_count), sizeof(segment_count)) || segment_count > 1000000)
+		if (!in.read(reinterpret_cast<char*>(&version), sizeof(version)) || version < 1 || version > kVersion)
 			return false;
 
 		Run run;
 		run.filepath = path;
 		run.name = FileStem(path);
+
+		if (version >= 2) {
+			uint8_t start_valid = 0, start_ducked = 0;
+			if (!in.read(reinterpret_cast<char*>(&start_valid), sizeof(start_valid)) ||
+				!in.read(reinterpret_cast<char*>(&run.start.origin), sizeof(float) * 3) ||
+				!in.read(reinterpret_cast<char*>(&run.start.velocity), sizeof(float) * 3) ||
+				!in.read(reinterpret_cast<char*>(&run.start.pitch), sizeof(run.start.pitch)) ||
+				!in.read(reinterpret_cast<char*>(&run.start.yaw), sizeof(run.start.yaw)) ||
+				!in.read(reinterpret_cast<char*>(&start_ducked), sizeof(start_ducked)) ||
+				!in.read(reinterpret_cast<char*>(&run.start.stamina), sizeof(run.start.stamina)))
+				return false;
+			run.start.valid = start_valid != 0;
+			run.start.ducked = start_ducked != 0;
+		}
+
+		uint32_t segment_count = 0;
+		if (!in.read(reinterpret_cast<char*>(&segment_count), sizeof(segment_count)) || segment_count > 1000000)
+			return false;
+
 		run.segments.reserve(segment_count);
 
 		for (uint32_t s = 0; s < segment_count; ++s) {

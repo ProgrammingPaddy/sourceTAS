@@ -1,0 +1,45 @@
+#pragma once
+
+#include "../World/Prediction.h"
+
+// Phase 2: the TAS authoring layer. An edited run is an absolute StartState
+// anchor plus an ordered list of segments; each segment is either raw per-tick
+// frames (imported recordings / baked / fine-tuned) or a generated span (rate
+// yaw, optimal auto-strafe, auto-bhop, pitch-follow). Compiling a run IS
+// simulating it: generators are closed-loop (each tick's input is derived from
+// the simulated state after the previous tick), run through the engine's real
+// movement pipeline via Prediction::RequestSim. The result is both the exact
+// per-tick frames (replayable through TasEngine) and per-tick world states
+// (drawn as the run line; stepped with the cursor).
+namespace TasEditor {
+	// Per-frame orchestration: fetch finished sims, issue new ones (debounced).
+	// Called from OnEndScene every frame, menu visible or not.
+	void Update();
+
+	// The editor window (call while the menu/cursor is available).
+	void DrawWindow();
+	bool IsOpen();
+	void Toggle();
+
+	// Tick cursor control (also bound to hotkeys).
+	void StepCursor(int delta);
+	void StepSegment(int direction);
+
+	// Snapshot of everything WorldDraw needs to render the run line.
+	struct DrawData {
+		const Prediction::SimState* states;   // per-tick world states
+		int count;
+		const int* seg_starts;                // start tick of each segment
+		int seg_count;
+		const float* eff;                     // per-tick strafe efficiency (null if none)
+		const float* maxgain;                 // per-tick max possible gain; <=0 = not scoreable
+		float min_eff;                        // "optimal enough" threshold for coloring
+		int cursor;                           // playhead: ticks before it draw locked/gray
+		int sel_start, sel_end;               // selected segment range [start,end)
+		StartState anchor;
+		bool show_hull;                       // draw the collision hull ghost at the playhead
+		bool have_view;                       // view angles at the playhead are valid
+		float view_pitch, view_yaw;           // for the view-direction arrow
+	};
+	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
+}
