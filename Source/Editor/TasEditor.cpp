@@ -679,6 +679,179 @@ namespace {
 		s.v.Z -= g_search.gravity * g_search.dt * 0.5f;
 	}
 
+	// One contact found by the hull sweep inside a tick.
+	struct TickContact {
+		int collider = -1;     // index into g_search.bcolliders
+		int plane = -1;        // plane index within that collider
+		float loss = 0.f;      // speed the clip resolution removed (u/s)
+		Vector point;
+	};
+
+	// Swept-hull trace against the corridor brush world (AABB-gated convex
+	// slab clips, DIST_EPSILON 1/32 exactly like CM_ClipBoxToBrush). Returns
+	// the earliest entry fraction in [0,1] (1 = clear) and the struck
+	// collider/plane.
+	float TraceHullWorld(const Vector& a, const Vector& b, int* out_b, int* out_pl) {
+		*out_b = -1;
+		*out_pl = -1;
+		const int nb = static_cast<int>(g_search.bcolliders.size());
+		const float sminx = fminf(a.X, b.X), smaxx = fmaxf(a.X, b.X);
+		const float sminy = fminf(a.Y, b.Y), smaxy = fmaxf(a.Y, b.Y);
+		const float sminz = fminf(a.Z, b.Z), smaxz = fmaxf(a.Z, b.Z);
+		float best = 1.f;
+		for (int bi = 0; bi < nb; ++bi) {
+			const SearchCtx::BrushCollider& bc = g_search.bcolliders[bi];
+			if (smaxx < bc.bmin.X || sminx > bc.bmax.X ||
+			    smaxy < bc.bmin.Y || sminy > bc.bmax.Y ||
+			    smaxz < bc.bmin.Z || sminz > bc.bmax.Z)
+				continue;
+			float tmin = 0.f, tmax = 1.f;
+			int enter = -1;
+			bool outside = false, miss = false;
+			const int np = static_cast<int>(bc.pn.size());
+			for (int pi = 0; pi < np; ++pi) {
+				const float d0 = Dot(bc.pn[pi], a) - bc.pd[pi];
+				const float d1 = Dot(bc.pn[pi], b) - bc.pd[pi];
+				if (d0 > 0.f) {
+					outside = true;
+					if (d1 > 0.f) { miss = true; break; }
+					float tt = (d0 - 0.03125f) / (d0 - d1);   // DIST_EPSILON
+					if (tt < 0.f) tt = 0.f;
+					if (tt > tmin) { tmin = tt; enter = pi; }
+				} else if (d1 > 0.f) {
+					const float tt = d0 / (d0 - d1);
+					if (tt < tmax) tmax = tt;
+				}
+			}
+			if (miss || !outside || enter < 0 || tmin > tmax)
+				continue;
+			if (tmin < best) {
+				best = tmin;
+				*out_b = bi;
+				*out_pl = enter;
+			}
+		}
+		return best;
+	}
+
+	// CGameMovement::ClipVelocity with overbounce 1 (sv_bounce 0 makes walls
+	// 1.0 too): out = in - n*dot(in,n), then the engine's one adjust
+	// iteration so the result never still points into the plane.
+	void EngineClipVelocity(const Vector& in, const Vector& n, Vector& out) {
+		const float backoff = Dot(in, n);
+		out = in - Scale(n, backoff);
+		const float adjust = Dot(out, n);
+		if (adjust < 0.f)
+			out = out - Scale(n, adjust);
+	}
+
+	// One full airborne engine tick against the brush world - FullWalkMove's
+	// exact order: view step, StartGravity, AirAccelerate, TryPlayerMove
+	// (up to 4 bumps; partial moves re-base the clip set; first-impact plain
+	// clip; multi-plane crease resolution; stop-dead guards), FinishGravity.
+	// Every sub-segment the hull actually travels is written to seg_pts
+	// ([nseg+1] points) so the caller can track the perigee THROUGH bumps;
+	// contacts report the collider plane struck and the speed its clip took.
+	// grounded = a floor-like plane (nz >= 0.7) was struck while falling
+	// slower than NON_JUMP_VELOCITY (140) - CategorizePosition would set
+	// ground and leave AirMove, so the model flight ends there.
+	int EngineMoveTick(FastState& s, float rate, int side,
+	                   Vector* seg_pts, TickContact* contacts, int* ncontacts,
+	                   bool* grounded) {
+		s.yaw = NormYaw(s.yaw - rate);   // screen + = right = Source yaw decrease
+		s.v.Z -= g_search.gravity * g_search.dt * 0.5f;          // StartGravity
+		const float wish = (s.yaw + static_cast<float>(side) * 90.f) * (kPi / 180.f);
+		const float wx = cosf(wish), wy = sinf(wish);            // AirAccelerate
+		const float cur = s.v.X * wx + s.v.Y * wy;
+		float add = g_search.cap - cur;
+		if (add > 0.f) {
+			if (add > g_search.accel_amt) add = g_search.accel_amt;
+			s.v.X += add * wx;
+			s.v.Y += add * wy;
+		}
+
+		// TryPlayerMove.
+		*ncontacts = 0;
+		*grounded = false;
+		int nseg = 0;
+		seg_pts[0] = s.p;
+		float time_left = g_search.dt;
+		Vector planes[5];
+		int numplanes = 0;
+		Vector original_v = s.v;
+		const Vector primal_v = s.v;
+		for (int bump = 0; bump < 4; ++bump) {
+			if (Dot3(s.v) == 0.f)
+				break;
+			const Vector end = s.p + Scale(s.v, time_left);
+			int hb, hpl;
+			const float frac = TraceHullWorld(s.p, end, &hb, &hpl);
+			if (frac > 0.f) {
+				s.p = s.p + Scale(end - s.p, frac);
+				seg_pts[++nseg] = s.p;
+				original_v = s.v;    // engine re-bases the clip set on partial moves
+				numplanes = 0;
+			}
+			if (frac >= 1.f || hb < 0)
+				break;
+			time_left -= time_left * frac;
+			const Vector n = g_search.bcolliders[hb].pn[hpl];
+			if (*ncontacts < 4) {
+				TickContact& c = contacts[(*ncontacts)++];
+				c.collider = hb;
+				c.plane = hpl;
+				c.point = s.p;
+				c.loss = 0.f;        // filled after this bump's clip below
+			}
+			if (numplanes >= 5) {
+				s.v = Vector(0.f, 0.f, 0.f);
+				break;
+			}
+			planes[numplanes++] = n;
+			const float sp_before = sqrtf(Dot3(s.v));
+			if (numplanes == 1) {
+				EngineClipVelocity(original_v, planes[0], s.v);
+				original_v = s.v;
+			} else {
+				int i = 0;
+				for (; i < numplanes; ++i) {
+					EngineClipVelocity(original_v, planes[i], s.v);
+					int j = 0;
+					for (; j < numplanes; ++j)
+						if (j != i && Dot(s.v, planes[j]) < 0.f)
+							break;
+					if (j == numplanes)
+						break;
+				}
+				if (i == numplanes) {
+					if (numplanes != 2) {
+						s.v = Vector(0.f, 0.f, 0.f);
+						break;
+					}
+					// Slide along the crease of the two planes.
+					Vector dir(planes[0].Y * planes[1].Z - planes[0].Z * planes[1].Y,
+					           planes[0].Z * planes[1].X - planes[0].X * planes[1].Z,
+					           planes[0].X * planes[1].Y - planes[0].Y * planes[1].X);
+					const float dl = sqrtf(Dot3(dir));
+					if (dl > 1e-6f) dir = Scale(dir, 1.f / dl);
+					s.v = Scale(dir, Dot(dir, s.v));
+				}
+				if (Dot(s.v, primal_v) <= 0.f) {
+					s.v = Vector(0.f, 0.f, 0.f);
+					break;
+				}
+			}
+			if (*ncontacts > 0)
+				contacts[*ncontacts - 1].loss = sp_before - sqrtf(Dot3(s.v));
+			if (n.Z >= 0.7f && s.v.Z <= 140.f)
+				*grounded = true;
+		}
+		if (nseg == 0)
+			seg_pts[++nseg] = s.p;   // fully blocked: zero-length segment
+		s.v.Z -= g_search.gravity * g_search.dt * 0.5f;          // FinishGravity
+		return nseg;
+	}
+
 	// Ballistic height after j ticks (matches FastTick's half-gravity order:
 	// z_j = z0 + vz0*dt*j - g*dt^2*j^2/2), used to COMPUTE the pass tick.
 	float ZAfter(float z0, float vz0, int j) {
@@ -762,16 +935,12 @@ namespace {
 		int k = 0;
 		if (g_search.have_face) {
 			const Vector tgt = g_search.target_pos;
-			const Vector fn = g_search.face_n;
-			const float fd = g_search.face_d;
-			// Touch-corner offset for the slide's stay-on-face test.
-			const float ceps = 1e-4f;
-			const Vector corner(
-				fn.X > ceps ? -16.f : fn.X < -ceps ? 16.f : 0.f,
-				fn.Y > ceps ? -16.f : fn.Y < -ceps ? 16.f : 0.f,
-				fn.Z > ceps ? 0.f : fn.Z < -ceps ? 72.f : 36.f);
-			const int nb = static_cast<int>(g_search.bcolliders.size());
-			// Closest approach of the whole (truncated) path to the point.
+			// Closest approach of the collision-resolved path to the point.
+			// Integration = EngineMoveTick: the REAL TryPlayerMove semantics
+			// against the corridor world - boards, kisses, slides, bounces and
+			// creases all emerge from the geometry (no glued-plane slide, no
+			// polygon heuristics). The flight only ENDS at grounding (the
+			// engine would leave AirMove) or the window's end.
 			Vector best_p = s.p;
 			int best_tick = 0;
 			float best_frac = 0.f;
@@ -795,115 +964,37 @@ namespace {
 			out.bump_ticks = 0;
 			out.bump_loss = 0.f;
 			int contact_tick = -1;
+			bool foreign_counted = false;
 			for (int t = 0; t < N + 8; ++t) {
 				while (k < nsplits && t >= splits[k]) k++;
-				const Vector before = s.p;
-				FastTick(s, rates[k], (k % 2 == 0) ? side0 : -side0);
-
-				// Sweep this tick's segment against the brush world (hull-
-				// expanded convex clips, AABB-gated). Earliest entry wins; the
-				// plane entered through decides board vs crash - edges and back
-				// faces resolve exactly like the engine's own brush collision.
-				// Contact fraction mirrors the engine's DIST_EPSILON (1/32) so
-				// the hull stops the same hair short of the plane the trace does.
-				const float sminx = fminf(before.X, s.p.X), smaxx = fmaxf(before.X, s.p.X);
-				const float sminy = fminf(before.Y, s.p.Y), smaxy = fmaxf(before.Y, s.p.Y);
-				const float sminz = fminf(before.Z, s.p.Z), smaxz = fmaxf(before.Z, s.p.Z);
-				float hit_t = 2.f;
-				int hit_b = -1, hit_pl = -1;
-				for (int b = 0; b < nb; ++b) {
-					const SearchCtx::BrushCollider& bc = g_search.bcolliders[b];
-					if (smaxx < bc.bmin.X || sminx > bc.bmax.X ||
-					    smaxy < bc.bmin.Y || sminy > bc.bmax.Y ||
-					    smaxz < bc.bmin.Z || sminz > bc.bmax.Z)
-						continue;
-					float tmin = 0.f, tmax = 1.f;
-					int enter = -1;
-					bool outside = false, miss = false;
-					const int np = static_cast<int>(bc.pn.size());
-					for (int pi = 0; pi < np; ++pi) {
-						const float d0 = Dot(bc.pn[pi], before) - bc.pd[pi];
-						const float d1 = Dot(bc.pn[pi], s.p) - bc.pd[pi];
-						if (d0 > 0.f) {
-							outside = true;
-							if (d1 > 0.f) { miss = true; break; }
-							float tt = (d0 - 0.03125f) / (d0 - d1);   // DIST_EPSILON
-							if (tt < 0.f) tt = 0.f;
-							if (tt > tmin) { tmin = tt; enter = pi; }
-						} else if (d1 > 0.f) {
-							const float tt = d0 / (d0 - d1);
-							if (tt < tmax) tmax = tt;
-						}
-					}
-					if (miss || !outside || enter < 0 || tmin > tmax)
-						continue;
-					if (tmin < hit_t) {
-						hit_t = tmin;
-						hit_b = b;
-						hit_pl = enter;
-					}
-				}
+				Vector segp[6];
+				TickContact tc[4];
+				int ntc = 0;
+				bool grounded = false;
+				const int nseg = EngineMoveTick(s, rates[k], (k % 2 == 0) ? side0 : -side0,
+				                                segp, tc, &ntc, &grounded);
 				const float v2n = sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y);
-				if (hit_b < 0) {
-					track(before, s.p, t + 1, v2n);
-					continue;
-				}
-
-				const SearchCtx::BrushCollider& bc = g_search.bcolliders[hit_b];
-				const Vector cp = before + Scale(s.p - before, hit_t);
-				track(before, cp, t + 1, v2n);   // path up to the contact counts
-				if (!bc.is_target || bc.pid[hit_pl] != bc.target_plane) {
-					// Entered through a non-boardable plane (crest/edge/back
-					// face/another brush): the engine deflects here, the free
-					// arc is over. The perigee reached so far is the honest
-					// pass - returning it keeps the residual smooth instead of
-					// walling off every grazing arc.
-					if (bc.is_target)
-						g_search.cnt_edge++;
-					else
-						g_search.early_hits++;
-					break;
-				}
-
-				// BOARD through the target's face: Source clip at the contact
-				// (loss recorded), then a short slide continues the tracking -
-				// an up-slope kiss slides INTO the target.
-				contact_tick = t + 1;
-				s.p = cp;
-				const float into = Dot(fn, s.v);
-				if (into < 0.f) {
-					const float before_sp = sqrtf(Dot3(s.v));
-					s.v = s.v - Scale(fn, into);   // engine ClipVelocity, overbounce 1
-					out.bump_loss = before_sp - sqrtf(Dot3(s.v));
-					if (out.bump_loss < 0.f)
-						out.bump_loss = 0.f;
-				}
-				// The engine finishes the tick's remaining time along the
-				// clipped velocity (TryPlayerMove's bump loop), on the plane.
-				s.p = s.p + Scale(s.v, g_search.dt * (1.f - hit_t));
-				{
-					const float ph0 = Dot(fn, s.p) - fd;
-					if (ph0 < 0.f)
-						s.p = s.p - Scale(fn, ph0);
-				}
-				track(cp, s.p, contact_tick, sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y));
-				Vector prevp = s.p;
-				for (int t2 = contact_tick; t2 < N + 8; ++t2) {
-					while (k < nsplits && t2 >= splits[k]) k++;
-					FastTick(s, rates[k], (k % 2 == 0) ? side0 : -side0);
-					const float ph2 = Dot(fn, s.p) - fd;
-					if (ph2 < 0.f) {
-						s.p = s.p - Scale(fn, ph2);
-						const float into2 = Dot(fn, s.v);
-						if (into2 < 0.f)
-							s.v = s.v - Scale(fn, into2);
+				for (int si = 0; si < nseg; ++si)
+					track(segp[si], segp[si + 1], t + 1, v2n);
+				for (int ci = 0; ci < ntc; ++ci) {
+					const SearchCtx::BrushCollider& bc = g_search.bcolliders[tc[ci].collider];
+					if (bc.is_target && bc.pid[tc[ci].plane] == bc.target_plane) {
+						if (contact_tick < 0) {
+							contact_tick = t + 1;   // first board through the face
+							out.bump_loss = tc[ci].loss;
+						}
+					} else if (!foreign_counted) {
+						// Deflected by other geometry - counted for diagnostics,
+						// but the flight CONTINUES exactly like the engine's.
+						foreign_counted = true;
+						if (bc.is_target)
+							g_search.cnt_edge++;
+						else
+							g_search.early_hits++;
 					}
-					if (!BspWorld::PointOnFace(bc.brush, bc.target_plane, s.p + corner, 2.f))
-						break;   // slid off the ramp face
-					track(prevp, s.p, t2 + 1, sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y));
-					prevp = s.p;
 				}
-				break;
+				if (grounded)
+					break;   // engine grounds + leaves AirMove: dead line for surf
 			}
 			if (best_tick < 1)
 				return false;   // the start itself was the nearest point - no pass
@@ -1777,10 +1868,9 @@ namespace {
 			const Vector prev_o = (i > 0) ? g_states[i - 1].origin : g_anchor.origin;
 			const Vector prev_v = (i > 0) ? g_states[i - 1].velocity : g_anchor.velocity;
 
-			// Model-symmetric world truncation: the first entry into a corridor
-			// brush through a non-boardable plane deflects the real path, and
-			// the free-flight comparison ends there - the same sweep the model
-			// runs. (Needs a search's collider set; skips cleanly without one.)
+			// First world deflection (metadata for the on_target verdict): the
+			// same sweep the model runs. The path itself CONTINUES - both the
+			// engine and the model clip and keep flying through deflections.
 			if (have_face && te_tick < 0 && fe_tick < 0 && we_tick < 0) {
 				const int nbw = static_cast<int>(g_search.bcolliders.size());
 				const float sminx = fminf(prev_o.X, o.X), smaxx = fmaxf(prev_o.X, o.X);
@@ -1826,12 +1916,12 @@ namespace {
 				}
 			}
 
-			// Interpolated closest approach of the segment - only while the free
-			// path is alive (accumulation stops at a deflection, like the model;
-			// the partial segment up to the entry point still counts).
-			if (fe_tick < 0 && (we_tick < 0 || we_tick == i)) {
-				const Vector send = (we_tick == i) ? we_pass : o;
-				const Vector d = send - prev_o;
+			// Interpolated closest approach of the segment. The scan runs
+			// through deflections (the model's integration does too) and only
+			// stops when the player GROUNDS - the engine leaves AirMove there
+			// and so does the model.
+			{
+				const Vector d = o - prev_o;
 				const float len2 = Dot3(d);
 				float tt = (len2 > 1e-9f) ? Dot(tgt - prev_o, d) / len2 : 0.f;
 				tt = Clampf(tt, 0.f, 1.f);
@@ -1846,6 +1936,8 @@ namespace {
 				if (dist < g_realpass.min_dist)
 					g_realpass.min_dist = dist;
 			}
+			if (have_face && i > b && (g_states[i].flags & FL_ONGROUND) != 0)
+				break;   // grounded: the airborne line is over (both sides stop here)
 
 			if (have_face && we_tick < 0) {
 				for (int c = 0; c < ncols; ++c) {
@@ -2414,8 +2506,16 @@ namespace {
 				Vector fn;
 				float fd = 0.f;
 				if (BspWorld::GetPlane(c.target_plane, &fn, &fd)) {
-					sprintf_s(line, "  board face: plane=%d n=(%.4f %.4f %.4f)\n",
-						c.target_plane, fn.X, fn.Y, fn.Z);
+					// d_rest (through the target's rest origin) vs d_expand (the
+					// brush plane + hull support offset): any gap here is a
+					// target-seating offset that shifts board timing sub-tick.
+					float d_rest = 0.f;
+					for (size_t pi = 0; pi < c.pid.size(); ++pi)
+						if (c.pid[pi] == c.target_plane) { d_rest = c.pd[pi]; break; }
+					const float d_expand = fd + 16.f * fabsf(fn.X) + 16.f * fabsf(fn.Y)
+						+ (fn.Z < 0.f ? 72.f * fabsf(fn.Z) : 0.f);
+					sprintf_s(line, "  board face: plane=%d n=(%.4f %.4f %.4f) d_rest=%.4f d_expand=%.4f (gap %+0.4f)\n",
+						c.target_plane, fn.X, fn.Y, fn.Z, d_rest, d_expand, d_rest - d_expand);
 					out << line;
 				}
 			}
@@ -2481,7 +2581,14 @@ namespace {
 		float worst = 0.f;
 		for (int t = 0; t < sd.ticks + 8 && b + t < static_cast<int>(g_states.size()); ++t) {
 			while (k < sd.nsplits && t >= sd.splits[k]) k++;
-			FastTick(s, sd.rates[k], (k % 2 == 0) ? sd.side0 : -sd.side0);
+			// The SAME collision integration the solver uses - the trace
+			// compares the actual model, boards and slides included.
+			Vector tsp[6];
+			TickContact ttc[4];
+			int tnc = 0;
+			bool tgr = false;
+			EngineMoveTick(s, sd.rates[k], (k % 2 == 0) ? sd.side0 : -sd.side0,
+			               tsp, ttc, &tnc, &tgr);
 			const Vector ro = g_states[b + t].origin;
 			const Vector rv = g_states[b + t].velocity;
 			const float dp = sqrtf(Dot3(s.p - ro));
@@ -3363,7 +3470,7 @@ namespace {
 
 				if (g_search.seg == g_sel) {
 					if (g_search.active) {
-						ImGui::Text("searching...  %d%%   (%d exact passes so far)",
+						ImGui::Text("searching...  %d%%   (%d passes collected - near-identical lines merge at the end)",
 							g_search.jobs_total ? (g_search.jobs_done * 100 / g_search.jobs_total) : 0,
 							static_cast<int>(g_search.results.size()));
 					} else if (g_search.done && g_search.results.empty()) {
