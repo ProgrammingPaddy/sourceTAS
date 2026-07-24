@@ -45,13 +45,12 @@ namespace TasEditor {
 		bool show_hull;                       // draw the collision hull ghost at the playhead
 		bool have_view;                       // view angles at the playhead are valid
 		float view_pitch, view_yaw;           // for the view-direction arrow
-		// The REAL sim's board-contact point. The engine slides within the
-		// contact tick, so the polyline of tick positions cuts the corner at the
-		// touch - splicing this vertex in makes the drawn line literally pass
-		// through where the hull met the ramp (the solver's exact target).
-		bool have_board;
-		int board_tick;                       // global tick whose edge gets spliced
-		Vector board_point;
+		// The REAL sim's measured pass point (where its path crosses the solver
+		// target's height). Spliced into the drawn line as a vertex so the line
+		// visibly runs through it - and decimation never skips that tick.
+		bool have_pass;
+		int pass_tick;                        // global tick whose edge gets spliced
+		Vector pass_point;
 	};
 	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
 }

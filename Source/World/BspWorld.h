@@ -48,6 +48,15 @@ namespace BspWorld {
 
 	// --- geometry queries (for the solvers) ----------------------------------
 	bool GetPlane(int plane, Vector* normal, float* dist);
+	// A brush's COMPLETE convex plane set (the same set the ray clip uses), for
+	// hull-vs-brush sweeps in the route model.
+	int  BrushClipPlaneCount(int brush);
+	bool GetBrushClipPlane(int brush, int index, int* plane_id, Vector* n, float* d);
+	// Enumeration for the route model's collision world: every parsed brush,
+	// with contents + AABB, so the solver can gather all solids along a flight
+	// corridor (the engine's TracePlayerBBox collides with all of them).
+	int  BrushCount();
+	bool GetBrushInfo(int brush, int* contents, Vector* mins, Vector* maxs);
 	// Pitch (Source sign: + = down) that puts the view direction for `yaw`
 	// exactly IN the face's plane - the "pitch locked to the ramp" view.
 	bool LockedPitch(int plane, float yaw, float* out_pitch);
@@ -56,6 +65,12 @@ namespace BspWorld {
 	// Is `point` (projected onto the plane) within the face polygon, allowing
 	// `expand` units of slack past the edges?
 	bool PointOnFace(int brush, int plane, const Vector& point, float expand);
+	// Richer variant: returns true when within `margin` of the face (inside or
+	// in the outside edge zone); *interior reports strictly-inside-by-margin.
+	// The gap between the two is the EDGE ZONE - where a hull catches the
+	// brush's crest/corner instead of boarding the face.
+	bool PointOnFaceQuery(int brush, int plane, const Vector& point,
+	                      float margin, bool* interior);
 
 	// --- board targets: solver destinations (persisted per map) --------------
 	// A target is the player hull rested tangent against a face (the same

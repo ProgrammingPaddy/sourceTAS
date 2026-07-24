@@ -950,6 +950,41 @@ bool BspWorld::GetPlane(int plane, Vector* normal, float* dist) {
 	return true;
 }
 
+int BspWorld::BrushClipPlaneCount(int brush) {
+	if (brush < 0 || brush >= static_cast<int>(g_brushes.size()))
+		return 0;
+	return static_cast<int>(g_brushes[brush].clip_planes.size());
+}
+
+bool BspWorld::GetBrushClipPlane(int brush, int index, int* plane_id, Vector* n, float* d) {
+	if (brush < 0 || brush >= static_cast<int>(g_brushes.size()))
+		return false;
+	const Brush& b = g_brushes[brush];
+	if (index < 0 || index >= static_cast<int>(b.clip_planes.size()))
+		return false;
+	const int pid = b.clip_planes[index];
+	if (pid < 0 || pid >= static_cast<int>(g_planes.size()))
+		return false;
+	if (plane_id) *plane_id = pid;
+	if (n) *n = g_planes[pid].first;
+	if (d) *d = g_planes[pid].second;
+	return true;
+}
+
+int BspWorld::BrushCount() {
+	return static_cast<int>(g_brushes.size());
+}
+
+bool BspWorld::GetBrushInfo(int brush, int* contents, Vector* mins, Vector* maxs) {
+	if (brush < 0 || brush >= static_cast<int>(g_brushes.size()))
+		return false;
+	const Brush& b = g_brushes[brush];
+	if (contents) *contents = b.contents;
+	if (mins) *mins = b.mins;
+	if (maxs) *maxs = b.maxs;
+	return true;
+}
+
 bool BspWorld::LockedPitch(int plane, float yaw, float* out_pitch) {
 	if (plane < 0 || plane >= static_cast<int>(g_planes.size()) || !out_pitch)
 		return false;
@@ -978,46 +1013,73 @@ bool BspWorld::GetFacePolygon(int brush, int plane, const Vector** points, int* 
 	return false;
 }
 
-bool BspWorld::PointOnFace(int brush, int plane, const Vector& point, float expand) {
-	const Vector* pts = nullptr;
-	int count = 0;
-	if (!GetFacePolygon(brush, plane, &pts, &count))
-		return false;
-	Vector n;
-	float d = 0.f;
-	if (!GetPlane(plane, &n, &d))
-		return false;
+namespace {
+	// Shared point-vs-face computation: 2D point-in-polygon on the plane plus
+	// the distance to the nearest polygon edge.
+	bool FacePointQuery(int brush, int plane, const Vector& point,
+	                    bool* out_inside, float* out_edge_dist) {
+		const Vector* pts = nullptr;
+		int count = 0;
+		if (!BspWorld::GetFacePolygon(brush, plane, &pts, &count))
+			return false;
+		Vector n;
+		float d = 0.f;
+		if (!BspWorld::GetPlane(plane, &n, &d))
+			return false;
 
-	// Project onto the plane, then drop the normal's dominant axis for a 2D
-	// point-in-polygon test (with `expand` units of slack past the edges).
-	const Vector p = point - Scale(n, Dot(n, point) - d);
-	int drop = 0;
-	float best = fabsf(n.X);
-	if (fabsf(n.Y) > best) { best = fabsf(n.Y); drop = 1; }
-	if (fabsf(n.Z) > best) { drop = 2; }
-	auto u = [&](const Vector& v) { return drop == 0 ? v.Y : v.X; };
-	auto w = [&](const Vector& v) { return drop == 2 ? v.Y : v.Z; };
+		// Project onto the plane, then drop the normal's dominant axis for a
+		// 2D point-in-polygon test.
+		const Vector p = point - Scale(n, Dot(n, point) - d);
+		int drop = 0;
+		float best = fabsf(n.X);
+		if (fabsf(n.Y) > best) { best = fabsf(n.Y); drop = 1; }
+		if (fabsf(n.Z) > best) { drop = 2; }
+		auto u = [&](const Vector& v) { return drop == 0 ? v.Y : v.X; };
+		auto w = [&](const Vector& v) { return drop == 2 ? v.Y : v.Z; };
 
-	bool inside = false;
-	float min_edge_dist = 1e9f;
-	const float pu = u(p), pw = w(p);
-	for (int i = 0, j = count - 1; i < count; j = i++) {
-		const float iu = u(pts[i]), iw = w(pts[i]);
-		const float ju = u(pts[j]), jw = w(pts[j]);
-		if ((iw > pw) != (jw > pw) &&
-			pu < (ju - iu) * (pw - iw) / (jw - iw) + iu)
-			inside = !inside;
+		bool inside = false;
+		float min_edge_dist = 1e9f;
+		const float pu = u(p), pw = w(p);
+		for (int i = 0, j = count - 1; i < count; j = i++) {
+			const float iu = u(pts[i]), iw = w(pts[i]);
+			const float ju = u(pts[j]), jw = w(pts[j]);
+			if ((iw > pw) != (jw > pw) &&
+				pu < (ju - iu) * (pw - iw) / (jw - iw) + iu)
+				inside = !inside;
 
-		// Distance to the edge segment (for the expand slack).
-		const float ex = ju - iu, ew = jw - iw;
-		const float len2 = ex * ex + ew * ew;
-		float t = len2 > 1e-9f ? ((pu - iu) * ex + (pw - iw) * ew) / len2 : 0.f;
-		if (t < 0.f) t = 0.f;
-		if (t > 1.f) t = 1.f;
-		const float du = pu - (iu + ex * t), dw = pw - (iw + ew * t);
-		const float dist = sqrtf(du * du + dw * dw);
-		if (dist < min_edge_dist)
-			min_edge_dist = dist;
+			const float ex = ju - iu, ew = jw - iw;
+			const float len2 = ex * ex + ew * ew;
+			float t = len2 > 1e-9f ? ((pu - iu) * ex + (pw - iw) * ew) / len2 : 0.f;
+			if (t < 0.f) t = 0.f;
+			if (t > 1.f) t = 1.f;
+			const float du = pu - (iu + ex * t), dw = pw - (iw + ew * t);
+			const float dist = sqrtf(du * du + dw * dw);
+			if (dist < min_edge_dist)
+				min_edge_dist = dist;
+		}
+		*out_inside = inside;
+		*out_edge_dist = min_edge_dist;
+		return true;
 	}
-	return inside || min_edge_dist <= expand;
+}
+
+bool BspWorld::PointOnFace(int brush, int plane, const Vector& point, float expand) {
+	bool inside = false;
+	float edge_dist = 1e9f;
+	if (!FacePointQuery(brush, plane, point, &inside, &edge_dist))
+		return false;
+	return inside || edge_dist <= expand;
+}
+
+bool BspWorld::PointOnFaceQuery(int brush, int plane, const Vector& point,
+                                float margin, bool* interior) {
+	bool inside = false;
+	float edge_dist = 1e9f;
+	if (interior)
+		*interior = false;
+	if (!FacePointQuery(brush, plane, point, &inside, &edge_dist))
+		return false;
+	if (interior)
+		*interior = inside && edge_dist >= margin;
+	return inside || edge_dist <= margin;
 }

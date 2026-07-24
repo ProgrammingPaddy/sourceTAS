@@ -195,28 +195,27 @@ void WorldDraw::Render() {
 				boundary = true;
 				next_seg++;
 			}
-			const bool board_edge = ed.have_board && i == ed.board_tick;
-			if (!boundary && !board_edge && (i % stride) != 0 && i != ed.count - 1 && i != ed.cursor)
+			const bool pass_edge = ed.have_pass && i == ed.pass_tick;
+			if (!boundary && !pass_edge && (i % stride) != 0 && i != ed.count - 1 && i != ed.cursor)
 				continue;
 
 			const Vector p = ed.states[i].origin;
 			if (!FiniteWorldPoint(p))
 				break;
 
-			// The engine slides inside the contact tick, so the straight edge
-			// prev->p cuts the corner at the actual touch point. Splice the
-			// measured touch in as a vertex: the drawn line now literally
-			// passes through where the hull met the ramp (= the solver target).
-			if (board_edge && prev_ok && FiniteWorldPoint(ed.board_point)) {
-				debugoverlay->AddLineOverlay(prev, ed.board_point, 255, 235, 60, false, duration);
+			// Splice the measured pass point in as a vertex (and never decimate
+			// its tick): the drawn line visibly runs through the exact point
+			// where the real path crosses the target's height.
+			if (pass_edge && prev_ok && FiniteWorldPoint(ed.pass_point)) {
+				debugoverlay->AddLineOverlay(prev, ed.pass_point, 255, 235, 60, false, duration);
 				for (int c = 0; c < 4; ++c)
 					if (corner_trails[c])
-						debugoverlay->AddLineOverlay(prev + kCornerOff[c], ed.board_point + kCornerOff[c],
+						debugoverlay->AddLineOverlay(prev + kCornerOff[c], ed.pass_point + kCornerOff[c],
 						                             120, 170, 200, false, duration);
-				debugoverlay->AddBoxOverlay(ed.board_point, Vector(-1.2f, -1.2f, -1.2f),
+				debugoverlay->AddBoxOverlay(ed.pass_point, Vector(-1.2f, -1.2f, -1.2f),
 				                            Vector(1.2f, 1.2f, 1.2f), kNoRotation,
 				                            255, 235, 60, 255, duration);
-				prev = ed.board_point;
+				prev = ed.pass_point;
 			}
 
 			// The whole future path is colored by strafe efficiency (the line is
