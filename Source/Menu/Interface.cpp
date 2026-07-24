@@ -3,6 +3,7 @@
 #include "../World/WorldDraw.h"
 #include "../World/Prediction.h"
 #include "../World/NetVars.h"
+#include "../World/BspWorld.h"
 #include "../Editor/TasEditor.h"
 
 #include <cmath>
@@ -37,15 +38,13 @@ namespace {
 		{ "Editor: Step Forward", 0, [] { return true; }, [] { TasEditor::StepCursor(1); } },
 		{ "Editor: Prev Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(-1); } },
 		{ "Editor: Next Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(1); } },
+		{ "Editor: Pick At Crosshair", 0, [] { return true; }, [] { TasEditor::PickAtCrosshair(); } },
 	};
 
 	constexpr int kCommandCount = static_cast<int>(sizeof(g_commands) / sizeof(g_commands[0]));
 
 	// Index of the command currently capturing a key, or -1 when not rebinding.
 	int g_binding = -1;
-
-	// Non-interactive status HUD shown while a run replays.
-	bool g_show_replay_hud = true;
 
 	const ImGuiWindowFlags kOverlayFlags =
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -89,7 +88,7 @@ void BasehookInterface::OnEndScene() {
 
 	// Replay diagnostics HUD: non-interactive status while a run plays back,
 	// shown whether or not the menu is open.
-	if (g_show_replay_hud && g_tas.IsPlaying()) {
+	if (WorldDraw::show_replay_hud && g_tas.IsPlaying()) {
 		ImGui::SetNextWindowPos(ImVec2(12, 52));
 		ImGui::Begin("##stas_replay_hud", nullptr, kOverlayFlags | ImGuiWindowFlags_NoInputs);
 
@@ -243,29 +242,15 @@ void BasehookInterface::OnEndScene() {
 	ImGui::Separator();
 	if (ImGui::Button(TasEditor::IsOpen() ? "Close TAS Editor" : "Open TAS Editor", ImVec2(250, 0)))
 		TasEditor::Toggle();
-	ImGui::SameLine();
-	ImGui::Checkbox("Replay HUD", &g_show_replay_hud);
 
 	ImGui::Separator();
-	ImGui::TextWrapped("Click a key, then press one to bind it (Escape clears). Hotkeys work with the menu closed. F8 toggles this menu.");
+	ImGui::TextWrapped("Click a key, then press one to bind it (Escape clears). Hotkeys work with the menu closed. F8 toggles this menu. Rendering toggles live in the editor's Rendering tab.");
 
-	// --- world draw (Phase 1a dev tools) --------------------------------
-	// Collapsed by default so it doesn't crowd the recording UI. Draws the local
-	// player's collision hull into the 3D scene and exposes the two overlay vtable
-	// indices for a bounded in-game verification (no rebuild needed).
+	// --- diagnostics -----------------------------------------------------
+	// Dev readouts + the overlay vtable indices. All the visual toggles live in
+	// the editor's Rendering tab now.
 	ImGui::Separator();
-	if (ImGui::CollapsingHeader("World Draw (Phase 1a)")) {
-		ImGui::Checkbox("Test marker at world origin", &WorldDraw::draw_test_marker);
-		ImGui::Checkbox("Player collision hull", &WorldDraw::draw_player_box);
-		ImGui::Checkbox("Player feet marker (dot)", &WorldDraw::draw_player_marker);
-
-		ImGui::Spacing();
-		ImGui::PushItemWidth(200);
-		ImGui::SliderInt("Hull alpha (0 = wireframe)", &WorldDraw::player_box_alpha, 0, 160);
-		ImGui::SliderFloat("Overlay lifetime (x frame)", &WorldDraw::overlay_life_scale, 0.5f, 4.0f, "%.2f");
-		ImGui::PopItemWidth();
-
-		ImGui::Spacing();
+	if (ImGui::CollapsingHeader("Diagnostics")) {
 		ImGui::PushItemWidth(120);
 		ImGui::InputInt("Box overlay index", &g_overlay_box_index);
 		ImGui::InputInt("Line overlay index", &g_overlay_line_index);
@@ -302,27 +287,7 @@ void BasehookInterface::OnEndScene() {
 			ImGui::TextDisabled("no local player entity");
 		}
 
-		// --- prediction (Phase 1b) --------------------------------------
 		ImGui::Separator();
-		ImGui::Checkbox("Predict path", &WorldDraw::draw_prediction);
-		ImGui::SameLine();
-		ImGui::Checkbox("Live input", &WorldDraw::pred_live_input);
-		ImGui::SameLine();
-		ImGui::Checkbox("Auto-bhop", &WorldDraw::pred_autobhop);
-
-		ImGui::PushItemWidth(200);
-		ImGui::SliderInt("Predict ticks", &WorldDraw::pred_ticks, 1, 200);
-		if (!WorldDraw::pred_live_input) {
-			ImGui::SliderFloat("Forward move", &WorldDraw::pred_forwardmove, -450.f, 450.f, "%.0f");
-			ImGui::SliderFloat("Side move", &WorldDraw::pred_sidemove, -450.f, 450.f, "%.0f");
-		}
-		ImGui::PopItemWidth();
-		if (!WorldDraw::pred_live_input) {
-			ImGui::Checkbox("Jump", &WorldDraw::pred_jump);
-			ImGui::SameLine();
-			ImGui::Checkbox("Duck", &WorldDraw::pred_duck);
-		}
-
 		const Prediction::Diag pd = Prediction::LastDiag();
 		const char* pred_state =
 			pd.ran       ? "running" :

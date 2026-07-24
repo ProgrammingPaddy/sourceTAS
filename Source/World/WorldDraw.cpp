@@ -1,6 +1,7 @@
 #include "WorldDraw.h"
 #include "NetVars.h"
 #include "Prediction.h"
+#include "BspWorld.h"
 #include "../Editor/TasEditor.h"
 
 #include <cstdint>
@@ -19,6 +20,7 @@ namespace WorldDraw {
 
 	int   player_box_alpha   = 30;    // low: mostly wireframe, never reads as solid
 	float overlay_life_scale = 1.5f;  // ~one frame of lifetime (see FrameDuration)
+	bool  show_replay_hud    = true;
 
 	int   pred_ticks       = 66;      // ~1s at 66-tick
 	bool  pred_live_input  = true;    // reflect what you're actually pressing
@@ -27,6 +29,8 @@ namespace WorldDraw {
 	float pred_sidemove    = 0.f;
 	bool  pred_jump        = false;
 	bool  pred_duck        = false;
+
+	bool corner_trails[4]  = { false, false, false, false };
 }
 
 namespace {
@@ -40,6 +44,13 @@ namespace {
 
 	// Half-extent of the feet dot (a small cube centred on the origin point).
 	const float  kMarkerHalf  = 1.5f;
+
+	// Bottom hull corners as world offsets (the hull is axis-aligned, so these
+	// never rotate). Order matches WorldDraw::corner_trails.
+	const Vector kCornerOff[4] = {
+		Vector( kHullWidth,  kHullWidth, 0.f), Vector( kHullWidth, -kHullWidth, 0.f),
+		Vector(-kHullWidth,  kHullWidth, 0.f), Vector(-kHullWidth, -kHullWidth, 0.f),
+	};
 
 	WorldDraw::Diagnostics g_diag;
 
@@ -153,6 +164,10 @@ void WorldDraw::Render() {
 					break;   // prediction diverged; stop before feeding garbage to the overlay
 				debugoverlay->AddLineOverlay(prev, p, 40, 220, 90, false, duration);
 				debugoverlay->AddBoxOverlay(p, dmin, dmax, kNoRotation, 40, 255, 90, 255, duration);
+				for (int c = 0; c < 4; ++c)
+					if (corner_trails[c])
+						debugoverlay->AddLineOverlay(prev + kCornerOff[c], p + kCornerOff[c],
+						                             120, 170, 200, false, duration);
 				prev = p;
 			}
 		}
@@ -180,12 +195,29 @@ void WorldDraw::Render() {
 				boundary = true;
 				next_seg++;
 			}
-			if (!boundary && (i % stride) != 0 && i != ed.count - 1 && i != ed.cursor)
+			const bool board_edge = ed.have_board && i == ed.board_tick;
+			if (!boundary && !board_edge && (i % stride) != 0 && i != ed.count - 1 && i != ed.cursor)
 				continue;
 
 			const Vector p = ed.states[i].origin;
 			if (!FiniteWorldPoint(p))
 				break;
+
+			// The engine slides inside the contact tick, so the straight edge
+			// prev->p cuts the corner at the actual touch point. Splice the
+			// measured touch in as a vertex: the drawn line now literally
+			// passes through where the hull met the ramp (= the solver target).
+			if (board_edge && prev_ok && FiniteWorldPoint(ed.board_point)) {
+				debugoverlay->AddLineOverlay(prev, ed.board_point, 255, 235, 60, false, duration);
+				for (int c = 0; c < 4; ++c)
+					if (corner_trails[c])
+						debugoverlay->AddLineOverlay(prev + kCornerOff[c], ed.board_point + kCornerOff[c],
+						                             120, 170, 200, false, duration);
+				debugoverlay->AddBoxOverlay(ed.board_point, Vector(-1.2f, -1.2f, -1.2f),
+				                            Vector(1.2f, 1.2f, 1.2f), kNoRotation,
+				                            255, 235, 60, 255, duration);
+				prev = ed.board_point;
+			}
 
 			// The whole future path is colored by strafe efficiency (the line is
 			// always the exact simulated path; color is information, not a
@@ -204,8 +236,13 @@ void WorldDraw::Render() {
 				const bool selected = (i >= ed.sel_start && i < ed.sel_end);
 				if (!selected) { r = (r * 11) / 20; g = (g * 11) / 20; b = (b * 11) / 20; }
 			}
-			if (prev_ok)
+			if (prev_ok) {
 				debugoverlay->AddLineOverlay(prev, p, r, g, b, false, duration);
+				for (int c = 0; c < 4; ++c)
+					if (corner_trails[c])
+						debugoverlay->AddLineOverlay(prev + kCornerOff[c], p + kCornerOff[c],
+						                             120, 170, 200, false, duration);
+			}
 			prev = p;
 			prev_ok = true;
 
@@ -249,6 +286,10 @@ void WorldDraw::Render() {
 			}
 		}
 	}
+
+	// (5) World geometry (1.1): brush wireframes from the map's BSP collision
+	// data, centered on the player. Self-guards and auto-loads on level change.
+	BspWorld::Render(d.origin, d.have_player, duration);
 
 	g_diag = d;
 }

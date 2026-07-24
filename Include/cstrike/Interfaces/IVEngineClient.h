@@ -6,6 +6,10 @@ class IVEngineClient {
 			return GetVirtualFunction<int(*)(IVEngineClient*)>(this, 12)(this);
 		}
 
+		void GetViewAngles(QAngle& angles) {
+			return GetVirtualFunction<void(*)(IVEngineClient*, QAngle&)>(this, 19)(this, angles);
+		}
+
 		void SetViewAngles(QAngle& angles) {
 			return GetVirtualFunction<void(*)(IVEngineClient*, QAngle&)>(this, 20)(this, angles);
 		}

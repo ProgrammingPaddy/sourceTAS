@@ -16,6 +16,13 @@ namespace WorldDraw {
 	// Menu-controlled tuning.
 	extern int   player_box_alpha;   // hull fill alpha; 0 = wireframe only
 	extern float overlay_life_scale; // overlay lifetime as a multiple of frame time
+	extern bool  show_replay_hud;    // status HUD while a run replays
+
+	// Bottom hull-corner trails: parallel path lines offset to each bottom corner
+	// of the (axis-aligned) player hull, for lining up and checking ramp boards.
+	// Applies to both the live prediction line and the editor run line.
+	// Order: [0] +X+Y   [1] +X-Y   [2] -X+Y   [3] -X-Y.
+	extern bool corner_trails[4];
 
 	// Prediction input (held for the whole predicted window).
 	extern int   pred_ticks;         // number of ticks to predict

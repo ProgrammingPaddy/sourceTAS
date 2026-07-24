@@ -455,8 +455,20 @@ bool Prediction::CaptureStartState(StartState& out) {
 	out.velocity = NetVars::Get<Vector>(player, g_off.velocity);
 	const int flags = g_off.flags ? NetVars::Get<int>(player, g_off.flags) : 0;
 	out.ducked  = (flags & FL_DUCKING) != 0;
-	out.pitch   = g_off.eye_angles ? NetVars::Get<float>(player, g_off.eye_angles) : 0.f;
-	out.yaw     = g_off.eye_angles ? NetVars::Get<float>(player, g_off.eye_angles + 4) : 0.f;
+
+	// View angles come from the engine: the m_angEyeAngles netvars exist for
+	// drawing REMOTE players and are unreliable for the local one (pitch reads
+	// ~0), which sent pick rays out level at eye height. Netvars stay as the
+	// fallback only if the engine call reads exactly zero.
+	QAngle view(0.f, 0.f, 0.f);
+	engine->GetViewAngles(view);
+	out.pitch = view.X;
+	out.yaw   = view.Y;
+	if (view.X == 0.f && view.Y == 0.f && g_off.eye_angles) {
+		out.pitch = NetVars::Get<float>(player, g_off.eye_angles);
+		out.yaw   = NetVars::Get<float>(player, g_off.eye_angles + 4);
+	}
+
 	out.stamina = g_off.stamina ? NetVars::Get<float>(player, g_off.stamina) : 0.f;
 	out.valid = true;
 	return true;

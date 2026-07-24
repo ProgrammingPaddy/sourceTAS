@@ -25,6 +25,11 @@ namespace TasEditor {
 	void StepCursor(int delta);
 	void StepSegment(int direction);
 
+	// Crosshair pick (also bound to a hotkey): acts per the Targets tab's mode -
+	// tag/untag the aimed surf face, or place a board target where the hull
+	// would rest on the aimed surface.
+	void PickAtCrosshair();
+
 	// Snapshot of everything WorldDraw needs to render the run line.
 	struct DrawData {
 		const Prediction::SimState* states;   // per-tick world states
@@ -40,6 +45,13 @@ namespace TasEditor {
 		bool show_hull;                       // draw the collision hull ghost at the playhead
 		bool have_view;                       // view angles at the playhead are valid
 		float view_pitch, view_yaw;           // for the view-direction arrow
+		// The REAL sim's board-contact point. The engine slides within the
+		// contact tick, so the polyline of tick positions cuts the corner at the
+		// touch - splicing this vertex in makes the drawn line literally pass
+		// through where the hull met the ramp (the solver's exact target).
+		bool have_board;
+		int board_tick;                       // global tick whose edge gets spliced
+		Vector board_point;
 	};
 	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
 }
