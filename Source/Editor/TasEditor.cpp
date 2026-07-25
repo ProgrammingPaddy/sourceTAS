@@ -45,8 +45,16 @@ namespace {
 		ImGui::PopItemWidth();
 		ImGui::SameLine();
 		ImGui::PushItemWidth(kInputW);
-		changed |= ImGui::InputFloat("##i", v, step, fast, decimals);
+		// Fine adjustment: two-decimal rows step 0.01 on the arrows (the
+		// slider keeps its coarse feel; the arrows are the precision path).
+		const float arrow = (decimals >= 2 && step > 0.011f) ? 0.01f : step;
+		changed |= ImGui::InputFloat("##i", v, arrow, fast, decimals);
 		ImGui::PopItemWidth();
+		ImGui::SameLine();
+		if (ImGui::Button("0##z")) {
+			*v = 0.f;
+			changed = true;
+		}
 		ImGui::SameLine();
 		ImGui::Text("%s", label);
 		ImGui::PopID();
@@ -88,8 +96,12 @@ namespace {
 		int   yaw_mode = 1;           // 1 = turn at yaw_rate (0 = legacy hold);
 		                              // 2 = OPTIMAL strafe: yaw follows the velocity
 		                              //     heading (max gain), yaw_rate = bias deg
-		float yaw_rate = 0.f;         // deg/tick, screen sign (+ = right); mode 2: bias
-		int   opt_dir = 1;            // mode 2 direction: +1 = left (A), -1 = right (D)
+		                              // 3 = STRAIGHT SYNC: alternating optimal strafes
+		                              //     every opt_period ticks; the net path holds
+		                              //     its heading, yaw_rate = steer bias deg
+		float yaw_rate = 0.f;         // deg/tick, screen sign (+ = right); mode 2/3: bias
+		int   opt_dir = 1;            // mode 2 direction / mode 3 first side (+1 A, -1 D)
+		int   opt_period = 8;         // mode 3: ticks per strafe side
 		bool  yaw_abs = false;
 		float yaw_start = 0.f;
 		int   pitch_mode = PM_Const;
@@ -107,7 +119,12 @@ namespace {
 		int   strafes = 3;            // alternating strafe count (1..4); 3 = exactly determined
 		bool  start_jump = false;     // jump on the segment's first tick (grounded start)
 		bool  opt = false;            // optimal-rate mode: rates[] hold per-phase BIASES
-		                              // off the max-gain line; final yaw lands free
+		                              // off the max-gain line
+		int   blend = 8;              // opt: view blends onto the target yaw over the
+		                              // last N ticks (max gain until then, yaw exact at
+		                              // the pass - welding view to heading all the way
+		                              // cost ~65 u/s vs the free-yaw runs)
+		float tyaw = 0.f;             // opt: target yaw snapshot for the provider's blend
 		bool  solved = false;
 		int   ticks = 0;              // N: the pass is inside the segment's final tick
 		int   side0 = 1;
@@ -305,6 +322,25 @@ namespace {
 		return NormYaw(atan2f(v.Y, v.X) * (180.f / 3.14159265358979f));
 	}
 
+	// Per-tick view yaw for OPTIMAL solver mode: ride the max-gain line
+	// (heading + side*bias) until the BLEND window, then sweep the view onto
+	// the target yaw with a telescoping step that lands EXACTLY on it at
+	// tick N and holds it through the overrun. Welding the view to the
+	// heading for the whole last phase (the old eliminated-bias scheme) cost
+	// ~65 u/s - the blend confines the off-optimal ticks to a short tail.
+	// Deterministic in (prev yaw, prev velocity, t): the model and the
+	// provider evaluate the identical expression on identical state.
+	float OptYawStep(float prev_yaw, const Vector& prev_vel, int t, int N,
+	                 int blend, float bias, int side, float target_yaw) {
+		if (t >= N)
+			return target_yaw;
+		if (t >= N - blend) {
+			const int rem = N - t;
+			return NormYaw(prev_yaw - NormYaw(prev_yaw - target_yaw) / static_cast<float>(rem));
+		}
+		return NormYaw(HeadingDeg(prev_vel, prev_yaw) + static_cast<float>(side) * bias);
+	}
+
 	// Closed-loop frame generation: called by the sim (game thread) per tick,
 	// with the simulated state after the previous tick.
 	void Provider(int tick, const Prediction::SimState& prev, Frame* out) {
@@ -351,8 +387,8 @@ namespace {
 			while (k < sd.nsplits && t >= sd.splits[k]) k++;
 			const int side = (k % 2 == 0) ? sd.side0 : -sd.side0;
 			if (sd.opt)
-				yaw = NormYaw(HeadingDeg(prev.velocity, g_pv_last_yaw)
-					+ static_cast<float>(side) * sd.rates[k]);
+				yaw = OptYawStep(g_pv_last_yaw, prev.velocity, t, sd.ticks,
+					(sd.blend < 1) ? 1 : sd.blend, sd.rates[k], side, sd.tyaw);
 			else
 				yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
 			smove = (side > 0) ? -450.f : 450.f;   // +1 = A (left), -1 = D (right)
@@ -367,6 +403,15 @@ namespace {
 			else if (g.yaw_mode == 2)
 				yaw = HeadingDeg(prev.velocity, g_pv_last_yaw)
 					+ static_cast<float>(g.opt_dir) * g.yaw_rate;
+			else if (g.yaw_mode == 3) {
+				// STRAIGHT SYNC: optimal wish (perpendicular to the velocity)
+				// with the side alternating every opt_period ticks - the half-
+				// curls cancel and the net path holds its heading. The steer
+				// bias tilts the wish the SAME direction on both sides, which
+				// makes one half-curl stronger than the other: the mean path
+				// bends while every tick stays on the biased-optimal line.
+				yaw = HeadingDeg(prev.velocity, g_pv_last_yaw) + g.yaw_rate;
+			}
 			yaw = NormYaw(yaw);
 
 			// Held keys. W releases while airborne by default (surf): the forward
@@ -382,9 +427,15 @@ namespace {
 			if (g.auto_key && turning && !onground && !g.key_a && !g.key_d)
 				smove = (g.yaw_rate > 0.f) ? 450.f : -450.f;   // right turn -> D, left -> A
 
-			// Optimal mode drives the strafe key itself - the side IS the mechanic.
+			// Optimal modes drive the strafe key themselves - the side IS the
+			// mechanic. Mode 3 alternates it every opt_period ticks.
 			if (g.yaw_mode == 2)
 				smove = (g.opt_dir > 0) ? -450.f : 450.f;
+			else if (g.yaw_mode == 3) {
+				const int per = (g.opt_period < 1) ? 1 : g.opt_period;
+				const int side = (((t / per) % 2) == 0) ? g.opt_dir : -g.opt_dir;
+				smove = (side > 0) ? -450.f : 450.f;
+			}
 		}
 
 		float pitch = g.pitch_val;
@@ -471,6 +522,16 @@ namespace {
 		g_gain.assign(n, 0.f);
 		g_maxgain.assign(n, 0.f);
 		g_eff.assign(n, 0.f);
+
+		// The efficiency coloring must always score against the CURRENT
+		// engine constants - the same cap/accel inputs the solver runs with -
+		// not whatever the last plan build happened to see. MaxAirGain is the
+		// exact per-tick optimum of AirAccelerate: gain = sqrt(v^2 + 2 c* a'
+		// + a'^2) - v with c* = max(cap - amt, 0), a' = min(cap - c*, amt).
+		float interval = Prediction::LastDiag().interval_per_tick;
+		if (interval <= 0.f) interval = 0.015f;
+		g_plan_cap = g_air_cap;
+		g_plan_accel = g_air_accel * g_wishspeed * interval;
 
 		float prev_speed = Speed2D(g_anchor.velocity);
 		for (int i = 0; i < n; ++i) {
@@ -600,7 +661,8 @@ namespace {
 		// solutions, and canonical starts often sit in infeasible territory
 		// (early-boarding curves) that the LM must otherwise crawl out of.
 		bool   opt = false;           // optimal-rate mode: rates are biases (yaw exact
-		                              // via the eliminated last-phase bias)
+		                              // via the blend tail below)
+		int    blend = 8;             // opt: view-blend window before the pass tick
 		int    cap_dropped = 0;       // candidates lost to the collection backstop
 		int    dedupe_kept = 0;       // distinct lines after dedupe (pre-trim)
 		float  warm_fr[2][2] = {};
@@ -1060,9 +1122,11 @@ namespace {
 				while (k < nsplits && t >= splits[k]) k++;
 				const int side = (k % 2 == 0) ? side0 : -side0;
 				// rates[] = deg/tick turn rates, or per-phase BIASES off the
-				// exact max-gain line in optimal mode.
+				// exact max-gain line in optimal mode (blend tail lands the
+				// view exactly on the target yaw).
 				const float yaw_next = g_search.opt
-					? NormYaw(HeadingDeg(s.v, s.yaw) + static_cast<float>(side) * rates[k])
+					? OptYawStep(s.yaw, s.v, t, N, g_search.blend, rates[k], side,
+						g_search.target_yaw)
 					: NormYaw(s.yaw - rates[k]);
 				Vector segp[6];
 				TickContact tc[4];
@@ -1111,7 +1175,8 @@ namespace {
 			while (k < nsplits && t >= splits[k]) k++;
 			const int side = (k % 2 == 0) ? side0 : -side0;
 			const float yaw_next = g_search.opt
-				? NormYaw(HeadingDeg(s.v, s.yaw) + static_cast<float>(side) * rates[k])
+				? OptYawStep(s.yaw, s.v, t, N, g_search.blend, rates[k], side,
+					g_search.target_yaw)
 				: NormYaw(s.yaw - rates[k]);
 			prev = s.p;
 			FastTick(s, yaw_next, side);
@@ -1375,71 +1440,37 @@ namespace {
 		};
 
 		// OPTIMAL-RATE MODE: per-phase yaw BIASES off the exact max-gain line
-		// (wish perpendicular to the velocity). The LAST phase's bias is
-		// ELIMINATED by the exact-yaw constraint - at the pass tick the view
-		// yaw MUST equal the target yaw (yaw_pass = heading(v_pass) +
-		// side_K*biasK, and biasK chases the small heading feedback in a few
-		// fixed-point steps). Up to two of the remaining phases carry the
-		// free biases; earlier phases fly the pure optimal curve. "Imperfect"
-		// here means deviating from max gain to steer - never a yaw miss.
+		// (wish perpendicular to the velocity). The view lands on the target
+		// yaw via the BLEND TAIL inside OptYawStep - exact by construction,
+		// no eliminated bias (welding the view to the heading for a whole
+		// phase to hit the yaw cost ~65 u/s; the blend confines the loss to
+		// a few ticks). The last (up to) two phases carry the free biases;
+		// earlier phases fly the pure optimal curve.
 		if (g_search.opt) {
 			cur_wrap = 0;
 			g_search.yaw_ever_feasible = true;
 			float blo[4], bhi[4];
 			for (int i = 0; i < 4; ++i) { blo[i] = -20.f; bhi[i] = 20.f; }
-			const int nfree = (K - 1 < 2) ? (K - 1) : 2;
-			const int bbase = (K - 1) - nfree;
+			const int nfree = (K < 2) ? K : 2;
+			const int bbase = K - nfree;
 			const int fmapo[2] = { bbase, bbase + 1 };
-			const int side_K = ((K - 1) % 2 == 0) ? side0 : -side0;
-			const int last_split = (nsplits > 0) ? splits[nsplits - 1] : 0;
-			float solved_bK = 0.f;
 			auto oresid = [&](const float* fr, int nf, float* F, PassEval* pout) -> bool {
 				float bias[4] = { 0.f, 0.f, 0.f, 0.f };
 				for (int i = 0; i < nf; ++i) bias[bbase + i] = fr[i];
-				// Solve the last bias so the pass-tick yaw equals the target
-				// EXACTLY. The bias acts on EVERY tick of the last phase, so
-				// yaw_pass moves ~(phase_len + 1) degrees per bias degree -
-				// Newton with that slope first, then the measured secant.
-				// (A unit-slope update diverged and rejected everything.)
-				float bK = 0.f, ye = 0.f, bK_prev = 0.f, ye_prev = 0.f;
-				bool have_prev = false, yok = false;
-				for (int m = 0; m < 8; ++m) {
-					bias[K - 1] = bK;
-					if (!EvalPass(N, frac, side0, splits, nsplits, bias, pe))
-						return false;
-					ye = NormYaw(pe.yaw - g_search.target_yaw);
-					if (fabsf(ye) <= 0.01f) { yok = true; break; }
-					float slope;
-					if (have_prev && fabsf(bK - bK_prev) > 1e-5f)
-						slope = (ye - ye_prev) / (bK - bK_prev);
-					else
-						slope = static_cast<float>(side_K)
-							* static_cast<float>(((pe.tick > last_split) ? pe.tick - last_split : 1) + 1);
-					if (fabsf(slope) < 1e-3f)
-						return false;
-					bK_prev = bK;
-					ye_prev = ye;
-					have_prev = true;
-					float nb = Clampf(bK - ye / slope, blo[K - 1], bhi[K - 1]);
-					if (fabsf(nb - bK) < 1e-5f)
-						return false;   // pinned at the bound: yaw unreachable
-					bK = nb;
-				}
-				if (!yok)
+				if (!EvalPass(N, frac, side0, splits, nsplits, bias, pe))
 					return false;
-				solved_bK = bK;
 				const Vector dd = pe.pass - tgt;
 				F[0] = Dot(g_search.e1, dd);
 				F[1] = Dot(g_search.e2, dd);
 				if (pout) *pout = pe;
 				return true;
 			};
-			const float ostarts[4][2] = { {0.f, 0.f}, {5.f, -5.f}, {-5.f, 5.f}, {9.f, 9.f} };
+			const float ostarts[5][2] = {
+				{0.f, 0.f}, {5.f, -5.f}, {-5.f, 5.f}, {9.f, 9.f}, {-9.f, -9.f} };
 			float best_err = 1e9f;
 			float best_b[4] = {};
 			PassEval best_po{};
-			const int nstarts = (nfree > 0) ? 4 : 1;
-			for (int s0 = 0; s0 < nstarts; ++s0) {
+			for (int s0 = 0; s0 < 5; ++s0) {
 				float fr[2] = { ostarts[s0][0], (nfree > 1) ? ostarts[s0][1] : 0.f };
 				if (nfree > 0)
 					newton(oresid, blo, bhi, fr, nfree, fmapo);
@@ -1451,7 +1482,6 @@ namespace {
 						best_err = e;
 						memset(best_b, 0, sizeof(best_b));
 						for (int i = 0; i < nfree; ++i) best_b[bbase + i] = fr[i];
-						best_b[K - 1] = solved_bK;
 						best_po = p;
 					}
 				}
@@ -1658,6 +1688,7 @@ namespace {
 			return;
 		SolverData& sd = g_segs[seg_index].solver;
 		sd.solved = true;
+		sd.tyaw = g_search.target_yaw;   // provider's blend target (opt mode)
 		sd.ticks = sol.ticks;
 		sd.side0 = sol.side0;
 		sd.nsplits = sol.nsplits;
@@ -1903,6 +1934,7 @@ namespace {
 		}
 		g_search.strafes = sd.strafes < 1 ? 1 : sd.strafes > 4 ? 4 : sd.strafes;
 		g_search.opt = sd.opt;
+		g_search.blend = (sd.blend < 1) ? 1 : (sd.blend > 24 ? 24 : sd.blend);
 
 		float interval = Prediction::LastDiag().interval_per_tick;
 		if (interval <= 0.f) interval = 0.015f;
@@ -2502,7 +2534,7 @@ namespace {
 			return false;
 		SolverData& sd = es.solver;
 		const int K = sd.nsplits + 1;
-		if (K < 2)
+		if (K < 2 && !sd.opt)
 			return false;   // no free parameters left after the yaw constraint
 		const BspWorld::BoardTarget* target = BspWorld::GetTarget(sd.target);
 		if (!target)
@@ -2545,6 +2577,8 @@ namespace {
 		float lo[4], hi[4];
 		RateBounds(sd.side0, K, lo, hi);
 		g_search.opt = sd.opt;   // EvalPass steps by bias when set
+		g_search.blend = (sd.blend < 1) ? 1 : (sd.blend > 24 ? 24 : sd.blend);
+		g_search.target_yaw = target->yaw;
 		if (sd.opt)
 			for (int i = 0; i < 4; ++i) { lo[i] = -20.f; hi[i] = 20.f; }
 		float T_w = 0.f;
@@ -2553,11 +2587,10 @@ namespace {
 
 		// Free parameters. Constant mode: K=2 -> {r0}; K=3 -> {r0,r1};
 		// K=4 -> {r1,r2} (r0 fixed, last eliminated from the yaw equation).
-		// Optimal mode: up to two of the NON-last phase biases (the last is
-		// re-eliminated per eval by the exact-yaw constraint, same as the
-		// search); untouched phases keep their applied values.
-		const int nfree = sd.opt ? ((K - 1 < 2) ? (K - 1) : 2) : ((K == 2) ? 1 : 2);
-		const int nlead = sd.opt ? ((K - 1) - nfree) : ((K == 4) ? 1 : 0);
+		// Optimal mode: the LAST (up to) two biases (the blend tail keeps the
+		// yaw exact); untouched phases keep their applied values.
+		const int nfree = sd.opt ? ((K < 2) ? K : 2) : ((K == 2) ? 1 : 2);
+		const int nlead = sd.opt ? (K - nfree) : ((K == 4) ? 1 : 0);
 		float lead[1] = { sd.rates[0] };
 		int fmap[2] = { nlead, nlead + 1 };
 		float fr[2] = { sd.rates[nlead], (nfree > 1) ? sd.rates[nlead + 1] : 0.f };
@@ -2568,37 +2601,9 @@ namespace {
 			if (sd.opt) {
 				for (int i = 0; i < 4; ++i) r[i] = sd.rates[i];
 				for (int i = 0; i < nfree; ++i) r[nlead + i] = f[i];
-				// Re-eliminate the last-phase bias: the corrected line must
-				// still land with the view yaw EXACTLY on the target. Same
-				// measured-slope secant as the search (the bias acts on every
-				// tick of the last phase, ~phase_len deg of yaw per bias deg).
-				const int side_K = ((K - 1) % 2 == 0) ? sd.side0 : -sd.side0;
-				const int lsplit = (sd.nsplits > 0) ? sd.splits[sd.nsplits - 1] : 0;
-				float bK = r[K - 1], ye = 0.f, bK_prev = 0.f, ye_prev = 0.f;
-				bool have_prev = false, yok = false;
-				for (int m = 0; m < 8; ++m) {
-					r[K - 1] = bK;
-					if (!EvalPass(sd.ticks, sd.pass_frac, sd.side0, sd.splits, sd.nsplits, r, pe))
-						return false;
-					ye = NormYaw(pe.yaw - target->yaw);
-					if (fabsf(ye) <= 0.01f) { yok = true; break; }
-					float slope;
-					if (have_prev && fabsf(bK - bK_prev) > 1e-5f)
-						slope = (ye - ye_prev) / (bK - bK_prev);
-					else
-						slope = static_cast<float>(side_K)
-							* static_cast<float>(((pe.tick > lsplit) ? pe.tick - lsplit : 1) + 1);
-					if (fabsf(slope) < 1e-3f)
-						return false;
-					bK_prev = bK;
-					ye_prev = ye;
-					have_prev = true;
-					const float nb = Clampf(bK - ye / slope, -20.f, 20.f);
-					if (fabsf(nb - bK) < 1e-5f)
-						return false;
-					bK = nb;
-				}
-				if (!yok)
+				// The blend tail keeps the pass-tick yaw exact regardless of
+				// the biases - just evaluate.
+				if (!EvalPass(sd.ticks, sd.pass_frac, sd.side0, sd.splits, sd.nsplits, r, pe))
 					return false;
 			} else {
 				if (!BuildRatesFromYaw(n, K, lo, hi, T_w, lead, nlead, f, nfree, r))
@@ -3079,7 +3084,8 @@ namespace {
 			// compares the actual model, boards and slides included.
 			const int side = (k % 2 == 0) ? sd.side0 : -sd.side0;
 			const float yaw_next = sd.opt
-				? NormYaw(HeadingDeg(s.v, s.yaw) + static_cast<float>(side) * sd.rates[k])
+				? OptYawStep(s.yaw, s.v, t, sd.ticks, (sd.blend < 1) ? 1 : sd.blend,
+					sd.rates[k], side, sd.tyaw)
 				: NormYaw(s.yaw - sd.rates[k]);
 			Vector tsp[6];
 			TickContact ttc[4];
@@ -3440,8 +3446,9 @@ namespace {
 	// v7/v8: first-generation solver eras (couple, contact fields) - read and
 	// discarded. v9: rebuilt solver block (start_jump, pass_frac, model pass).
 	// v10: optimal strafe - gen gains opt_dir, solver block gains the opt flag
-	// (rates[] hold per-phase biases when set).
-	constexpr uint32_t kProjVersion = 10;
+	// (rates[] hold per-phase biases when set). v11: gen gains opt_period
+	// (straight-sync mode); solver gains blend + tyaw (the opt yaw-blend tail).
+	constexpr uint32_t kProjVersion = 11;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -3497,7 +3504,8 @@ namespace {
 				W(out, g.yaw_mode); W(out, g.yaw_rate); W(out, yabs); W(out, g.yaw_start);
 				W(out, g.pitch_mode); W(out, g.pitch_val); W(out, g.pitch_mult);
 				W(out, duck); W(out, g.jump_mode); W(out, noW);
-				W(out, g.opt_dir);   // v10
+				W(out, g.opt_dir);     // v10
+				W(out, g.opt_period);  // v11
 
 				const uint32_t novr = static_cast<uint32_t>(s.jump_ovr.size());
 				W(out, novr);
@@ -3520,7 +3528,9 @@ namespace {
 					W(out, sd.pass_frac);
 					W(out, sd.model_pass.X); W(out, sd.model_pass.Y); W(out, sd.model_pass.Z);
 					W(out, sd.model_err);
-					W(out, sopt);   // v10
+					W(out, sopt);        // v10
+					W(out, sd.blend);    // v11
+					W(out, sd.tyaw);     // v11
 				}
 			}
 		}
@@ -3536,8 +3546,10 @@ namespace {
 	void SanitizeGen(GenParams& g) {
 		if (g.ticks < 1) g.ticks = 1;
 		if (g.ticks > 100000) g.ticks = 100000;
-		if (g.yaw_mode < 0 || g.yaw_mode > 2) g.yaw_mode = 1;
+		if (g.yaw_mode < 0 || g.yaw_mode > 3) g.yaw_mode = 1;
 		g.opt_dir = (g.opt_dir < 0) ? -1 : 1;
+		if (g.opt_period < 1) g.opt_period = 1;
+		if (g.opt_period > 128) g.opt_period = 128;
 		if (!(g.yaw_rate == g.yaw_rate)) g.yaw_rate = 0.f;       // NaN guard
 		if (g.yaw_rate < -180.f) g.yaw_rate = -180.f;
 		if (g.yaw_rate > 180.f) g.yaw_rate = 180.f;
@@ -3562,6 +3574,9 @@ namespace {
 			if (sd.rates[i] > 180.f) sd.rates[i] = 180.f;
 		}
 		if (!(sd.pass_frac == sd.pass_frac)) sd.pass_frac = 1.f;
+		if (sd.blend < 1) sd.blend = 1;
+		if (sd.blend > 24) sd.blend = 24;
+		if (!(sd.tyaw == sd.tyaw)) sd.tyaw = 0.f;                // NaN guard
 		if (sd.ticks == 0)
 			sd.solved = false;                                   // an empty schedule isn't a solution
 	}
@@ -3631,6 +3646,8 @@ namespace {
 		if (version >= 6 && !R(in, noW))
 			return false;
 		if (version >= 10 && !R(in, g.opt_dir))
+			return false;
+		if (version >= 11 && !R(in, g.opt_period))
 			return false;
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
 		g.auto_key = autok != 0;
@@ -3737,6 +3754,10 @@ namespace {
 							if (!R(in, sopt))
 								return false;
 							sd.opt = sopt != 0;
+						}
+						if (version >= 11) {
+							if (!R(in, sd.blend) || !R(in, sd.tyaw))
+								return false;
 						}
 					} else {
 						// v7/v8 first-generation solver blocks: consume their extra
@@ -4013,9 +4034,12 @@ namespace {
 					s.solver.opt = sopt;
 					MarkDirty();   // an applied schedule's numbers change meaning - re-search
 				}
-				if (s.solver.opt)
-					ImGui::TextDisabled("each phase rides the max-gain line +- a solved bias; the last "
-						"phase's bias is solved so the view yaw lands EXACTLY on the target");
+				if (s.solver.opt) {
+					ImGui::TextDisabled("each phase rides the max-gain line +- a solved bias; the view "
+						"BLENDS onto the target yaw over the last ticks (exact at the pass)");
+					if (IntRow("Yaw blend window (ticks before the pass)", &s.solver.blend, 1, 24))
+						MarkDirty();   // the applied schedule's replay changes with it
+				}
 				else if (s.solver.strafes < 3)
 					ImGui::TextDisabled("(with the yaw constraint, %d strafe(s) only hit the point when "
 						"a timing happens to line up - 3+ solves it structurally)", s.solver.strafes);
@@ -4331,16 +4355,19 @@ namespace {
 
 				ch |= IntRow("Ticks (duration)", &g.ticks, 1, 1000);
 				// "Hold" retired: it's identical to turning at 0 deg/tick (old
-				// files are normalized at load). Mode 2 = OPTIMAL strafe: the
-				// yaw rides the velocity heading (max per-tick gain) plus a
-				// user bias - the "wrangle" control.
-				if (g.yaw_mode != 2)
+				// files are normalized at load). Mode 2 = OPTIMAL strafe (yaw
+				// rides the velocity heading + bias). Mode 3 = STRAIGHT SYNC
+				// (alternating optimal strafes; the net path holds heading).
+				if (g.yaw_mode < 1 || g.yaw_mode > 3)
 					g.yaw_mode = 1;
-				bool gopt = (g.yaw_mode == 2);
-				if (ImGui::Checkbox("Optimal strafe (yaw rides the velocity heading = max gain)", &gopt)) {
-					g.yaw_mode = gopt ? 2 : 1;
+				int vmode = (g.yaw_mode == 2) ? 1 : (g.yaw_mode == 3) ? 2 : 0;
+				ImGui::PushItemWidth(260);
+				if (ImGui::Combo("View mode", &vmode,
+					"Turn rate\0Optimal strafe (max gain)\0Straight sync strafe\0")) {
+					g.yaw_mode = (vmode == 1) ? 2 : (vmode == 2) ? 3 : 1;
 					ch = true;
 				}
+				ImGui::PopItemWidth();
 				if (g.yaw_mode == 2) {
 					int dir_idx = (g.opt_dir > 0) ? 0 : 1;
 					ImGui::PushItemWidth(140);
@@ -4352,6 +4379,19 @@ namespace {
 					ch |= FloatRow("Turn bias   (+ tighter / - wider, 0 = pure optimal)",
 						&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
 					ImGui::TextDisabled("bias trades speed (quadratic loss) for curvature (linear) - stays optimal for that curvature");
+				} else if (g.yaw_mode == 3) {
+					int dir_idx = (g.opt_dir > 0) ? 0 : 1;
+					ImGui::PushItemWidth(140);
+					if (ImGui::Combo("First side", &dir_idx, "Left (A)\0Right (D)\0")) {
+						g.opt_dir = (dir_idx == 0) ? 1 : -1;
+						ch = true;
+					}
+					ImGui::PopItemWidth();
+					ch |= IntRow("Ticks per strafe side (frequency)", &g.opt_period, 1, 64);
+					ch |= FloatRow("Heading steer bias   (0 = straight)",
+						&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+					ImGui::TextDisabled("alternating max-gain strafes; half-curls cancel so the path holds its "
+						"heading - the bias strengthens one side and curves the mean");
 				} else {
 					ch |= FloatRow("View turn   (- left / + right, 0 = hold)", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
 				}
