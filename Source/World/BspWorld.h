@@ -57,6 +57,12 @@ namespace BspWorld {
 	// corridor (the engine's TracePlayerBBox collides with all of them).
 	int  BrushCount();
 	bool GetBrushInfo(int brush, int* contents, Vector* mins, Vector* maxs);
+	// True when the brush belongs to worldspawn (model 0) - the only brushes
+	// the engine traces player movement against. Brush ENTITIES (triggers,
+	// illusionaries) are CONTENTS_SOLID on disk but block nothing.
+	bool IsWorldBrush(int brush);
+	int  BrushBevelPlaneCount(int brush);
+	bool GetBrushBevelPlane(int brush, int index, Vector* n, float* d);
 	// Pitch (Source sign: + = down) that puts the view direction for `yaw`
 	// exactly IN the face's plane - the "pitch locked to the ramp" view.
 	bool LockedPitch(int plane, float yaw, float* out_pitch);

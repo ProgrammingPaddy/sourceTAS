@@ -30,6 +30,14 @@ namespace WorldDraw {
 	// Order: [0] +X+Y   [1] +X-Y   [2] -X+Y   [3] -X-Y.
 	extern bool corner_trails[4];
 
+	// Speed tags: line-drawn digits (no extra engine surface) floating over
+	// the selected segment's final tick and over the playhead position.
+	extern bool tag_seg_end_speed;
+	extern bool tag_cursor_speed;
+	extern bool tag_seg_end_eff;     // % of optimal speed gain over the segment
+	extern bool tag_seg_end_time;    // elapsed seconds at the segment's end
+	extern bool tag_cursor_time;     // elapsed seconds at the playhead
+
 	// Prediction input (held for the whole predicted window).
 	extern int   pred_ticks;         // number of ticks to predict
 	extern bool  pred_live_input;    // use the live command's input (else the overrides below)

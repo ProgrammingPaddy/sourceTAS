@@ -1,13 +1,19 @@
-#include "TasEditor.h"
+﻿#include "TasEditor.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <csignal>
+#include <cstdlib>
+#include <exception>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <windows.h>
@@ -102,6 +108,15 @@ namespace {
 		float yaw_rate = 0.f;         // deg/tick, screen sign (+ = right); mode 2/3: bias
 		int   opt_dir = 1;            // mode 2 direction / mode 3 first side (+1 A, -1 D)
 		int   opt_period = 8;         // mode 3: ticks per strafe side
+		int   bias_kind = 2;          // mode 2 bias meaning: 0 = TOTAL heading change
+		                              // over the segment (evenly distributed - LENGTH
+		                              // DEPENDENT: resizing/splitting re-spreads the
+		                              // turn and moves the drawn path); 1 = per-tick,
+		                              // relative to the strafe side (legacy);
+		                              // 2 = STEERING L/R (default): a fixed angle off
+		                              // the max-gain line in screen sign, identical
+		                              // every tick, so the path never depends on the
+		                              // segment's tick count
 		bool  yaw_abs = false;
 		float yaw_start = 0.f;
 		int   pitch_mode = PM_Const;
@@ -109,6 +124,29 @@ namespace {
 		float pitch_mult = 1.f;
 		bool  duck = false;
 		int   jump_mode = JM_None;
+		// Boundary SMOOTHING (straddle): >0 blends the view across this
+		// segment's START over this many ticks - half in the previous
+		// segment's tail, half in this segment's head - so the per-tick view
+		// rate is continuous through the cut instead of snapping. In optimal
+		// modes any wish stays max-gain, so the blend costs almost no speed.
+		int   smooth_ticks = 0;
+
+		// ---- PRESTRAFE recipe (deterministic startzone exit) --------------
+		// WA ground accel -> jump + release the ground key -> steerable optimal
+		// air-strafe -> crouch at the last airborne tick to skim the floor. The
+		// engine sims the real physics (ground accel, jump, air accel, and the
+		// mid-air FinishDuck origin lift) from these inputs; this only emits
+		// the button/view stream.
+		bool  prestrafe = false;
+		int   ps_ground_ticks = 22;   // W + ground-key accel duration
+		float ps_ground_turn = 100.f; // total view turn over the ground phase (deg)
+		int   ps_ground_dir = 1;      // ground strafe key (+1 A/left, -1 D/right)
+		int   ps_air_dir = 1;         // air strafe key (the steerable strafe)
+		float ps_air_bias = 0.f;      // air steering bias (deg, screen sign + = right)
+		bool  ps_crouch_end = true;   // crouch near the end (dodge the floor)
+		bool  ps_crouch_auto = true;  // auto-time the crouch to the last airborne tick
+		int   ps_crouch_lead = 2;     // manual: ticks before the segment end to crouch
+		int   ps_crouch_cached = -1;  // auto: last-airborne tick from the last sim (runtime)
 	};
 
 	// A solver segment's applied solution: alternating strafes routed to a board
@@ -125,6 +163,22 @@ namespace {
 		                              // the pass - welding view to heading all the way
 		                              // cost ~65 u/s vs the free-yaw runs)
 		float tyaw = 0.f;             // opt: target yaw snapshot for the provider's blend
+		// What the NEXT search runs. opt/blend above belong to the APPLIED
+		// schedule (they say how sd.rates replay); the checkbox must not
+		// reinterpret an applied line - flipping it used to turn applied
+		// biases into turn rates, the corrector then "fixed" the wreck.
+		bool  want_opt = false;
+		int   want_blend = 8;
+		// RIDE solve: the segment STARTS ON the target's face and rides it to
+		// the point - same-side bias phases pressing into the face, and the
+		// (duration, split) family spreads the approach yaw (the flick
+		// lead-in). Flight ballistic candidate seeding is meaningless here.
+		// `ride` = what the NEXT search runs (the checkbox); `applied_ride`
+		// = how the APPLIED schedule replays (stamped at Apply, same
+		// separation as opt/want_opt - a checkbox must never reinterpret
+		// numbers that are already applied).
+		bool  ride = false;
+		bool  applied_ride = false;
 		bool  solved = false;
 		int   ticks = 0;              // N: the pass is inside the segment's final tick
 		int   side0 = 1;
@@ -213,6 +267,10 @@ namespace {
 	float g_sol_pos_tol = 1.f;        // "exact" pass-distance tag (u)
 	float g_sol_max_bump = 10.f;      // max clip for the "exact" tag (u/s)
 	float g_sol_collect = 8.f;        // COLLECT everything passing within this (calibration data)
+	// Deep search: the tournament FULL config (wider N window, ungated
+	// polish). Costs ~3.8 u/s mean when OFF (worst scenario -35) but the
+	// default stays inside the 10-15s budget; deep is the final-line hunt.
+	bool g_deep_search = false;
 
 	// Engine probe values harvested from every landed sim's states - DISPLAY
 	// and explicit one-click adoption only, never silently used (the model
@@ -237,8 +295,12 @@ namespace {
 	bool g_sim_requested = false;
 	bool g_sim_fault = false;
 
-	// Project file list (Documents\sourceTAS\projects).
-	std::vector<std::string> g_files;
+	// Project file list (Documents\sourceTAS\projects). Leaked on purpose:
+	// this DLL lives until the process dies, and its atexit destructor ran
+	// into torn-down CRT state at game exit (crash.log 2026-07-24, offset
+	// resolved to the g_files ??__F thunk via the linker map). A reference
+	// to a heap object registers no destructor at all.
+	std::vector<std::string>& g_files = *new std::vector<std::string>();
 	int g_sel_file = -1;
 
 	// ------------------------------------------------------------------ plan --
@@ -264,6 +326,7 @@ namespace {
 	int   g_pv_seg = 0;
 	float g_pv_last_yaw = 0.f;
 	float g_pv_entry_yaw = 0.f;
+	float g_pv_entry_heading = 0.f;   // velocity heading at segment entry (opt modes)
 	bool  g_pv_prev_jump = false;
 
 	void Layout() {
@@ -341,6 +404,41 @@ namespace {
 		return NormYaw(HeadingDeg(prev_vel, prev_yaw) + static_cast<float>(side) * bias);
 	}
 
+	// The generated-segment view yaw at local tick t, for the current sim
+	// velocity/heading and the segment's entry captures. Extracted so the
+	// boundary smoother can evaluate a NEIGHBOR segment at the same tick and
+	// blend. entryYaw/entryHeading only matter for turn-rate (mode 1) and
+	// total-heading (kind 0); heading-relative modes (optimal steering, the
+	// default) ignore them, so the smoother is exact there.
+	float GenSegYaw(const GenParams& g, int t, const Vector& vel, float lastYaw,
+	                float entryYaw, float entryHeading) {
+		float yaw = entryYaw;
+		if (g.yaw_mode == 1)
+			yaw = entryYaw - g.yaw_rate * static_cast<float>(t);
+		else if (g.yaw_mode == 2) {
+			const float h = HeadingDeg(vel, lastYaw);
+			if (g.bias_kind == 0) {
+				const float want = NormYaw((entryHeading
+					+ static_cast<float>(g.opt_dir) * g.yaw_rate) - h);
+				const int rem = (g.ticks - t) > 0 ? (g.ticks - t) : 1;
+				const float th_des = want / static_cast<float>(rem);
+				const float v2 = Speed2D(vel);
+				const float th_nat = Deg(atan2f(g_plan_cap, (v2 > 1.f) ? v2 : 1.f));
+				float bias = static_cast<float>(g.opt_dir) * th_des - th_nat;
+				if (bias < -20.f) bias = -20.f;
+				if (bias > 20.f) bias = 20.f;
+				yaw = h + static_cast<float>(g.opt_dir) * bias;
+			} else if (g.bias_kind == 2) {
+				yaw = h - g.yaw_rate;
+			} else {
+				yaw = h + static_cast<float>(g.opt_dir) * g.yaw_rate;
+			}
+		} else if (g.yaw_mode == 3) {
+			yaw = HeadingDeg(vel, lastYaw) + g.yaw_rate;
+		}
+		return NormYaw(yaw);
+	}
+
 	// Closed-loop frame generation: called by the sim (game thread) per tick,
 	// with the simulated state after the previous tick.
 	void Provider(int tick, const Prediction::SimState& prev, Frame* out) {
@@ -367,12 +465,15 @@ namespace {
 		const GenParams& g = ps.gen;
 		const bool onground = (prev.flags & FL_ONGROUND) != 0;
 
-		if (t == 0)
+		if (t == 0) {
 			g_pv_entry_yaw = g.yaw_abs ? g.yaw_start : g_pv_last_yaw;
+			g_pv_entry_heading = HeadingDeg(prev.velocity, g_pv_last_yaw);
+		}
 
 		float yaw = g_pv_entry_yaw;
 		float fmove = 0.f;
 		float smove = 0.f;
+		bool  ps_jump = false, ps_duck = false;   // prestrafe's own jump/duck
 
 		if (ps.solver) {
 			// Solver segment: alternating-strafe schedule from the applied
@@ -385,34 +486,104 @@ namespace {
 			const SolverData& sd = ps.sdata;
 			int k = 0;
 			while (k < sd.nsplits && t >= sd.splits[k]) k++;
-			const int side = (k % 2 == 0) ? sd.side0 : -sd.side0;
-			if (sd.opt)
+			// Rides hold one side (into the ramp); flights alternate.
+			const int side = sd.applied_ride ? sd.side0
+				: ((k % 2 == 0) ? sd.side0 : -sd.side0);
+			if (sd.applied_ride)
+				yaw = NormYaw(HeadingDeg(prev.velocity, g_pv_last_yaw)
+					+ static_cast<float>(side) * sd.rates[k]);   // no blend: see EvalPass
+			else if (sd.opt)
 				yaw = OptYawStep(g_pv_last_yaw, prev.velocity, t, sd.ticks,
 					(sd.blend < 1) ? 1 : sd.blend, sd.rates[k], side, sd.tyaw);
 			else
 				yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
 			smove = (side > 0) ? -450.f : 450.f;   // +1 = A (left), -1 = D (right)
-		} else {
-			// View: turn at a fixed rate (screen sign: + = right = Source yaw
-			// decrease), or OPTIMAL strafe: yaw = velocity heading + dir*bias
-			// (wish exactly perpendicular to the velocity at bias 0 = max
-			// per-tick gain; the bias trades speed quadratically for linearly
-			// more/less curvature - the "wrangle" control).
-			if (g.yaw_mode == 1)
-				yaw = g_pv_entry_yaw - g.yaw_rate * static_cast<float>(t);
-			else if (g.yaw_mode == 2)
-				yaw = HeadingDeg(prev.velocity, g_pv_last_yaw)
-					+ static_cast<float>(g.opt_dir) * g.yaw_rate;
-			else if (g.yaw_mode == 3) {
-				// STRAIGHT SYNC: optimal wish (perpendicular to the velocity)
-				// with the side alternating every opt_period ticks - the half-
-				// curls cancel and the net path holds its heading. The steer
-				// bias tilts the wish the SAME direction on both sides, which
-				// makes one half-curl stronger than the other: the mean path
-				// bends while every tick stays on the biased-optimal line.
-				yaw = HeadingDeg(prev.velocity, g_pv_last_yaw) + g.yaw_rate;
+		} else if (g.prestrafe) {
+			// PRESTRAFE recipe: WA ground accel -> jump + release the ground
+			// key -> steerable optimal air-strafe -> crouch to skim the floor.
+			// Only inputs are emitted; the engine sims the real ground/air
+			// physics and the mid-air FinishDuck origin lift.
+			const int gt = (g.ps_ground_ticks < 0) ? 0
+				: (g.ps_ground_ticks > ps.ticks ? ps.ticks : g.ps_ground_ticks);
+			if (t < gt) {
+				// Ground accel: W + the ground strafe key, view turning steadily
+				// into that side to build prestrafe speed (A = left = Source yaw
+				// UP, so + ps_ground_dir raises yaw). ps_ground_turn is the total
+				// turn the user tunes for max ground speed.
+				const float frac = (gt > 1) ? static_cast<float>(t) / static_cast<float>(gt - 1) : 1.f;
+				yaw = NormYaw(g_pv_entry_yaw
+					+ static_cast<float>(g.ps_ground_dir) * g.ps_ground_turn * frac);
+				fmove = 450.f;   // W
+				smove = (g.ps_ground_dir > 0) ? -450.f : 450.f;   // A / D
+			} else {
+				// Air strafe: optimal (view follows velocity heading) plus the
+				// steering bias (screen sign, + = right); no W in air.
+				const float h = HeadingDeg(prev.velocity, g_pv_last_yaw);
+				yaw = NormYaw(h - g.ps_air_bias);
+				fmove = 0.f;
+				smove = (g.ps_air_dir > 0) ? -450.f : 450.f;
 			}
-			yaw = NormYaw(yaw);
+			// Launch on the first air tick while still grounded (releases the
+			// ground key that same tick since smove already switched sides).
+			if (t == gt && onground)
+				ps_jump = true;
+			// Crouch at the last airborne tick (auto, from the last sim) or a
+			// manual lead before the end - lifts the hull ~18u to skim the floor.
+			if (g.ps_crouch_end) {
+				int ctick = g.ps_crouch_auto
+					? g.ps_crouch_cached
+					: (ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead));
+				if (g.ps_crouch_auto && ctick < 0)   // no sim yet: manual fallback
+					ctick = ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead);
+				if (ctick >= 0 && t >= ctick)
+					ps_duck = true;
+			}
+		} else {
+			// Normal generated segment: view from GenSegYaw (mode 1/2/3).
+			yaw = GenSegYaw(g, t, prev.velocity, g_pv_last_yaw,
+				g_pv_entry_yaw, g_pv_entry_heading);
+
+			// BOUNDARY SMOOTHING (straddle): if this tick is within a smoothing
+			// window around a boundary, blend the two segments' natural yaw so
+			// the per-tick view rate is continuous. The smooth_ticks belongs to
+			// the LATER segment; the window is half in the earlier segment's
+			// tail and half in the later segment's head. Exact for heading-
+			// relative modes (the neighbor's entry captures are unused there).
+			if (!ps.raw) {
+				int Bstart = -1, Pseg = -1, Nseg = -1, W = 0;
+				if (g.smooth_ticks > 0 && g_pv_seg > 0) {
+					const int before = g.smooth_ticks / 2;
+					if (t < g.smooth_ticks - before) {   // head of a smoothed seg
+						Bstart = ps.start; Pseg = g_pv_seg - 1; Nseg = g_pv_seg;
+						W = g.smooth_ticks;
+					}
+				}
+				if (Nseg < 0 && g_pv_seg + 1 < g_plan_count) {
+					const PlanSeg& nx = g_plan[g_pv_seg + 1];
+					if (!nx.raw && !nx.solver && !nx.gen.prestrafe && nx.gen.smooth_ticks > 0) {
+						const int before = nx.gen.smooth_ticks / 2;
+						if (tick >= nx.start - before) {   // tail before a smoothed seg
+							Bstart = nx.start; Pseg = g_pv_seg; Nseg = g_pv_seg + 1;
+							W = nx.gen.smooth_ticks;
+						}
+					}
+				}
+				const bool pP = (Pseg >= 0) && !g_plan[Pseg].solver && !g_plan[Pseg].raw
+					&& g_plan[Pseg].gen.prestrafe;
+				const bool pN = (Nseg >= 0) && g_plan[Nseg].gen.prestrafe;
+				if (Nseg >= 0 && W > 0 && Pseg >= 0 && !pP && !pN) {
+					const int before = W / 2;
+					const float yawP = (g_plan[Pseg].solver || g_plan[Pseg].raw)
+						? g_pv_last_yaw   // solver/raw neighbor: hold its last view
+						: GenSegYaw(g_plan[Pseg].gen, tick - g_plan[Pseg].start,
+							prev.velocity, g_pv_last_yaw, g_pv_entry_yaw, g_pv_entry_heading);
+					const float yawN = GenSegYaw(g_plan[Nseg].gen, tick - g_plan[Nseg].start,
+						prev.velocity, g_pv_last_yaw, g_pv_entry_yaw, g_pv_entry_heading);
+					float s = static_cast<float>(tick - (Bstart - before)) / static_cast<float>(W);
+					s = (s < 0.f) ? 0.f : (s > 1.f ? 1.f : s);
+					yaw = NormYaw(yawP + NormYaw(yawN - yawP) * s);
+				}
+			}
 
 			// Held keys. W releases while airborne by default (surf): the forward
 			// wish is useless in air and fights the strafe.
@@ -448,11 +619,18 @@ namespace {
 		}
 
 		int buttons = 0;
-		if (g.duck) buttons |= IN_DUCK;
-		if (g.jump_mode == JM_Hold)
-			buttons |= IN_JUMP;
-		else if (g.jump_mode == JM_AutoBhop && onground && !g_pv_prev_jump)
-			buttons |= IN_JUMP;   // press only on ticks that start grounded
+		if (g.prestrafe) {
+			// The prestrafe drives its own jump/duck; the generic jump/duck
+			// settings do not apply to it.
+			if (ps_jump) buttons |= IN_JUMP;
+			if (ps_duck) buttons |= IN_DUCK;
+		} else {
+			if (g.duck) buttons |= IN_DUCK;
+			if (g.jump_mode == JM_Hold)
+				buttons |= IN_JUMP;
+			else if (g.jump_mode == JM_AutoBhop && onground && !g_pv_prev_jump)
+				buttons |= IN_JUMP;   // press only on ticks that start grounded
+		}
 		if (ps.solver && ps.sdata.start_jump && t == 0)
 			buttons |= IN_JUMP;   // solver's grounded-start hop
 
@@ -589,12 +767,17 @@ namespace {
 		int   ticks = 0;              // N: the pass happens between ticks N-1 and N
 		float frac = 0.f;             // fraction into that tick where z hits target z
 		int   side0 = 1;              // first strafe key: +1 = A (left), -1 = D (right)
+		bool  opt = false;            // rates[] are biases (opt) or turn rates (const)
+		bool  ride = false;           // same-side phases (ride) or alternating (flight)
+		int   blend = 8;              // opt: the blend window this line was solved with
 		int   nsplits = 0;
 		int   splits[3] = {};         // local ticks where the strafe key flips
 		float rates[4] = {};          // deg/tick per phase, screen sign (+ = right)
 		int   wrap = 0;               // which 360-degree wrap of the yaw equation
 		float pass_err = 0.f;         // model: |XY(t*) - target XY|
 		float speed = 0.f;            // 2D speed at the pass
+		float arr_heading = 0.f;      // velocity HEADING at the pass (approach yaw)
+		float arr_vz = 0.f;           // vertical velocity at the pass (flick height)
 		Vector pass_pos;              // model pass point (XY at t*, target z)
 		int   bump_ticks = 0;         // ramp kissed this many ticks before the pass
 		float bump_loss = 0.f;        // speed the kiss clipped away (u/s)
@@ -673,6 +856,30 @@ namespace {
 		int    cnt_edge = 0;          // flights deflected by the target brush's other planes
 		int    reject_retime = 0;     // hit the target but couldn't align the contact tick
 		int    cnt_bump = 0;          // hit the target but the ramp kiss cost too much speed
+		int    entity_brushes = 0;    // solid-flagged BRUSH ENTITIES skipped (triggers
+		                              // etc. - not collision, per the world model)
+		int    corridor_dropped = 0;  // solid brushes culled by the collider cap - NEVER
+		                              // silent: logged, because a missing brush is a
+		                              // model-real divergence factory
+		int    diverged = 0;          // lines dropped at verify: the REAL measurement
+		                              // contradicted the model claim (apex band lines,
+		                              // model 0.1-0.4u vs real ~2u landed). Geometric
+		                              // gates were tried TWICE and measured wrong - the
+		                              // proven 355.2 winner's endpoint sits in the same
+		                              // band and reproduces; real agreement is the
+		                              // arbiter, per line, from data.
+		std::vector<RouteSolution> dropped_diverged;   // kept for the log
+		// OPT+B refinement wave (offline tournament 2026-07-25: the full opt
+		// stack = +14.2 u/s mean over the shipped algorithm, 40/40 scenarios).
+		// Warm seeds and per-job blend/seed state live in thread_locals.
+		struct RefineTask {           // re-solve a fast line at one blend
+			int ticks, side0, nsplits, blend;
+			int splits[3];
+			float frac;
+			float rates[4];
+		};
+		std::vector<RefineTask> refine;
+		int    refine_idx = -1;       // -1 = wave not built yet
 		// Per-candidate outcome counters + the closest rejects with full detail,
 		// for the search diagnostics log (the search is otherwise a black box).
 		int    cnt_infeasible = 0;    // wrap/timing couldn't produce the yaw at all
@@ -703,10 +910,57 @@ namespace {
 		float reject_best = 1e9f;     // closest exact-yaw pass that missed the gate
 		bool  yaw_ever_feasible = false;
 		int   jump_start = 0;         // whether the model start included the jump
+		bool  ride = false;           // on-face ride solve (single into-face strafe)
 		std::vector<RouteSolution> results;
 	};
 	SearchCtx g_search;
 	int g_solution_pick = 0;
+
+	// ------------------------- threaded search runtime -----------------------
+	// The enumeration used to run in 5 ms render-thread slices - minutes of
+	// wall time once the collider fix (96->168) and the tournament-winning
+	// opt config landed. Jobs are now built FLAT at kickoff and chewed by a
+	// static-partitioned worker pool: contiguous job ranges per worker, so
+	// per-worker warm seeds stay deterministic for a given thread count.
+	// Kept OUTSIDE SearchCtx: atomics/mutexes would break its value-reset.
+	struct SearchJob {
+		int N; float frac; int side0; int nsplits; int splits[3];
+		bool refine; int refine_blend; float seed[4];
+	};
+	std::vector<SearchJob> g_jobs;
+	std::vector<std::thread> g_search_workers;
+	std::atomic<int>  g_jobs_done_a{ 0 };
+	std::atomic<int>  g_results_n{ 0 };     // race-safe "passes collected" mirror
+	std::atomic<int>  g_workers_left{ 0 };
+	std::atomic<bool> g_sfault{ false };
+	std::atomic<bool> g_sabort{ false };
+	std::mutex g_results_mtx;               // guards results + top_rejects + reject_best
+	char g_fault_detail[160] = {};
+	void LaunchSearchWorkers();   // defined with the worker, below
+	void StopSearchWorkers();
+	// Per-worker solver state (was on g_search - workers would race it).
+	// Outcome COUNTERS stay plain ints: concurrent increments can drop a few
+	// counts, which is acceptable for diagnostics and keeps EvalPass lock-free.
+	thread_local float tl_warm_fr[2][2];
+	thread_local bool  tl_have_warm[2] = { false, false };
+	thread_local float tl_warm_ob[2][3];
+	thread_local bool  tl_have_warm_ob[2] = { false, false };
+	thread_local float tl_best_speed = 0.f;   // polish gate: only lines near the
+	                                          // worker's speed lead get walked
+	thread_local bool  tl_refine_active = false;
+	thread_local int   tl_refine_blend = 8;
+	thread_local float tl_refine_seed[4] = {};
+	// True on a search worker thread. A fault here is NEVER the prediction
+	// path's routine-and-recovered AV, so the VEH logs it (those are normally
+	// filtered out to keep crash.log clean). Names a worker crash that slips
+	// past the per-job SEH guard (the loop scaffolding, the mutex, ...).
+	thread_local bool  tl_is_worker = false;
+	// The blend window is iterated PER JOB - through a global it would race
+	// across workers straight into EvalPass. 0 = fall back to g_search.blend
+	// (the main thread's context, e.g. the corrector re-solving an applied
+	// schedule).
+	thread_local int   tl_blend = 0;
+	int CurBlend() { return tl_blend > 0 ? tl_blend : g_search.blend; }
 
 	// --------------------------------------------------- real pass analysis --
 	// The drawn line is the REAL engine sim. After every landed sim, find
@@ -725,6 +979,8 @@ namespace {
 		Vector pass;                  // measured real pass point (closest approach)
 		float err = 0.f;              // |real pass - target|
 		float yaw_err = 0.f;          // |pass-tick view yaw - target yaw| (should be ~0)
+		float pass_speed = -1.f;      // REAL 2D speed at the pass tick - the number
+		                              // the model's per-line `speed` claims
 		float drift = 0.f;            // |real pass - model pass|
 		float closest_dz = 1e9f;      // no-face fallback: nearest height approach
 		float closest_phi = 1e9f;     // face: nearest approach to the support plane
@@ -864,8 +1120,13 @@ namespace {
 				if (d0 > 0.f) {
 					outside = true;
 					if (d1 > 0.f) { miss = true; break; }
-					float tt = (d0 - 0.03125f) / (d0 - d1);   // DIST_EPSILON
-					if (tt < 0.f) tt = 0.f;
+					// UNCLAMPED, like the engine: when the sweep starts touching
+					// several planes (apex corner), the LEAST-NEGATIVE enterfrac
+					// picks the contact plane. Clamping to 0 before the compare
+					// made the first-listed plane win ties - the measured apex
+					// landings hit the top bevel (-0.011) over the face (-0.025);
+					// the clamp handed them to the face and the model surfed off.
+					const float tt = (d0 - 0.03125f) / (d0 - d1);   // DIST_EPSILON
 					if (tt > tmin) { tmin = tt; enter = pi; }
 				} else if (d1 > 0.f) {
 					float tt = (d0 + 0.03125f) / (d0 - d1);
@@ -902,9 +1163,9 @@ namespace {
 	// Every sub-segment the hull actually travels is written to seg_pts
 	// ([nseg+1] points) so the caller can track the perigee THROUGH bumps;
 	// contacts report the collider plane struck and the speed its clip took.
-	// grounded = a floor-like plane (nz >= 0.7) was struck while falling
-	// slower than NON_JUMP_VELOCITY (140) - CategorizePosition would set
-	// ground and leave AirMove, so the model flight ends there.
+	// grounded = CategorizePosition's end-of-move probe (2u down-trace onto
+	// a walkable plane with vz <= 140) set ground - the engine's ONLY
+	// grounding rule - so the model flight ends there, origin snapped.
 	int EngineMoveTick(FastState& s, float yaw_abs, int side,
 	                   Vector* seg_pts, TickContact* contacts, int* ncontacts,
 	                   bool* grounded) {
@@ -993,12 +1254,33 @@ namespace {
 			}
 			if (*ncontacts > 0)
 				contacts[*ncontacts - 1].loss = sp_before - sqrtf(Dot3(s.v));
-			if (n.Z >= 0.7f && s.v.Z <= 140.f)
-				*grounded = true;
 		}
 		if (nseg == 0)
 			seg_pts[++nseg] = s.p;   // fully blocked: zero-length segment
+		// CategorizePosition - FullWalkMove runs it between the move and
+		// FinishGravity, and it is the ONLY thing that sets ground: falling
+		// no faster up than NON_JUMP_VELOCITY (140), a 2-unit down-trace
+		// hitting a walkable plane (nz >= 0.7) sets the ground entity AND
+		// SNAPS the origin to the trace end. A flight skimming the ramp
+		// APEX lands on the top face WITHOUT TryPlayerMove ever striking a
+		// plane (measured 2026-07-24: the side0=-1 ~2.06u real-vs-model
+		// cluster - real vz -6 walking the top at z 255.98 from tick 60
+		// while the model slid the face below). Striking a walkable plane
+		// mid-bump leaves the hull ON it, so this probe also covers what
+		// the old direct-contact grounding caught.
+		if (s.v.Z <= 140.f) {
+			int gb, gpl;
+			const float gf = TraceHullWorld(s.p, s.p - Vector(0.f, 0.f, 2.f), &gb, &gpl);
+			if (gf < 1.f && gb >= 0
+				&& g_search.bcolliders[gb].pn[gpl].Z >= 0.7f) {
+				s.p.Z -= 2.f * gf;           // engine: origin = trace endpos
+				seg_pts[++nseg] = s.p;       // the perigee sees the snapped point
+				*grounded = true;
+			}
+		}
 		s.v.Z -= g_search.gravity * g_search.dt * 0.5f;          // FinishGravity
+		if (*grounded)
+			s.v.Z = 0.f;   // FullWalkMove: grounded ticks end with vz cleared
 		return nseg;
 	}
 
@@ -1079,6 +1361,8 @@ namespace {
 		float yaw = 0.f;        // view yaw on the pass tick (for the yaw constraint)
 		int   bump_ticks = 0;   // pass tick minus board tick (0 = board IS the pass)
 		float bump_loss = 0.f;  // speed the board clip took away (u/s)
+		float vyaw = 0.f;       // velocity HEADING at the pass (the approach yaw)
+		float vz = 0.f;         // vertical velocity at the pass (flick height feed)
 	};
 	bool EvalPass(int N, float height_frac, int side0, const int* splits, int nsplits,
 	              const float* rates, PassEval& out) {
@@ -1097,8 +1381,11 @@ namespace {
 			float best_frac = 0.f;
 			float best_v2 = sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y);
 			float best_yaw = s.yaw;
+			float best_vy = HeadingDeg(s.v, s.yaw);
+			float best_vz = s.v.Z;
 			float best_d2 = Dot3(s.p - tgt);
-			auto track = [&](const Vector& a, const Vector& b2, int tick2, float v2, float yawv) {
+			auto track = [&](const Vector& a, const Vector& b2, int tick2, float v2,
+			                 float yawv, float vyawv, float vzv) {
 				const Vector d = b2 - a;
 				const float len2 = Dot3(d);
 				float tt = (len2 > 1e-9f) ? Dot(tgt - a, d) / len2 : 0.f;
@@ -1112,6 +1399,8 @@ namespace {
 					best_frac = tt;
 					best_v2 = v2;
 					best_yaw = yawv;
+					best_vy = vyawv;
+					best_vz = vzv;
 				}
 			};
 			out.bump_ticks = 0;
@@ -1120,12 +1409,23 @@ namespace {
 			bool foreign_counted = false;
 			for (int t = 0; t < N + 8; ++t) {
 				while (k < nsplits && t >= splits[k]) k++;
-				const int side = (k % 2 == 0) ? side0 : -side0;
+				// A RIDE holds ONE side (the key pressing into the ramp) and
+				// varies only the per-phase bias; flights alternate A/D.
+				const int side = g_search.ride ? side0
+					: ((k % 2 == 0) ? side0 : -side0);
 				// rates[] = deg/tick turn rates, or per-phase BIASES off the
 				// exact max-gain line in optimal mode (blend tail lands the
 				// view exactly on the target yaw).
-				const float yaw_next = g_search.opt
-					? OptYawStep(s.yaw, s.v, t, N, g_search.blend, rates[k], side,
+				// A RIDE never blends: forcing the view onto a board yaw at
+				// ride speed puts the wish ~136 deg off the velocity and the
+				// engine answers with a 562 u/s backward impulse that destroys
+				// the line (measured). The arrival yaw is an OUTPUT of a ride -
+				// the spread the flick chooses from - not a constraint.
+				const float yaw_next = g_search.ride
+					? NormYaw(HeadingDeg(s.v, s.yaw)
+						+ static_cast<float>(side) * rates[k])
+					: g_search.opt
+					? OptYawStep(s.yaw, s.v, t, N, CurBlend(), rates[k], side,
 						g_search.target_yaw)
 					: NormYaw(s.yaw - rates[k]);
 				Vector segp[6];
@@ -1135,8 +1435,9 @@ namespace {
 				const int nseg = EngineMoveTick(s, yaw_next, side,
 				                                segp, tc, &ntc, &grounded);
 				const float v2n = sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y);
+				const float vyn = HeadingDeg(s.v, s.yaw);
 				for (int si = 0; si < nseg; ++si)
-					track(segp[si], segp[si + 1], t + 1, v2n, s.yaw);
+					track(segp[si], segp[si + 1], t + 1, v2n, s.yaw, vyn, s.v.Z);
 				for (int ci = 0; ci < ntc; ++ci) {
 					const SearchCtx::BrushCollider& bc = g_search.bcolliders[tc[ci].collider];
 					if (bc.is_target && bc.pid[tc[ci].plane] == bc.target_plane) {
@@ -1164,6 +1465,8 @@ namespace {
 			out.frac = best_frac;
 			out.speed = best_v2;
 			out.yaw = best_yaw;
+			out.vyaw = best_vy;
+			out.vz = best_vz;
 			out.bump_ticks = (contact_tick >= 0 && best_tick > contact_tick)
 				? best_tick - contact_tick : 0;
 			if (contact_tick >= 0 && contact_tick > best_tick)
@@ -1173,9 +1476,10 @@ namespace {
 		Vector prev = s.p;
 		for (int t = 0; t < N; ++t) {
 			while (k < nsplits && t >= splits[k]) k++;
-			const int side = (k % 2 == 0) ? side0 : -side0;
+			const int side = g_search.ride ? side0
+				: ((k % 2 == 0) ? side0 : -side0);
 			const float yaw_next = g_search.opt
-				? OptYawStep(s.yaw, s.v, t, N, g_search.blend, rates[k], side,
+				? OptYawStep(s.yaw, s.v, t, N, CurBlend(), rates[k], side,
 					g_search.target_yaw)
 				: NormYaw(s.yaw - rates[k]);
 			prev = s.p;
@@ -1186,6 +1490,8 @@ namespace {
 		out.frac = height_frac;
 		out.speed = sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y);
 		out.yaw = s.yaw;
+		out.vyaw = HeadingDeg(s.v, s.yaw);
+		out.vz = s.v.Z;
 		return true;
 	}
 
@@ -1286,14 +1592,15 @@ namespace {
 		                         int n_used, int reason) {
 			if (reason == 0) {
 				g_search.cnt_floor++;
-				if (err < g_search.reject_best)
-					g_search.reject_best = err;
 			} else if (reason == 1) {
 				g_search.reject_retime++;
 			} else {
 				g_search.cnt_bump++;
 			}
 			// Keep the ~24 closest rejects with full detail for the log.
+			std::lock_guard<std::mutex> lk(g_results_mtx);
+			if (err < g_search.reject_best && reason == 0)
+				g_search.reject_best = err;   // exact under the lock (workers race)
 			if (g_search.top_rejects.size() < 24
 				|| err < g_search.top_rejects.back().err) {
 				SearchCtx::RejectRec rec;
@@ -1331,24 +1638,33 @@ namespace {
 				// schedules (rates within 0.05 deg, splits within 2 ticks).
 				// The cap is a memory backstop, far above any real search, and
 				// COUNTED when hit instead of silently dropping lines.
-				if (static_cast<int>(g_search.results.size()) < 20000) {
-					RouteSolution s;
-					s.ticks = p.tick;
-					s.frac = p.frac;
-					s.side0 = side0;
-					s.nsplits = nsplits;
-					for (int i = 0; i < 3; ++i) s.splits[i] = (i < nsplits) ? splits[i] : 0;
-					memcpy(s.rates, rr, sizeof(float) * 4);
-					s.wrap = cur_wrap;
-					s.pass_err = err;
-					s.speed = p.speed;
-					s.pass_pos = p.pass;
-					s.bump_ticks = p.bump_ticks;
-					s.bump_loss = p.bump_loss;
-					s.exact = (err <= g_search.tol && p.bump_loss <= g_search.max_bump);
-					g_search.results.push_back(s);
-				} else {
-					g_search.cap_dropped++;
+				RouteSolution s;
+				s.ticks = p.tick;
+				s.frac = p.frac;
+				s.side0 = side0;
+				s.opt = g_search.opt;       // how rates[] replay - travels with the line
+				s.ride = g_search.ride;     // same-side vs alternating - ditto
+				s.blend = CurBlend();       // the window this line solved with
+				s.nsplits = nsplits;
+				for (int i = 0; i < 3; ++i) s.splits[i] = (i < nsplits) ? splits[i] : 0;
+				memcpy(s.rates, rr, sizeof(float) * 4);
+				s.wrap = cur_wrap;
+				s.pass_err = err;
+				s.speed = p.speed;
+				s.arr_heading = p.vyaw;
+				s.arr_vz = p.vz;
+				s.pass_pos = p.pass;
+				s.bump_ticks = p.bump_ticks;
+				s.bump_loss = p.bump_loss;
+				s.exact = (err <= g_search.tol && p.bump_loss <= g_search.max_bump);
+				{
+					std::lock_guard<std::mutex> lk(g_results_mtx);
+					if (static_cast<int>(g_search.results.size()) < 20000) {
+						g_search.results.push_back(s);
+						g_results_n.fetch_add(1, std::memory_order_relaxed);
+					} else {
+						g_search.cap_dropped++;
+					}
 				}
 			} else if (yaw_ok && err <= g_search.collect) {
 				record_reject(rr, err, p, expected_tick, 2);   // violent board
@@ -1359,13 +1675,13 @@ namespace {
 			}
 		};
 
-		// LM over 1-2 free rates; fmap maps free index -> rate index (bounds).
+		// LM over 1-3 free parameters; fmap maps free index -> bound index.
 		// Parametrized over the residual and bounds so the optimal-bias mode
-		// reuses it unchanged. FAILURE-TOLERANT: an infeasible evaluation
-		// (early board / no contact / yaw out of range) is a WALL to walk
-		// along, never a reason to abort - aborting froze the whole search at
-		// its starting guesses (the frozen -6.4/+6.4 rates visible across
-		// three diagnostics logs).
+		// reuses it unchanged (3 free biases won every offline scenario).
+		// FAILURE-TOLERANT: an infeasible evaluation (early board / no
+		// contact / yaw out of range) is a WALL to walk along, never a reason
+		// to abort - aborting froze the whole search at its starting guesses
+		// (the frozen -6.4/+6.4 rates visible across three diagnostics logs).
 		auto newton = [&](auto&& rfn, const float* rlo, const float* rhi,
 		                  float* fr, int nfree, const int* fmap) -> float {
 			float F[2];
@@ -1375,11 +1691,12 @@ namespace {
 			float lambda = 0.05f;
 			const float h = 0.04f;
 			for (int it = 0; it < 30 && err > 0.02f; ++it) {
-				float J[2][2] = {};
-				bool have_col[2] = { false, false };
+				float J[2][3] = {};
+				bool have_col[3] = { false, false, false };
 				for (int i = 0; i < nfree; ++i) {
 					for (int attempt = 0; attempt < 2 && !have_col[i]; ++attempt) {
-						float f2[2] = { fr[0], (nfree > 1) ? fr[1] : 0.f };
+						float f2[3] = { fr[0], (nfree > 1) ? fr[1] : 0.f,
+						                (nfree > 2) ? fr[2] : 0.f };
 						const int bi = fmap[i];
 						const float want = f2[i] + ((attempt == 0) ? h : -h);
 						const float clamped = Clampf(want, rlo[bi], rhi[bi]);
@@ -1395,28 +1712,54 @@ namespace {
 						}
 					}
 				}
-				if (!have_col[0] && (nfree < 2 || !have_col[1]))
+				bool any = false;
+				for (int i = 0; i < nfree; ++i)
+					any |= have_col[i];
+				if (!any)
 					break;   // boxed in on every side - genuinely stuck
 				bool stepped = false;
 				for (int attempt = 0; attempt < 6 && !stepped; ++attempt) {
-					float d[2] = {};
-					if (nfree == 1) {
-						const float a = J[0][0] * J[0][0] + J[1][0] * J[1][0] + lambda;
-						d[0] = -(J[0][0] * F[0] + J[1][0] * F[1]) / a;
-					} else {
-						const float a00 = J[0][0] * J[0][0] + J[1][0] * J[1][0] + lambda;
-						const float a11 = J[0][1] * J[0][1] + J[1][1] * J[1][1] + lambda;
-						const float a01 = J[0][0] * J[0][1] + J[1][0] * J[1][1];
-						const float b0 = -(J[0][0] * F[0] + J[1][0] * F[1]);
-						const float b1 = -(J[0][1] * F[0] + J[1][1] * F[1]);
-						const float det = a00 * a11 - a01 * a01;
-						if (fabsf(det) < 1e-12f) { lambda *= 5.f; continue; }
-						d[0] = (b0 * a11 - b1 * a01) / det;
-						d[1] = (b1 * a00 - b0 * a01) / det;
+					// (J^T J + lambda I) d = -J^T F, nfree x nfree (<= 3),
+					// by Gauss-Jordan with partial pivoting.
+					float M[3][4] = {};
+					for (int i = 0; i < nfree; ++i) {
+						for (int j = 0; j < nfree; ++j)
+							M[i][j] = J[0][i] * J[0][j] + J[1][i] * J[1][j];
+						M[i][i] += lambda;
+						M[i][nfree] = -(J[0][i] * F[0] + J[1][i] * F[1]);
 					}
-					const float m = fmaxf(fabsf(d[0]), fabsf(d[1]));
-					if (m > 2.f) { d[0] *= 2.f / m; d[1] *= 2.f / m; }
-					float f2[2] = { fr[0], (nfree > 1) ? fr[1] : 0.f };
+					bool sing = false;
+					for (int c = 0; c < nfree && !sing; ++c) {
+						int piv = c;
+						for (int r2 = c + 1; r2 < nfree; ++r2)
+							if (fabsf(M[r2][c]) > fabsf(M[piv][c]))
+								piv = r2;
+						if (fabsf(M[piv][c]) < 1e-12f) { sing = true; break; }
+						if (piv != c)
+							for (int j = 0; j <= nfree; ++j) {
+								const float tmp = M[piv][j];
+								M[piv][j] = M[c][j];
+								M[c][j] = tmp;
+							}
+						for (int r2 = 0; r2 < nfree; ++r2) {
+							if (r2 == c) continue;
+							const float f = M[r2][c] / M[c][c];
+							for (int j = 0; j <= nfree; ++j)
+								M[r2][j] -= f * M[c][j];
+						}
+					}
+					if (sing) { lambda *= 5.f; continue; }
+					float d[3] = {};
+					for (int i = 0; i < nfree; ++i)
+						d[i] = M[i][nfree] / M[i][i];
+					float m = 0.f;
+					for (int i = 0; i < nfree; ++i)
+						m = fmaxf(m, fabsf(d[i]));
+					if (m > 2.f)
+						for (int i = 0; i < nfree; ++i)
+							d[i] *= 2.f / m;
+					float f2[3] = { fr[0], (nfree > 1) ? fr[1] : 0.f,
+					                (nfree > 2) ? fr[2] : 0.f };
 					for (int i = 0; i < nfree; ++i)
 						f2[i] = Clampf(f2[i] + d[i], rlo[fmap[i]], rhi[fmap[i]]);
 					float F2[2];
@@ -1451,48 +1794,212 @@ namespace {
 			g_search.yaw_ever_feasible = true;
 			float blo[4], bhi[4];
 			for (int i = 0; i < 4; ++i) { blo[i] = -20.f; bhi[i] = 20.f; }
-			const int nfree = (K < 2) ? K : 2;
+			// ALL biases free (up to the LM's 3) - the offline lab won every
+			// scenario with 3 free over 2 (+1..3 u/s) - and TWO blend windows
+			// tried per candidate (worth several more); each window's best is
+			// collected as its own line, carrying its blend for the apply.
+			const int nfree = (K < 3) ? K : 3;
 			const int bbase = K - nfree;
-			const int fmapo[2] = { bbase, bbase + 1 };
-			auto oresid = [&](const float* fr, int nf, float* F, PassEval* pout) -> bool {
-				float bias[4] = { 0.f, 0.f, 0.f, 0.f };
-				for (int i = 0; i < nf; ++i) bias[bbase + i] = fr[i];
-				if (!EvalPass(N, frac, side0, splits, nsplits, bias, pe))
-					return false;
-				const Vector dd = pe.pass - tgt;
-				F[0] = Dot(g_search.e1, dd);
-				F[1] = Dot(g_search.e2, dd);
-				if (pout) *pout = pe;
-				return true;
-			};
-			const float ostarts[5][2] = {
-				{0.f, 0.f}, {5.f, -5.f}, {-5.f, 5.f}, {9.f, 9.f}, {-9.f, -9.f} };
-			float best_err = 1e9f;
-			float best_b[4] = {};
-			PassEval best_po{};
-			for (int s0 = 0; s0 < 5; ++s0) {
-				float fr[2] = { ostarts[s0][0], (nfree > 1) ? ostarts[s0][1] : 0.f };
-				if (nfree > 0)
-					newton(oresid, blo, bhi, fr, nfree, fmapo);
-				float F[2];
-				PassEval p;
-				if (oresid(fr, nfree, F, &p)) {
-					const float e = sqrtf(F[0] * F[0] + F[1] * F[1]);
-					if (e < best_err) {
-						best_err = e;
-						memset(best_b, 0, sizeof(best_b));
-						for (int i = 0; i < nfree; ++i) best_b[bbase + i] = fr[i];
-						best_po = p;
+			const int fmapo[3] = { bbase, bbase + 1, bbase + 2 };
+			const float ostarts[5][3] = {
+				{0.f, 0.f, 0.f}, {5.f, -5.f, 0.f}, {-5.f, 5.f, 0.f},
+				{0.f, 5.f, -5.f}, {0.f, -5.f, 5.f} };
+			const int save_blend = g_search.blend;
+			// FOUR blend windows per candidate (offline tournament: windows +
+			// polish + stride 2 = +11.2 u/s mean over the shipped pair, 39/40
+			// scenarios, sign p ~ 2e-12). A refinement task instead solves
+			// exactly ONE window, seeded with its line's own biases.
+			int blendset[4] = { save_blend, save_blend + 6,
+			                    save_blend - 3, save_blend + 12 };
+			for (int i = 0; i < 4; ++i)
+				blendset[i] = blendset[i] < 2 ? 2 : (blendset[i] > 24 ? 24 : blendset[i]);
+			// A ride has no blend tail, so the blend windows are all the
+			// same line - solve it once.
+			const int nblend = (tl_refine_active || g_search.ride) ? 1 : 4;
+			if (tl_refine_active)
+				blendset[0] = tl_refine_blend;
+			for (int bsel = 0; bsel < nblend; ++bsel) {
+				bool bdup = false;
+				for (int i = 0; i < bsel; ++i)
+					bdup |= (blendset[i] == blendset[bsel]);
+				if (bdup)
+					continue;
+				tl_blend = blendset[bsel];
+				// SELF-CONSISTENT schedule length, same as constant mode: the
+				// blend is anchored to the schedule length T, and the APPLIED
+				// solution replays with ticks = the pass tick - if those
+				// differ, the provider blends toward a different tick than
+				// the search solved and the real line diverges in the final
+				// ticks (measured: model 0.04u vs real 9.7u, plus the early
+				// boards that shifted stream caused). Solve AT T, require the
+				// perigee to land AT T, re-anchor and re-solve otherwise.
+				int T = N;
+				for (int fp = 0; fp < 3; ++fp) {
+					bool feasible = true;
+					for (int i = 0; i < nsplits; ++i)
+						if (splits[i] >= T)
+							feasible = false;
+					if (!feasible || T < 8)
+						break;
+					float best_err = 1e9f;
+					float best_b[4] = {};
+					PassEval best_po{};
+					auto tresid = [&](const float* fr, int nf, float* F, PassEval* pout) -> bool {
+						float bias[4] = { 0.f, 0.f, 0.f, 0.f };
+						for (int i = 0; i < nf; ++i) bias[bbase + i] = fr[i];
+						if (!EvalPass(T, frac, side0, splits, nsplits, bias, pe))
+							return false;
+						const Vector dd = pe.pass - tgt;
+						F[0] = Dot(g_search.e1, dd);
+						F[1] = Dot(g_search.e2, dd);
+						if (pout) *pout = pe;
+						return true;
+					};
+					const int widx = (side0 > 0) ? 0 : 1;
+					const int nstarts = tl_refine_active
+						? 2 : (tl_have_warm_ob[widx] ? 6 : 5);
+					for (int s0 = 0; s0 < nstarts; ++s0) {
+						float fr[3];
+						if (tl_refine_active) {
+							// Start 0 = the line's own biases; start 1 = zeros.
+							for (int i = 0; i < 3; ++i)
+								fr[i] = (s0 == 0 && bbase + i < 4)
+									? tl_refine_seed[bbase + i] : 0.f;
+						} else if (s0 == 5) {
+							memcpy(fr, tl_warm_ob[widx], sizeof(fr));
+						} else {
+							fr[0] = ostarts[s0][0];
+							fr[1] = (nfree > 1) ? ostarts[s0][1] : 0.f;
+							fr[2] = (nfree > 2) ? ostarts[s0][2] : 0.f;
+						}
+						for (int i = 0; i < nfree; ++i)
+							fr[i] = Clampf(fr[i], blo[fmapo[i]], bhi[fmapo[i]]);
+						if (nfree > 0)
+							newton(tresid, blo, bhi, fr, nfree, fmapo);
+						float F[2];
+						PassEval p;
+						if (tresid(fr, nfree, F, &p)) {
+							const float e = sqrtf(F[0] * F[0] + F[1] * F[1]);
+							if (e < best_err) {
+								best_err = e;
+								memset(best_b, 0, sizeof(best_b));
+								for (int i = 0; i < nfree; ++i) best_b[bbase + i] = fr[i];
+								best_po = p;
+							}
+						}
+						if (best_err <= g_search.tol && best_po.tick == T)
+							break;
 					}
+					if (best_err > 1e8f) {
+						g_search.cnt_no_contact++;
+						break;
+					}
+					// A RIDE's trajectory does not depend on the schedule
+					// length at all (no blend tail), so there is nothing to
+					// align: the arrival tick IS wherever the perigee lands
+					// and the segment simply ends there. Requiring tick == T
+					// made the residual undefined almost everywhere and the
+					// solve stalled at 171 u; anchoring to the perigee closes
+					// the same case to 0.004 u. Both phases must actually run.
+					if (g_search.ride) {
+						const float acc_err = sqrtf(Dot3(best_po.pass - tgt));
+						if (best_po.tick > splits[0])
+							consider(best_b, acc_err, best_po, best_po.tick);
+						else
+							record_reject(best_b, acc_err, best_po, best_po.tick, 1);
+						break;
+					}
+					if (best_po.tick == T) {
+						const float acc_err = sqrtf(Dot3(best_po.pass - tgt));
+						consider(best_b, acc_err, best_po, T);
+						// Polish only within reach of this worker's speed lead:
+						// walking every mediocre basin was most of the minutes.
+						// Deep search polishes everything (the tournament FULL
+						// config, worth ~+3.8 u/s mean / up to +35).
+						const bool near_lead = g_deep_search
+							|| best_po.speed > tl_best_speed - 3.f;
+						if (acc_err <= g_search.tol
+							&& best_po.speed > tl_best_speed)
+							tl_best_speed = best_po.speed;
+						if (acc_err <= g_search.tol && nfree == 3) {
+							memcpy(tl_warm_ob[widx], best_b + bbase,
+								sizeof(float) * 3);
+							tl_have_warm_ob[widx] = true;
+							// NULL-SPACE SPEED POLISH: 2 residuals over 3 free
+							// biases leave a 1-D curve of solutions that all hit
+							// the point; cross(J0,J1) is its tangent. Walk it
+							// both ways, LM-repair the miss each step, and every
+							// replayed speed gain becomes its own line.
+							if (near_lead)
+							for (int dirsel = 0; dirsel < 2; ++dirsel) {
+								float pt[3] = { best_b[bbase], best_b[bbase + 1],
+								                best_b[bbase + 2] };
+								float pspeed = best_po.speed;
+								for (int pstep = 0; pstep < 6; ++pstep) {
+									float F0[2];
+									if (!tresid(pt, 3, F0, nullptr))
+										break;
+									float J[2][3];
+									bool jok = true;
+									for (int i = 0; i < 3 && jok; ++i) {
+										float f2[3] = { pt[0], pt[1], pt[2] };
+										const float cl = Clampf(f2[i] + 0.04f,
+											blo[fmapo[i]], bhi[fmapo[i]]);
+										const float hs = cl - f2[i];
+										if (fabsf(hs) < 1e-6f) { jok = false; break; }
+										f2[i] = cl;
+										float F2[2];
+										if (!tresid(f2, 3, F2, nullptr)) { jok = false; break; }
+										J[0][i] = (F2[0] - F0[0]) / hs;
+										J[1][i] = (F2[1] - F0[1]) / hs;
+									}
+									if (!jok)
+										break;
+									Vector nu(J[0][1] * J[1][2] - J[0][2] * J[1][1],
+									          J[0][2] * J[1][0] - J[0][0] * J[1][2],
+									          J[0][0] * J[1][1] - J[0][1] * J[1][0]);
+									const float nl = sqrtf(Dot3(nu));
+									if (nl < 1e-9f)
+										break;
+									nu = Scale(nu, (dirsel == 0 ? 1.5f : -1.5f) / nl);
+									float nxt[3] = {
+										Clampf(pt[0] + nu.X, blo[fmapo[0]], bhi[fmapo[0]]),
+										Clampf(pt[1] + nu.Y, blo[fmapo[1]], bhi[fmapo[1]]),
+										Clampf(pt[2] + nu.Z, blo[fmapo[2]], bhi[fmapo[2]]) };
+									newton(tresid, blo, bhi, nxt, 3, fmapo);
+									float Fx[2];
+									PassEval px;
+									if (!tresid(nxt, 3, Fx, &px))
+										break;
+									if (px.tick != T)
+										break;
+									const float ex = sqrtf(Dot3(px.pass - tgt));
+									if (ex > g_search.tol)
+										break;
+									if (px.speed > pspeed + 0.05f) {
+										memcpy(pt, nxt, sizeof(pt));
+										pspeed = px.speed;
+										float pb[4];
+										memcpy(pb, best_b, sizeof(pb));
+										for (int i = 0; i < 3; ++i)
+											pb[bbase + i] = nxt[i];
+										consider(pb, ex, px, T);
+									} else
+										break;
+								}
+							}
+						}
+						break;
+					}
+					if (fp == 2) {
+						record_reject(best_b, sqrtf(Dot3(best_po.pass - tgt)), best_po, T, 1);
+						break;
+					}
+					T = best_po.tick;   // re-anchor the blend to the real pass tick
 				}
-				if (best_err <= g_search.tol)
-					break;
 			}
-			if (best_err > 1e8f) {
-				g_search.cnt_no_contact++;
-				return;
-			}
-			consider(best_b, sqrtf(Dot3(best_po.pass - tgt)), best_po, best_po.tick);
+			tl_blend = 0;
+			(void)save_blend;
 			return;
 		}
 
@@ -1544,14 +2051,14 @@ namespace {
 						const float mixes8[8][2] = {
 							{0.5f, 0.5f}, {0.2f, 0.8f}, {0.8f, 0.2f}, {0.3f, 0.3f},
 							{0.7f, 0.7f}, {0.1f, 0.4f}, {0.4f, 0.1f}, {0.9f, 0.6f} };
-						const bool warm = g_search.have_warm[sidx];
+						const bool warm = tl_have_warm[sidx];
 						const int nstarts = warm ? 9 : 8;
 						for (int s0 = 0; s0 < nstarts; ++s0) {
 							float fr[2];
 							if (warm && s0 == 0) {
-								fr[0] = Clampf(g_search.warm_fr[sidx][0], lo[0], hi[0]);
+								fr[0] = Clampf(tl_warm_fr[sidx][0], lo[0], hi[0]);
 								fr[1] = (nfree > 1)
-									? Clampf(g_search.warm_fr[sidx][1], lo[1], hi[1]) : 0.f;
+									? Clampf(tl_warm_fr[sidx][1], lo[1], hi[1]) : 0.f;
 							} else {
 								const int mi = warm ? s0 - 1 : s0;
 								for (int i = 0; i < nfree; ++i)
@@ -1572,9 +2079,9 @@ namespace {
 								break;
 						}
 						if (best_err < 60.f) {
-							g_search.warm_fr[sidx][0] = best_r[0];
-							g_search.warm_fr[sidx][1] = (nfree > 1) ? best_r[1] : 0.f;
-							g_search.have_warm[sidx] = true;
+							tl_warm_fr[sidx][0] = best_r[0];
+							tl_warm_fr[sidx][1] = (nfree > 1) ? best_r[1] : 0.f;
+							tl_have_warm[sidx] = true;
 						}
 					}
 					if (best_err > 1e8f) {
@@ -1619,6 +2126,47 @@ namespace {
 	// over an impossible tick count (the diagnostics showed those flooring a
 	// few units short in the wrong rate family). No face: same crossings, with
 	// their exact fractions.
+	// RIDE candidates: a ride's duration is paced by ALONG-FACE progress, not
+	// free fall (the 13:30 attempt seeded ballistically: N 33 vs real contact
+	// 57+, every candidate TICK-ALIGN-rejected 400u short). Rides accelerate
+	// down-slope and pressing-up lines take longer, so the window is wide and
+	// the in-resid retimer fills the gaps.
+	void RideCandidates() {
+		g_search.cands.clear();
+		// With no blend tail the ride's path is independent of the schedule
+		// length - only the split and the two biases shape it, and the
+		// arrival tick is read off the perigee. So ONE generous evaluation
+		// window is enough; BuildSplits enumerates the split inside it and
+		// each solve reports its own N. (Ballistic seeding was the original
+		// failure: N 33 against a real contact at 57+.)
+		const float dist = sqrtf(Dot3(g_search.target_pos - g_search.start_pos));
+		const float spd = fmaxf(sqrtf(Dot3(g_search.start_vel)), 50.f);
+		const int n0 = static_cast<int>(dist / (spd * g_search.dt) + 0.5f);
+		int win = static_cast<int>(static_cast<float>(n0) * 1.8f) + 12;
+		if (win < 24) win = 24;
+		if (win > 280) win = 280;
+		SearchCtx::PassCand c;
+		c.N = win;
+		c.frac = 1.f;
+		g_search.cands.push_back(c);
+	}
+
+	// The strafe key whose wish direction presses INTO the face (wish = yaw
+	// +- 90, exactly the AirAccelerate formula the tick uses).
+	int RideSideIntoFace(float heading, const Vector& n) {
+		int best = 1;
+		float bestd = -1e9f;
+		for (int side = -1; side <= 1; side += 2) {
+			const float w = (heading + 90.f * static_cast<float>(side)) * (kPi / 180.f);
+			const float d = -(cosf(w) * n.X + sinf(w) * n.Y);
+			if (d > bestd) {
+				bestd = d;
+				best = side;
+			}
+		}
+		return best;
+	}
+
 	void BuildPassCandidates() {
 		g_search.cands.clear();
 		const float z0 = g_search.start_pos.Z;
@@ -1629,9 +2177,12 @@ namespace {
 			const float z = ZAfter(z0, vz0, j);
 			if ((prev - zt) * (z - zt) <= 0.f && prev != z) {
 				if (g_search.have_face) {
-					// +4 on the late side: a pre-target kiss slides, and the
-					// slide descends slower than free fall, delaying the pass.
-					for (int dj = -1; dj <= 4; ++dj) {
+					// +2 on the late side: a pre-target kiss slides and passes
+					// late, but the in-resid retimer re-anchors from any seed -
+					// the old +4 window only manufactured sibling-N duplicates
+					// (six copies of every line in the 11:47 log's rejects).
+					// Deep search restores the full window.
+					for (int dj = -1; dj <= (g_deep_search ? 4 : 2); ++dj) {
 						const int cand = j + dj;
 						if (cand < 1)
 							continue;
@@ -1668,7 +2219,10 @@ namespace {
 			for (int a = 1; a < N; ++a)
 				g_search.splits_list.push_back({ a, 0, 0 });
 		} else if (K == 3) {
-			const int stride = (N > 120) ? 2 : 1;
+			// Optimal mode: the biases do the shaping, so near-identical
+			// timings converge to the same line - a coarser stride buys the
+			// blend-pair + 3-bias budget at the same total search time.
+			const int stride = g_search.opt ? 2 : ((N > 120) ? 2 : 1);
 			for (int a = 1; a < N - 1; a += stride)
 				for (int b = a + 1; b < N; b += stride)
 					g_search.splits_list.push_back({ a, b, 0 });
@@ -1688,7 +2242,10 @@ namespace {
 			return;
 		SolverData& sd = g_segs[seg_index].solver;
 		sd.solved = true;
+		sd.opt = sol.opt;                // the SOLUTION carries its own semantics
+		sd.applied_ride = sol.ride;
 		sd.tyaw = g_search.target_yaw;   // provider's blend target (opt mode)
+		sd.blend = (sol.blend < 1) ? 1 : (sol.blend > 24 ? 24 : sol.blend);
 		sd.ticks = sol.ticks;
 		sd.side0 = sol.side0;
 		sd.nsplits = sol.nsplits;
@@ -1791,6 +2348,20 @@ namespace {
 	// real paths landing on the valley floor and side brushes the model knew
 	// nothing about). Each brush = its complete hull-expanded plane set; the
 	// plane the sweep ENTERS through decides board vs crash.
+	// Origin-space expansion of a brush plane: the Minkowski sum of the brush
+	// with the NEGATED player hull. For plane n.p <= d the hull (offsets b in
+	// [mins,maxs]) touches iff n.origin <= d - min_b(n.b), and min_b picks
+	// mins on the axes where n is positive, maxs where it is negative. The
+	// hull comes from the ENGINE (CCollisionProperty), not a constant - so a
+	// mod/server with different player bounds is modelled correctly.
+	float HullExpand(const Vector& n) {
+		Vector mn, mx;
+		Prediction::PlayerHull(&mn, &mx);
+		return -((n.X > 0.f ? n.X * mn.X : n.X * mx.X)
+			+ (n.Y > 0.f ? n.Y * mn.Y : n.Y * mx.Y)
+			+ (n.Z > 0.f ? n.Z * mn.Z : n.Z * mx.Z));
+	}
+
 	void BuildBrushColliders(const BspWorld::BoardTarget* target,
 	                         std::vector<SearchCtx::BrushCollider>& out) {
 		out.clear();
@@ -1809,9 +2380,7 @@ namespace {
 				float pd = 0.f;
 				if (!BspWorld::GetBrushClipPlane(brush, i, &pid, &pn, &pd))
 					continue;
-				// Hull expansion (standing 32x32x72, feet origin).
-				float d_origin = pd + 16.f * fabsf(pn.X) + 16.f * fabsf(pn.Y)
-					+ (pn.Z < 0.f ? 72.f * fabsf(pn.Z) : 0.f);
+				float d_origin = pd + HullExpand(pn);   // engine hull, feet origin
 				// The boardable face uses the target's EXACT rest distance so
 				// the sweep contact and the slide/residual share one plane.
 				if (is_target && pid == target_plane)
@@ -1822,30 +2391,44 @@ namespace {
 			}
 			if (bc.pn.empty())
 				return;
+			// BEVEL planes: CM_ClipBoxToBrush clips swept boxes against the
+			// compiler's bevel sides (axial + edge bevels). Use the EXACT lump
+			// planes - the apex top-land vs face-surf branch flips on their
+			// dists (a winding-derived top at 256.004 vs the compiler's 256.000
+			// put the model on the wrong side of the measured landings).
+			const int nbev = BspWorld::BrushBevelPlaneCount(brush);
+			for (int i = 0; i < nbev; ++i) {
+				Vector pn;
+				float pd = 0.f;
+				if (!BspWorld::GetBrushBevelPlane(brush, i, &pn, &pd))
+					continue;
+				const float d_origin = pd + HullExpand(pn);
+				bc.pn.push_back(pn);
+				bc.pd.push_back(d_origin);
+				bc.pid.push_back(-2);   // bevel: never a boardable face
+			}
 			// Origin-space AABB gate: brush box grown by the hull (feet origin
 			// reaches 16 out sideways and 72 down-to-feet above the box).
 			Vector bmin, bmax;
 			if (BspWorld::GetBrushInfo(brush, nullptr, &bmin, &bmax)) {
-				bc.bmin = bmin - Vector(16.f, 16.f, 72.f);
-				bc.bmax = bmax + Vector(16.f, 16.f, 0.f);
-				// BEVEL planes: the engine's box clip always carries the six
-				// axial planes of the brush AABB (bevel sides). Without them,
-				// per-plane hull expansion over-collides in the wedge regions
-				// past edges - the bevels cut those wedges so a hull passing an
-				// edge resolves exactly like the engine (and an edge hit
-				// reports an AXIAL normal, exactly like the engine's trace).
-				const Vector bn[6] = {
-					Vector(1.f, 0.f, 0.f), Vector(-1.f, 0.f, 0.f),
-					Vector(0.f, 1.f, 0.f), Vector(0.f, -1.f, 0.f),
-					Vector(0.f, 0.f, 1.f), Vector(0.f, 0.f, -1.f) };
-				const float bd[6] = { bmax.X, -bmin.X, bmax.Y, -bmin.Y, bmax.Z, -bmin.Z };
-				for (int i = 0; i < 6; ++i) {
-					const float d_origin = bd[i]
-						+ 16.f * fabsf(bn[i].X) + 16.f * fabsf(bn[i].Y)
-						+ (bn[i].Z < 0.f ? 72.f : 0.f);
-					bc.pn.push_back(bn[i]);
-					bc.pd.push_back(d_origin);
-					bc.pid.push_back(-2);   // bevel: never a boardable face
+				Vector hmn, hmx;
+				Prediction::PlayerHull(&hmn, &hmx);
+				bc.bmin = bmin - hmx;   // origin-space box: brush (-) hull
+				bc.bmax = bmax - hmn;
+				if (nbev == 0) {
+					// No lump bevels (shouldn't happen on compiled maps):
+					// fall back to axial planes of the winding AABB.
+					const Vector bn[6] = {
+						Vector(1.f, 0.f, 0.f), Vector(-1.f, 0.f, 0.f),
+						Vector(0.f, 1.f, 0.f), Vector(0.f, -1.f, 0.f),
+						Vector(0.f, 0.f, 1.f), Vector(0.f, 0.f, -1.f) };
+					const float bd[6] = { bmax.X, -bmin.X, bmax.Y, -bmin.Y, bmax.Z, -bmin.Z };
+					for (int i = 0; i < 6; ++i) {
+						const float d_origin = bd[i] + HullExpand(bn[i]);
+						bc.pn.push_back(bn[i]);
+						bc.pd.push_back(d_origin);
+						bc.pid.push_back(-2);
+					}
 				}
 			} else {
 				bc.bmin = Vector(-1e9f, -1e9f, -1e9f);
@@ -1869,7 +2452,9 @@ namespace {
 		const Vector cmax(fmaxf(a.X, b.X) + 256.f, fmaxf(a.Y, b.Y) + 256.f,
 		                  fmaxf(a.Z, b.Z) + 128.f);
 		const int nbr = BspWorld::BrushCount();
-		for (int bi = 0; bi < nbr && static_cast<int>(out.size()) < 96; ++bi) {
+		g_search.corridor_dropped = 0;
+		g_search.entity_brushes = 0;
+		for (int bi = 0; bi < nbr; ++bi) {
 			int contents = 0;
 			Vector bmin, bmax;
 			if (!BspWorld::GetBrushInfo(bi, &contents, &bmin, &bmax))
@@ -1877,15 +2462,31 @@ namespace {
 			// SOLID | WINDOW | GRATE | PLAYERCLIP: what MASK_PLAYERSOLID hits.
 			if (!(contents & (0x1 | 0x2 | 0x8 | 0x10000)))
 				continue;
+			// ...but only if it is WORLD geometry. Brush entities (trigger
+			// volumes, illusionaries) are CONTENTS_SOLID on disk and block
+			// nothing - surf maps carpet the void under the ramps with them,
+			// and treating them as collision invented floors that made real
+			// targets look unreachable.
+			if (!BspWorld::IsWorldBrush(bi)) {
+				g_search.entity_brushes++;
+				continue;
+			}
 			if (bmax.X < cmin.X - 16.f || bmin.X > cmax.X + 16.f ||
 			    bmax.Y < cmin.Y - 16.f || bmin.Y > cmax.Y + 16.f ||
 			    bmax.Z < cmin.Z - 16.f || bmin.Z > cmax.Z + 72.f)
 				continue;
+			// A capped-out brush is a hole in the model's world - count it
+			// loudly (96 used to cull 72 brushes of this very corridor).
+			if (static_cast<int>(out.size()) >= 256) {
+				g_search.corridor_dropped++;
+				continue;
+			}
 			add_brush(bi, false, -1);
 		}
 	}
 
 	void StartSearch(int seg_index) {
+		StopSearchWorkers();        // never reset g_search under running workers
 		if (g_batch.active)
 			FinishBatch(true);      // a new search invalidates the batch's results
 		g_verify.active = false;
@@ -1932,9 +2533,20 @@ namespace {
 			g_search.e1 = Vector(1.f, 0.f, 0.f);
 			g_search.e2 = Vector(0.f, 1.f, 0.f);
 		}
-		g_search.strafes = sd.strafes < 1 ? 1 : sd.strafes > 4 ? 4 : sd.strafes;
-		g_search.opt = sd.opt;
-		g_search.blend = (sd.blend < 1) ? 1 : (sd.blend > 24 ? 24 : sd.blend);
+		// RIDE solves are single-strafe bias solves by construction; otherwise
+		// the search runs what the CHECKBOX says (want_*). sd.opt/sd.blend
+		// describe the currently APPLIED schedule and may differ until the
+		// next Apply stamps them from the chosen solution.
+		g_search.ride = sd.ride;
+		// A ride needs TWO same-side bias phases: the residual is 2D (the
+		// pass point) and one bias is one DOF - the single-phase attempt
+		// could only get within 63 u (15:12 log, every candidate rejected).
+		// Two phases = exactly determined; the (duration, split) family is
+		// the spread of approach yaw / lift the flick picks from.
+		g_search.strafes = g_search.ride ? 2
+			: (sd.strafes < 1 ? 1 : sd.strafes > 4 ? 4 : sd.strafes);
+		g_search.opt = g_search.ride ? true : sd.want_opt;
+		g_search.blend = (sd.want_blend < 1) ? 1 : (sd.want_blend > 24 ? 24 : sd.want_blend);
 
 		float interval = Prediction::LastDiag().interval_per_tick;
 		if (interval <= 0.f) interval = 0.015f;
@@ -1950,22 +2562,100 @@ namespace {
 		if (sd.start_jump)
 			PrepStartJump(g_search.start_vel);
 
-		BuildPassCandidates();
+		if (g_search.ride) {
+			RideCandidates();
+			if (g_search.have_face) {
+				const float phi0 = Dot(g_search.face_n, g_search.start_pos)
+					- g_search.face_d;
+				if (fabsf(phi0) > 8.f) {
+					g_search.done = true;
+					char note[256];
+					Sfmt(note, "RIDE solve: the segment start is %.1f u off the "
+						"target's face plane - a ride must START ON the ramp "
+						"(end the previous segment on it, or uncheck RIDE).",
+						phi0);
+					g_status = note;
+					return;
+				}
+				// Is the target a position a player can actually OCCUPY?
+				// The origin belongs OFF the surface (the hull is what rests
+				// on it), so the brush's raw box says nothing - the test is
+				// whether the HULL at that origin intersects another solid,
+				// which in origin space means the point is inside that
+				// brush's EXPANDED plane set (what the colliders already
+				// carry). Deep inside only (> 1 u past every plane) so a
+				// legitimate rest position, which sits exactly ON its face,
+				// is never flagged. 2026-07-25: the reported ride target was
+				// clear of its own ramp but 23 u inside the floor brushes -
+				// the ramp continues below the floor there, so no ride could
+				// ever reach it and the search just came back empty.
+				for (size_t ci = 0; ci < g_search.bcolliders.size(); ++ci) {
+					const SearchCtx::BrushCollider& bc = g_search.bcolliders[ci];
+					bool inside = !bc.pn.empty();
+					for (size_t pi = 0; pi < bc.pn.size() && inside; ++pi)
+						if (Dot(bc.pn[pi], target->pos) - bc.pd[pi] > -1.f)
+							inside = false;
+					if (inside) {
+						g_search.done = true;
+						char note[400];
+						Sfmt(note, "RIDE solve: no player can stand at this target - "
+							"the collision hull there is INSIDE brush %d (the ramp "
+							"continues under it). The usable surface ends where the "
+							"ramp meets that geometry; re-place the target higher up "
+							"the exposed part of the ramp.", bc.brush);
+						g_status = note;
+						WriteSearchLog();
+						return;
+					}
+				}
+			}
+		} else {
+			BuildPassCandidates();
+		}
 		if (g_search.cands.empty()) {
 			g_search.done = true;
-			g_status = "Solver: the ballistic arc NEVER reaches the target's height from this "
-				"start - enable 'Jump at start' if the start is grounded, otherwise the "
-				"target is too high (or the approach needs more airtime).";
+			g_status = g_search.ride
+				? "RIDE solve: no duration candidates - the start and target are "
+				  "practically the same point on the face."
+				: "Solver: the ballistic arc NEVER reaches the target's height from this "
+				  "start - enable 'Jump at start' if the start is grounded, otherwise the "
+				  "target is too high (or the approach needs more airtime).";
 			return;
 		}
-		g_search.jobs_total = 0;
+		// Flat job list for the worker pool (side-major inside each N so a
+		// contiguous partition still sees both families early for its warm).
+		// A RIDE has exactly one meaningful side: the strafe pressing INTO
+		// the face.
+		const int ride_side = (g_search.ride && g_search.have_face)
+			? RideSideIntoFace(HeadingDeg(g_search.start_vel, g_search.start_yaw),
+				g_search.face_n)
+			: 0;
+		g_jobs.clear();
 		for (const SearchCtx::PassCand& c : g_search.cands) {
 			BuildSplits(c.N);
-			g_search.jobs_total += 2 * static_cast<int>(g_search.splits_list.size());
+			for (int side = 0; side < 2; ++side) {
+				const int s0 = (side == 0) ? 1 : -1;
+				if (g_search.ride && ride_side != 0 && s0 != ride_side)
+					continue;
+				for (const std::array<int, 3>& sp : g_search.splits_list) {
+					SearchJob j{};
+					j.N = c.N;
+					j.frac = c.frac;
+					j.side0 = s0;
+					j.nsplits = g_search.strafes - 1;
+					j.splits[0] = sp[0]; j.splits[1] = sp[1]; j.splits[2] = sp[2];
+					j.refine = false;
+					g_jobs.push_back(j);
+				}
+			}
 		}
-		g_search.splits_built_for = -1;
-		g_search.split_idx = 0;
+		g_search.jobs_total = static_cast<int>(g_jobs.size());
+		g_jobs_done_a.store(0);
+		g_results_n.store(0);
+		g_sfault.store(false);
+		g_fault_detail[0] = 0;
 		g_search.active = true;
+		LaunchSearchWorkers();
 		g_status = "Solver: searching (exact point, exact yaw)...";
 	}
 
@@ -1989,7 +2679,8 @@ namespace {
 		for (const RouteSolution& s : v) {
 			bool dup = false;
 			for (const RouteSolution& k : kept) {
-				if (k.side0 != s.side0 || k.nsplits != s.nsplits || k.ticks != s.ticks)
+				if (k.side0 != s.side0 || k.nsplits != s.nsplits || k.ticks != s.ticks
+					|| k.blend != s.blend)
 					continue;
 				bool same = true;
 				for (int i = 0; i <= s.nsplits && same; ++i)
@@ -2005,6 +2696,41 @@ namespace {
 	}
 
 	void StartCorrect(int seg_index);   // fwd (real-sim correction, below)
+
+	// OPT+B refinement wave: after the enumeration, the fastest solved lines
+	// each get re-solved across the whole blend range (their own biases as
+	// the seed) - the blend window trades tail curvature for speed and the
+	// sweep finds each line's own best trade (offline: +3.0 u/s mean, 36/40).
+	void BuildRefineTasks() {
+		g_search.refine.clear();
+		if (!g_search.opt)
+			return;
+		std::vector<const RouteSolution*> byspeed;
+		for (const RouteSolution& s : g_search.results)
+			if (s.pass_err <= g_search.tol)
+				byspeed.push_back(&s);
+		std::sort(byspeed.begin(), byspeed.end(),
+			[](const RouteSolution* a, const RouteSolution* b) {
+				return a->speed > b->speed;
+			});
+		const size_t ntop = (std::min)(byspeed.size(), static_cast<size_t>(30));
+		for (size_t i = 0; i < ntop; ++i) {
+			const RouteSolution& s = *byspeed[i];
+			for (int blend = 4; blend <= 20; blend += 2) {
+				if (blend == s.blend)
+					continue;
+				SearchCtx::RefineTask t;
+				t.ticks = s.ticks;
+				t.side0 = s.side0;
+				t.nsplits = s.nsplits;
+				t.blend = blend;
+				memcpy(t.splits, s.splits, sizeof(t.splits));
+				t.frac = s.frac;
+				memcpy(t.rates, s.rates, sizeof(t.rates));
+				g_search.refine.push_back(t);
+			}
+		}
+	}
 
 	void FinishSearch() {
 		SortResults(g_search.results);
@@ -2088,6 +2814,52 @@ namespace {
 		return g_prev_uef ? g_prev_uef(ep) : EXCEPTION_CONTINUE_SEARCH;
 	}
 
+	// Append one line to crash.log (same file the fault filters write). Used
+	// by the handlers below, which fire for deaths that raise NO exception at
+	// all and therefore left crash.log EMPTY every time (2026-07-25: two
+	// silent instant closes, nothing in any log).
+	void WriteCrashLine(const char* what, const char* detail) {
+		char documents[MAX_PATH] = {};
+		if (!SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents)))
+			return;
+		char path[MAX_PATH] = {};
+		_snprintf_s(path, _TRUNCATE, "%s\\sourceTAS\\calibration\\crash.log", documents);
+		HANDLE f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+			OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (f == INVALID_HANDLE_VALUE)
+			return;
+		char line[512];
+		_snprintf_s(line, _TRUNCATE, "PROCESS DEATH (%s) %s thread=%lu stage=%s\r\n",
+			what, detail ? detail : "", GetCurrentThreadId(),
+			g_stage_name && g_stage_name[0] ? g_stage_name : "(none)");
+		DWORD written = 0;
+		WriteFile(f, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
+		CloseHandle(f);
+	}
+
+	// The three silent killers, none of which raise a catchable exception:
+	//   * a failing *_s CRT call (buffer too small, bad arg) -> the invalid
+	//     parameter handler, which by DEFAULT kills the process outright;
+	//   * an uncaught throw or a destroyed joinable std::thread -> terminate;
+	//   * a pure-virtual call.
+	// Each now names itself in crash.log before the process goes down.
+	void __cdecl InvalidParamHandler(const wchar_t*, const wchar_t*,
+	                                 const wchar_t*, unsigned int, uintptr_t) {
+		WriteCrashLine("CRT invalid parameter (a *_s call failed)", "");
+	}
+	void __cdecl TerminateHandler() {
+		WriteCrashLine("std::terminate (uncaught throw / joinable thread destroyed)", "");
+	}
+	void __cdecl PureCallHandler() {
+		WriteCrashLine("pure virtual call", "");
+	}
+	void SignalHandler(int sig) {
+		char d[32];
+		_snprintf_s(d, _TRUNCATE, "signal=%d", sig);
+		WriteCrashLine("abort/signal", d);
+	}
+
 	// Vectored FIRST-CHANCE logging for the killer classes the unhandled
 	// filter never sees (heap corruption and friends terminate the process
 	// without normal dispatch; the game's own crash handler can eat the
@@ -2098,6 +2870,29 @@ namespace {
 		if (!ep || !ep->ExceptionRecord)
 			return EXCEPTION_CONTINUE_SEARCH;
 		const DWORD code = ep->ExceptionRecord->ExceptionCode;
+		// C++ throws (0xE06D7363) are rare in this codebase; an UNCAUGHT one is
+		// std::terminate = instant silent death (the 13:2x hard close). Log the
+		// first few first-chance so the thrower names itself even if something
+		// downstream eats the process.
+		if (code == 0xE06D7363) {
+			static volatile LONG cxx_logged = 0;
+			if (InterlockedIncrement(&cxx_logged) <= 3)
+				CrashWriter(ep);
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+		// A fault on a SEARCH WORKER is always our bug (the prediction path
+		// that legitimately faults-and-recovers only runs on the game thread),
+		// so log ANY exception there - that is the class of the tab-out crash
+		// that left crash.log empty, since a plain AV in a worker is skipped
+		// by the fatal-class filter below.
+		if (tl_is_worker) {
+			static volatile LONG worker_logged = 0;
+			if (InterlockedIncrement(&worker_logged) <= 6) {
+				g_stage_name = "search-worker";
+				CrashWriter(ep);
+			}
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
 		const bool fatal_class =
 			code == 0xC0000374          // STATUS_HEAP_CORRUPTION
 			|| code == 0xC00000FD      // STATUS_STACK_OVERFLOW
@@ -2114,6 +2909,35 @@ namespace {
 	void VerifyPump();        // fwd
 	void CorrectPump();       // fwd
 
+	// PRESTRAFE auto-crouch: after a sim, set each auto prestrafe segment's
+	// crouch tick to its LAST AIRBORNE tick (the max-speed moment, right
+	// before the floor). Crouching lifts the hull ~18u and delays landing,
+	// so the tick can shift a little on the re-sim - settle a few rounds then
+	// stop (the manual offset covers any last-tick preference).
+	void UpdatePrestrafeCrouch() {
+		static int settle = 0;
+		if (!g_valid || g_states.empty()) { settle = 0; return; }
+		bool changed = false;
+		for (size_t k = 0; k < g_segs.size(); ++k) {
+			EditSegment& s = g_segs[k];
+			if (s.raw || s.is_solver || !s.gen.prestrafe || !s.gen.ps_crouch_auto)
+				continue;
+			const int start = (k < g_starts.size()) ? g_starts[k] : 0;
+			int end = start + s.Ticks();
+			if (end > static_cast<int>(g_states.size())) end = static_cast<int>(g_states.size());
+			int last_air = -1;
+			for (int i = start; i < end; ++i)
+				if (!(g_states[i].flags & FL_ONGROUND))
+					last_air = i - start;
+			if (last_air >= 0 && last_air != s.gen.ps_crouch_cached) {
+				s.gen.ps_crouch_cached = last_air;
+				changed = true;
+			}
+		}
+		if (changed && settle < 6) { settle++; MarkDirty(); }
+		else settle = 0;
+	}
+
 	// Everything that runs when a sim lands, with a stage marker so a fault
 	// names its location. Lives behind SimLandedGuarded's POD-only SEH frame.
 	void SimLandedStage() {
@@ -2129,6 +2953,8 @@ namespace {
 		RecomputeDiag();
 		g_stage_name = "AnalyzeRealPass";
 		AnalyzeRealPass();
+		g_stage_name = "PrestrafeCrouch";
+		UpdatePrestrafeCrouch();
 		if (g_batch.active) {
 			g_stage_name = "BatchPump";
 			BatchPump();
@@ -2172,63 +2998,131 @@ namespace {
 		}
 	}
 
+	// Worker main: chew a contiguous range of the flat job list. Fresh warm
+	// seeds per worker (deterministic for a fixed partition); the per-job
+	// blend/seed state travels through thread_locals into SolveCandidate.
+	void SearchWorkerMain(int lo, int hi) {
+		tl_is_worker = true;
+		tl_have_warm[0] = tl_have_warm[1] = false;
+		tl_have_warm_ob[0] = tl_have_warm_ob[1] = false;
+		tl_best_speed = 0.f;
+		tl_blend = 0;
+		// C++ catch as well as the per-job SEH guard: an uncaught throw in a
+		// worker is std::terminate = INSTANT process death with nothing in
+		// crash.log (the 13:2x hard close left zero forensics).
+		try {
+			for (int i = lo; i < hi; ++i) {
+				if (g_sabort.load(std::memory_order_relaxed)
+					|| g_sfault.load(std::memory_order_relaxed))
+					break;
+				const SearchJob& j = g_jobs[i];
+				tl_refine_active = j.refine;
+				tl_refine_blend = j.refine_blend;
+				memcpy(tl_refine_seed, j.seed, sizeof(tl_refine_seed));
+				if (!SolveCandidateGuarded(j.N, j.frac, j.side0, j.splits, j.nsplits)) {
+					Sfmt(g_fault_detail, "N=%d side=%+d splits=%d,%d,%d%s blend=%d",
+						j.N, j.side0, j.splits[0], j.splits[1], j.splits[2],
+						j.refine ? " refine" : "", j.refine_blend);
+					g_sfault.store(true);
+					break;
+				}
+				g_jobs_done_a.fetch_add(1, std::memory_order_relaxed);
+			}
+		} catch (...) {
+			Sfmt(g_fault_detail, "C++ exception in a search worker");
+			g_sfault.store(true);
+		}
+		tl_refine_active = false;
+		tl_blend = 0;
+		g_workers_left.fetch_sub(1);
+	}
+
+	void LaunchSearchWorkers() {
+		const int hw = static_cast<int>(std::thread::hardware_concurrency());
+		int nw = (hw > 4) ? hw - 2 : 2;
+		if (nw > 12) nw = 12;
+		const int njobs = static_cast<int>(g_jobs.size());
+		if (njobs < 1)
+			return;
+		if (nw > njobs) nw = njobs;
+		g_workers_left.store(nw);
+		for (int w = 0; w < nw; ++w) {
+			const int lo = njobs * w / nw;
+			const int hi = njobs * (w + 1) / nw;
+			g_search_workers.emplace_back(SearchWorkerMain, lo, hi);
+		}
+	}
+
+	void StopSearchWorkers() {
+		g_sabort.store(true);
+		for (std::thread& t : g_search_workers)
+			if (t.joinable())
+				t.join();
+		g_search_workers.clear();
+		g_sabort.store(false);
+	}
+
 	void StepSearch() {
 		if (!g_search.active || g_search.done)
 			return;
-		const ULONGLONG t0 = GetTickCount64();
-		while (GetTickCount64() - t0 < 5) {
-			if (g_search.cand_idx >= static_cast<int>(g_search.cands.size())) {
-				if (!FinishSearchGuarded()) {
-					char note[256];
-					Sfmt(note, "EDITOR FAULT 0x%08X in stage FinishSearch "
-						"(results=%d) - search aborted; report this line.",
-						g_guard_code, static_cast<int>(g_search.results.size()));
-					g_status = note;
-					const std::string dir = CalibDir();
-					if (!dir.empty()) {
-						std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
-						if (f)
-							f << note << "\n";
-					}
-					g_search.done = true;
-					g_search.active = false;
-					g_verify.active = false;
+		g_search.jobs_done = g_jobs_done_a.load(std::memory_order_relaxed);
+		if (g_workers_left.load() > 0)
+			return;                     // the pool is still chewing this wave
+		StopSearchWorkers();            // join the finished threads
+		if (g_sfault.load()) {
+			char note[512];
+			Sfmt(note, "SOLVER FAULT 0x%08X in a worker at %s - search aborted "
+				"safely; this candidate is the repro.",
+				g_guard_code, g_fault_detail[0] ? g_fault_detail : "(unknown job)");
+			g_status = note;
+			const std::string dir = CalibDir();
+			if (!dir.empty()) {
+				std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
+				if (f)
+					f << note << "\n";
+			}
+			g_search.done = true;
+			g_search.active = false;
+			return;
+		}
+		// Second wave (opt): blend refinement of the fastest lines, same pool.
+		if (g_search.opt && g_search.refine_idx < 0) {
+			BuildRefineTasks();
+			g_search.refine_idx = 0;
+			if (!g_search.refine.empty()) {
+				g_jobs.clear();
+				for (const SearchCtx::RefineTask& t : g_search.refine) {
+					SearchJob j{};
+					j.N = t.ticks;
+					j.frac = t.frac;
+					j.side0 = t.side0;
+					j.nsplits = t.nsplits;
+					memcpy(j.splits, t.splits, sizeof(j.splits));
+					j.refine = true;
+					j.refine_blend = t.blend;
+					memcpy(j.seed, t.rates, sizeof(j.seed));
+					g_jobs.push_back(j);
 				}
+				g_search.jobs_total += static_cast<int>(g_jobs.size());
+				LaunchSearchWorkers();
 				return;
 			}
-			const SearchCtx::PassCand pc = g_search.cands[g_search.cand_idx];
-			if (g_search.splits_built_for != pc.N)
-				BuildSplits(pc.N);
-			if (g_search.split_idx >= static_cast<int>(g_search.splits_list.size())) {
-				g_search.split_idx = 0;
-				g_search.side_idx++;
-				if (g_search.side_idx > 1) {
-					g_search.side_idx = 0;
-					g_search.cand_idx++;
-					g_search.splits_built_for = -1;
-				}
-				continue;
+		}
+		if (!FinishSearchGuarded()) {
+			char note[256];
+			Sfmt(note, "EDITOR FAULT 0x%08X in stage FinishSearch "
+				"(results=%d) - search aborted; report this line.",
+				g_guard_code, static_cast<int>(g_search.results.size()));
+			g_status = note;
+			const std::string dir = CalibDir();
+			if (!dir.empty()) {
+				std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
+				if (f)
+					f << note << "\n";
 			}
-			const std::array<int, 3>& sp = g_search.splits_list[g_search.split_idx++];
-			g_search.jobs_done++;
-			if (!SolveCandidateGuarded(pc.N, pc.frac, g_search.side_idx == 0 ? 1 : -1,
-			                           sp.data(), g_search.strafes - 1)) {
-				char note[512];
-				Sfmt(note, "SOLVER FAULT 0x%08X at N=%d side=%+d splits=%d,%d,%d "
-					"strafes=%d%s - search aborted safely; this candidate is the repro.",
-					g_guard_code, pc.N, g_search.side_idx == 0 ? 1 : -1,
-					sp[0], sp[1], sp[2], g_search.strafes, g_search.opt ? " OPT" : "");
-				g_status = note;
-				const std::string dir = CalibDir();
-				if (!dir.empty()) {
-					std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
-					if (f)
-						f << note << "\n";
-				}
-				g_search.done = true;
-				g_search.active = false;
-				return;
-			}
+			g_search.done = true;
+			g_search.active = false;
+			g_verify.active = false;
 		}
 	}
 
@@ -2494,6 +3388,9 @@ namespace {
 		if (g_realpass.crossed)
 			g_realpass.drift = (Dot3(sd.model_pass) > 1e-6f)
 				? sqrtf(Dot3(g_realpass.pass - sd.model_pass)) : -1.f;
+		if (g_realpass.crossed && g_realpass.tick >= 1
+			&& g_realpass.tick <= count)
+			g_realpass.pass_speed = Speed2D(g_states[g_realpass.tick - 1].velocity);
 		// start_jump sanity: the segment's first tick must carry the jump
 		// velocity, else the sim start wasn't actually on the ground.
 		if (sd.start_jump && b < count)
@@ -2544,6 +3441,24 @@ namespace {
 		float yaw;
 		if (!SolverStartState(seg_index, pos, vel, yaw))
 			return false;
+		// The corrector BORROWS the live search context for its EvalPass
+		// calls. Whatever it flips must come back on EVERY exit, or a
+		// finished search's results get re-labeled (the 23:14 "const" log
+		// was the opt run wearing the corrected segment's mode). RAII so
+		// no return path can forget.
+		struct CtxRestore {
+			bool opt; bool ride; int blend; float tyaw; Vector tpos;
+			CtxRestore()
+				: opt(g_search.opt), ride(g_search.ride), blend(g_search.blend),
+				  tyaw(g_search.target_yaw), tpos(g_search.target_pos) {}
+			~CtxRestore() {
+				g_search.opt = opt;
+				g_search.ride = ride;
+				g_search.blend = blend;
+				g_search.target_yaw = tyaw;
+				g_search.target_pos = tpos;
+			}
+		} ctx_restore;
 		float interval = Prediction::LastDiag().interval_per_tick;
 		if (interval <= 0.f) interval = 0.015f;
 		g_search.dt = interval;
@@ -2577,6 +3492,7 @@ namespace {
 		float lo[4], hi[4];
 		RateBounds(sd.side0, K, lo, hi);
 		g_search.opt = sd.opt;   // EvalPass steps by bias when set
+		g_search.ride = sd.applied_ride;   // ...and holds one side for a ride
 		g_search.blend = (sd.blend < 1) ? 1 : (sd.blend > 24 ? 24 : sd.blend);
 		g_search.target_yaw = target->yaw;
 		if (sd.opt)
@@ -2708,6 +3624,8 @@ namespace {
 		const bool keep = g_correct.auto_run;
 		g_correct = CorrectCtx();
 		g_correct.auto_run = keep;
+		if (g_search.active)
+			return;   // the corrector borrows g_search - never while jobs run
 		if (seg_index < 0 || seg_index >= static_cast<int>(g_segs.size()))
 			return;
 		if (!g_segs[seg_index].is_solver || !g_segs[seg_index].solver.solved)
@@ -2824,7 +3742,7 @@ namespace {
 	// quantum) fall through to the next tier. real_on_target always partitions
 	// first - a deflected line never outranks a clean one.
 	int g_sort_key[3] = { 1, 0, 2 };   // default: Speed > Real miss > Yaw err
-	const char* const kSortKeyItems = "Real miss (u)\0Speed (u/s)\0Yaw err (deg)\0Board loss (u/s)\0Model miss (u)\0";
+	const char* const kSortKeyItems = "Real miss (u)\0Speed (u/s)\0Yaw err (deg)\0Board loss (u/s)\0Model miss (u)\0Pass vz (flick lift)\0";
 
 	float SortValue(const RouteSolution& s, int key) {
 		switch (key) {
@@ -2832,15 +3750,17 @@ namespace {
 		case 2: return (s.real_yaw_err >= 0.f) ? s.real_yaw_err : 999.f;
 		case 3: return s.bump_loss;                           // cleaner board first
 		case 4: return s.pass_err;
+		case 5: return -s.arr_vz;                             // more lift first
 		default: return (s.real_err >= 0.f) ? s.real_err : 1e9f;
 		}
 	}
 	int SortBucket(const RouteSolution& s, int key) {
-		if (key < 0 || key > 4)
+		if (key < 0 || key > 5)
 			key = 0;
 		float v = SortValue(s, key);
 		float q = 0.05f;                    // miss/yaw quantum
 		if (key == 1 || key == 3) q = 0.5f; // speed/loss quantum (u/s)
+		if (key == 5) q = 5.f;              // lift quantum (u/s vertical)
 		// CLAMP before the int cast. Unmeasured entries carry 1e9 sentinels;
 		// 1e9/0.05 = 2e10 does NOT fit an int and float->int overflow is UB -
 		// the optimizer may evaluate it DIFFERENTLY at different inline sites,
@@ -2893,9 +3813,49 @@ namespace {
 			return;
 		}
 
-		// All measured. NOTHING gets dropped - the calibration loop needs the
-		// data. Sort by the user's tiered criteria; always write the
-		// diagnostics log (model vs real for every candidate).
+		// All measured. THE REAL ENGINE IS THE ARBITER: real replay is
+		// deterministic per anchor, so a line whose real measurement
+		// CONTRADICTS its model claim (the apex-band lines: model 0.1-0.4u,
+		// real ~2u landed on the top) can never be flown as promised - it
+		// moves OUT of the presented list into the log's DROPPED section.
+		// A line that agrees stays even if it grazes the apex: agreement IS
+		// the reproducibility proof (two geometric fragility gates were
+		// tried first and both measurably culled the proven 355.2 winner).
+		{
+			// A line PROMISES (pass point, pass tick, view yaw) - but the
+			// analyzer measures the closest approach over the WHOLE sim
+			// including the +16-tick overrun, so a healthy board-and-slide
+			// line legitimately gets its perigee a few ticks PAST N (and in
+			// const mode the overrun yaw keeps turning). The 13:10 build
+			// compared the promise against that later measurement and dropped
+			// ALL 600 lines, perfect-agreement ones included. Corrected:
+			//  - miss:   model vs real perigee distance (always comparable)
+			//  - tick:   only a perigee far outside the overrun window is a
+			//            contradiction (the apex walkers: tick 112 vs N 62)
+			//  - yaw:    only checkable when the perigee IS at the promised
+			//            tick - past-N perigees carry post-plan yaw.
+			// real_tick is GLOBAL; r.ticks is segment-local.
+			const int segbase = (g_verify.seg >= 0
+				&& g_verify.seg < static_cast<int>(g_starts.size()))
+				? g_starts[g_verify.seg] : 0;
+			std::vector<RouteSolution> kept, dropped;
+			kept.reserve(g_search.results.size());
+			for (const RouteSolution& r : g_search.results) {
+				const int dtick = (r.real_tick >= 0)
+					? (r.real_tick - segbase) - r.ticks : 0;
+				// A RIDE promises no view yaw (the arrival angle is its
+				// output), so only the point and the timing are checkable.
+				const bool disagree = (r.real_err > 1e8f)
+					|| fabsf(r.real_err - r.pass_err) > 0.75f
+					|| dtick > kSolverOverrun + 2 || dtick < -3
+					|| (!r.ride && dtick >= -2 && dtick <= 2
+						&& r.real_yaw_err >= 0.f && r.real_yaw_err > 1.f);
+				(disagree ? dropped : kept).push_back(r);
+			}
+			g_search.diverged = static_cast<int>(dropped.size());
+			g_search.results.swap(kept);
+			g_search.dropped_diverged.swap(dropped);
+		}
 		SortVerifiedResults();
 		int hit_tol = 0, hit_near = 0;
 		for (const RouteSolution& r : g_search.results) {
@@ -2912,9 +3872,11 @@ namespace {
 			if (g_correct.auto_run)
 				StartCorrect(g_verify.seg);
 			char msg[512];   // holds a full MAX_PATH log path safely
-			Sfmt(msg, "Solver: %d candidates real-measured: %d within tol, %d within 3u. "
+			Sfmt(msg, "Solver: %d candidates real-measured: %d within tol, %d within 3u, "
+				"%d dropped (real run contradicted the model - see log). "
 				"Fastest within-tolerance line first, rest by real miss. Log: %s",
 				static_cast<int>(g_search.results.size()), hit_tol, hit_near,
+				g_search.diverged,
 				g_searchlog_path[0] ? g_searchlog_path : "(write failed)");
 			g_status = msg;
 		}
@@ -2959,16 +3921,20 @@ namespace {
 
 		// Data lines: EXACT dynamic formatting (FmtStr) - never truncated,
 		// never a fixed buffer to outgrow (one of those killed the process).
+		Vector hull_mn, hull_mx;
+		const bool hull_measured = Prediction::PlayerHull(&hull_mn, &hull_mx);
 		out << FmtStr("== sourceTAS search diagnostics ==\n"
-			"map=%s  strafes=%d%s  tol=%.2f  jobs=%d/%d  results=%d (of %d distinct post-dedupe)\n"
+			"map=%s  %s%s  tol=%.2f  jobs=%d/%d  results=%d (of %d distinct post-dedupe)\n"
 			"start: pos=(%.2f %.2f %.2f) vel=(%.2f %.2f %.2f) yaw=%.3f jump=%d\n"
 			"target: pos=(%.2f %.2f %.2f) yaw=%.3f\n"
 			"model in-use: dt=%.6f cap=%.1f amt=%.1f grav=%.1f jump_vz_input=%.2f\n"
 			"colliders=%d corridor brushes (target brush first)\n"
-			"outcomes: infeasible=%d  no_eval=%d  floor(>collect)=%d  tick_align=%d  violent_board=%d  deflect_target_brush=%d  deflect_world=%d  cap_dropped=%d\n"
-			"closest positional miss: %.3f u   max_bump=%.1f\n\n",
-			BspWorld::GetStatus().map, g_search.strafes,
-			g_search.opt ? " OPTIMAL-BIAS (rates are biases; last one solved for EXACT yaw)" : "",
+			"outcomes: infeasible=%d  no_eval=%d  floor(>collect)=%d  tick_align=%d  violent_board=%d  real_diverged=%d  deflect_target_brush=%d  deflect_world=%d  cap_dropped=%d  corridor_dropped=%d\n"
+			"closest positional miss: %.3f u   max_bump=%.1f   entity_brushes_skipped=%d   hull=(%.0f %.0f %.0f)-(%.0f %.0f %.0f)%s\n\n",
+			BspWorld::GetStatus().map,
+			g_search.ride ? FmtStr("RIDE 1 strafe (%d steering phases)", g_search.strafes).c_str()
+			              : FmtStr("strafes=%d", g_search.strafes).c_str(),
+			g_search.ride ? "" : (g_search.opt ? " OPTIMAL-BIAS (rates are per-phase biases; the blend tail lands the yaw exactly)" : ""),
 			g_search.tol,
 			g_search.jobs_done, g_search.jobs_total,
 			static_cast<int>(g_search.results.size()),
@@ -2983,10 +3949,13 @@ namespace {
 			g_search.gravity, g_jump_vz,
 			static_cast<int>(g_search.bcolliders.size()),
 			g_search.cnt_infeasible, g_search.cnt_no_contact, g_search.cnt_floor,
-			g_search.reject_retime, g_search.cnt_bump, g_search.cnt_edge, g_search.early_hits,
-			g_search.cap_dropped,
+			g_search.reject_retime, g_search.cnt_bump, g_search.diverged,
+			g_search.cnt_edge, g_search.early_hits, g_search.cap_dropped,
+			g_search.corridor_dropped,
 			g_search.reject_best < 1e8f ? g_search.reject_best : -1.f,
-			g_search.max_bump);
+			g_search.max_bump, g_search.entity_brushes,
+			hull_mn.X, hull_mn.Y, hull_mn.Z, hull_mx.X, hull_mx.Y, hull_mx.Z,
+			hull_measured ? " (engine)" : " (DEFAULT - never read from a live player)");
 
 		const size_t ndump = (std::min)(g_search.bcolliders.size(), static_cast<size_t>(12));
 		if (ndump < g_search.bcolliders.size()) {
@@ -3035,12 +4004,31 @@ namespace {
 		for (int i = 0; i < nsol; ++i) {
 			const RouteSolution& s = g_search.results[i];
 			out << FmtStr("[sol %02d]%s err=%.4f real=%.3f N=%d frac=%.3f side0=%+d splits=%d,%d,%d "
-				"wrap=%+d speed=%.1f bump=%dt/%.2f rates=%+.4f,%+.4f,%+.4f,%+.4f pass=(%.2f %.2f %.2f)\n",
+				"wrap=%+d speed=%.1f arr=%.1f vz=%+.0f bump=%dt/%.2f %s rates=%+.4f,%+.4f,%+.4f,%+.4f pass=(%.2f %.2f %.2f)\n",
 				i, s.exact ? " EXACT" : " near ", s.pass_err, s.real_err, s.ticks, s.frac, s.side0,
 				s.splits[0], s.splits[1], s.splits[2], s.wrap, s.speed,
+				s.arr_heading, s.arr_vz,
 				s.bump_ticks, s.bump_loss,
+				s.opt ? FmtStr("OPT/bl%d", s.blend).c_str() : "CONST",
 				s.rates[0], s.rates[1], s.rates[2], s.rates[3],
 				s.pass_pos.X, s.pass_pos.Y, s.pass_pos.Z);
+		}
+		if (!g_search.dropped_diverged.empty()) {
+			out << FmtStr("\nDROPPED - real run contradicted the model (%d lines; the "
+				"real engine is the arbiter, these cannot be flown as promised):\n",
+				static_cast<int>(g_search.dropped_diverged.size()));
+			const int ndrop = (std::min)(
+				static_cast<int>(g_search.dropped_diverged.size()), 40);
+			for (int i = 0; i < ndrop; ++i) {
+				const RouteSolution& s = g_search.dropped_diverged[i];
+				out << FmtStr("[drp %02d] err=%.4f real=%.3f N=%d real_tick=%d real_yaw=%.2f "
+					"side0=%+d splits=%d,%d,%d speed=%.1f %s rates=%+.4f,%+.4f,%+.4f,%+.4f\n",
+					i, s.pass_err, s.real_err < 1e8f ? s.real_err : -1.f,
+					s.ticks, s.real_tick, s.real_yaw_err, s.side0,
+					s.splits[0], s.splits[1], s.splits[2], s.speed,
+					s.opt ? FmtStr("OPT/bl%d", s.blend).c_str() : "CONST",
+					s.rates[0], s.rates[1], s.rates[2], s.rates[3]);
+			}
 		}
 		strncpy_s(g_searchlog_path, full.c_str(), _TRUNCATE);
 	}
@@ -3136,10 +4124,11 @@ namespace {
 		ApplySolution(g_batch.seg, sol);
 		g_batch.round = 0;
 		g_batch.virt = g_search.target_pos;
-		BatchAppendf("[sol %03d] N=%d frac=%.3f side0=%+d nsplits=%d splits=%d,%d,%d wrap=%+d speed=%.1f\n"
+		BatchAppendf("[sol %03d] N=%d frac=%.3f side0=%+d nsplits=%d splits=%d,%d,%d wrap=%+d speed=%.1f %s\n"
 		             "  model: rates=%+.4f,%+.4f,%+.4f,%+.4f  pass_err=%.4f  pass=(%.2f %.2f %.2f)\n",
 			g_batch.idx, sol.ticks, sol.frac, sol.side0, sol.nsplits,
 			sol.splits[0], sol.splits[1], sol.splits[2], sol.wrap, sol.speed,
+			sol.opt ? FmtStr("OPT/bl%d", sol.blend).c_str() : "CONST",
 			sol.rates[0], sol.rates[1], sol.rates[2], sol.rates[3],
 			sol.pass_err, sol.pass_pos.X, sol.pass_pos.Y, sol.pass_pos.Z);
 	}
@@ -3193,7 +4182,7 @@ namespace {
 		             "model: dt=%.6f cap=%.1f accel_amt=%.1f (sv_airaccelerate=%.0f wishspeed=%.0f) gravity=%.0f\n\n",
 			BspWorld::GetStatus().map, static_cast<int>(g_search.results.size()),
 			g_search.strafes,
-			g_search.opt ? " OPTIMAL-BIAS (rates are biases; last one solved for EXACT yaw)" : "",
+			g_search.opt ? " OPTIMAL-BIAS (rates are per-phase biases; the blend tail lands the yaw exactly)" : "",
 			g_sol_pos_tol,
 			g_search.start_pos.X, g_search.start_pos.Y, g_search.start_pos.Z,
 			g_search.start_vel.X, g_search.start_vel.Y, g_search.start_vel.Z,
@@ -3340,6 +4329,52 @@ namespace {
 			prefix.jump_ovr.end());
 	}
 
+	// TOTAL-HEADING bias (kind 0) spreads its turn over the segment's tick
+	// count, so cutting a segment shorter re-spreads the SAME total over
+	// fewer ticks and the path behind the playhead visibly jumps. Re-fit both
+	// halves from the SIMULATED headings instead: the prefix keeps exactly
+	// the heading change it actually achieved by the split tick, and the
+	// suffix carries the remainder to the original target heading. Nothing to
+	// do for kinds 1/2 - their per-tick expression never sees the length.
+	void RefitTotalHeadingSplit(GenParams& prefix, GenParams* suffix,
+	                            int seg_index, int local) {
+		if (prefix.yaw_mode != 2 || prefix.bias_kind != 0)
+			return;
+		if (fabsf(prefix.yaw_rate) < 1e-4f)
+			return;                       // pure optimal: no turn to divide
+		const int start = (seg_index < static_cast<int>(g_starts.size()))
+			? g_starts[seg_index] : -1;
+		if (start < 0 || local < 1)
+			return;
+		const int split = start + local;   // global tick index of the cut
+		float h_entry = 0.f, h_split = 0.f;
+		if (g_valid && !g_dirty && split >= 1
+			&& split <= static_cast<int>(g_states.size())) {
+			// Heading ENTERING the segment (state before its first tick) and
+			// heading at the cut - the real numbers the provider fed on.
+			const Vector& v_entry = (start >= 1)
+				? g_states[start - 1].velocity : g_anchor.velocity;
+			h_entry = HeadingDeg(v_entry, 0.f);
+			h_split = HeadingDeg(g_states[split - 1].velocity, h_entry);
+		} else {
+			// No usable sim: fall back to the proportional split, which is
+			// what the even spread intends anyway.
+			const int total = (prefix.ticks > 0) ? prefix.ticks : 1;
+			const float frac = Clampf(static_cast<float>(local)
+				/ static_cast<float>(total), 0.f, 1.f);
+			const float done = prefix.yaw_rate * frac;
+			if (suffix) suffix->yaw_rate = prefix.yaw_rate - done;
+			prefix.yaw_rate = done;
+			return;
+		}
+		const float dir = static_cast<float>(prefix.opt_dir);
+		const float done = dir * NormYaw(h_split - h_entry);         // achieved
+		const float target_h = h_entry + dir * prefix.yaw_rate;      // original goal
+		if (suffix)
+			suffix->yaw_rate = dir * NormYaw(target_h - h_split);    // remainder
+		prefix.yaw_rate = done;
+	}
+
 	void SplitAtCursor() {
 		const int k = SegmentAtTick(g_cursor);
 		if (k < 0 || k >= static_cast<int>(g_segs.size()))
@@ -3361,6 +4396,7 @@ namespace {
 			suffix.frames.assign(prefix.frames.begin() + local, prefix.frames.end());
 			prefix.frames.resize(local);
 		} else {
+			RefitTotalHeadingSplit(prefix.gen, &suffix.gen, k, local);
 			prefix.gen.ticks = local;
 			suffix.gen.ticks = total - local;
 			suffix.gen.yaw_abs = false;   // suffix continues from the split state
@@ -3389,6 +4425,10 @@ namespace {
 		SplitOverrides(seg, suffix, local);
 
 		seg.gen = before;
+		// The prefix must keep the path it already drew - re-fit its
+		// total-heading target to what the sim actually reached by `local`
+		// (the suffix carries the user's NEW values, so it isn't re-fitted).
+		RefitTotalHeadingSplit(seg.gen, nullptr, k, local);
 		seg.gen.ticks = local;
 
 		g_segs.insert(g_segs.begin() + k + 1, std::move(suffix));
@@ -3448,7 +4488,12 @@ namespace {
 	// v10: optimal strafe - gen gains opt_dir, solver block gains the opt flag
 	// (rates[] hold per-phase biases when set). v11: gen gains opt_period
 	// (straight-sync mode); solver gains blend + tyaw (the opt yaw-blend tail).
-	constexpr uint32_t kProjVersion = 11;
+	// v12: gen gains bias_kind (total-heading vs per-tick optimal bias).
+	// v13: solver gains want_opt/want_blend (the NEXT search's mode) so the
+	//      checkbox no longer reinterprets the APPLIED schedule's numbers.
+	// v14: solver gains ride (on-face ride solve).
+	// v15: gen gains smooth_ticks + the prestrafe recipe fields.
+	constexpr uint32_t kProjVersion = 15;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -3506,6 +4551,20 @@ namespace {
 				W(out, duck); W(out, g.jump_mode); W(out, noW);
 				W(out, g.opt_dir);     // v10
 				W(out, g.opt_period);  // v11
+				W(out, g.bias_kind);   // v12
+				W(out, g.smooth_ticks);      // v15
+				const uint8_t pstrafe = g.prestrafe ? 1 : 0;
+				const uint8_t pcend = g.ps_crouch_end ? 1 : 0;
+				const uint8_t pcauto = g.ps_crouch_auto ? 1 : 0;
+				W(out, pstrafe);             // v15
+				W(out, g.ps_ground_ticks);
+				W(out, g.ps_ground_turn);
+				W(out, g.ps_ground_dir);
+				W(out, g.ps_air_dir);
+				W(out, g.ps_air_bias);
+				W(out, pcend);
+				W(out, pcauto);
+				W(out, g.ps_crouch_lead);
 
 				const uint32_t novr = static_cast<uint32_t>(s.jump_ovr.size());
 				W(out, novr);
@@ -3531,6 +4590,13 @@ namespace {
 					W(out, sopt);        // v10
 					W(out, sd.blend);    // v11
 					W(out, sd.tyaw);     // v11
+					const uint8_t wopt = sd.want_opt ? 1 : 0;
+					W(out, wopt);          // v13
+					W(out, sd.want_blend); // v13
+					const uint8_t ride = sd.ride ? 1 : 0;
+					const uint8_t aride = sd.applied_ride ? 1 : 0;
+					W(out, ride);          // v14
+					W(out, aride);         // v14
 				}
 			}
 		}
@@ -3550,11 +4616,27 @@ namespace {
 		g.opt_dir = (g.opt_dir < 0) ? -1 : 1;
 		if (g.opt_period < 1) g.opt_period = 1;
 		if (g.opt_period > 128) g.opt_period = 128;
+		if (g.bias_kind < 0 || g.bias_kind > 2) g.bias_kind = 2;
 		if (!(g.yaw_rate == g.yaw_rate)) g.yaw_rate = 0.f;       // NaN guard
 		if (g.yaw_rate < -180.f) g.yaw_rate = -180.f;
 		if (g.yaw_rate > 180.f) g.yaw_rate = 180.f;
 		if (g.pitch_mode < 0 || g.pitch_mode > 1) g.pitch_mode = PM_Const;
 		if (g.jump_mode < 0 || g.jump_mode > 2) g.jump_mode = JM_None;
+		if (g.smooth_ticks < 0) g.smooth_ticks = 0;
+		if (g.smooth_ticks > 64) g.smooth_ticks = 64;
+		if (g.ps_ground_ticks < 0) g.ps_ground_ticks = 0;
+		if (g.ps_ground_ticks > 2000) g.ps_ground_ticks = 2000;
+		if (!(g.ps_ground_turn == g.ps_ground_turn)) g.ps_ground_turn = 0.f;   // NaN
+		if (g.ps_ground_turn < -720.f) g.ps_ground_turn = -720.f;
+		if (g.ps_ground_turn > 720.f) g.ps_ground_turn = 720.f;
+		g.ps_ground_dir = (g.ps_ground_dir < 0) ? -1 : 1;
+		g.ps_air_dir = (g.ps_air_dir < 0) ? -1 : 1;
+		if (!(g.ps_air_bias == g.ps_air_bias)) g.ps_air_bias = 0.f;
+		if (g.ps_air_bias < -20.f) g.ps_air_bias = -20.f;
+		if (g.ps_air_bias > 20.f) g.ps_air_bias = 20.f;
+		if (g.ps_crouch_lead < 0) g.ps_crouch_lead = 0;
+		if (g.ps_crouch_lead > 200) g.ps_crouch_lead = 200;
+		g.ps_crouch_cached = -1;   // runtime-only
 	}
 	void SanitizeSolver(SolverData& sd) {
 		if (sd.strafes < 1) sd.strafes = 1;
@@ -3576,6 +4658,8 @@ namespace {
 		if (!(sd.pass_frac == sd.pass_frac)) sd.pass_frac = 1.f;
 		if (sd.blend < 1) sd.blend = 1;
 		if (sd.blend > 24) sd.blend = 24;
+		if (sd.want_blend < 1) sd.want_blend = 1;
+		if (sd.want_blend > 24) sd.want_blend = 24;
 		if (!(sd.tyaw == sd.tyaw)) sd.tyaw = 0.f;                // NaN guard
 		if (sd.ticks == 0)
 			sd.solved = false;                                   // an empty schedule isn't a solution
@@ -3649,6 +4733,25 @@ namespace {
 			return false;
 		if (version >= 11 && !R(in, g.opt_period))
 			return false;
+		if (version >= 12) {
+			if (!R(in, g.bias_kind))
+				return false;
+		} else {
+			g.bias_kind = 1;   // pre-v12 optimal segments were per-tick bias
+		}
+		if (version >= 15) {
+			uint8_t pstrafe = 0, pcend = 1, pcauto = 1;
+			if (!R(in, g.smooth_ticks) || !R(in, pstrafe)
+				|| !R(in, g.ps_ground_ticks) || !R(in, g.ps_ground_turn)
+				|| !R(in, g.ps_ground_dir) || !R(in, g.ps_air_dir)
+				|| !R(in, g.ps_air_bias) || !R(in, pcend) || !R(in, pcauto)
+				|| !R(in, g.ps_crouch_lead))
+				return false;
+			g.prestrafe = pstrafe != 0;
+			g.ps_crouch_end = pcend != 0;
+			g.ps_crouch_auto = pcauto != 0;
+			g.ps_crouch_cached = -1;   // runtime-only; recomputed on the next sim
+		}
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
 		g.auto_key = autok != 0;
 		g.no_w_air = noW != 0;
@@ -3758,6 +4861,23 @@ namespace {
 						if (version >= 11) {
 							if (!R(in, sd.blend) || !R(in, sd.tyaw))
 								return false;
+						}
+						if (version >= 13) {
+							uint8_t wopt = 0;
+							if (!R(in, wopt) || !R(in, sd.want_blend))
+								return false;
+							sd.want_opt = wopt != 0;
+						} else {
+							// One flag served both roles before v13.
+							sd.want_opt = sd.opt;
+							sd.want_blend = sd.blend;
+						}
+						if (version >= 14) {
+							uint8_t ride = 0, aride = 0;
+							if (!R(in, ride) || !R(in, aride))
+								return false;
+							sd.ride = ride != 0;
+							sd.applied_ride = aride != 0;
 						}
 					} else {
 						// v7/v8 first-generation solver blocks: consume their extra
@@ -4025,20 +5145,37 @@ namespace {
 				int target = s.solver.target;
 				if (ImGui::Combo("Board target", &target, TargetItemGetter, nullptr, BspWorld::TargetCount()))
 					s.solver.target = target;
-				int strafes = s.solver.strafes;
-				if (ImGui::InputInt("Strafes (alternating)", &strafes))
-					s.solver.strafes = strafes < 1 ? 1 : strafes > 4 ? 4 : strafes;
-				ImGui::PopItemWidth();
-				bool sopt = s.solver.opt;
-				if (ImGui::Checkbox("Optimal-rate strafes (max gain; search per-phase biases)", &sopt)) {
-					s.solver.opt = sopt;
-					MarkDirty();   // an applied schedule's numbers change meaning - re-search
+				// A ride is ALWAYS one continuous strafe - the strafe count is
+				// a flight-only control, so hide it in ride mode (it used to
+				// read "2", which looked like two strafes to the user; a ride
+				// is one press with a single mid-course steering adjustment).
+				if (!s.solver.ride) {
+					int strafes = s.solver.strafes;
+					if (ImGui::InputInt("Strafes (alternating)", &strafes))
+						s.solver.strafes = strafes < 1 ? 1 : strafes > 4 ? 4 : strafes;
 				}
-				if (s.solver.opt) {
+				ImGui::PopItemWidth();
+				ImGui::Checkbox("RIDE solve: this segment STARTS ON the target's ramp",
+					&s.solver.ride);
+				if (s.solver.ride)
+					ImGui::TextDisabled("ONE continuous strafe pressing into the ramp, riding the "
+						"face to the exact point. The search allows a single mid-course steering "
+						"change, and the solution family spreads the approach yaw and pass vz - "
+						"the flick lead-in. Strafe-count/optimal settings are ignored; "
+						"'Jump at start' should be OFF.");
+				// The checkbox picks what the NEXT search runs. The applied
+				// schedule keeps ITS OWN mode (stamped at Apply) - toggling
+				// here must never reinterpret applied numbers.
+				ImGui::Checkbox("Optimal-rate strafes (max gain; search per-phase biases)",
+					&s.solver.want_opt);
+				if (s.solver.solved && s.solver.opt != s.solver.want_opt)
+					ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f),
+						"applied line stays %s until the next search+apply",
+						s.solver.opt ? "OPTIMAL" : "CONSTANT-RATE");
+				if (s.solver.want_opt) {
 					ImGui::TextDisabled("each phase rides the max-gain line +- a solved bias; the view "
 						"BLENDS onto the target yaw over the last ticks (exact at the pass)");
-					if (IntRow("Yaw blend window (ticks before the pass)", &s.solver.blend, 1, 24))
-						MarkDirty();   // the applied schedule's replay changes with it
+					IntRow("Yaw blend window (ticks before the pass)", &s.solver.want_blend, 1, 24);
 				}
 				else if (s.solver.strafes < 3)
 					ImGui::TextDisabled("(with the yaw constraint, %d strafe(s) only hit the point when "
@@ -4089,12 +5226,16 @@ namespace {
 
 				if (ImGui::Button("Search solutions"))
 					StartSearch(g_sel);
+				ImGui::SameLine();
+				ImGui::Checkbox("Deep search", &g_deep_search);
+				ImGui::SameLine();
+				ImGui::TextDisabled("(tournament-full config: ~+4 u/s mean, up to +35; slower)");
 
 				if (g_search.seg == g_sel) {
 					if (g_search.active) {
 						ImGui::Text("searching...  %d%%   (%d passes collected - near-identical lines merge at the end)",
 							g_search.jobs_total ? (g_search.jobs_done * 100 / g_search.jobs_total) : 0,
-							static_cast<int>(g_search.results.size()));
+							g_results_n.load(std::memory_order_relaxed));
 					} else if (g_search.done && g_search.results.empty()) {
 						ImGui::PushTextWrapPos(0.f);
 						if (g_search.cands.empty()) {
@@ -4190,6 +5331,9 @@ namespace {
 						ImGui::Text("model: pass %.3f u from target inside tick %d (frac %.2f)   speed %.0f u/s   wrap %+d%s",
 							sol.pass_err, sol.ticks, sol.frac, sol.speed, sol.wrap,
 							sol.exact ? "" : "   [near]");
+						ImGui::TextDisabled("   arrival: velocity heading %.1f deg, vz %+.0f u/s "
+							"(the flick lead-in - sort tier 'Pass vz' spreads these)",
+							sol.arr_heading, sol.arr_vz);
 						if (sol.bump_ticks > 0)
 							ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.f, 1.f),
 								"   kisses the ramp %d tick(s) before the pass, clipping %.2f u/s, then slides in",
@@ -4282,6 +5426,18 @@ namespace {
 									? ImVec4(0.4f, 1.f, 0.55f, 1.f) : ImVec4(1.f, 0.7f, 0.3f, 1.f),
 								"REAL line: passes %.2f u from the target (tick %d)   yaw at pass %+.3f deg off%s",
 								g_realpass.err, g_realpass.tick, g_realpass.yaw_err, drift);
+							// The one number every speed comparison should use:
+							// the REAL 2D speed at the pass tick. A solution
+							// row's `speed` is the model's claim for exactly
+							// this state; the in-world END tag draws the plan's
+							// final tick, which for a solver segment IS the
+							// pass tick. Post-pass slide/overrun speeds are a
+							// different (later) quantity - never compare those
+							// against a row's pass speed.
+							if (g_realpass.pass_speed >= 0.f)
+								ImGui::TextDisabled("   real pass-tick speed: %.1f u/s "
+									"(= what a row's `speed` claims and the end tag draws)",
+									g_realpass.pass_speed);
 							if (g_realpass.bump_tick >= 0)
 								ImGui::TextDisabled("   kissed the ramp %d tick(s) before the pass (clip ~%.1f u/s), slid in",
 									g_realpass.bump_ticks, g_realpass.bump_loss);
@@ -4341,6 +5497,58 @@ namespace {
 				GenParams g = before;
 				bool ch = false;
 
+				ch |= ImGui::Checkbox("Prestrafe recipe (startzone exit: WA -> jump -> air-strafe -> crouch)",
+					&g.prestrafe);
+				if (g.prestrafe) {
+					ImGui::TextDisabled("WA to max ground speed, jump + release the ground key, a "
+						"steerable optimal air-strafe, then crouch at the last airborne tick to skim "
+						"the floor. The engine sims the real physics, including the mid-air duck "
+						"hull-lift; only the inputs are emitted.");
+					ch |= IntRow("Total ticks", &g.ticks, 2, 2000);
+					ch |= IntRow("Ground accel ticks (W + strafe key)", &g.ps_ground_ticks, 0, g.ticks);
+					ch |= FloatRow("Ground view turn (total deg over the ground phase)",
+						&g.ps_ground_turn, -360.f, 360.f, "%+.1f deg", 1.f, 10.f, 1);
+					ImGui::PushItemWidth(150);
+					int gdir = (g.ps_ground_dir > 0) ? 0 : 1;
+					if (ImGui::Combo("Ground strafe", &gdir, "A (left)\0D (right)\0")) {
+						g.ps_ground_dir = (gdir == 0) ? 1 : -1; ch = true;
+					}
+					ImGui::SameLine();
+					int adir = (g.ps_air_dir > 0) ? 0 : 1;
+					if (ImGui::Combo("Air strafe", &adir, "A (left)\0D (right)\0")) {
+						g.ps_air_dir = (adir == 0) ? 1 : -1; ch = true;
+					}
+					ImGui::PopItemWidth();
+					ch |= FloatRow("Air steer bias (+ right / - left, 0 = pure optimal)",
+						&g.ps_air_bias, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+					ch |= ImGui::Checkbox("Crouch at the end (dodge the floor)", &g.ps_crouch_end);
+					if (g.ps_crouch_end) {
+						ch |= ImGui::Checkbox("Auto-time to the last airborne tick", &g.ps_crouch_auto);
+						if (!g.ps_crouch_auto)
+							ch |= IntRow("Crouch this many ticks before the end", &g.ps_crouch_lead, 0, 60);
+						else if (g.ps_crouch_cached >= 0)
+							ImGui::TextDisabled("auto crouch tick: local %d (last airborne of the last sim)",
+								g.ps_crouch_cached);
+					}
+					// Live 3D-speed readout at the crouch tick (the "475 total"):
+					// the real simmed velocity magnitude including the downward vz.
+					if (g_valid && !g_dirty && g_sel < static_cast<int>(g_starts.size())) {
+						const int start = g_starts[g_sel];
+						int ct = g.ps_crouch_auto ? g.ps_crouch_cached
+							: (g.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead));
+						if (ct < 0) ct = g.ticks - 1;
+						const int gi = start + ct;
+						if (gi >= 0 && gi < static_cast<int>(g_states.size())) {
+							const Vector& v = g_states[gi].velocity;
+							const float sp3 = sqrtf(v.X * v.X + v.Y * v.Y + v.Z * v.Z);
+							const float sp2 = sqrtf(v.X * v.X + v.Y * v.Y);
+							ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.f, 1.f),
+								"at the crouch tick: 3D speed %.1f u/s  (horizontal %.1f, vz %+.0f)",
+								sp3, sp2, v.Z);
+						}
+					}
+				} else {
+
 				ImGui::Text("Held keys:");
 				ImGui::SameLine(); ch |= ImGui::Checkbox("W", &g.key_w);
 				ImGui::SameLine(); ch |= ImGui::Checkbox("A", &g.key_a);
@@ -4375,10 +5583,30 @@ namespace {
 						g.opt_dir = (dir_idx == 0) ? 1 : -1;
 						ch = true;
 					}
+					ImGui::SameLine();
+					if (ImGui::Combo("Bias kind", &g.bias_kind,
+						"Total heading (deg over segment)\0Per-tick (legacy)\0Steering L/R\0"))
+						ch = true;
 					ImGui::PopItemWidth();
-					ch |= FloatRow("Turn bias   (+ tighter / - wider, 0 = pure optimal)",
-						&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-					ImGui::TextDisabled("bias trades speed (quadratic loss) for curvature (linear) - stays optimal for that curvature");
+					if (g.bias_kind == 0) {
+						ch |= FloatRow("Total heading change   (into the strafe side, 0 = pure optimal)",
+							&g.yaw_rate, -180.f, 180.f, "%+.2f deg", 0.05f, 5.f);
+						ImGui::TextDisabled("the turn is re-spread over the remaining ticks every tick - "
+							"max speed for that total curvature");
+						ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f),
+							"length-DEPENDENT: changing this segment's tick count re-spreads the turn "
+							"and moves the path (splits re-fit both halves to the simulated headings).");
+					} else if (g.bias_kind == 2) {
+						ch |= FloatRow("Steering bias   (+ right / - left, 0 = pure optimal)",
+							&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+						ImGui::TextDisabled("a fixed angle off the max-gain line in screen sign, identical every "
+							"tick - the tick COUNT never enters the geometry, so splitting or resizing "
+							"leaves the existing path exactly where it was");
+					} else {
+						ch |= FloatRow("Turn bias   (+ tighter / - wider, 0 = pure optimal)",
+							&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+						ImGui::TextDisabled("bias trades speed (quadratic loss) for curvature (linear) - stays optimal for that curvature");
+					}
 				} else if (g.yaw_mode == 3) {
 					int dir_idx = (g.opt_dir > 0) ? 0 : 1;
 					ImGui::PushItemWidth(140);
@@ -4416,10 +5644,26 @@ namespace {
 				ch |= ImGui::Combo("Jump", &g.jump_mode, "None (walk)\0Hold\0Auto-bhop on landing\0");
 				ImGui::PopItemWidth();
 
+				// Boundary smoothing: blend the view across THIS segment's start
+				// so the per-tick rate is continuous with the previous segment
+				// (half the window in each). In optimal modes the wish stays
+				// max-gain, so it costs almost no speed.
+				ch |= IntRow("Boundary smoothing (blend view over N ticks across this segment's start)",
+					&g.smooth_ticks, 0, 32);
+				if (g.smooth_ticks > 0)
+					ImGui::TextDisabled("straddles the boundary: %d ticks eased in the previous "
+						"segment's tail, %d in this segment's head", g.smooth_ticks / 2,
+						g.smooth_ticks - g.smooth_ticks / 2);
+
+				}   // end else (normal generated-segment controls)
+
 				if (ch) {
+					// A prestrafe recipe is a whole-segment behavior - never
+					// auto-split it; other gen edits keep the forward-only split.
 					const int start = (g_sel < static_cast<int>(g_starts.size())) ? g_starts[g_sel] : 0;
 					const int local = g_cursor - start;
-					if (local > 0 && local < g_segs[g_sel].Ticks() && SegmentAtTick(g_cursor) == g_sel)
+					if (!g.prestrafe && !before.prestrafe
+						&& local > 0 && local < g_segs[g_sel].Ticks() && SegmentAtTick(g_cursor) == g_sel)
 						AutoSplitApply(g_sel, local, before, g);
 					else
 						g_segs[g_sel].gen = g;
@@ -4712,6 +5956,14 @@ namespace {
 		ImGui::Checkbox("Feet marker", &WorldDraw::draw_player_marker);
 		IntRow("Hull alpha (0 = wireframe)", &WorldDraw::player_box_alpha, 0, 160);
 		FloatRow("Overlay lifetime (x frame)", &WorldDraw::overlay_life_scale, 0.5f, 4.f, "%.2f", 0.05f, 0.2f);
+		ImGui::Checkbox("Speed tag: segment end", &WorldDraw::tag_seg_end_speed);
+		ImGui::SameLine();
+		ImGui::Checkbox("Speed tag: playhead", &WorldDraw::tag_cursor_speed);
+		ImGui::Checkbox("Tag: % of optimal gain (segment end, green)",
+			&WorldDraw::tag_seg_end_eff);
+		ImGui::Checkbox("Tag: time at segment end", &WorldDraw::tag_seg_end_time);
+		ImGui::SameLine();
+		ImGui::Checkbox("Tag: time at playhead", &WorldDraw::tag_cursor_time);
 		ImGui::Checkbox("Pause in-world draws while the solver works (crash isolation)",
 			&WorldDraw::pause_draw_busy);
 		if (WorldDraw::pause_draw_busy)
@@ -4830,6 +6082,11 @@ void TasEditor::Update() {
 		s_crash_filter = true;
 		g_prev_uef = SetUnhandledExceptionFilter(&CrashWriter);
 		g_veh_handle = AddVectoredExceptionHandler(1, &FirstChanceWriter);
+		// Deaths that raise no exception at all (these left crash.log empty).
+		_set_invalid_parameter_handler(&InvalidParamHandler);
+		std::set_terminate(&TerminateHandler);
+		_set_purecall_handler(&PureCallHandler);
+		signal(SIGABRT, &SignalHandler);
 	}
 
 	// Pump the solver search (time-sliced; no-op when idle).
@@ -5060,6 +6317,26 @@ bool TasEditor::GetDrawData(DrawData& out) {
 	out.have_pass = g_realpass.computed && g_realpass.crossed;
 	out.pass_tick = g_realpass.tick;
 	out.pass_point = g_realpass.pass;
+	// Tag data: % of optimal gain over the selected segment + elapsed time.
+	float interval = Prediction::LastDiag().interval_per_tick;
+	if (interval <= 0.f) interval = 0.015f;
+	out.cursor_time = (g_cursor >= 0) ? static_cast<float>(g_cursor) * interval : -1.f;
+	out.seg_time = (out.sel_end > 0) ? static_cast<float>(out.sel_end) * interval : -1.f;
+	out.seg_gain_pct = -1.f;
+	if (out.sel_start >= 0 && out.sel_end > out.sel_start && !g_gain.empty()) {
+		float gs = 0.f, ms = 0.f;
+		const int hi = (std::min)(out.sel_end,
+			(std::min)(static_cast<int>(g_gain.size()),
+			           static_cast<int>(g_maxgain.size())));
+		for (int i = out.sel_start; i < hi; ++i) {
+			if (g_maxgain[i] <= 0.f)
+				continue;   // unscoreable ticks (sliding/grounded) stay out
+			gs += g_gain[i];
+			ms += g_maxgain[i];
+		}
+		if (ms > 1.f)
+			out.seg_gain_pct = 100.f * gs / ms;
+	}
 	return true;
 }
 

@@ -54,7 +54,11 @@ namespace {
 	void*     g_helper = nullptr;
 	void**    g_gpg_holder = nullptr;
 	uintptr_t g_client_base = 0;
-	std::unique_ptr<VMTHook> g_pred_hook;
+	// Raw + leaked: the unique_ptr's atexit destructor restored the vtable
+	// into game memory that was already gone at process exit (crash.log
+	// 2026-07-24, ??__Fg_pred_hook thunk). Nothing ever unloads this DLL
+	// mid-game, so the hook lives exactly as long as the process.
+	VMTHook* g_pred_hook = nullptr;
 	using FinishMoveFn = void(*)(void*, void*, void*, void*);
 	FinishMoveFn g_orig_finishmove = nullptr;
 
@@ -101,6 +105,7 @@ namespace {
 	struct PlayerOffsets {
 		int origin = 0, velocity = 0, flags = 0, eye_angles = 0;
 		int stamina = 0, ducked = 0, ducking = 0, ducktime = 0;
+		int mins = 0, maxs = 0;
 		bool init = false;
 	} g_off;
 
@@ -114,8 +119,17 @@ namespace {
 		g_off.ducked     = NetVars::Offset("DT_CSPlayer", "m_bDucked");
 		g_off.ducking    = NetVars::Offset("DT_CSPlayer", "m_bDucking");
 		g_off.ducktime   = NetVars::Offset("DT_CSPlayer", "m_flDucktime");
+		// CCollisionProperty's bounds - the hull the engine actually sweeps.
+		g_off.mins       = NetVars::Offset("DT_CSPlayer", "m_vecMins");
+		g_off.maxs       = NetVars::Offset("DT_CSPlayer", "m_vecMaxs");
 		g_off.init = true;
 	}
+
+	// Last STANDING hull read off the live player. Cached because the live
+	// value shrinks while ducked and the model simulates standing.
+	Vector g_hull_min(-16.f, -16.f, 0.f);
+	Vector g_hull_max(16.f, 16.f, 72.f);
+	bool   g_hull_measured = false;
 
 	// Minimal fault net: record where a fault landed, then recover.
 	long FaultFilter(EXCEPTION_POINTERS* ep) {
@@ -392,7 +406,7 @@ void Prediction::Install() {
 
 	Diag d;
 	if (g_pred) {
-		g_pred_hook = std::make_unique<VMTHook>(g_pred);
+		g_pred_hook = new VMTHook(g_pred);
 		g_orig_finishmove = g_pred_hook->GetOriginalFunction<FinishMoveFn>(kFinishMoveIdx);
 		g_pred_hook->HookFunction(reinterpret_cast<void*>(&OnFinishMove), kFinishMoveIdx);
 		d.installed = (g_orig_finishmove != nullptr);
@@ -440,6 +454,12 @@ void Prediction::TakeSim(Frame* frames, SimState* states) {
 	s_sim_ready = 0;
 }
 
+bool Prediction::PlayerHull(Vector* mins, Vector* maxs) {
+	if (mins) *mins = g_hull_min;
+	if (maxs) *maxs = g_hull_max;
+	return g_hull_measured;
+}
+
 bool Prediction::CaptureStartState(StartState& out) {
 	if (!engine || !entitylist || !engine->IsInGame())
 		return false;
@@ -455,6 +475,21 @@ bool Prediction::CaptureStartState(StartState& out) {
 	out.velocity = NetVars::Get<Vector>(player, g_off.velocity);
 	const int flags = g_off.flags ? NetVars::Get<int>(player, g_off.flags) : 0;
 	out.ducked  = (flags & FL_DUCKING) != 0;
+
+	// The collision hull, straight from the engine's CCollisionProperty -
+	// the box it sweeps. Only sampled while STANDING (it shrinks when ducked)
+	// because the model simulates a standing player; the values feed the
+	// collider expansion instead of hardcoded 16/16/72.
+	if (!out.ducked && g_off.mins && g_off.maxs) {
+		const Vector mn = NetVars::Get<Vector>(player, g_off.mins);
+		const Vector mx = NetVars::Get<Vector>(player, g_off.maxs);
+		if (mx.X > mn.X && mx.Y > mn.Y && mx.Z > mn.Z
+			&& mx.Z - mn.Z > 8.f && mx.Z - mn.Z < 200.f) {
+			g_hull_min = mn;
+			g_hull_max = mx;
+			g_hull_measured = true;
+		}
+	}
 
 	// View angles come from the engine: the m_angEyeAngles netvars exist for
 	// drawing REMOTE players and are unreliable for the local one (pitch reads

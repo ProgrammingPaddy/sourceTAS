@@ -87,7 +87,7 @@ DWORD WINAPI basehook_init(LPVOID dll_instance) {
 
 	// Hook 'CreateMove' from ClientModeShared (vtable index 21).
 	if (clientmode) {
-		clientmode_hook = std::make_unique<VMTHook>(clientmode);
+		clientmode_hook = new VMTHook(clientmode);
 		clientmode_hook->HookFunction(&Hooks::CreateMove, 21);
 	}
 

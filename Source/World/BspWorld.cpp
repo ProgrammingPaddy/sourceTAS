@@ -38,6 +38,15 @@ namespace {
 	constexpr int kLumpPlanes = 1;
 	constexpr int kLumpBrushes = 18;
 	constexpr int kLumpBrushSides = 19;
+	// Model 0 is worldspawn: ONLY its brushes are the collision world. Brushes
+	// reachable from models 1..N belong to brush ENTITIES (triggers, illusion-
+	// aries, doors) - a trigger_teleport slab is CONTENTS_SOLID on disk but
+	// blocks nothing, and surf maps carpet the void with them. Walking the
+	// world tree is how the engine itself decides, so it is exact.
+	constexpr int kLumpNodes = 5;
+	constexpr int kLumpLeafs = 10;
+	constexpr int kLumpModels = 14;
+	constexpr int kLumpLeafBrushes = 17;
 
 #pragma pack(push, 1)
 	struct dlump_t { int32_t fileofs; int32_t filelen; int32_t version; char fourCC[4]; };
@@ -45,6 +54,25 @@ namespace {
 	struct dplane_t { float nx, ny, nz; float dist; int32_t type; };
 	struct dbrush_t { int32_t firstside; int32_t numsides; int32_t contents; };
 	struct dbrushside_t { uint16_t planenum; int16_t texinfo; int16_t dispinfo; int16_t bevel; };
+	struct dnode_t {
+		int32_t planenum; int32_t children[2];
+		int16_t mins[3]; int16_t maxs[3];
+		uint16_t firstface; uint16_t numfaces; int16_t area; int16_t padding;
+	};
+	struct dmodel_t {
+		float mins[3], maxs[3], origin[3];
+		int32_t headnode; int32_t firstface; int32_t numfaces;
+	};
+	// dleaf_t grew/shrank across versions: lump version 0 carries a 24-byte
+	// ambient cube, version 1+ does not. Only the leafbrush span is needed and
+	// it sits at the same offset in both, so the stride is all that differs.
+	struct dleaf_common_t {
+		int32_t contents; int16_t cluster; int16_t area_flags;
+		int16_t mins[3]; int16_t maxs[3];
+		uint16_t firstleafface; uint16_t numleaffaces;
+		uint16_t firstleafbrush; uint16_t numleafbrushes;
+		int16_t leafWaterDataID;
+	};
 #pragma pack(pop)
 
 	// --- parsed world ---------------------------------------------------------
@@ -59,6 +87,12 @@ namespace {
 		std::vector<int> clip_planes;   // ALL non-bevel side planes - the ray
 		                                // clip needs the complete convex set even
 		                                // when a sliver face's winding was dropped
+		std::vector<int> bevel_planes;  // the compiler's EXACT bevel sides (axial
+		                                // + edge bevels) - what CM_ClipBoxToBrush
+		                                // actually clips swept boxes against; the
+		                                // apex top-vs-face branch flips on their
+		                                // exact dists, so approximations are out
+		bool world = true;              // reachable from model 0 = real collision
 		std::vector<std::pair<Vector, Vector>> edges;   // deduped outline
 	};
 
@@ -214,6 +248,73 @@ namespace {
 		for (int i = 0; i < nplanes; ++i)
 			g_planes.push_back({ Vector(planes[i].nx, planes[i].ny, planes[i].nz), planes[i].dist });
 
+		// Which brushes belong to the WORLD model? Walk model 0's BSP tree,
+		// collect its leaves, and union their leafbrush spans - the same set
+		// the engine traces movement against. Everything else is entity
+		// geometry (trigger_teleport slabs, func_illusionary, ...) which is
+		// CONTENTS_SOLID on disk but blocks nothing, and surf maps carpet the
+		// void below the ramps with exactly those.
+		std::vector<bool> world_brush(nbrushes, false);
+		bool world_set_ok = false;
+		if (lump_ok(kLumpModels, sizeof(dmodel_t)) && lump_ok(kLumpNodes, sizeof(dnode_t))
+			&& lump_ok(kLumpLeafBrushes, sizeof(uint16_t))
+			&& header->lumps[kLumpModels].filelen >= static_cast<int>(sizeof(dmodel_t))) {
+			const dmodel_t* models = reinterpret_cast<const dmodel_t*>(
+				data.data() + header->lumps[kLumpModels].fileofs);
+			const dnode_t* nodes = reinterpret_cast<const dnode_t*>(
+				data.data() + header->lumps[kLumpNodes].fileofs);
+			const int nnodes = header->lumps[kLumpNodes].filelen / sizeof(dnode_t);
+			const uint16_t* leafbrushes = reinterpret_cast<const uint16_t*>(
+				data.data() + header->lumps[kLumpLeafBrushes].fileofs);
+			const int nleafbrushes = header->lumps[kLumpLeafBrushes].filelen / sizeof(uint16_t);
+			const dlump_t& ll = header->lumps[kLumpLeafs];
+			// dleaf_t ON-DISK stride is the DOCUMENTED size, NOT sizeof() of a
+			// packed struct: version 1 = 32 bytes (a 2-byte tail pad the packed
+			// struct drops), version 0 = 56 (that pad + a 24-byte ambient cube).
+			// The packed-30 sizeof was off by 2, so the walk read every leaf
+			// misaligned, marked brushes at random, and the trigger floors
+			// stayed in the corridor - which is exactly what broke ride solves
+			// (search_162612: 752 present, entity_brushes_skipped=0). Verify the
+			// chosen stride divides the lump; if not, try the other before
+			// giving up (which safely falls back to all-world).
+			size_t leaf_stride = (ll.version == 0) ? 56 : 32;
+			if (ll.filelen > 0 && (static_cast<size_t>(ll.filelen) % leaf_stride) != 0) {
+				const size_t alt = (leaf_stride == 32) ? 56 : 32;
+				if ((static_cast<size_t>(ll.filelen) % alt) == 0)
+					leaf_stride = alt;
+			}
+			const int nleafs = (ll.filelen > 0
+				&& (static_cast<size_t>(ll.filelen) % leaf_stride) == 0)
+				? static_cast<int>(static_cast<size_t>(ll.filelen) / leaf_stride) : 0;
+			if (nleafs > 0 && ll.fileofs >= 0
+				&& static_cast<size_t>(ll.fileofs) + static_cast<size_t>(ll.filelen) <= data.size()) {
+				std::vector<int> stack;
+				stack.push_back(models[0].headnode);
+				int guard = 0;
+				while (!stack.empty() && guard++ < 4000000) {
+					const int idx = stack.back();
+					stack.pop_back();
+					if (idx >= 0) {
+						if (idx >= nnodes) continue;
+						stack.push_back(nodes[idx].children[0]);
+						stack.push_back(nodes[idx].children[1]);
+						continue;
+					}
+					const int leaf = -1 - idx;
+					if (leaf < 0 || leaf >= nleafs) continue;
+					const dleaf_common_t* lf = reinterpret_cast<const dleaf_common_t*>(
+						data.data() + ll.fileofs + static_cast<size_t>(leaf) * leaf_stride);
+					for (int b = 0; b < lf->numleafbrushes; ++b) {
+						const int lbi = lf->firstleafbrush + b;
+						if (lbi < 0 || lbi >= nleafbrushes) continue;
+						const int br = leafbrushes[lbi];
+						if (br >= 0 && br < nbrushes) world_brush[br] = true;
+					}
+				}
+				world_set_ok = true;
+			}
+		}
+
 		g_tags.clear();
 		g_targets.clear();
 
@@ -230,11 +331,25 @@ namespace {
 
 			brush_planes.clear();
 			brush_plane_ids.clear();
+			std::vector<int> bevel_ids;
 			for (int s = db.firstside; s < db.firstside + db.numsides; ++s) {
-				if (sides[s].bevel)
-					continue;   // collision-expansion planes, not geometry
 				if (sides[s].planenum >= nplanes)
 					continue;
+				if (sides[s].bevel) {
+					// AXIAL bevel sides only: the compiler's exact box-extent
+					// planes (the apex top-vs-face branch flips on their exact
+					// dists - winding AABBs were 0.004 off). The NON-axial edge
+					// bevels are NOT what the measured engine clips against:
+					// loading them deflected the real log's proven 355.2 winner
+					// off a slanted apex "lid" (nz .94) mid-flight to 401 - while
+					// months of dpos=0.000 traces validate regular sides + axial
+					// extents as the engine's effective swept-hull behavior.
+					const dplane_t& bp = planes[sides[s].planenum];
+					const float ax = fabsf(bp.nx), ay = fabsf(bp.ny), az = fabsf(bp.nz);
+					if (ax > 0.999f || ay > 0.999f || az > 0.999f)
+						bevel_ids.push_back(sides[s].planenum);
+					continue;
+				}
 				const dplane_t& p = planes[sides[s].planenum];
 				brush_planes.push_back({ Vector(p.nx, p.ny, p.nz), p.dist });
 				brush_plane_ids.push_back(sides[s].planenum);
@@ -245,6 +360,10 @@ namespace {
 			Brush brush;
 			brush.contents = db.contents;
 			brush.clip_planes = brush_plane_ids;
+			brush.bevel_planes = bevel_ids;
+			// If the world set couldn't be built, assume every brush is world
+			// (the old behavior) rather than silently emptying the map.
+			brush.world = world_set_ok ? world_brush[bi] : true;
 			brush.mins = Vector(1e9f, 1e9f, 1e9f);
 			brush.maxs = Vector(-1e9f, -1e9f, -1e9f);
 
@@ -771,6 +890,11 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 		if (brush.contents & BSP_CONTENTS_PLAYERCLIP) { r = 255; g = 80;  b = 80; }
 		else if (brush.contents & BSP_CONTENTS_LADDER) { r = 80;  g = 255; b = 120; }
 		else if (brush.contents & BSP_CONTENTS_GRATE) { r = 90;  g = 200; b = 255; }
+		// BRUSH ENTITIES (triggers, illusionaries) are CONTENTS_SOLID on disk
+		// but the engine never traces movement against them, so they are NOT
+		// in the physics model either. Draw them dim purple so a wireframe
+		// slab can never be mistaken for a floor that the solver ignores.
+		if (!brush.world) { r = 90; g = 60; b = 110; }
 
 		for (const std::pair<Vector, Vector>& edge : brush.edges) {
 			debugoverlay->AddLineOverlay(edge.first, edge.second, r, g, b, false, duration);
@@ -966,6 +1090,32 @@ bool BspWorld::GetBrushClipPlane(int brush, int index, int* plane_id, Vector* n,
 	if (pid < 0 || pid >= static_cast<int>(g_planes.size()))
 		return false;
 	if (plane_id) *plane_id = pid;
+	if (n) *n = g_planes[pid].first;
+	if (d) *d = g_planes[pid].second;
+	return true;
+}
+
+bool BspWorld::IsWorldBrush(int brush) {
+	if (brush < 0 || brush >= static_cast<int>(g_brushes.size()))
+		return false;
+	return g_brushes[brush].world;
+}
+
+int BspWorld::BrushBevelPlaneCount(int brush) {
+	if (brush < 0 || brush >= static_cast<int>(g_brushes.size()))
+		return 0;
+	return static_cast<int>(g_brushes[brush].bevel_planes.size());
+}
+
+bool BspWorld::GetBrushBevelPlane(int brush, int index, Vector* n, float* d) {
+	if (brush < 0 || brush >= static_cast<int>(g_brushes.size()))
+		return false;
+	const Brush& b = g_brushes[brush];
+	if (index < 0 || index >= static_cast<int>(b.bevel_planes.size()))
+		return false;
+	const int pid = b.bevel_planes[index];
+	if (pid < 0 || pid >= static_cast<int>(g_planes.size()))
+		return false;
 	if (n) *n = g_planes[pid].first;
 	if (d) *d = g_planes[pid].second;
 	return true;

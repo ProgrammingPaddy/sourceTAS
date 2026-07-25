@@ -69,4 +69,9 @@ namespace Prediction {
 		unsigned long long last_fault_access = 0;
 	};
 	Diag LastDiag();
+
+	// The player's STANDING collision hull as the engine reports it
+	// (CCollisionProperty m_vecMins/m_vecMaxs, sampled while not ducked).
+	// False = never measured yet and the standard box is being returned.
+	bool PlayerHull(Vector* mins, Vector* maxs);
 }

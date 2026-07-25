@@ -51,6 +51,11 @@ namespace TasEditor {
 		bool have_pass;
 		int pass_tick;                        // global tick whose edge gets spliced
 		Vector pass_point;
+		// Tag data: cumulative strafe quality + elapsed time (seconds).
+		float seg_gain_pct;                   // % of optimal gain over the selected
+		                                      // segment (-1 = not scoreable)
+		float seg_time;                       // time at the segment's end (-1 = n/a)
+		float cursor_time;                    // time at the playhead (-1 = n/a)
 	};
 	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
 	// True while the solver machinery hitches frames (search/verify/batch/

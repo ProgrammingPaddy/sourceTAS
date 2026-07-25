@@ -2,7 +2,10 @@
 #include "../shareddefs.h"
 #include "../World/Prediction.h"
 
-std::unique_ptr<VMTHook> clientmode_hook;
+// Raw + leaked on purpose: the atexit destructor restored the vtable into
+// game memory that is already gone at process exit (crash.log 2026-07-25,
+// ??__Fclientmode_hook). The hook lives exactly as long as the process.
+VMTHook* clientmode_hook = nullptr;
 
 
 bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* command) {

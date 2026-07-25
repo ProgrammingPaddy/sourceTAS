@@ -3,7 +3,7 @@
 #include <cstrike/sdk.h>
 #include <vmthook/vmthook.h>
 
-extern std::unique_ptr<VMTHook> clientmode_hook;
+extern VMTHook* clientmode_hook;   // leaked: no atexit vtable-restore into a dead game
 
 namespace Hooks {
 	// ClientModeShared::CreateMove (vtable index 21). On x64 there is a single
