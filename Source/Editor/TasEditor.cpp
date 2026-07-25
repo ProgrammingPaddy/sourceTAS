@@ -1,4 +1,4 @@
-﻿#include "TasEditor.h"
+#include "TasEditor.h"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +15,7 @@
 
 #include <cstrike/sdk.h>
 #include <imgui/imgui.h>
+#include <imgui/imgui_internal.h>   // window-stack rebalance after a UI fault
 
 #include "../World/WorldDraw.h"
 #include "../World/BspWorld.h"
@@ -84,8 +85,11 @@ namespace {
 		bool  key_w = true, key_a = false, key_s = false, key_d = false;
 		bool  auto_key = true;        // A/D from view turn direction (airborne)
 		bool  no_w_air = true;        // release W while airborne (surf default)
-		int   yaw_mode = 1;           // 1 = turn at yaw_rate (0 = legacy hold; identical to rate 0)
-		float yaw_rate = 0.f;         // deg/tick, screen sign (+ = right)
+		int   yaw_mode = 1;           // 1 = turn at yaw_rate (0 = legacy hold);
+		                              // 2 = OPTIMAL strafe: yaw follows the velocity
+		                              //     heading (max gain), yaw_rate = bias deg
+		float yaw_rate = 0.f;         // deg/tick, screen sign (+ = right); mode 2: bias
+		int   opt_dir = 1;            // mode 2 direction: +1 = left (A), -1 = right (D)
 		bool  yaw_abs = false;
 		float yaw_start = 0.f;
 		int   pitch_mode = PM_Const;
@@ -102,6 +106,8 @@ namespace {
 		int   target = -1;            // board target index (used as a pure point + yaw)
 		int   strafes = 3;            // alternating strafe count (1..4); 3 = exactly determined
 		bool  start_jump = false;     // jump on the segment's first tick (grounded start)
+		bool  opt = false;            // optimal-rate mode: rates[] hold per-phase BIASES
+		                              // off the max-gain line; final yaw lands free
 		bool  solved = false;
 		int   ticks = 0;              // N: the pass is inside the segment's final tick
 		int   side0 = 1;
@@ -131,8 +137,40 @@ namespace {
 		}
 	};
 
+	// Truncating formatter for UI-facing strings (labels, status rows) where
+	// clipping is cosmetic: sprintf_s KILLS THE PROCESS when the output
+	// outgrows the buffer (two shipped crashes came from exactly that).
+	template <size_t N>
+	void Sfmt(char (&dst)[N], const char* fmt, ...) {
+		va_list args;
+		va_start(args, fmt);
+		_vsnprintf_s(dst, N, _TRUNCATE, fmt, args);
+		va_end(args);
+	}
+
+	// EXACT formatter for DATA (logs, calibration lines): measures the needed
+	// size and allocates it - no fixed buffer, no overflow, no truncation.
+	std::string FmtV(const char* fmt, va_list args) {
+		va_list copy;
+		va_copy(copy, args);
+		const int need = _vscprintf(fmt, copy);
+		va_end(copy);
+		if (need <= 0)
+			return std::string();
+		std::string s(static_cast<size_t>(need), '\0');
+		vsnprintf(&s[0], s.size() + 1, fmt, args);
+		return s;
+	}
+	std::string FmtStr(const char* fmt, ...) {
+		va_list args;
+		va_start(args, fmt);
+		std::string s = FmtV(fmt, args);
+		va_end(args);
+		return s;
+	}
+
 	// ---------------------------------------------------------------- state --
-	bool g_open = false;
+	bool g_open = true;   // the editor IS the tool - visible whenever the menu is
 	int  g_tab = 0;                   // 0 Run, 1 Targets, 2 Rendering, 3 Project
 	char g_name[64] = "untitled";
 	StartState g_anchor;
@@ -146,7 +184,7 @@ namespace {
 	int g_pick_mode = 0;              // 0 = tag surf face, 1 = place board target
 	int g_sel_target = -1;
 	int g_sel_tag = -1;
-	char g_pick_info[256] = {};       // last pick forensics (ray + hit)
+	char g_pick_info[512] = {};       // last pick forensics (ray + hit)
 
 	// Air-strafe model (match server settings; defaults = stock CS:S) + the
 	// visual "optimal enough" threshold used by the line coloring.
@@ -253,6 +291,20 @@ namespace {
 		return -1;
 	}
 
+	// Horizontal velocity heading in degrees (Source yaw space); falls back
+	// when there is no meaningful horizontal speed. The OPTIMAL strafe yaw is
+	// heading + side*bias: wish exactly perpendicular to the velocity is the
+	// max per-tick gain whenever accel*wishspeed*dt >= the 30 air cap
+	// (gain^2 = cap^2 - (v*sin bias)^2 - bias trades speed QUADRATICALLY for
+	// LINEARLY more or less curvature, so slightly-biased strafes stay near
+	// optimal). Model and provider both evaluate this exact expression on
+	// their own velocity; model == engine makes the yaw streams identical.
+	float HeadingDeg(const Vector& v, float fallback) {
+		if (v.X * v.X + v.Y * v.Y < 1.f)
+			return fallback;
+		return NormYaw(atan2f(v.Y, v.X) * (180.f / 3.14159265358979f));
+	}
+
 	// Closed-loop frame generation: called by the sim (game thread) per tick,
 	// with the simulated state after the previous tick.
 	void Provider(int tick, const Prediction::SimState& prev, Frame* out) {
@@ -287,23 +339,34 @@ namespace {
 		float smove = 0.f;
 
 		if (ps.solver) {
-			// Solver segment: pure alternating-strafe schedule from the applied
-			// solution - the view turns at the strafe's rate each tick, only
-			// the side key is held (W never). NOTHING is state-dependent here:
-			// the input stream is exactly the schedule the model solved, so the
-			// real yaw stream equals the model's by construction. Overrun ticks
-			// past the last split simply hold the final phase.
+			// Solver segment: alternating-strafe schedule from the applied
+			// solution, only the side key held (W never). Constant mode: the
+			// view turns at the phase's rate - a pure input stream. Optimal
+			// mode: rates[] are per-phase BIASES and the yaw follows the
+			// SIMULATED velocity heading + side*bias - the exact expression
+			// the model evaluated on its own (identical) velocity, so the yaw
+			// streams still match. Overrun ticks hold the final phase.
 			const SolverData& sd = ps.sdata;
 			int k = 0;
 			while (k < sd.nsplits && t >= sd.splits[k]) k++;
 			const int side = (k % 2 == 0) ? sd.side0 : -sd.side0;
-			yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
+			if (sd.opt)
+				yaw = NormYaw(HeadingDeg(prev.velocity, g_pv_last_yaw)
+					+ static_cast<float>(side) * sd.rates[k]);
+			else
+				yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
 			smove = (side > 0) ? -450.f : 450.f;   // +1 = A (left), -1 = D (right)
 		} else {
-			// View: hold or turn at a fixed rate (screen sign: + = right = Source
-			// yaw decrease).
+			// View: turn at a fixed rate (screen sign: + = right = Source yaw
+			// decrease), or OPTIMAL strafe: yaw = velocity heading + dir*bias
+			// (wish exactly perpendicular to the velocity at bias 0 = max
+			// per-tick gain; the bias trades speed quadratically for linearly
+			// more/less curvature - the "wrangle" control).
 			if (g.yaw_mode == 1)
 				yaw = g_pv_entry_yaw - g.yaw_rate * static_cast<float>(t);
+			else if (g.yaw_mode == 2)
+				yaw = HeadingDeg(prev.velocity, g_pv_last_yaw)
+					+ static_cast<float>(g.opt_dir) * g.yaw_rate;
 			yaw = NormYaw(yaw);
 
 			// Held keys. W releases while airborne by default (surf): the forward
@@ -318,6 +381,10 @@ namespace {
 			const bool turning = (g.yaw_mode == 1) && fabsf(g.yaw_rate) > 0.01f;
 			if (g.auto_key && turning && !onground && !g.key_a && !g.key_d)
 				smove = (g.yaw_rate > 0.f) ? 450.f : -450.f;   // right turn -> D, left -> A
+
+			// Optimal mode drives the strafe key itself - the side IS the mechanic.
+			if (g.yaw_mode == 2)
+				smove = (g.opt_dir > 0) ? -450.f : 450.f;
 		}
 
 		float pitch = g.pitch_val;
@@ -476,6 +543,7 @@ namespace {
 		bool  real_on_target = false;
 		int   real_tick = -1;
 		float real_bump_loss = 0.f;
+		float real_yaw_err = -1.f;    // REAL view-yaw miss at the pass (deg)
 	};
 
 	struct SearchCtx {
@@ -531,6 +599,10 @@ namespace {
 		// Warm starts per first-side: neighboring timings have neighboring
 		// solutions, and canonical starts often sit in infeasible territory
 		// (early-boarding curves) that the LM must otherwise crawl out of.
+		bool   opt = false;           // optimal-rate mode: rates are biases (yaw exact
+		                              // via the eliminated last-phase bias)
+		int    cap_dropped = 0;       // candidates lost to the collection backstop
+		int    dedupe_kept = 0;       // distinct lines after dedupe (pre-trim)
 		float  warm_fr[2][2] = {};
 		bool   have_warm[2] = {};
 		float  max_bump = 10.f;       // bump-loss gate for the "exact" tag (u/s)
@@ -620,9 +692,19 @@ namespace {
 		float best_err = 1e9f;
 		float best_rates[4] = {};     // rates that produced the best measurement
 		bool  have_best = false;
-		char note[160] = {};
+		// Roomy: sprintf_s KILLS the process on overflow, and the early-board
+		// message once outgrew a 160-byte buffer (the post-verify crash).
+		char note[512] = {};
 	};
 	CorrectCtx g_correct;
+	// Solution-slider settle: auto-correction fires only once the user stops
+	// scrubbing (ApplySolution stays immediate for the line preview).
+	bool g_pick_correct_pending = false;
+	unsigned long long g_pick_settle_ms = 0;
+	// Deferred teleport verification: measure where the player ACTUALLY landed
+	// vs the anchor and report it - data instead of guessing at setpos lore.
+	bool g_tp_check = false;
+	unsigned long long g_tp_ms = 0;
 
 	// --------------------------------------- calibration batch (TEMPORARY) --
 	// Manual button while the model/engine gap gets tuned: runs EVERY found
@@ -661,10 +743,12 @@ namespace {
 
 	struct FastState { Vector p, v; float yaw; };
 
-	// One airborne tick: turn, half gravity, air-accelerate along the side key's
-	// wishdir, integrate, half gravity. Mirrors the engine's order closely.
-	void FastTick(FastState& s, float rate, int side) {
-		s.yaw = NormYaw(s.yaw - rate);   // screen + = right = Source yaw decrease
+	// One airborne tick WITHOUT collision: set the tick's view yaw, half
+	// gravity, air-accelerate along the side key's wishdir, integrate, half
+	// gravity. (The collision-aware EngineMoveTick supersedes this for face
+	// targets; this remains the no-face fallback.)
+	void FastTick(FastState& s, float yaw_abs, int side) {
+		s.yaw = yaw_abs;
 		s.v.Z -= g_search.gravity * g_search.dt * 0.5f;
 		const float wish = (s.yaw + static_cast<float>(side) * 90.f) * (kPi / 180.f);
 		const float wx = cosf(wish), wy = sinf(wish);
@@ -688,9 +772,12 @@ namespace {
 	};
 
 	// Swept-hull trace against the corridor brush world (AABB-gated convex
-	// slab clips, DIST_EPSILON 1/32 exactly like CM_ClipBoxToBrush). Returns
-	// the earliest entry fraction in [0,1] (1 = clear) and the struck
-	// collider/plane.
+	// slab clips). Mirrors CM_ClipBoxToBrush exactly: enterfrac starts BELOW
+	// zero so a contact at fraction 0 REGISTERS (the resting re-contact every
+	// slide tick produces exactly f=0 - rejecting it made the model sink
+	// through the face and stop colliding), enter side backs off DIST_EPSILON
+	// (1/32), leave side extends by it. Returns the earliest entry fraction
+	// in [0,1] (1 = clear) and the struck collider/plane.
 	float TraceHullWorld(const Vector& a, const Vector& b, int* out_b, int* out_pl) {
 		*out_b = -1;
 		*out_pl = -1;
@@ -705,7 +792,7 @@ namespace {
 			    smaxy < bc.bmin.Y || sminy > bc.bmax.Y ||
 			    smaxz < bc.bmin.Z || sminz > bc.bmax.Z)
 				continue;
-			float tmin = 0.f, tmax = 1.f;
+			float tmin = -1.f, tmax = 1.f;   // engine: enterfrac = -1, leavefrac = 1
 			int enter = -1;
 			bool outside = false, miss = false;
 			const int np = static_cast<int>(bc.pn.size());
@@ -719,14 +806,15 @@ namespace {
 					if (tt < 0.f) tt = 0.f;
 					if (tt > tmin) { tmin = tt; enter = pi; }
 				} else if (d1 > 0.f) {
-					const float tt = d0 / (d0 - d1);
+					float tt = (d0 + 0.03125f) / (d0 - d1);
+					if (tt > 1.f) tt = 1.f;
 					if (tt < tmax) tmax = tt;
 				}
 			}
-			if (miss || !outside || enter < 0 || tmin > tmax)
+			if (miss || !outside || enter < 0 || tmin >= tmax)
 				continue;
 			if (tmin < best) {
-				best = tmin;
+				best = (tmin > 0.f) ? tmin : 0.f;
 				*out_b = bi;
 				*out_pl = enter;
 			}
@@ -755,10 +843,10 @@ namespace {
 	// grounded = a floor-like plane (nz >= 0.7) was struck while falling
 	// slower than NON_JUMP_VELOCITY (140) - CategorizePosition would set
 	// ground and leave AirMove, so the model flight ends there.
-	int EngineMoveTick(FastState& s, float rate, int side,
+	int EngineMoveTick(FastState& s, float yaw_abs, int side,
 	                   Vector* seg_pts, TickContact* contacts, int* ncontacts,
 	                   bool* grounded) {
-		s.yaw = NormYaw(s.yaw - rate);   // screen + = right = Source yaw decrease
+		s.yaw = yaw_abs;                 // the tick's view yaw, set by the caller
 		s.v.Z -= g_search.gravity * g_search.dt * 0.5f;          // StartGravity
 		const float wish = (s.yaw + static_cast<float>(side) * 90.f) * (kPi / 180.f);
 		const float wx = cosf(wish), wy = sinf(wish);            // AirAccelerate
@@ -926,6 +1014,7 @@ namespace {
 		int   tick = 0;
 		float frac = 0.f;
 		float speed = 0.f;      // 2D speed at the pass
+		float yaw = 0.f;        // view yaw on the pass tick (for the yaw constraint)
 		int   bump_ticks = 0;   // pass tick minus board tick (0 = board IS the pass)
 		float bump_loss = 0.f;  // speed the board clip took away (u/s)
 	};
@@ -945,8 +1034,9 @@ namespace {
 			int best_tick = 0;
 			float best_frac = 0.f;
 			float best_v2 = sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y);
+			float best_yaw = s.yaw;
 			float best_d2 = Dot3(s.p - tgt);
-			auto track = [&](const Vector& a, const Vector& b2, int tick2, float v2) {
+			auto track = [&](const Vector& a, const Vector& b2, int tick2, float v2, float yawv) {
 				const Vector d = b2 - a;
 				const float len2 = Dot3(d);
 				float tt = (len2 > 1e-9f) ? Dot(tgt - a, d) / len2 : 0.f;
@@ -959,6 +1049,7 @@ namespace {
 					best_tick = tick2;
 					best_frac = tt;
 					best_v2 = v2;
+					best_yaw = yawv;
 				}
 			};
 			out.bump_ticks = 0;
@@ -967,15 +1058,21 @@ namespace {
 			bool foreign_counted = false;
 			for (int t = 0; t < N + 8; ++t) {
 				while (k < nsplits && t >= splits[k]) k++;
+				const int side = (k % 2 == 0) ? side0 : -side0;
+				// rates[] = deg/tick turn rates, or per-phase BIASES off the
+				// exact max-gain line in optimal mode.
+				const float yaw_next = g_search.opt
+					? NormYaw(HeadingDeg(s.v, s.yaw) + static_cast<float>(side) * rates[k])
+					: NormYaw(s.yaw - rates[k]);
 				Vector segp[6];
 				TickContact tc[4];
 				int ntc = 0;
 				bool grounded = false;
-				const int nseg = EngineMoveTick(s, rates[k], (k % 2 == 0) ? side0 : -side0,
+				const int nseg = EngineMoveTick(s, yaw_next, side,
 				                                segp, tc, &ntc, &grounded);
 				const float v2n = sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y);
 				for (int si = 0; si < nseg; ++si)
-					track(segp[si], segp[si + 1], t + 1, v2n);
+					track(segp[si], segp[si + 1], t + 1, v2n, s.yaw);
 				for (int ci = 0; ci < ntc; ++ci) {
 					const SearchCtx::BrushCollider& bc = g_search.bcolliders[tc[ci].collider];
 					if (bc.is_target && bc.pid[tc[ci].plane] == bc.target_plane) {
@@ -1002,6 +1099,7 @@ namespace {
 			out.tick = best_tick;
 			out.frac = best_frac;
 			out.speed = best_v2;
+			out.yaw = best_yaw;
 			out.bump_ticks = (contact_tick >= 0 && best_tick > contact_tick)
 				? best_tick - contact_tick : 0;
 			if (contact_tick >= 0 && contact_tick > best_tick)
@@ -1011,13 +1109,18 @@ namespace {
 		Vector prev = s.p;
 		for (int t = 0; t < N; ++t) {
 			while (k < nsplits && t >= splits[k]) k++;
+			const int side = (k % 2 == 0) ? side0 : -side0;
+			const float yaw_next = g_search.opt
+				? NormYaw(HeadingDeg(s.v, s.yaw) + static_cast<float>(side) * rates[k])
+				: NormYaw(s.yaw - rates[k]);
 			prev = s.p;
-			FastTick(s, rates[k], (k % 2 == 0) ? side0 : -side0);
+			FastTick(s, yaw_next, side);
 		}
 		out.pass = prev + Scale(s.p - prev, height_frac);
 		out.tick = N;
 		out.frac = height_frac;
 		out.speed = sqrtf(s.v.X * s.v.X + s.v.Y * s.v.Y);
+		out.yaw = s.yaw;
 		return true;
 	}
 
@@ -1157,7 +1260,13 @@ namespace {
 			// the `exact` tag. Hard rejects remain for structure only.
 			const bool yaw_ok = (p.tick == expected_tick);
 			if (yaw_ok && err <= g_search.collect && p.bump_loss <= 60.f) {
-				if (static_cast<int>(g_search.results.size()) < 600) {
+				// EVERY distinct schedule that reaches the point is a solution
+				// (the user explores the space) - no outcome-merging here; the
+				// post-search DedupeResults collapses only near-identical
+				// schedules (rates within 0.05 deg, splits within 2 ticks).
+				// The cap is a memory backstop, far above any real search, and
+				// COUNTED when hit instead of silently dropping lines.
+				if (static_cast<int>(g_search.results.size()) < 20000) {
 					RouteSolution s;
 					s.ticks = p.tick;
 					s.frac = p.frac;
@@ -1173,6 +1282,8 @@ namespace {
 					s.bump_loss = p.bump_loss;
 					s.exact = (err <= g_search.tol && p.bump_loss <= g_search.max_bump);
 					g_search.results.push_back(s);
+				} else {
+					g_search.cap_dropped++;
 				}
 			} else if (yaw_ok && err <= g_search.collect) {
 				record_reject(rr, err, p, expected_tick, 2);   // violent board
@@ -1184,13 +1295,16 @@ namespace {
 		};
 
 		// LM over 1-2 free rates; fmap maps free index -> rate index (bounds).
-		// FAILURE-TOLERANT: an infeasible evaluation (early board / no contact /
-		// yaw out of range) is a WALL to walk along, never a reason to abort -
-		// aborting froze the whole search at its starting guesses (the frozen
-		// -6.4/+6.4 rates visible across three diagnostics logs).
-		auto newton = [&](float* fr, int nfree, const int* fmap) -> float {
+		// Parametrized over the residual and bounds so the optimal-bias mode
+		// reuses it unchanged. FAILURE-TOLERANT: an infeasible evaluation
+		// (early board / no contact / yaw out of range) is a WALL to walk
+		// along, never a reason to abort - aborting froze the whole search at
+		// its starting guesses (the frozen -6.4/+6.4 rates visible across
+		// three diagnostics logs).
+		auto newton = [&](auto&& rfn, const float* rlo, const float* rhi,
+		                  float* fr, int nfree, const int* fmap) -> float {
 			float F[2];
-			if (!resid(fr, nfree, F, nullptr))
+			if (!rfn(fr, nfree, F, nullptr))
 				return 1e9f;
 			float err = sqrtf(F[0] * F[0] + F[1] * F[1]);
 			float lambda = 0.05f;
@@ -1203,13 +1317,13 @@ namespace {
 						float f2[2] = { fr[0], (nfree > 1) ? fr[1] : 0.f };
 						const int bi = fmap[i];
 						const float want = f2[i] + ((attempt == 0) ? h : -h);
-						const float clamped = Clampf(want, lo[bi], hi[bi]);
+						const float clamped = Clampf(want, rlo[bi], rhi[bi]);
 						const float hs = clamped - f2[i];
 						if (fabsf(hs) < 1e-6f)
 							continue;
 						f2[i] = clamped;
 						float F2[2];
-						if (resid(f2, nfree, F2, nullptr)) {
+						if (rfn(f2, nfree, F2, nullptr)) {
 							J[0][i] = (F2[0] - F[0]) / hs;
 							J[1][i] = (F2[1] - F[1]) / hs;
 							have_col[i] = true;
@@ -1239,9 +1353,9 @@ namespace {
 					if (m > 2.f) { d[0] *= 2.f / m; d[1] *= 2.f / m; }
 					float f2[2] = { fr[0], (nfree > 1) ? fr[1] : 0.f };
 					for (int i = 0; i < nfree; ++i)
-						f2[i] = Clampf(f2[i] + d[i], lo[fmap[i]], hi[fmap[i]]);
+						f2[i] = Clampf(f2[i] + d[i], rlo[fmap[i]], rhi[fmap[i]]);
 					float F2[2];
-					if (resid(f2, nfree, F2, nullptr)) {
+					if (rfn(f2, nfree, F2, nullptr)) {
 						const float e2 = sqrtf(F2[0] * F2[0] + F2[1] * F2[1]);
 						if (e2 < err) {
 							for (int i = 0; i < nfree; ++i) fr[i] = f2[i];
@@ -1259,6 +1373,98 @@ namespace {
 			}
 			return err;
 		};
+
+		// OPTIMAL-RATE MODE: per-phase yaw BIASES off the exact max-gain line
+		// (wish perpendicular to the velocity). The LAST phase's bias is
+		// ELIMINATED by the exact-yaw constraint - at the pass tick the view
+		// yaw MUST equal the target yaw (yaw_pass = heading(v_pass) +
+		// side_K*biasK, and biasK chases the small heading feedback in a few
+		// fixed-point steps). Up to two of the remaining phases carry the
+		// free biases; earlier phases fly the pure optimal curve. "Imperfect"
+		// here means deviating from max gain to steer - never a yaw miss.
+		if (g_search.opt) {
+			cur_wrap = 0;
+			g_search.yaw_ever_feasible = true;
+			float blo[4], bhi[4];
+			for (int i = 0; i < 4; ++i) { blo[i] = -20.f; bhi[i] = 20.f; }
+			const int nfree = (K - 1 < 2) ? (K - 1) : 2;
+			const int bbase = (K - 1) - nfree;
+			const int fmapo[2] = { bbase, bbase + 1 };
+			const int side_K = ((K - 1) % 2 == 0) ? side0 : -side0;
+			const int last_split = (nsplits > 0) ? splits[nsplits - 1] : 0;
+			float solved_bK = 0.f;
+			auto oresid = [&](const float* fr, int nf, float* F, PassEval* pout) -> bool {
+				float bias[4] = { 0.f, 0.f, 0.f, 0.f };
+				for (int i = 0; i < nf; ++i) bias[bbase + i] = fr[i];
+				// Solve the last bias so the pass-tick yaw equals the target
+				// EXACTLY. The bias acts on EVERY tick of the last phase, so
+				// yaw_pass moves ~(phase_len + 1) degrees per bias degree -
+				// Newton with that slope first, then the measured secant.
+				// (A unit-slope update diverged and rejected everything.)
+				float bK = 0.f, ye = 0.f, bK_prev = 0.f, ye_prev = 0.f;
+				bool have_prev = false, yok = false;
+				for (int m = 0; m < 8; ++m) {
+					bias[K - 1] = bK;
+					if (!EvalPass(N, frac, side0, splits, nsplits, bias, pe))
+						return false;
+					ye = NormYaw(pe.yaw - g_search.target_yaw);
+					if (fabsf(ye) <= 0.01f) { yok = true; break; }
+					float slope;
+					if (have_prev && fabsf(bK - bK_prev) > 1e-5f)
+						slope = (ye - ye_prev) / (bK - bK_prev);
+					else
+						slope = static_cast<float>(side_K)
+							* static_cast<float>(((pe.tick > last_split) ? pe.tick - last_split : 1) + 1);
+					if (fabsf(slope) < 1e-3f)
+						return false;
+					bK_prev = bK;
+					ye_prev = ye;
+					have_prev = true;
+					float nb = Clampf(bK - ye / slope, blo[K - 1], bhi[K - 1]);
+					if (fabsf(nb - bK) < 1e-5f)
+						return false;   // pinned at the bound: yaw unreachable
+					bK = nb;
+				}
+				if (!yok)
+					return false;
+				solved_bK = bK;
+				const Vector dd = pe.pass - tgt;
+				F[0] = Dot(g_search.e1, dd);
+				F[1] = Dot(g_search.e2, dd);
+				if (pout) *pout = pe;
+				return true;
+			};
+			const float ostarts[4][2] = { {0.f, 0.f}, {5.f, -5.f}, {-5.f, 5.f}, {9.f, 9.f} };
+			float best_err = 1e9f;
+			float best_b[4] = {};
+			PassEval best_po{};
+			const int nstarts = (nfree > 0) ? 4 : 1;
+			for (int s0 = 0; s0 < nstarts; ++s0) {
+				float fr[2] = { ostarts[s0][0], (nfree > 1) ? ostarts[s0][1] : 0.f };
+				if (nfree > 0)
+					newton(oresid, blo, bhi, fr, nfree, fmapo);
+				float F[2];
+				PassEval p;
+				if (oresid(fr, nfree, F, &p)) {
+					const float e = sqrtf(F[0] * F[0] + F[1] * F[1]);
+					if (e < best_err) {
+						best_err = e;
+						memset(best_b, 0, sizeof(best_b));
+						for (int i = 0; i < nfree; ++i) best_b[bbase + i] = fr[i];
+						best_b[K - 1] = solved_bK;
+						best_po = p;
+					}
+				}
+				if (best_err <= g_search.tol)
+					break;
+			}
+			if (best_err > 1e8f) {
+				g_search.cnt_no_contact++;
+				return;
+			}
+			consider(best_b, sqrtf(Dot3(best_po.pass - tgt)), best_po, best_po.tick);
+			return;
+		}
 
 		// Enumerate the feasible wraps: T_w = base + 360*w within [Tmin, Tmax].
 		int w = static_cast<int>(ceilf((Tmin - base) / 360.f));
@@ -1321,7 +1527,7 @@ namespace {
 								for (int i = 0; i < nfree; ++i)
 									fr[i] = lo[i] + (hi[i] - lo[i]) * mixes8[mi][i];
 							}
-							newton(fr, nfree, fmap);
+							newton(resid, lo, hi, fr, nfree, fmap);
 							float F[2];
 							PassEval p;
 							if (resid(fr, nfree, F, &p)) {
@@ -1362,7 +1568,7 @@ namespace {
 			for (int g = 0; g < 5; ++g) {
 				lead[0] = lo[0] + (hi[0] - lo[0]) * (static_cast<float>(g) + 0.5f) / 5.f;
 				float fr[2] = { 0.5f * (lo[1] + hi[1]), 0.5f * (lo[2] + hi[2]) };
-				newton(fr, 2, fmap4);
+				newton(resid, lo, hi, fr, 2, fmap4);
 				float F[2];
 				PassEval p;
 				if (resid(fr, 2, F, &p))
@@ -1591,6 +1797,25 @@ namespace {
 			if (BspWorld::GetBrushInfo(brush, nullptr, &bmin, &bmax)) {
 				bc.bmin = bmin - Vector(16.f, 16.f, 72.f);
 				bc.bmax = bmax + Vector(16.f, 16.f, 0.f);
+				// BEVEL planes: the engine's box clip always carries the six
+				// axial planes of the brush AABB (bevel sides). Without them,
+				// per-plane hull expansion over-collides in the wedge regions
+				// past edges - the bevels cut those wedges so a hull passing an
+				// edge resolves exactly like the engine (and an edge hit
+				// reports an AXIAL normal, exactly like the engine's trace).
+				const Vector bn[6] = {
+					Vector(1.f, 0.f, 0.f), Vector(-1.f, 0.f, 0.f),
+					Vector(0.f, 1.f, 0.f), Vector(0.f, -1.f, 0.f),
+					Vector(0.f, 0.f, 1.f), Vector(0.f, 0.f, -1.f) };
+				const float bd[6] = { bmax.X, -bmin.X, bmax.Y, -bmin.Y, bmax.Z, -bmin.Z };
+				for (int i = 0; i < 6; ++i) {
+					const float d_origin = bd[i]
+						+ 16.f * fabsf(bn[i].X) + 16.f * fabsf(bn[i].Y)
+						+ (bn[i].Z < 0.f ? 72.f : 0.f);
+					bc.pn.push_back(bn[i]);
+					bc.pd.push_back(d_origin);
+					bc.pid.push_back(-2);   // bevel: never a boardable face
+				}
 			} else {
 				bc.bmin = Vector(-1e9f, -1e9f, -1e9f);
 				bc.bmax = Vector(1e9f, 1e9f, 1e9f);
@@ -1677,6 +1902,7 @@ namespace {
 			g_search.e2 = Vector(0.f, 1.f, 0.f);
 		}
 		g_search.strafes = sd.strafes < 1 ? 1 : sd.strafes > 4 ? 4 : sd.strafes;
+		g_search.opt = sd.opt;
 
 		float interval = Prediction::LastDiag().interval_per_tick;
 		if (interval <= 0.f) interval = 0.015f;
@@ -1751,6 +1977,12 @@ namespace {
 	void FinishSearch() {
 		SortResults(g_search.results);
 		DedupeResults(g_search.results);
+		// A slider with thousands of near-ties is unusable and real-verifying
+		// them all takes minutes: keep the best 600 of the DEDUPED ranking
+		// (exact-first, fastest-first). The trim is REPORTED, never silent.
+		g_search.dedupe_kept = static_cast<int>(g_search.results.size());
+		if (g_search.results.size() > 600)
+			g_search.results.resize(600);
 		g_search.done = true;
 		g_search.active = false;
 		g_solution_pick = 0;
@@ -1758,8 +1990,10 @@ namespace {
 			// Model search done; now every candidate gets a REAL sim pass and
 			// only real-verified ones survive into the presented list.
 			StartVerify(g_search.seg);
-			g_status = "Solver: " + std::to_string(g_search.results.size())
-				+ " model passes found - verifying each on the real sim...";
+			g_status = "Solver: " + std::to_string(g_search.dedupe_kept)
+				+ " distinct model passes"
+				+ (g_search.dedupe_kept > 600 ? " (verifying the best 600)" : "")
+				+ " - verifying each on the real sim...";
 		} else {
 			// An empty search is exactly when the diagnostics matter - write
 			// them without being asked.
@@ -1771,13 +2005,163 @@ namespace {
 
 	// Time-sliced search pump (~5 ms per frame from Update()). Accuracy first:
 	// the enumeration is allowed to take seconds.
+	// SEH guard: a fault inside one solve job becomes a logged, named failure
+	// (the exact candidate parameters ARE the repro) instead of a dead game.
+	// This frame holds only PODs so __try is legal here; the search aborts.
+	int g_guard_code = 0;
+	const char* g_stage_name = "";
+	std::string CalibDir();   // fwd (defined with the batch)
+
+	// LAST-RESORT crash writer: fires when a fault escapes every frame guard
+	// (any thread - game, render, engine internals). Writes the code, the
+	// faulting address and its MODULE+OFFSET, which is enough to name the
+	// culprit binary and function even after the process dies. Keeps the
+	// previous filter chained so nothing else breaks.
+	LPTOP_LEVEL_EXCEPTION_FILTER g_prev_uef = nullptr;
+	LONG WINAPI CrashWriter(EXCEPTION_POINTERS* ep) {
+		char path[MAX_PATH] = {};
+		char documents[MAX_PATH] = {};
+		if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents))) {
+			_snprintf_s(path, _TRUNCATE, "%s\\sourceTAS\\calibration\\crash.log", documents);
+			HANDLE f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+				OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (f != INVALID_HANDLE_VALUE) {
+				char mod[MAX_PATH] = "(unknown)";
+				unsigned long long base = 0;
+				HMODULE hm = nullptr;
+				void* addr = ep && ep->ExceptionRecord
+					? ep->ExceptionRecord->ExceptionAddress : nullptr;
+				if (addr && GetModuleHandleExA(
+					GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+					| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					static_cast<LPCSTR>(addr), &hm) && hm) {
+					GetModuleFileNameA(hm, mod, sizeof(mod));
+					base = reinterpret_cast<unsigned long long>(hm);
+				}
+				char line[640];
+				_snprintf_s(line, _TRUNCATE,
+					"PROCESS CRASH code=0x%08X addr=0x%llX module=%s+0x%llX thread=%lu stage=%s\r\n",
+					ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0,
+					reinterpret_cast<unsigned long long>(addr),
+					mod,
+					base ? reinterpret_cast<unsigned long long>(addr) - base : 0ull,
+					GetCurrentThreadId(),
+					g_stage_name && g_stage_name[0] ? g_stage_name : "(none)");
+				DWORD written = 0;
+				WriteFile(f, line, static_cast<DWORD>(strlen(line)), &written, nullptr);
+				CloseHandle(f);
+			}
+		}
+		return g_prev_uef ? g_prev_uef(ep) : EXCEPTION_CONTINUE_SEARCH;
+	}
+
+	// Vectored FIRST-CHANCE logging for the killer classes the unhandled
+	// filter never sees (heap corruption and friends terminate the process
+	// without normal dispatch; the game's own crash handler can eat the
+	// rest). Fatal-looking codes only - the prediction system ROUTINELY
+	// recovers access violations, so those stay out to keep the log clean.
+	PVOID g_veh_handle = nullptr;
+	LONG CALLBACK FirstChanceWriter(EXCEPTION_POINTERS* ep) {
+		if (!ep || !ep->ExceptionRecord)
+			return EXCEPTION_CONTINUE_SEARCH;
+		const DWORD code = ep->ExceptionRecord->ExceptionCode;
+		const bool fatal_class =
+			code == 0xC0000374          // STATUS_HEAP_CORRUPTION
+			|| code == 0xC00000FD      // STATUS_STACK_OVERFLOW
+			|| code == 0xC0000409      // STATUS_STACK_BUFFER_OVERRUN (fastfail)
+			|| (ep->ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE) != 0;
+		if (!fatal_class)
+			return EXCEPTION_CONTINUE_SEARCH;
+		CrashWriter(ep);   // same module+offset line, tagged by its code
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	void RecomputeDiag();     // fwd
+	void AnalyzeRealPass();   // fwd
+	void BatchPump();         // fwd
+	void VerifyPump();        // fwd
+	void CorrectPump();       // fwd
+
+	// Everything that runs when a sim lands, with a stage marker so a fault
+	// names its location. Lives behind SimLandedGuarded's POD-only SEH frame.
+	void SimLandedStage() {
+		g_stage_name = "TakeSim";
+		const int n = Prediction::SimCount();
+		g_sim_fault = Prediction::SimFaulted();
+		g_frames.resize(n);
+		g_states.resize(n);
+		Prediction::TakeSim(g_frames.data(), g_states.data());
+		g_valid = n > 0;
+		g_sim_requested = false;
+		g_stage_name = "RecomputeDiag";
+		RecomputeDiag();
+		g_stage_name = "AnalyzeRealPass";
+		AnalyzeRealPass();
+		if (g_batch.active) {
+			g_stage_name = "BatchPump";
+			BatchPump();
+		} else if (g_verify.active) {
+			g_stage_name = "VerifyPump";
+			VerifyPump();
+		} else {
+			g_stage_name = "CorrectPump";
+			CorrectPump();
+		}
+		g_stage_name = "";
+	}
+	bool SimLandedGuarded() {
+		__try {
+			SimLandedStage();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			g_guard_code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
+	bool SolveCandidateGuarded(int N, float frac, int side0, const int* splits, int nsplits) {
+		__try {
+			SolveCandidate(N, frac, side0, splits, nsplits);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			g_guard_code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
+	// FinishSearch sorts/dedupes the whole pool and kicks off verification -
+	// it runs at EXACTLY "the search just completed", so it gets its own guard
+	// (it used to sit outside every guard; a fault there was a dead game).
+	bool FinishSearchGuarded() {
+		__try {
+			FinishSearch();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			g_guard_code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
+
 	void StepSearch() {
 		if (!g_search.active || g_search.done)
 			return;
 		const ULONGLONG t0 = GetTickCount64();
 		while (GetTickCount64() - t0 < 5) {
 			if (g_search.cand_idx >= static_cast<int>(g_search.cands.size())) {
-				FinishSearch();
+				if (!FinishSearchGuarded()) {
+					char note[256];
+					Sfmt(note, "EDITOR FAULT 0x%08X in stage FinishSearch "
+						"(results=%d) - search aborted; report this line.",
+						g_guard_code, static_cast<int>(g_search.results.size()));
+					g_status = note;
+					const std::string dir = CalibDir();
+					if (!dir.empty()) {
+						std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
+						if (f)
+							f << note << "\n";
+					}
+					g_search.done = true;
+					g_search.active = false;
+					g_verify.active = false;
+				}
 				return;
 			}
 			const SearchCtx::PassCand pc = g_search.cands[g_search.cand_idx];
@@ -1795,8 +2179,24 @@ namespace {
 			}
 			const std::array<int, 3>& sp = g_search.splits_list[g_search.split_idx++];
 			g_search.jobs_done++;
-			SolveCandidate(pc.N, pc.frac, g_search.side_idx == 0 ? 1 : -1,
-			               sp.data(), g_search.strafes - 1);
+			if (!SolveCandidateGuarded(pc.N, pc.frac, g_search.side_idx == 0 ? 1 : -1,
+			                           sp.data(), g_search.strafes - 1)) {
+				char note[512];
+				Sfmt(note, "SOLVER FAULT 0x%08X at N=%d side=%+d splits=%d,%d,%d "
+					"strafes=%d%s - search aborted safely; this candidate is the repro.",
+					g_guard_code, pc.N, g_search.side_idx == 0 ? 1 : -1,
+					sp[0], sp[1], sp[2], g_search.strafes, g_search.opt ? " OPT" : "");
+				g_status = note;
+				const std::string dir = CalibDir();
+				if (!dir.empty()) {
+					std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
+					if (f)
+						f << note << "\n";
+				}
+				g_search.done = true;
+				g_search.active = false;
+				return;
+			}
 		}
 	}
 
@@ -1833,6 +2233,12 @@ namespace {
 		const bool have_face = BspWorld::GetPlane(target->plane, &fn, nullptr);
 		float interval = Prediction::LastDiag().interval_per_tick;
 		if (interval <= 0.f) interval = 0.015f;
+		// The sub-tick reconstruction below runs the model tick on real
+		// states; keep its parameters current (same values a search uses).
+		g_search.dt = interval;
+		g_search.cap = g_air_cap;
+		g_search.accel_amt = g_air_accel * g_wishspeed * interval;
+		g_search.gravity = g_gravity;
 
 		g_realpass.computed = true;
 		const int b = g_starts[L];
@@ -1872,41 +2278,9 @@ namespace {
 			// same sweep the model runs. The path itself CONTINUES - both the
 			// engine and the model clip and keep flying through deflections.
 			if (have_face && te_tick < 0 && fe_tick < 0 && we_tick < 0) {
-				const int nbw = static_cast<int>(g_search.bcolliders.size());
-				const float sminx = fminf(prev_o.X, o.X), smaxx = fmaxf(prev_o.X, o.X);
-				const float sminy = fminf(prev_o.Y, o.Y), smaxy = fmaxf(prev_o.Y, o.Y);
-				const float sminz = fminf(prev_o.Z, o.Z), smaxz = fmaxf(prev_o.Z, o.Z);
-				float hit_t = 2.f;
 				int hit_b = -1, hit_pl = -1;
-				for (int bw = 0; bw < nbw; ++bw) {
-					const SearchCtx::BrushCollider& bc = g_search.bcolliders[bw];
-					if (smaxx < bc.bmin.X || sminx > bc.bmax.X ||
-					    smaxy < bc.bmin.Y || sminy > bc.bmax.Y ||
-					    smaxz < bc.bmin.Z || sminz > bc.bmax.Z)
-						continue;
-					float tmin = 0.f, tmax = 1.f;
-					int enter = -1;
-					bool outside = false, miss = false;
-					const int np = static_cast<int>(bc.pn.size());
-					for (int pi = 0; pi < np; ++pi) {
-						const float d0 = Dot(bc.pn[pi], prev_o) - bc.pd[pi];
-						const float d1 = Dot(bc.pn[pi], o) - bc.pd[pi];
-						if (d0 > 0.f) {
-							outside = true;
-							if (d1 > 0.f) { miss = true; break; }
-							float tt = (d0 - 0.03125f) / (d0 - d1);
-							if (tt < 0.f) tt = 0.f;
-							if (tt > tmin) { tmin = tt; enter = pi; }
-						} else if (d1 > 0.f) {
-							const float tt = d0 / (d0 - d1);
-							if (tt < tmax) tmax = tt;
-						}
-					}
-					if (miss || !outside || enter < 0 || tmin > tmax)
-						continue;
-					if (tmin < hit_t) { hit_t = tmin; hit_b = bw; hit_pl = enter; }
-				}
-				if (hit_b >= 0) {
+				const float hit_t = TraceHullWorld(prev_o, o, &hit_b, &hit_pl);
+				if (hit_b >= 0 && hit_t < 1.f) {
 					const SearchCtx::BrushCollider& bc = g_search.bcolliders[hit_b];
 					if (!(bc.is_target && bc.pid[hit_pl] == bc.target_plane)) {
 						we_tick = i;
@@ -1919,17 +2293,49 @@ namespace {
 			// Interpolated closest approach of the segment. The scan runs
 			// through deflections (the model's integration does too) and only
 			// stops when the player GROUNDS - the engine leaves AirMove there
-			// and so does the model.
+			// and so does the model. NEAR THE TARGET the straight chord
+			// between end-of-tick states cuts the corner the engine actually
+			// turned mid-tick (a board bends the path INSIDE the tick) - that
+			// chord was a constant ~0.3u false miss on perfect landings. So
+			// within range, the tick is re-integrated with the engine tick
+			// from the previous real state (model == engine, proven by the
+			// traces) and the closest approach runs over the true sub-segments.
 			{
 				const Vector d = o - prev_o;
 				const float len2 = Dot3(d);
 				float tt = (len2 > 1e-9f) ? Dot(tgt - prev_o, d) / len2 : 0.f;
 				tt = Clampf(tt, 0.f, 1.f);
 				const Vector cp = prev_o + Scale(d, tt);
-				const float dd = Dot3(cp - tgt);
+				float dd = Dot3(cp - tgt);
+				Vector best_cp = cp;
+				const bool solver_style = (i < static_cast<int>(g_frames.size()))
+					&& fabsf(g_frames[i].forwardmove) < 10.f
+					&& fabsf(g_frames[i].sidemove) > 10.f;
+				if (have_face && dd < 3600.f && solver_style
+					&& !g_search.bcolliders.empty()) {
+					FastState rs{ prev_o, prev_v, g_frames[i].viewangles[1] };
+					Vector rsp[6];
+					TickContact rtc[4];
+					int rnc = 0;
+					bool rgr = false;
+					const int rseg = EngineMoveTick(rs, g_frames[i].viewangles[1],
+						(g_frames[i].sidemove < 0.f) ? 1 : -1, rsp, rtc, &rnc, &rgr);
+					for (int si = 0; si < rseg; ++si) {
+						const Vector d2 = rsp[si + 1] - rsp[si];
+						const float l2 = Dot3(d2);
+						float t2 = (l2 > 1e-9f) ? Dot(tgt - rsp[si], d2) / l2 : 0.f;
+						t2 = Clampf(t2, 0.f, 1.f);
+						const Vector cp2 = rsp[si] + Scale(d2, t2);
+						const float dd2 = Dot3(cp2 - tgt);
+						if (dd2 < dd) {
+							dd = dd2;
+							best_cp = cp2;
+						}
+					}
+				}
 				if (dd < cb_d2) {
 					cb_d2 = dd;
-					cb_pass = cp;
+					cb_pass = best_cp;
 					cb_tick = i;
 				}
 				const float dist = sqrtf(dd);
@@ -2097,7 +2503,7 @@ namespace {
 		SolverData& sd = es.solver;
 		const int K = sd.nsplits + 1;
 		if (K < 2)
-			return false;   // no free rates left after the yaw constraint
+			return false;   // no free parameters left after the yaw constraint
 		const BspWorld::BoardTarget* target = BspWorld::GetTarget(sd.target);
 		if (!target)
 			return false;
@@ -2138,13 +2544,20 @@ namespace {
 		PhaseLens(sd.ticks, sd.splits, sd.nsplits, n);
 		float lo[4], hi[4];
 		RateBounds(sd.side0, K, lo, hi);
+		g_search.opt = sd.opt;   // EvalPass steps by bias when set
+		if (sd.opt)
+			for (int i = 0; i < 4; ++i) { lo[i] = -20.f; hi[i] = 20.f; }
 		float T_w = 0.f;
 		for (int i = 0; i < K; ++i)
 			T_w += static_cast<float>(n[i]) * sd.rates[i];
 
-		// Free rates: K=2 -> {r0}; K=3 -> {r0,r1}; K=4 -> {r1,r2} (r0 fixed).
-		const int nlead = (K == 4) ? 1 : 0;
-		const int nfree = (K == 2) ? 1 : 2;
+		// Free parameters. Constant mode: K=2 -> {r0}; K=3 -> {r0,r1};
+		// K=4 -> {r1,r2} (r0 fixed, last eliminated from the yaw equation).
+		// Optimal mode: up to two of the NON-last phase biases (the last is
+		// re-eliminated per eval by the exact-yaw constraint, same as the
+		// search); untouched phases keep their applied values.
+		const int nfree = sd.opt ? ((K - 1 < 2) ? (K - 1) : 2) : ((K == 2) ? 1 : 2);
+		const int nlead = sd.opt ? ((K - 1) - nfree) : ((K == 4) ? 1 : 0);
 		float lead[1] = { sd.rates[0] };
 		int fmap[2] = { nlead, nlead + 1 };
 		float fr[2] = { sd.rates[nlead], (nfree > 1) ? sd.rates[nlead + 1] : 0.f };
@@ -2152,10 +2565,47 @@ namespace {
 		float r[4];
 		PassEval pe;
 		auto resid = [&](const float* f, float* F) -> bool {
-			if (!BuildRatesFromYaw(n, K, lo, hi, T_w, lead, nlead, f, nfree, r))
-				return false;
-			if (!EvalPass(sd.ticks, sd.pass_frac, sd.side0, sd.splits, sd.nsplits, r, pe))
-				return false;
+			if (sd.opt) {
+				for (int i = 0; i < 4; ++i) r[i] = sd.rates[i];
+				for (int i = 0; i < nfree; ++i) r[nlead + i] = f[i];
+				// Re-eliminate the last-phase bias: the corrected line must
+				// still land with the view yaw EXACTLY on the target. Same
+				// measured-slope secant as the search (the bias acts on every
+				// tick of the last phase, ~phase_len deg of yaw per bias deg).
+				const int side_K = ((K - 1) % 2 == 0) ? sd.side0 : -sd.side0;
+				const int lsplit = (sd.nsplits > 0) ? sd.splits[sd.nsplits - 1] : 0;
+				float bK = r[K - 1], ye = 0.f, bK_prev = 0.f, ye_prev = 0.f;
+				bool have_prev = false, yok = false;
+				for (int m = 0; m < 8; ++m) {
+					r[K - 1] = bK;
+					if (!EvalPass(sd.ticks, sd.pass_frac, sd.side0, sd.splits, sd.nsplits, r, pe))
+						return false;
+					ye = NormYaw(pe.yaw - target->yaw);
+					if (fabsf(ye) <= 0.01f) { yok = true; break; }
+					float slope;
+					if (have_prev && fabsf(bK - bK_prev) > 1e-5f)
+						slope = (ye - ye_prev) / (bK - bK_prev);
+					else
+						slope = static_cast<float>(side_K)
+							* static_cast<float>(((pe.tick > lsplit) ? pe.tick - lsplit : 1) + 1);
+					if (fabsf(slope) < 1e-3f)
+						return false;
+					bK_prev = bK;
+					ye_prev = ye;
+					have_prev = true;
+					const float nb = Clampf(bK - ye / slope, -20.f, 20.f);
+					if (fabsf(nb - bK) < 1e-5f)
+						return false;
+					bK = nb;
+				}
+				if (!yok)
+					return false;
+			} else {
+				if (!BuildRatesFromYaw(n, K, lo, hi, T_w, lead, nlead, f, nfree, r))
+					return false;
+				if (!EvalPass(sd.ticks, sd.pass_frac, sd.side0, sd.splits, sd.nsplits, r, pe))
+					return false;
+			}
 			const Vector d = pe.pass - virt;
 			F[0] = Dot(g_search.e1, d);
 			F[1] = Dot(g_search.e2, d);
@@ -2163,8 +2613,10 @@ namespace {
 		};
 
 		float F[2];
-		if (!resid(fr, F))
+		if (!resid(fr, F)) {
+			g_search.target_pos = target->pos;   // undo the virt tracking
 			return false;
+		}
 		float err = sqrtf(F[0] * F[0] + F[1] * F[1]);
 		float best_r[4];
 		memcpy(best_r, r, sizeof(best_r));
@@ -2242,6 +2694,7 @@ namespace {
 		}
 
 		memcpy(sd.rates, best_r, sizeof(float) * 4);
+		g_search.target_pos = target->pos;   // undo the virt tracking (logs read this)
 		MarkDirty();   // the resim measures the corrected schedule
 		return true;
 	}
@@ -2272,11 +2725,11 @@ namespace {
 			&& g_segs[g_correct.seg].is_solver) {
 			memcpy(g_segs[g_correct.seg].solver.rates, g_correct.best_rates, sizeof(float) * 4);
 			MarkDirty();
-			sprintf_s(g_correct.note, "real-sim check: %s at %.2f u; restored best rates (%.2f u).",
+			Sfmt(g_correct.note, "real-sim check: %s at %.2f u; restored best rates (%.2f u).",
 				how, final_err, g_correct.best_err);
 			return;
 		}
-		sprintf_s(g_correct.note, "real-sim check: %s - pass %.2f u from target (%d round(s)).",
+		Sfmt(g_correct.note, "real-sim check: %s - pass %.2f u from target (%d round(s)).",
 			how, final_err, g_correct.rounds);
 	}
 
@@ -2301,7 +2754,7 @@ namespace {
 		if (!target || !g_realpass.computed || !g_realpass.crossed) {
 			g_correct.active = false;
 			g_correct.done = true;
-			sprintf_s(g_correct.note, "correction stopped: the real path never reaches the pass "
+			Sfmt(g_correct.note, "correction stopped: the real path never reaches the pass "
 				"event%s.",
 				g_realpass.jump_missing
 					? " (the start jump never fired - was the sim start actually on the ground?)"
@@ -2311,7 +2764,7 @@ namespace {
 		if (!g_realpass.on_target) {
 			g_correct.active = false;
 			g_correct.done = true;
-			sprintf_s(g_correct.note, "correction stopped: the real path boards another tagged "
+			Sfmt(g_correct.note, "correction stopped: the real path boards another tagged "
 				"surface first (brush %d plane %d, tick %d) - structural; re-search (the model "
 				"now rejects early-boarding candidates).",
 				g_realpass.hit_brush, g_realpass.hit_plane, g_realpass.tick);
@@ -2361,6 +2814,52 @@ namespace {
 		g_verify.active = true;
 	}
 
+	// ---------------------------------------------- solution ranking (tiers) --
+	// The user picks up to three sort criteria; equal values (within a sane
+	// quantum) fall through to the next tier. real_on_target always partitions
+	// first - a deflected line never outranks a clean one.
+	int g_sort_key[3] = { 1, 0, 2 };   // default: Speed > Real miss > Yaw err
+	const char* const kSortKeyItems = "Real miss (u)\0Speed (u/s)\0Yaw err (deg)\0Board loss (u/s)\0Model miss (u)\0";
+
+	float SortValue(const RouteSolution& s, int key) {
+		switch (key) {
+		case 1: return -s.speed;                              // faster first
+		case 2: return (s.real_yaw_err >= 0.f) ? s.real_yaw_err : 999.f;
+		case 3: return s.bump_loss;                           // cleaner board first
+		case 4: return s.pass_err;
+		default: return (s.real_err >= 0.f) ? s.real_err : 1e9f;
+		}
+	}
+	int SortBucket(const RouteSolution& s, int key) {
+		if (key < 0 || key > 4)
+			key = 0;
+		float v = SortValue(s, key);
+		float q = 0.05f;                    // miss/yaw quantum
+		if (key == 1 || key == 3) q = 0.5f; // speed/loss quantum (u/s)
+		// CLAMP before the int cast. Unmeasured entries carry 1e9 sentinels;
+		// 1e9/0.05 = 2e10 does NOT fit an int and float->int overflow is UB -
+		// the optimizer may evaluate it DIFFERENTLY at different inline sites,
+		// which makes the same entry compare inconsistently, and std::sort
+		// with an inconsistent comparator writes OUT OF BOUNDS: silent heap-
+		// corruption death, no catchable exception (the sort-click crash).
+		if (v > 1e6f) v = 1e6f;
+		if (v < -1e6f) v = -1e6f;
+		return static_cast<int>(floorf(v / q));   // |result| <= 2e7: safe
+	}
+	void SortVerifiedResults() {
+		std::sort(g_search.results.begin(), g_search.results.end(),
+			[](const RouteSolution& a, const RouteSolution& b) {
+				if (a.real_on_target != b.real_on_target) return a.real_on_target;
+				for (int i = 0; i < 3; ++i) {
+					const int ba = SortBucket(a, g_sort_key[i]);
+					const int bb = SortBucket(b, g_sort_key[i]);
+					if (ba != bb) return ba < bb;
+				}
+				if (a.real_err != b.real_err) return a.real_err < b.real_err;
+				return a.speed > b.speed;
+			});
+	}
+
 	// One landed sim = one candidate verified against the REAL engine.
 	void VerifyPump() {
 		if (!g_verify.active)
@@ -2382,6 +2881,7 @@ namespace {
 		s.real_err = measured ? g_realpass.err : 1e9f;
 		s.real_tick = g_realpass.tick;
 		s.real_bump_loss = g_realpass.bump_loss;
+		s.real_yaw_err = measured ? g_realpass.yaw_err : -1.f;
 		g_verify.idx++;
 		if (g_verify.idx < static_cast<int>(g_search.results.size())) {
 			ApplySolution(g_verify.seg, g_search.results[g_verify.idx]);
@@ -2389,20 +2889,9 @@ namespace {
 		}
 
 		// All measured. NOTHING gets dropped - the calibration loop needs the
-		// data. Ranking (provisional until board-quality layers on): everything
-		// REAL-verified within tolerance is equally "a solution", so the
-		// fastest of those leads; beyond tolerance, closest real miss first.
-		// Always write the diagnostics log (model vs real for every candidate).
-		std::sort(g_search.results.begin(), g_search.results.end(),
-			[](const RouteSolution& a, const RouteSolution& b) {
-				if (a.real_on_target != b.real_on_target) return a.real_on_target;
-				const bool at = a.real_on_target && a.real_err <= g_search.tol;
-				const bool bt = b.real_on_target && b.real_err <= g_search.tol;
-				if (at != bt) return at;
-				if (at) return a.speed > b.speed;   // within tol: fastest first
-				if (a.real_err != b.real_err) return a.real_err < b.real_err;
-				return a.speed > b.speed;
-			});
+		// data. Sort by the user's tiered criteria; always write the
+		// diagnostics log (model vs real for every candidate).
+		SortVerifiedResults();
 		int hit_tol = 0, hit_near = 0;
 		for (const RouteSolution& r : g_search.results) {
 			if (r.real_on_target && r.real_err <= g_search.tol)
@@ -2417,8 +2906,8 @@ namespace {
 			ApplySolution(g_verify.seg, g_search.results[0]);
 			if (g_correct.auto_run)
 				StartCorrect(g_verify.seg);
-			char msg[256];
-			sprintf_s(msg, "Solver: %d candidates real-measured: %d within tol, %d within 3u. "
+			char msg[512];   // holds a full MAX_PATH log path safely
+			Sfmt(msg, "Solver: %d candidates real-measured: %d within tol, %d within 3u. "
 				"Fastest within-tolerance line first, rest by real miss. Log: %s",
 				static_cast<int>(g_search.results.size()), hit_tol, hit_near,
 				g_searchlog_path[0] ? g_searchlog_path : "(write failed)");
@@ -2439,12 +2928,11 @@ namespace {
 	}
 
 	void BatchAppendf(const char* fmt, ...) {
-		char line[640];
+		// Calibration lines are DATA: exact-size formatting, never truncated.
 		va_list args;
 		va_start(args, fmt);
-		vsnprintf(line, sizeof(line), fmt, args);
+		g_batch.log += FmtV(fmt, args);
 		va_end(args);
-		g_batch.log += line;
 	}
 
 	// Search-space diagnostics: outcome counters + the closest rejects in full
@@ -2457,25 +2945,30 @@ namespace {
 		SYSTEMTIME st;
 		GetLocalTime(&st);
 		char name[128];
-		sprintf_s(name, "search_%04d%02d%02d_%02d%02d%02d.log",
+		Sfmt(name, "search_%04d%02d%02d_%02d%02d%02d.log",
 			st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 		const std::string full = dir + "\\" + name;
 		std::ofstream out(full, std::ios::trunc);
 		if (!out)
 			return;
 
-		char line[640];
-		sprintf_s(line, "== sourceTAS search diagnostics ==\n"
-			"map=%s  strafes=%d  tol=%.2f  jobs=%d/%d  results=%d\n"
+		// Data lines: EXACT dynamic formatting (FmtStr) - never truncated,
+		// never a fixed buffer to outgrow (one of those killed the process).
+		out << FmtStr("== sourceTAS search diagnostics ==\n"
+			"map=%s  strafes=%d%s  tol=%.2f  jobs=%d/%d  results=%d (of %d distinct post-dedupe)\n"
 			"start: pos=(%.2f %.2f %.2f) vel=(%.2f %.2f %.2f) yaw=%.3f jump=%d\n"
 			"target: pos=(%.2f %.2f %.2f) yaw=%.3f\n"
 			"model in-use: dt=%.6f cap=%.1f amt=%.1f grav=%.1f jump_vz_input=%.2f\n"
 			"colliders=%d corridor brushes (target brush first)\n"
-			"outcomes: infeasible=%d  no_eval=%d  floor(>collect)=%d  tick_align=%d  violent_board=%d  deflect_target_brush=%d  deflect_world=%d\n"
+			"outcomes: infeasible=%d  no_eval=%d  floor(>collect)=%d  tick_align=%d  violent_board=%d  deflect_target_brush=%d  deflect_world=%d  cap_dropped=%d\n"
 			"closest positional miss: %.3f u   max_bump=%.1f\n\n",
-			BspWorld::GetStatus().map, g_search.strafes, g_search.tol,
+			BspWorld::GetStatus().map, g_search.strafes,
+			g_search.opt ? " OPTIMAL-BIAS (rates are biases; last one solved for EXACT yaw)" : "",
+			g_search.tol,
 			g_search.jobs_done, g_search.jobs_total,
 			static_cast<int>(g_search.results.size()),
+			g_search.dedupe_kept > 0 ? g_search.dedupe_kept
+			                         : static_cast<int>(g_search.results.size()),
 			g_search.start_pos.X, g_search.start_pos.Y, g_search.start_pos.Z,
 			g_search.start_vel.X, g_search.start_vel.Y, g_search.start_vel.Z,
 			g_search.start_yaw, g_search.jump_start,
@@ -2486,22 +2979,20 @@ namespace {
 			static_cast<int>(g_search.bcolliders.size()),
 			g_search.cnt_infeasible, g_search.cnt_no_contact, g_search.cnt_floor,
 			g_search.reject_retime, g_search.cnt_bump, g_search.cnt_edge, g_search.early_hits,
+			g_search.cap_dropped,
 			g_search.reject_best < 1e8f ? g_search.reject_best : -1.f,
 			g_search.max_bump);
-		out << line;
 
 		const size_t ndump = (std::min)(g_search.bcolliders.size(), static_cast<size_t>(12));
 		if (ndump < g_search.bcolliders.size()) {
-			sprintf_s(line, "collision world: %d corridor brushes (first %d listed)\n",
+			out << FmtStr("collision world: %d corridor brushes (first %d listed)\n",
 				static_cast<int>(g_search.bcolliders.size()), static_cast<int>(ndump));
-			out << line;
 		}
 		for (size_t i = 0; i < ndump; ++i) {
 			const SearchCtx::BrushCollider& c = g_search.bcolliders[i];
-			sprintf_s(line, "brush collider %d: brush=%d planes=%d%s\n",
+			out << FmtStr("brush collider %d: brush=%d planes=%d%s\n",
 				static_cast<int>(i), c.brush, static_cast<int>(c.pn.size()),
 				c.is_target ? "  TARGET (board face plane below)" : "");
-			out << line;
 			if (c.is_target) {
 				Vector fn;
 				float fd = 0.f;
@@ -2514,9 +3005,8 @@ namespace {
 						if (c.pid[pi] == c.target_plane) { d_rest = c.pd[pi]; break; }
 					const float d_expand = fd + 16.f * fabsf(fn.X) + 16.f * fabsf(fn.Y)
 						+ (fn.Z < 0.f ? 72.f * fabsf(fn.Z) : 0.f);
-					sprintf_s(line, "  board face: plane=%d n=(%.4f %.4f %.4f) d_rest=%.4f d_expand=%.4f (gap %+0.4f)\n",
+					out << FmtStr("  board face: plane=%d n=(%.4f %.4f %.4f) d_rest=%.4f d_expand=%.4f (gap %+0.4f)\n",
 						c.target_plane, fn.X, fn.Y, fn.Z, d_rest, d_expand, d_rest - d_expand);
-					out << line;
 				}
 			}
 		}
@@ -2524,7 +3014,7 @@ namespace {
 
 		for (size_t i = 0; i < g_search.top_rejects.size(); ++i) {
 			const SearchCtx::RejectRec& rec = g_search.top_rejects[i];
-			sprintf_s(line, "[rej %02d] err=%.4f %s  N=%d n_eff=%d contact_tick=%d side0=%+d "
+			out << FmtStr("[rej %02d] err=%.4f %s  N=%d n_eff=%d contact_tick=%d side0=%+d "
 				"splits=%d,%d,%d wrap=%+d rates=%+.4f,%+.4f,%+.4f,%+.4f pass=(%.2f %.2f %.2f)\n",
 				static_cast<int>(i), rec.err,
 				rec.reason == 0 ? "FLOOR" : rec.reason == 1 ? "TICK-ALIGN" : "BUMP-LOSS",
@@ -2532,7 +3022,6 @@ namespace {
 				rec.splits[0], rec.splits[1], rec.splits[2], rec.wrap,
 				rec.rates[0], rec.rates[1], rec.rates[2], rec.rates[3],
 				rec.pass.X, rec.pass.Y, rec.pass.Z);
-			out << line;
 		}
 
 		const int nsol = (std::min)(static_cast<int>(g_search.results.size()), 100);
@@ -2540,14 +3029,13 @@ namespace {
 			out << "\nsolutions (model + real for each - the calibration dataset):\n";
 		for (int i = 0; i < nsol; ++i) {
 			const RouteSolution& s = g_search.results[i];
-			sprintf_s(line, "[sol %02d]%s err=%.4f real=%.3f N=%d frac=%.3f side0=%+d splits=%d,%d,%d "
+			out << FmtStr("[sol %02d]%s err=%.4f real=%.3f N=%d frac=%.3f side0=%+d splits=%d,%d,%d "
 				"wrap=%+d speed=%.1f bump=%dt/%.2f rates=%+.4f,%+.4f,%+.4f,%+.4f pass=(%.2f %.2f %.2f)\n",
 				i, s.exact ? " EXACT" : " near ", s.pass_err, s.real_err, s.ticks, s.frac, s.side0,
 				s.splits[0], s.splits[1], s.splits[2], s.wrap, s.speed,
 				s.bump_ticks, s.bump_loss,
 				s.rates[0], s.rates[1], s.rates[2], s.rates[3],
 				s.pass_pos.X, s.pass_pos.Y, s.pass_pos.Z);
-			out << line;
 		}
 		strncpy_s(g_searchlog_path, full.c_str(), _TRUNCATE);
 	}
@@ -2579,22 +3067,47 @@ namespace {
 		int k = 0;
 		int first_div = -1;
 		float worst = 0.f;
+		Vector bfn;
+		float bfd = 0.f;
+		const BspWorld::BoardTarget* btgt = BspWorld::GetTarget(sd.target);
+		const bool bface = btgt && BspWorld::GetPlane(btgt->plane, &bfn, nullptr);
+		if (bface)
+			bfd = Dot(bfn, btgt->pos);
 		for (int t = 0; t < sd.ticks + 8 && b + t < static_cast<int>(g_states.size()); ++t) {
 			while (k < sd.nsplits && t >= sd.splits[k]) k++;
 			// The SAME collision integration the solver uses - the trace
 			// compares the actual model, boards and slides included.
+			const int side = (k % 2 == 0) ? sd.side0 : -sd.side0;
+			const float yaw_next = sd.opt
+				? NormYaw(HeadingDeg(s.v, s.yaw) + static_cast<float>(side) * sd.rates[k])
+				: NormYaw(s.yaw - sd.rates[k]);
 			Vector tsp[6];
 			TickContact ttc[4];
 			int tnc = 0;
 			bool tgr = false;
-			EngineMoveTick(s, sd.rates[k], (k % 2 == 0) ? sd.side0 : -sd.side0,
-			               tsp, ttc, &tnc, &tgr);
+			EngineMoveTick(s, yaw_next, side, tsp, ttc, &tnc, &tgr);
 			const Vector ro = g_states[b + t].origin;
 			const Vector rv = g_states[b + t].velocity;
 			const float dp = sqrtf(Dot3(s.p - ro));
 			const float dv = sqrtf(Dot3(s.v - rv));
 			if (dp > worst)
 				worst = dp;
+			// Board-window forensics: distance to the target's rest plane and
+			// normal velocity, model vs real, plus which brush plane the model
+			// struck - pins seam/edge order questions with data.
+			if (bface && t >= sd.ticks - 4 && t <= sd.ticks + 6) {
+				char cbuf[96] = "";
+				if (tnc > 0) {
+					const SearchCtx::BrushCollider& cc = g_search.bcolliders[ttc[0].collider];
+					Sfmt(cbuf, "  mdl-hit brush=%d pid=%d loss=%.1f%s", cc.brush,
+						(ttc[0].plane >= 0 && ttc[0].plane < static_cast<int>(cc.pid.size()))
+							? cc.pid[ttc[0].plane] : -1,
+						ttc[0].loss, (tnc > 1) ? " +more" : "");
+				}
+				BatchAppendf("  brd t=%03d phi m=%+.3f r=%+.3f  n.v m=%+.1f r=%+.1f%s\n",
+					t, Dot(bfn, s.p) - bfd, Dot(bfn, ro) - bfd,
+					Dot(bfn, s.v), Dot(bfn, rv), cbuf);
+			}
 			if (first_div < 0 && dp > 0.1f) {
 				first_div = t;
 				BatchAppendf("  trace: FIRST divergence at local tick %d: dpos=%.3f (%+.3f %+.3f %+.3f) dvel=%.3f (%+.3f %+.3f %+.3f)\n"
@@ -2637,7 +3150,7 @@ namespace {
 			SYSTEMTIME st;
 			GetLocalTime(&st);
 			char name[128];
-			sprintf_s(name, "calib_%04d%02d%02d_%02d%02d%02d.log",
+			Sfmt(name, "calib_%04d%02d%02d_%02d%02d%02d.log",
 				st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 			const std::string full = dir + "\\" + name;
 			std::ofstream out(full, std::ios::trunc);
@@ -2668,12 +3181,14 @@ namespace {
 		g_correct.active = false;   // the batch owns the correction loop
 		g_correct.done = false;
 		BatchAppendf("== sourceTAS solver calibration ==\n"
-		             "map=%s  solutions=%d  strafes=%d  accept_tol=%.2f  correct_target=0.25\n"
+		             "map=%s  solutions=%d  strafes=%d%s  accept_tol=%.2f  correct_target=0.25\n"
 		             "start: pos=(%.2f %.2f %.2f) vel=(%.2f %.2f %.2f) yaw=%.3f  jump_at_start=%d\n"
 		             "target: pos=(%.2f %.2f %.2f) yaw=%.3f\n"
 		             "model: dt=%.6f cap=%.1f accel_amt=%.1f (sv_airaccelerate=%.0f wishspeed=%.0f) gravity=%.0f\n\n",
 			BspWorld::GetStatus().map, static_cast<int>(g_search.results.size()),
-			g_search.strafes, g_sol_pos_tol,
+			g_search.strafes,
+			g_search.opt ? " OPTIMAL-BIAS (rates are biases; last one solved for EXACT yaw)" : "",
+			g_sol_pos_tol,
 			g_search.start_pos.X, g_search.start_pos.Y, g_search.start_pos.Z,
 			g_search.start_vel.X, g_search.start_vel.Y, g_search.start_vel.Z,
 			g_search.start_yaw, g_search.jump_start,
@@ -2788,11 +3303,11 @@ namespace {
 	}
 
 	bool TargetItemGetter(void*, int index, const char** out_text) {
-		static char buffer[64];
+		static char buffer[128];
 		const BspWorld::BoardTarget* t = BspWorld::GetTarget(index);
 		if (!t)
 			return false;
-		sprintf_s(buffer, "#%d  %.0f %.0f %.0f  yaw %.0f", index, t->pos.X, t->pos.Y, t->pos.Z, t->yaw);
+		Sfmt(buffer, "#%d  %.0f %.0f %.0f  yaw %.0f", index, t->pos.X, t->pos.Y, t->pos.Z, t->yaw);
 		*out_text = buffer;
 		return true;
 	}
@@ -2924,7 +3439,9 @@ namespace {
 	// 2 solver), gen gains no_w_air, solver segments append their solution.
 	// v7/v8: first-generation solver eras (couple, contact fields) - read and
 	// discarded. v9: rebuilt solver block (start_jump, pass_frac, model pass).
-	constexpr uint32_t kProjVersion = 9;
+	// v10: optimal strafe - gen gains opt_dir, solver block gains the opt flag
+	// (rates[] hold per-phase biases when set).
+	constexpr uint32_t kProjVersion = 10;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -2980,6 +3497,7 @@ namespace {
 				W(out, g.yaw_mode); W(out, g.yaw_rate); W(out, yabs); W(out, g.yaw_start);
 				W(out, g.pitch_mode); W(out, g.pitch_val); W(out, g.pitch_mult);
 				W(out, duck); W(out, g.jump_mode); W(out, noW);
+				W(out, g.opt_dir);   // v10
 
 				const uint32_t novr = static_cast<uint32_t>(s.jump_ovr.size());
 				W(out, novr);
@@ -2993,6 +3511,7 @@ namespace {
 					const SolverData& sd = s.solver;
 					const uint8_t solved = sd.solved ? 1 : 0;
 					const uint8_t sjump = sd.start_jump ? 1 : 0;
+					const uint8_t sopt = sd.opt ? 1 : 0;
 					W(out, sd.target); W(out, sd.strafes); W(out, solved);
 					W(out, sd.ticks); W(out, sd.side0); W(out, sd.nsplits);
 					for (int i = 0; i < 3; ++i) W(out, sd.splits[i]);
@@ -3001,6 +3520,7 @@ namespace {
 					W(out, sd.pass_frac);
 					W(out, sd.model_pass.X); W(out, sd.model_pass.Y); W(out, sd.model_pass.Z);
 					W(out, sd.model_err);
+					W(out, sopt);   // v10
 				}
 			}
 		}
@@ -3008,6 +3528,42 @@ namespace {
 		g_status = out ? ("Saved " + base + ".tasproj.") : "Write failed.";
 		RefreshFiles();
 		return static_cast<bool>(out);
+	}
+
+	// Deserialized fields feed array indexing in the solver, the provider (on
+	// the GAME thread) and the UI - a corrupt or hand-edited file must never
+	// be able to index out of bounds. Clamp everything into its legal range.
+	void SanitizeGen(GenParams& g) {
+		if (g.ticks < 1) g.ticks = 1;
+		if (g.ticks > 100000) g.ticks = 100000;
+		if (g.yaw_mode < 0 || g.yaw_mode > 2) g.yaw_mode = 1;
+		g.opt_dir = (g.opt_dir < 0) ? -1 : 1;
+		if (!(g.yaw_rate == g.yaw_rate)) g.yaw_rate = 0.f;       // NaN guard
+		if (g.yaw_rate < -180.f) g.yaw_rate = -180.f;
+		if (g.yaw_rate > 180.f) g.yaw_rate = 180.f;
+		if (g.pitch_mode < 0 || g.pitch_mode > 1) g.pitch_mode = PM_Const;
+		if (g.jump_mode < 0 || g.jump_mode > 2) g.jump_mode = JM_None;
+	}
+	void SanitizeSolver(SolverData& sd) {
+		if (sd.strafes < 1) sd.strafes = 1;
+		if (sd.strafes > 4) sd.strafes = 4;
+		if (sd.nsplits < 0) sd.nsplits = 0;
+		if (sd.nsplits > 3) sd.nsplits = 3;                      // splits[3]/rates[4]
+		sd.side0 = (sd.side0 < 0) ? -1 : 1;
+		if (sd.ticks < 0) sd.ticks = 0;
+		if (sd.ticks > Prediction::kMaxSimTicks) sd.ticks = Prediction::kMaxSimTicks;
+		for (int i = 0; i < 3; ++i) {
+			if (sd.splits[i] < 0) sd.splits[i] = 0;
+			if (sd.splits[i] > Prediction::kMaxSimTicks) sd.splits[i] = Prediction::kMaxSimTicks;
+		}
+		for (int i = 0; i < 4; ++i) {
+			if (!(sd.rates[i] == sd.rates[i])) sd.rates[i] = 0.f;  // NaN guard
+			if (sd.rates[i] < -180.f) sd.rates[i] = -180.f;
+			if (sd.rates[i] > 180.f) sd.rates[i] = 180.f;
+		}
+		if (!(sd.pass_frac == sd.pass_frac)) sd.pass_frac = 1.f;
+		if (sd.ticks == 0)
+			sd.solved = false;                                   // an empty schedule isn't a solution
 	}
 
 	// v1: the very first generator layout.
@@ -3073,6 +3629,8 @@ namespace {
 			!R(in, duck) || !R(in, g.jump_mode))
 			return false;
 		if (version >= 6 && !R(in, noW))
+			return false;
+		if (version >= 10 && !R(in, g.opt_dir))
 			return false;
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
 		g.auto_key = autok != 0;
@@ -3144,6 +3702,7 @@ namespace {
 					s.gen.yaw_mode = 1;
 					s.gen.yaw_rate = 0.f;
 				}
+				SanitizeGen(s.gen);
 				if (version >= 4) {
 					uint32_t novr = 0;
 					if (!R(in, novr) || novr > 4096) return false;
@@ -3173,6 +3732,12 @@ namespace {
 							return false;
 						sd.start_jump = sjump != 0;
 						sd.model_pass = Vector(px, py, pz);
+						if (version >= 10) {
+							uint8_t sopt = 0;
+							if (!R(in, sopt))
+								return false;
+							sd.opt = sopt != 0;
+						}
 					} else {
 						// v7/v8 first-generation solver blocks: consume their extra
 						// fields; the raw schedule itself still replays fine.
@@ -3188,6 +3753,7 @@ namespace {
 						}
 						sd.pass_frac = 1.f;
 					}
+					SanitizeSolver(sd);
 				}
 			}
 			segs.push_back(std::move(s));
@@ -3256,8 +3822,9 @@ namespace {
 			g_status = "Sim not current - wait for the resim, then test.";
 			return;
 		}
-		char cmd[160];
-		sprintf_s(cmd, "setpos %.2f %.2f %.2f; setang %.2f %.2f 0",
+		char cmd[192];
+		// setpos_exact, full precision (see the Teleport button note).
+		Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
 			g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
 			g_anchor.pitch, g_anchor.yaw);
 		if (engine)
@@ -3326,12 +3893,18 @@ namespace {
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Teleport player to anchor") && g_anchor.valid && engine) {
-			char cmd[160];
-			sprintf_s(cmd, "setpos %.2f %.2f %.2f; setang %.2f %.2f 0",
+			char cmd[192];
+			// setpos_exact, full precision, no nudges: plain setpos ran the
+			// engine's unstick (1u forward); a +0.25z guess flipped it to 1u
+			// BEHIND. No more guessing - the deferred check below MEASURES the
+			// landing delta and prints it, so the next report is data.
+			Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
 				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
 				g_anchor.pitch, g_anchor.yaw);
 			engine->ClientCmd_Unrestricted(cmd);
-			g_status = "Teleported (needs sv_cheats 1).";
+			g_tp_check = true;
+			g_tp_ms = GetTickCount64();
+			g_status = "Teleported (needs sv_cheats 1); measuring the landing...";
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Test play from anchor"))
@@ -3348,22 +3921,22 @@ namespace {
 		ImGui::BeginChild("segs", ImVec2(0, 100), true);
 		for (int k = 0; k < static_cast<int>(g_segs.size()); ++k) {
 			const EditSegment& s = g_segs[k];
-			char kind[48];
+			char kind[64];
 			if (s.raw) {
 				strcpy_s(kind, "RAW");
 			} else if (s.is_solver) {
-				sprintf_s(kind, "SOLVER ->#%d K%d%s", s.solver.target, s.solver.strafes,
+				Sfmt(kind, "SOLVER ->#%d K%d%s", s.solver.target, s.solver.strafes,
 					s.solver.solved ? "" : " (unsolved)");
 			} else {
 				const bool turning = s.gen.yaw_mode == 1 && fabsf(s.gen.yaw_rate) > 0.01f;
-				sprintf_s(kind, "MOVE %s%s%s%s%s%s",
+				Sfmt(kind, "MOVE %s%s%s%s%s%s",
 					s.gen.key_w ? "W" : "", s.gen.key_a ? "A" : "",
 					s.gen.key_s ? "S" : "", s.gen.key_d ? "D" : "",
 					(turning && s.gen.auto_key && !s.gen.key_a && !s.gen.key_d) ? "+auto" : "",
 					turning ? " turn" : "");
 			}
-			char label[128];
-			sprintf_s(label, "#%d  %s  %d ticks%s##seg%d", k, kind, s.Ticks(),
+			char label[256];
+			Sfmt(label, "#%d  %s  %d ticks%s##seg%d", k, kind, s.Ticks(),
 				(!s.raw && !s.jump_ovr.empty()) ? "  [jump ovr]" : "", k);
 			if (ImGui::Selectable(label, g_sel == k)) {
 				g_sel = k;
@@ -3375,6 +3948,23 @@ namespace {
 
 		if (ImGui::Button("+ Segment")) {
 			EditSegment s;
+			// A segment added right after a SOLVED solver segment starts
+			// mid-board. Bare defaults (no keys, frozen yaw) let go of the
+			// ramp there, which visibly changed the ride vs the solver's own
+			// overrun (it holds the final phase's key + turn) - the "adding a
+			// segment changes the outcome" report. Default the new segment to
+			// CONTINUE the ride: optimal strafe in the final phase's
+			// direction, zero bias - all visible and editable in its UI.
+			if (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())
+				&& g_segs[g_sel].is_solver && g_segs[g_sel].solver.solved) {
+				const SolverData& psd = g_segs[g_sel].solver;
+				const int kk = psd.nsplits;
+				const int last_side = (kk % 2 == 0) ? psd.side0 : -psd.side0;
+				s.gen.key_w = false;
+				s.gen.yaw_mode = 2;                    // optimal strafe (ride)
+				s.gen.opt_dir = last_side;
+				s.gen.yaw_rate = 0.f;                  // pure max-gain line
+			}
 			InsertSegment(s);
 		}
 		ImGui::SameLine();
@@ -3418,7 +4008,15 @@ namespace {
 				if (ImGui::InputInt("Strafes (alternating)", &strafes))
 					s.solver.strafes = strafes < 1 ? 1 : strafes > 4 ? 4 : strafes;
 				ImGui::PopItemWidth();
-				if (s.solver.strafes < 3)
+				bool sopt = s.solver.opt;
+				if (ImGui::Checkbox("Optimal-rate strafes (max gain; search per-phase biases)", &sopt)) {
+					s.solver.opt = sopt;
+					MarkDirty();   // an applied schedule's numbers change meaning - re-search
+				}
+				if (s.solver.opt)
+					ImGui::TextDisabled("each phase rides the max-gain line +- a solved bias; the last "
+						"phase's bias is solved so the view yaw lands EXACTLY on the target");
+				else if (s.solver.strafes < 3)
 					ImGui::TextDisabled("(with the yaw constraint, %d strafe(s) only hit the point when "
 						"a timing happens to line up - 3+ solves it structurally)", s.solver.strafes);
 
@@ -3525,12 +4123,42 @@ namespace {
 							g_verify.idx, static_cast<int>(g_search.results.size()));
 					} else if (g_search.done) {
 						const int count = static_cast<int>(g_search.results.size());
+						// Tiered sort controls: equal values (quantized) fall
+						// through to the next tier; clean lines always outrank
+						// deflected ones.
+						{
+							bool resort = false;
+							ImGui::Text("Sort:");
+							ImGui::PushItemWidth(150);
+							for (int i = 0; i < 3; ++i) {
+								ImGui::SameLine();
+								char lbl[16];
+								Sfmt(lbl, "##sort%d", i);
+								resort |= ImGui::Combo(lbl, &g_sort_key[i], kSortKeyItems);
+							}
+							ImGui::PopItemWidth();
+							ImGui::SameLine();
+							ImGui::TextDisabled("(ties: 0.5 u/s, 0.05 u, 0.05 deg)");
+							if (resort && count > 0) {
+								SortVerifiedResults();
+								g_solution_pick = 0;
+								ApplySolution(g_sel, g_search.results[0]);
+								g_correct.active = false;
+								g_pick_correct_pending = g_correct.auto_run;
+								g_pick_settle_ms = GetTickCount64();
+							}
+						}
 						int pick = g_solution_pick;
-						if (IntRow("Solution (0 = fastest)", &pick, 0, count - 1) && pick != g_solution_pick) {
+						if (IntRow("Solution (0 = best by sort)", &pick, 0, count - 1) && pick != g_solution_pick) {
 							g_solution_pick = pick;
 							ApplySolution(g_sel, g_search.results[pick]);
-							if (g_correct.auto_run)
-								StartCorrect(g_sel);
+							// Correction starts only after the slider SETTLES -
+							// scrubbing quickly fired a correction (with its
+							// collider rebuilds and re-solves) per notch on top
+							// of the resim churn.
+							g_correct.active = false;
+							g_pick_correct_pending = g_correct.auto_run;
+							g_pick_settle_ms = GetTickCount64();
 						}
 						if (g_solution_pick >= count)
 							g_solution_pick = 0;
@@ -3556,8 +4184,8 @@ namespace {
 						for (int k = 0; k <= sol.nsplits; ++k) {
 							const int end = (k < sol.nsplits) ? sol.splits[k] : sol.ticks;
 							const int side = (k % 2 == 0) ? sol.side0 : -sol.side0;
-							char part[64];
-							sprintf_s(part, "%s%+.3f deg/t x %dt (%s)", k ? "  |  " : "",
+							char part[96];
+							Sfmt(part, "%s%+.3f deg/t x %dt (%s)", k ? "  |  " : "",
 								sol.rates[k], end - prev, side > 0 ? "A" : "D");
 							strcat_s(breakdown, part);
 							prev = end;
@@ -3625,7 +4253,7 @@ namespace {
 						} else if (g_realpass.crossed) {
 							char drift[48] = {};
 							if (g_realpass.drift >= 0.f)
-								sprintf_s(drift, "   drift vs model %.1f u", g_realpass.drift);
+								Sfmt(drift, "   drift vs model %.1f u", g_realpass.drift);
 							ImGui::TextColored(g_realpass.err <= g_sol_pos_tol
 									? ImVec4(0.4f, 1.f, 0.55f, 1.f) : ImVec4(1.f, 0.7f, 0.3f, 1.f),
 								"REAL line: passes %.2f u from the target (tick %d)   yaw at pass %+.3f deg off%s",
@@ -3703,9 +4331,30 @@ namespace {
 
 				ch |= IntRow("Ticks (duration)", &g.ticks, 1, 1000);
 				// "Hold" retired: it's identical to turning at 0 deg/tick (old
-				// files are normalized at load).
-				g.yaw_mode = 1;
-				ch |= FloatRow("View turn   (- left / + right, 0 = hold)", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
+				// files are normalized at load). Mode 2 = OPTIMAL strafe: the
+				// yaw rides the velocity heading (max per-tick gain) plus a
+				// user bias - the "wrangle" control.
+				if (g.yaw_mode != 2)
+					g.yaw_mode = 1;
+				bool gopt = (g.yaw_mode == 2);
+				if (ImGui::Checkbox("Optimal strafe (yaw rides the velocity heading = max gain)", &gopt)) {
+					g.yaw_mode = gopt ? 2 : 1;
+					ch = true;
+				}
+				if (g.yaw_mode == 2) {
+					int dir_idx = (g.opt_dir > 0) ? 0 : 1;
+					ImGui::PushItemWidth(140);
+					if (ImGui::Combo("Direction", &dir_idx, "Left (A)\0Right (D)\0")) {
+						g.opt_dir = (dir_idx == 0) ? 1 : -1;
+						ch = true;
+					}
+					ImGui::PopItemWidth();
+					ch |= FloatRow("Turn bias   (+ tighter / - wider, 0 = pure optimal)",
+						&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+					ImGui::TextDisabled("bias trades speed (quadratic loss) for curvature (linear) - stays optimal for that curvature");
+				} else {
+					ch |= FloatRow("View turn   (- left / + right, 0 = hold)", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
+				}
 				ch |= ImGui::Checkbox("Absolute start yaw", &g.yaw_abs);
 				if (g.yaw_abs) {
 					ImGui::SameLine();
@@ -3936,8 +4585,8 @@ namespace {
 					centroid = centroid + pts[p];
 				centroid = Scale(centroid, 1.f / static_cast<float>(count));
 			}
-			char label[128];
-			sprintf_s(label, "#%d  brush %d plane %d   slope %.0f deg   @ %.0f %.0f %.0f##tag%d",
+			char label[256];
+			Sfmt(label, "#%d  brush %d plane %d   slope %.0f deg   @ %.0f %.0f %.0f##tag%d",
 				i, brush, plane, slope, centroid.X, centroid.Y, centroid.Z, i);
 			if (ImGui::Selectable(label, g_sel_tag == i))
 				g_sel_tag = i;
@@ -3957,8 +4606,8 @@ namespace {
 		ImGui::BeginChild("targets", ImVec2(0, 90), true);
 		for (int i = 0; i < BspWorld::TargetCount(); ++i) {
 			const BspWorld::BoardTarget* t = BspWorld::GetTarget(i);
-			char label[128];
-			sprintf_s(label, "#%d  %.0f %.0f %.0f   yaw %.1f%s##tgt%d",
+			char label[256];
+			Sfmt(label, "#%d  %.0f %.0f %.0f   yaw %.1f%s##tgt%d",
 				i, t->pos.X, t->pos.Y, t->pos.Z, t->yaw, t->ducked ? "  duck" : "", i);
 			if (ImGui::Selectable(label, g_sel_target == i))
 				g_sel_target = i;
@@ -4023,6 +4672,11 @@ namespace {
 		ImGui::Checkbox("Feet marker", &WorldDraw::draw_player_marker);
 		IntRow("Hull alpha (0 = wireframe)", &WorldDraw::player_box_alpha, 0, 160);
 		FloatRow("Overlay lifetime (x frame)", &WorldDraw::overlay_life_scale, 0.5f, 4.f, "%.2f", 0.05f, 0.2f);
+		ImGui::Checkbox("Pause in-world draws while the solver works (crash isolation)",
+			&WorldDraw::pause_draw_busy);
+		if (WorldDraw::pause_draw_busy)
+			ImGui::TextDisabled("lines/hulls vanish during search+verify+correction; if the "
+				"silent crashes stop with this ON, the engine overlay race is confirmed");
 
 		ImGui::Separator();
 		ImGui::Text("Live prediction (from the player)");
@@ -4129,26 +4783,89 @@ namespace {
 
 // ------------------------------------------------------------------- public --
 void TasEditor::Update() {
+	// Last-resort crash writer for faults OUTSIDE every frame guard (any
+	// thread): names module+offset in calibration\crash.log before dying.
+	static bool s_crash_filter = false;
+	if (!s_crash_filter) {
+		s_crash_filter = true;
+		g_prev_uef = SetUnhandledExceptionFilter(&CrashWriter);
+		g_veh_handle = AddVectoredExceptionHandler(1, &FirstChanceWriter);
+	}
+
 	// Pump the solver search (time-sliced; no-op when idle).
 	StepSearch();
 
+	// Teleport landing check: report the measured delta from the anchor, and
+	// persist it (a later crash or status overwrite must not eat the number).
+	if (g_tp_check && GetTickCount64() - g_tp_ms >= 400) {
+		g_tp_check = false;
+		StartState now;
+		if (g_anchor.valid && Prediction::CaptureStartState(now)) {
+			const Vector d = now.origin - g_anchor.origin;
+			const float yr = g_anchor.yaw * (kPi / 180.f);
+			const std::string line = FmtStr(
+				"teleport: anchor=(%.4f %.4f %.4f) landed=(%.4f %.4f %.4f) "
+				"delta=(%.4f %.4f %.4f) = %.4f fwd, %.4f side, %.4f up (yaw %.2f)",
+				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
+				now.origin.X, now.origin.Y, now.origin.Z,
+				d.X, d.Y, d.Z,
+				d.X * cosf(yr) + d.Y * sinf(yr),
+				-d.X * sinf(yr) + d.Y * cosf(yr),
+				d.Z, g_anchor.yaw);
+			g_status = line;
+			const std::string dir = CalibDir();
+			if (!dir.empty()) {
+				std::ofstream f(dir + "\\teleport.log", std::ios::app);
+				if (f)
+					f << line << "\n";
+			}
+		}
+	}
+
+	// Slider settled? Start the deferred auto-correction (one, not per notch).
+	if (g_pick_correct_pending && GetTickCount64() - g_pick_settle_ms >= 350
+		&& !g_verify.active && !g_batch.active && !g_search.active) {
+		g_pick_correct_pending = false;
+		if (g_correct.auto_run && g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())
+			&& g_segs[g_sel].is_solver)
+			StartCorrect(g_sel);
+	}
+
+	// Corrections are PUMPED by landing sims - a correction armed while no
+	// sim is in flight would never take its first step and g_correct.active
+	// would stick true forever (which also kept SearchBusy true, so the
+	// draw-pause blanked the world until a menu interaction forced a resim).
+	// Kick a stalled correction once the current line is landed and clean.
+	if (g_correct.active && g_correct.skip == 0 && g_valid && !g_dirty
+		&& !g_sim_requested && !Prediction::SimBusy()
+		&& !g_verify.active && !g_batch.active) {
+		g_stage_name = "CorrectPump(kick)";
+		CorrectPump();
+		g_stage_name = "";
+	}
+
 	// Land a finished sim, measure the REAL pass, feed the correction loop.
+	// The whole chain runs under the same fault guard as the search jobs: a
+	// crash anywhere in it becomes a NAMED stage in solver_fault.log and the
+	// pumps stop, instead of a dead game with no evidence.
 	if (Prediction::SimReady()) {
-		const int n = Prediction::SimCount();
-		g_sim_fault = Prediction::SimFaulted();
-		g_frames.resize(n);
-		g_states.resize(n);
-		Prediction::TakeSim(g_frames.data(), g_states.data());
-		g_valid = n > 0;
-		g_sim_requested = false;
-		RecomputeDiag();
-		AnalyzeRealPass();
-		if (g_batch.active)
-			BatchPump();
-		else if (g_verify.active)
-			VerifyPump();
-		else
-			CorrectPump();
+		if (!SimLandedGuarded()) {
+			char note[256];
+			Sfmt(note, "EDITOR FAULT 0x%08X in stage %s (verify idx %d, batch idx %d) "
+				"- pumps stopped; report this line.",
+				g_guard_code, g_stage_name[0] ? g_stage_name : "TakeSim",
+				g_verify.idx, g_batch.idx);
+			g_status = note;
+			const std::string dir = CalibDir();
+			if (!dir.empty()) {
+				std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
+				if (f)
+					f << note << "\n";
+			}
+			g_verify.active = false;
+			g_batch.active = false;
+			g_correct.active = false;
+		}
 	}
 
 	// Live preview: resim as fast as the sim itself allows (measured, not
@@ -4167,6 +4884,8 @@ void TasEditor::Update() {
 			if (g_plan_count > 0 && g_plan[g_plan_count - 1].solver
 				&& g_plan[g_plan_count - 1].ticks > 0)
 				sim_ticks += kSolverOverrun;
+			if (sim_ticks > Prediction::kMaxSimTicks)
+				sim_ticks = Prediction::kMaxSimTicks;
 			if (Prediction::RequestSim(g_anchor, sim_ticks, &Provider)) {
 				g_sim_requested = true;
 				g_dirty = false;
@@ -4223,7 +4942,7 @@ void TasEditor::PickAtCrosshair() {
 		const char* what = !hit.hit ? "MISS"
 			: (hit.contents & 0x10000) ? "PLAYERCLIP (invisible)"
 			: (hit.contents & 0x8) ? "grate" : "solid";
-		sprintf_s(g_pick_info, "last pick: yaw %.1f pitch %.1f | eye %.0f %.0f %.0f | %s"
+		Sfmt(g_pick_info, "last pick: yaw %.1f pitch %.1f | eye %.0f %.0f %.0f | %s"
 			" brush %d plane %d dist %.0f @ %.0f %.0f %.0f",
 			s.yaw, s.pitch, eye.X, eye.Y, eye.Z, what,
 			hit.brush, hit.plane, hit.dist, hit.point.X, hit.point.Y, hit.point.Z);
@@ -4234,23 +4953,43 @@ void TasEditor::PickAtCrosshair() {
 		return;
 	}
 
-	char message[192];
+	char message[384];
 	if (g_pick_mode == 0) {
 		const bool tagged = BspWorld::ToggleFaceTag(hit.brush, hit.plane);
-		sprintf_s(message, "%s face (brush %d, plane %d) at %.0f %.0f %.0f",
+		Sfmt(message, "%s face (brush %d, plane %d) at %.0f %.0f %.0f",
 			tagged ? "Tagged" : "Untagged", hit.brush, hit.plane,
 			hit.point.X, hit.point.Y, hit.point.Z);
 	} else {
 		const int index = BspWorld::AddTargetFromHit(hit, s.yaw, s.pitch, false);
 		if (index >= 0) {
 			g_sel_target = index;
-			sprintf_s(message, "Board target #%d placed (surface normal %.2f %.2f %.2f)",
+			Sfmt(message, "Board target #%d placed (surface normal %.2f %.2f %.2f)",
 				index, hit.normal.X, hit.normal.Y, hit.normal.Z);
 		} else {
-			sprintf_s(message, "Couldn't place a target there.");
+			Sfmt(message, "Couldn't place a target there.");
 		}
 	}
 	g_status = message;
+}
+
+bool TasEditor::SearchBusy() {
+	return g_search.active || g_verify.active || g_batch.active || g_correct.active;
+}
+
+bool TasEditor::SearchHeavy() {
+	return g_search.active || g_verify.active || g_batch.active;
+}
+
+void TasEditor::NoteExternalFault(const char* where, int code) {
+	char note[256];
+	Sfmt(note, "EDITOR FAULT 0x%08X in stage %s - report this line.", code, where);
+	g_status = note;
+	const std::string dir = CalibDir();
+	if (!dir.empty()) {
+		std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
+		if (f)
+			f << note << "\n";
+	}
 }
 
 bool TasEditor::GetDrawData(DrawData& out) {
@@ -4284,13 +5023,75 @@ bool TasEditor::GetDrawData(DrawData& out) {
 	return true;
 }
 
+namespace {
+	// The whole editor UI, guarded: a fault anywhere inside becomes a named
+	// report; the ImGui window stack is rebalanced so EndFrame survives, and
+	// the editor UI disables itself instead of killing the game.
+	bool g_ui_disabled = false;
+	void DrawWindowImpl();
+	bool DrawWindowGuarded() {
+		__try {
+			DrawWindowImpl();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			g_guard_code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
+}
+
 void TasEditor::DrawWindow() {
+	if (g_ui_disabled) {
+		ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiSetCond_FirstUseEver);
+		ImGui::Begin("sourceTAS Editor FAULT", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+		ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f),
+			"The editor UI hit a fault and disabled itself (game kept alive).");
+		ImGui::TextWrapped("%s", g_status.c_str());
+		ImGui::End();
+		return;
+	}
+	if (!DrawWindowGuarded()) {
+		g_ui_disabled = true;
+		// Pop any windows the faulting frame left unbalanced - an unmatched
+		// Begin would assert (and kill us) in ImGui::EndFrame otherwise.
+		ImGuiContext& ctx = *GImGui;
+		while (ctx.CurrentWindowStack.Size > 1)
+			ImGui::End();
+		char note[256];
+		Sfmt(note, "EDITOR FAULT 0x%08X in stage DrawWindow - UI disabled, game kept alive.",
+			g_guard_code);
+		g_status = note;
+		const std::string dir = CalibDir();
+		if (!dir.empty()) {
+			std::ofstream f(dir + "\\solver_fault.log", std::ios::app);
+			if (f)
+				f << note << "\n";
+		}
+	}
+}
+
+namespace {
+void DrawWindowImpl() {
 	if (!g_open)
 		return;
 
 	BspWorld::highlight_target = g_sel_target;
 	BspWorld::highlight_tag = g_sel_tag;
 
+	// Default-open skips Toggle(), so refresh the project list once lazily.
+	static bool s_refreshed = false;
+	if (!s_refreshed) {
+		s_refreshed = true;
+		RefreshFiles();
+	}
+
+	// Bottom-left by default (NoSavedSettings means this applies every launch).
+	{
+		const ImVec2 disp = ImGui::GetIO().DisplaySize;
+		float wy = disp.y - 820.f - 12.f;
+		if (wy < 10.f) wy = 10.f;
+		ImGui::SetNextWindowPos(ImVec2(12.f, wy), ImGuiSetCond_FirstUseEver);
+	}
 	ImGui::SetNextWindowSize(ImVec2(920, 820), ImGuiSetCond_FirstUseEver);
 	if (!ImGui::Begin("sourceTAS Editor", &g_open, ImGuiWindowFlags_NoSavedSettings)) {
 		ImGui::End();
@@ -4323,3 +5124,4 @@ void TasEditor::DrawWindow() {
 	ImGui::TextWrapped("%s", g_status.c_str());
 	ImGui::End();
 }
+}   // namespace (DrawWindowImpl)

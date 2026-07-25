@@ -21,6 +21,7 @@ namespace WorldDraw {
 	int   player_box_alpha   = 30;    // low: mostly wireframe, never reads as solid
 	float overlay_life_scale = 1.5f;  // ~one frame of lifetime (see FrameDuration)
 	bool  show_replay_hud    = true;
+	bool  pause_draw_busy    = true;  // crash isolation: no overlays while solving
 
 	int   pred_ticks       = 66;      // ~1s at 66-tick
 	bool  pred_live_input  = true;    // reflect what you're actually pressing
@@ -65,6 +66,12 @@ namespace {
 		       v.Z > -kMax && v.Z < kMax;
 	}
 
+	// PLAYER-ATTACHED overlays (hull, origin dot, live prediction) use the
+	// RAW per-frame interval: they track a moving entity, and any lifetime
+	// stretching leaves visible trails on it ("ghosting on the active player
+	// hitbox"). Refreshed by FrameDuration each frame.
+	float g_dur_live = 0.03f;
+
 	// Adaptive overlay lifetime. A fixed duration leaves a moving "ghost trail":
 	// stale copies from previous positions stay alive while the player moves, and
 	// stacked translucent copies read as a solid box. A static overlay hides this
@@ -90,9 +97,26 @@ namespace {
 		if (scale < 0.5f) scale = 0.5f;
 		if (scale > 6.0f) scale = 6.0f;
 
-		float duration = (dt > 0.f) ? dt * scale : 0.03f;
+		// Player-attached lifetime: raw interval only.
+		g_dur_live = (dt > 0.f) ? dt * scale : 0.03f;
+		if (g_dur_live < 0.01f) g_dur_live = 0.01f;
+		if (g_dur_live > 0.20f) g_dur_live = 0.20f;
+
+		// Static-drawing lifetime: the MAX of the last few intervals, so a
+		// spiky frame (solver work slices, sims landing unevenly) doesn't
+		// strand the editor line - flicker-resistant without trailing, since
+		// those drawings don't move between frames.
+		static float hist[8] = {};
+		static int hi = 0;
+		hist[hi] = dt;
+		hi = (hi + 1) & 7;
+		float base = dt;
+		for (int i = 0; i < 8; ++i)
+			if (hist[i] > base) base = hist[i];
+
+		float duration = (base > 0.f) ? base * scale : 0.03f;
 		if (duration < 0.01f) duration = 0.01f;   // survive to the next frame's draw
-		if (duration > 0.20f) duration = 0.20f;   // cap ghosting if a frame hitches
+		if (duration > 0.30f) duration = 0.30f;   // cap ghosting if frames hitch hard
 		return duration;
 	}
 }
@@ -105,6 +129,17 @@ void WorldDraw::Render() {
 
 	d.in_game = engine->IsInGame();
 	if (!d.in_game) { g_diag = d; return; }
+
+	// Crash isolation: while the solver's HEAVY phases churn (search /
+	// verify / batch), submit NOTHING. The engine expires its overlay list
+	// on the game thread while we add from the render hook; if the silent
+	// heap-corruption crashes stop with this pause active, that race is
+	// confirmed (then the real fix is game-thread submission). Brief
+	// corrections don't pause - a stalled one used to blank the world.
+	if (pause_draw_busy && TasEditor::SearchHeavy()) {
+		g_diag = d;
+		return;
+	}
 
 	const float   duration = FrameDuration();
 	const QAngle  kNoRotation(0.f, 0.f, 0.f);
@@ -132,13 +167,15 @@ void WorldDraw::Render() {
 
 		const float height = d.ducking ? kDuckHeight : kStandHeight;
 
+		// Player-attached draws track a MOVING entity: raw per-frame lifetime,
+		// or every stretched frame leaves a trail of stale copies behind it.
 		if (draw_player_box) {
 			int a = player_box_alpha;
 			if (a < 0)   a = 0;
 			if (a > 255) a = 255;
 			const Vector maxs(kHullWidth, kHullWidth, height);
 			debugoverlay->AddBoxOverlay(d.origin, kHullMins, maxs, kNoRotation,
-			                            255, 64, 64, a, duration);
+			                            255, 64, 64, a, g_dur_live);
 		}
 
 		// A single dot at the feet origin. Per tick this is the path vertex; when a
@@ -147,7 +184,7 @@ void WorldDraw::Render() {
 			const Vector dmin(-kMarkerHalf, -kMarkerHalf, -kMarkerHalf);
 			const Vector dmax( kMarkerHalf,  kMarkerHalf,  kMarkerHalf);
 			debugoverlay->AddBoxOverlay(d.origin, dmin, dmax, kNoRotation,
-			                            255, 255, 0, 255, duration);
+			                            255, 255, 0, 255, g_dur_live);
 		}
 
 		// (3) Predicted path (Phase 1b): the look-ahead computed once per tick inside
@@ -162,12 +199,12 @@ void WorldDraw::Render() {
 			for (const Vector& p : path) {
 				if (!FiniteWorldPoint(p))
 					break;   // prediction diverged; stop before feeding garbage to the overlay
-				debugoverlay->AddLineOverlay(prev, p, 40, 220, 90, false, duration);
-				debugoverlay->AddBoxOverlay(p, dmin, dmax, kNoRotation, 40, 255, 90, 255, duration);
+				debugoverlay->AddLineOverlay(prev, p, 40, 220, 90, false, g_dur_live);
+				debugoverlay->AddBoxOverlay(p, dmin, dmax, kNoRotation, 40, 255, 90, 255, g_dur_live);
 				for (int c = 0; c < 4; ++c)
 					if (corner_trails[c])
 						debugoverlay->AddLineOverlay(prev + kCornerOff[c], p + kCornerOff[c],
-						                             120, 170, 200, false, duration);
+						                             120, 170, 200, false, g_dur_live);
 				prev = p;
 			}
 		}
@@ -251,13 +288,22 @@ void WorldDraw::Render() {
 		}
 
 		if (ed.cursor >= 0 && ed.cursor < ed.count) {
-			const Vector cp = ed.states[ed.cursor].origin;
+			// The hull for tick t is the state ENTERING t: states[t-1], and the
+			// ANCHOR for t=0. Drawing states[t] put the "start hitbox" one tick
+			// of movement AHEAD of the anchor - the teleport measured EXACT
+			// (delta 0.000) while the marker sat ~1u forward: the marker lied.
+			const Vector cp = (ed.cursor == 0)
+				? ed.anchor.origin
+				: ed.states[ed.cursor - 1].origin;
+			const unsigned cflags = (ed.cursor == 0)
+				? (ed.anchor.ducked ? FL_DUCKING : 0)
+				: ed.states[ed.cursor - 1].flags;
 			if (FiniteWorldPoint(cp)) {
 				// Origin marker always draws at the playhead; the hull is a toggle.
 				debugoverlay->AddBoxOverlay(cp, Vector(-1.5f, -1.5f, -1.5f), Vector(1.5f, 1.5f, 1.5f),
 				                            kNoRotation, 255, 255, 0, 255, duration);
 				if (ed.show_hull) {
-					const float h = (ed.states[ed.cursor].flags & FL_DUCKING) ? 54.f : 72.f;
+					const float h = (cflags & FL_DUCKING) ? 54.f : 72.f;
 					debugoverlay->AddBoxOverlay(cp, Vector(-16.f, -16.f, 0.f), Vector(16.f, 16.f, h),
 					                            kNoRotation, 255, 255, 0, 40, duration);
 				}

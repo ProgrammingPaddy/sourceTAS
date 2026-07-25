@@ -77,14 +77,47 @@ namespace {
 		sprintf_s(buffer, "Key %d", vk);
 		return buffer;
 	}
+
+	// Hook-level SEH shells (POD frames only): a fault in the editor's frame
+	// work is logged and survived instead of killing the game.
+	bool GuardedEditorUpdate(int* code) {
+		__try {
+			TasEditor::Update();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			*code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
+	bool GuardedWorldDrawRender(int* code) {
+		__try {
+			WorldDraw::Render();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			*code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
 }
 
 void BasehookInterface::OnEndScene() {
 
 	// Editor sim orchestration + in-world overlays run every frame, independent
-	// of the menu. Both self-guard when out of game.
-	TasEditor::Update();
-	WorldDraw::Render();
+	// of the menu. Both self-guard when out of game - and both run under
+	// hook-level SEH so a fault becomes a logged report, not a dead game
+	// (transient: the next frame tries again; the log has the evidence).
+	{
+		static int upd_reported = 0, wd_reported = 0;
+		int code = 0;
+		if (!GuardedEditorUpdate(&code) && upd_reported < 3) {
+			upd_reported++;
+			TasEditor::NoteExternalFault("TasEditor::Update", code);
+		}
+		if (!GuardedWorldDrawRender(&code) && wd_reported < 3) {
+			wd_reported++;
+			TasEditor::NoteExternalFault("WorldDraw::Render", code);
+		}
+	}
 
 	// Replay diagnostics HUD: non-interactive status while a run plays back,
 	// shown whether or not the menu is open.

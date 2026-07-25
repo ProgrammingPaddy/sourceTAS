@@ -153,13 +153,13 @@ namespace {
 			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (file == INVALID_HANDLE_VALUE) {
-			sprintf_s(error, error_size, "open failed (err %lu): %s", GetLastError(), path.c_str());
+			_snprintf_s(error, error_size, _TRUNCATE, "open failed (err %lu): %s", GetLastError(), path.c_str());
 			return false;
 		}
 
 		LARGE_INTEGER size = {};
 		if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > (256ll << 20)) {
-			sprintf_s(error, error_size, "bad file size: %s", path.c_str());
+			_snprintf_s(error, error_size, _TRUNCATE, "bad file size: %s", path.c_str());
 			CloseHandle(file);
 			return false;
 		}
@@ -170,7 +170,7 @@ namespace {
 			&& read == out.size();
 		CloseHandle(file);
 		if (!ok)
-			sprintf_s(error, error_size, "read failed (err %lu): %s", GetLastError(), path.c_str());
+			_snprintf_s(error, error_size, _TRUNCATE, "read failed (err %lu): %s", GetLastError(), path.c_str());
 		return ok;
 	}
 

@@ -53,4 +53,14 @@ namespace TasEditor {
 		Vector pass_point;
 	};
 	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
+	// True while the solver machinery hitches frames (search/verify/batch/
+	// correction) - overlay lifetimes pin longer so the 3D draws don't flicker.
+	bool SearchBusy();
+	// The HEAVY phases only (search/verify/batch - the overlay-churn storms).
+	// The draw pause keys off this so a brief correction doesn't blank the
+	// world.
+	bool SearchHeavy();
+	// Record a fault caught by an OUTSIDE guard (hook-level SEH around Update/
+	// WorldDraw): writes the where+code to the status line and solver_fault.log.
+	void NoteExternalFault(const char* where, int code);
 }

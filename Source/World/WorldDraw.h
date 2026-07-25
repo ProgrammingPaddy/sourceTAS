@@ -17,6 +17,12 @@ namespace WorldDraw {
 	extern int   player_box_alpha;   // hull fill alpha; 0 = wireframe only
 	extern float overlay_life_scale; // overlay lifetime as a multiple of frame time
 	extern bool  show_replay_hud;    // status HUD while a run replays
+	// Crash-isolation switch: skip ALL overlay submission while the solver
+	// machinery runs. The engine walks/expires its overlay list on the game
+	// thread while we submit from the render hook - a probabilistic race that
+	// scales with churn; pausing our traffic during solver work for one
+	// session proves or clears the theory.
+	extern bool  pause_draw_busy;
 
 	// Bottom hull-corner trails: parallel path lines offset to each bottom corner
 	// of the (axis-aligned) player hull, for lining up and checking ramp boards.
