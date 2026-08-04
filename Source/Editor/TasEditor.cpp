@@ -25,6 +25,8 @@
 
 #include "../World/WorldDraw.h"
 #include "../World/BspWorld.h"
+#include "../Menu/Theme.h"
+#include "../Menu/RecordPanel.h"
 
 namespace {
 	constexpr float kPi = 3.14159265358979f;
@@ -99,12 +101,16 @@ namespace {
 		bool  key_w = true, key_a = false, key_s = false, key_d = false;
 		bool  auto_key = true;        // A/D from view turn direction (airborne)
 		bool  no_w_air = true;        // release W while airborne (surf default)
-		int   yaw_mode = 1;           // 1 = turn at yaw_rate (0 = legacy hold);
+		int   yaw_mode = 2;           // DEFAULT optimal. 1 = turn at yaw_rate (0 = hold);
 		                              // 2 = OPTIMAL strafe: yaw follows the velocity
 		                              //     heading (max gain), yaw_rate = bias deg
 		                              // 3 = STRAIGHT SYNC: alternating optimal strafes
 		                              //     every opt_period ticks; the net path holds
-		                              //     its heading, yaw_rate = steer bias deg
+		                              //     its heading, yaw_rate = steer bias (view tilt)
+		                              // 4 = STRAIGHT SKEW: alternating optimal strafes
+		                              //     with ASYMMETRIC dwell (left ticks != right)
+		                              //     so the mean path bends by dwell, view stays
+		                              //     pure max-gain; yaw_rate = tick skew
 		float yaw_rate = 0.f;         // deg/tick, screen sign (+ = right); mode 2/3: bias
 		int   opt_dir = 1;            // mode 2 direction / mode 3 first side (+1 A, -1 D)
 		int   opt_period = 8;         // mode 3: ticks per strafe side
@@ -141,7 +147,8 @@ namespace {
 		int   ps_ground_ticks = 22;   // W + ground-key accel duration
 		float ps_ground_turn = 100.f; // total view turn over the ground phase (deg)
 		int   ps_ground_dir = 1;      // ground strafe key (+1 A/left, -1 D/right)
-		int   ps_air_dir = 1;         // air strafe key (the steerable strafe)
+		int   ps_air_dir = 1;         // FIRST air strafe key
+		int   ps_strafes = 1;         // air phase = N alternating optimal strafes
 		float ps_air_bias = 0.f;      // air steering bias (deg, screen sign + = right)
 		bool  ps_crouch_end = true;   // crouch near the end (dodge the floor)
 		bool  ps_crouch_auto = true;  // auto-time the crouch to the last airborne tick
@@ -242,7 +249,7 @@ namespace {
 
 	// ---------------------------------------------------------------- state --
 	bool g_open = true;   // the editor IS the tool - visible whenever the menu is
-	int  g_tab = 0;                   // 0 Run, 1 Targets, 2 Rendering, 3 Project
+	int  g_tab = 1;                   // 0 Record, 1 Run, 2 Targets, 3 Rendering, 4 Project
 	char g_name[64] = "untitled";
 	StartState g_anchor;
 	std::vector<EditSegment> g_segs;
@@ -434,7 +441,14 @@ namespace {
 				yaw = h + static_cast<float>(g.opt_dir) * g.yaw_rate;
 			}
 		} else if (g.yaw_mode == 3) {
-			yaw = HeadingDeg(vel, lastYaw) + g.yaw_rate;
+			// Straight sync: steer in SCREEN sign (+ = right), same convention
+			// as the L/R steering bias, and tick-independent (splice-safe).
+			yaw = HeadingDeg(vel, lastYaw) - g.yaw_rate;
+		} else if (g.yaw_mode == 4) {
+			// Straight SKEW: the view is pure max-gain (heading); the steering
+			// comes entirely from the asymmetric strafe dwell (below), so the
+			// bias never tilts the view here.
+			yaw = HeadingDeg(vel, lastYaw);
 		}
 		return NormYaw(yaw);
 	}
@@ -516,12 +530,20 @@ namespace {
 				fmove = 450.f;   // W
 				smove = (g.ps_ground_dir > 0) ? -450.f : 450.f;   // A / D
 			} else {
-				// Air strafe: optimal (view follows velocity heading) plus the
-				// steering bias (screen sign, + = right); no W in air.
+				// Air: N alternating optimal strafes (max gain, view follows the
+				// velocity heading) steered by one bias. The air ticks split into
+				// ps_strafes equal strafes; the side alternates from ps_air_dir.
+				// N = 1 is a single continuous strafe (max speed build).
+				const int air_ticks = ps.ticks - gt;
+				const int at = t - gt;
+				const int N = (g.ps_strafes < 1) ? 1 : g.ps_strafes;
+				int si = (air_ticks > 0) ? (at * N) / air_ticks : 0;
+				if (si >= N) si = N - 1;
+				const int side = (si % 2 == 0) ? g.ps_air_dir : -g.ps_air_dir;
 				const float h = HeadingDeg(prev.velocity, g_pv_last_yaw);
 				yaw = NormYaw(h - g.ps_air_bias);
 				fmove = 0.f;
-				smove = (g.ps_air_dir > 0) ? -450.f : 450.f;
+				smove = (side > 0) ? -450.f : 450.f;
 			}
 			// Launch on the first air tick while still grounded (releases the
 			// ground key that same tick since smove already switched sides).
@@ -606,6 +628,20 @@ namespace {
 				const int per = (g.opt_period < 1) ? 1 : g.opt_period;
 				const int side = (((t / per) % 2) == 0) ? g.opt_dir : -g.opt_dir;
 				smove = (side > 0) ? -450.f : 450.f;
+			}
+			else if (g.yaw_mode == 4) {
+				// Asymmetric dwell (view stays max-gain). yaw_rate = tick skew,
+				// screen sign: + holds the RIGHT (D) side longer -> bends right,
+				// - holds LEFT (A) longer -> bends left. opt_dir-independent so
+				// the slider always means the same thing.
+				const int base = (g.opt_period < 1) ? 1 : g.opt_period;
+				int skew = static_cast<int>(g.yaw_rate + (g.yaw_rate >= 0.f ? 0.5f : -0.5f));
+				int pA = base - skew, pD = base + skew;   // A = left, D = right
+				if (pA < 1) pA = 1;
+				if (pD < 1) pD = 1;
+				const int cycle = pA + pD;
+				const int phase = ((t % cycle) + cycle) % cycle;
+				smove = (phase < pA) ? -450.f : 450.f;   // A for pA ticks, then D
 			}
 		}
 
@@ -4448,6 +4484,38 @@ namespace {
 		return dir;
 	}
 
+	// Global UI preferences (not per-project): one value per line in
+	// Documents\sourceTAS\ui.cfg. Currently just the menu opacity.
+	std::string SettingsPath() {
+		char documents[MAX_PATH];
+		if (FAILED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, documents)))
+			return {};
+		std::string base = std::string(documents) + "\\sourceTAS";
+		CreateDirectoryA(base.c_str(), nullptr);
+		return base + "\\ui.cfg";
+	}
+
+	void LoadUiSettings() {
+		const std::string p = SettingsPath();
+		if (p.empty())
+			return;
+		std::ifstream f(p);
+		if (!f)
+			return;
+		float op = Theme::MenuOpacity();
+		if (f >> op && op >= 0.05f && op <= 1.f)
+			Theme::MenuOpacity() = op;
+	}
+
+	void SaveUiSettings() {
+		const std::string p = SettingsPath();
+		if (p.empty())
+			return;
+		std::ofstream f(p, std::ios::trunc);
+		if (f)
+			f << Theme::MenuOpacity() << "\n";
+	}
+
 	std::string SanitizeName(const std::string& name) {
 		std::string out;
 		for (char c : name) {
@@ -4493,7 +4561,8 @@ namespace {
 	//      checkbox no longer reinterprets the APPLIED schedule's numbers.
 	// v14: solver gains ride (on-face ride solve).
 	// v15: gen gains smooth_ticks + the prestrafe recipe fields.
-	constexpr uint32_t kProjVersion = 15;
+	// v16: prestrafe gains ps_strafes (N alternating air strafes).
+	constexpr uint32_t kProjVersion = 16;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -4565,6 +4634,7 @@ namespace {
 				W(out, pcend);
 				W(out, pcauto);
 				W(out, g.ps_crouch_lead);
+					W(out, g.ps_strafes);        // v16
 
 				const uint32_t novr = static_cast<uint32_t>(s.jump_ovr.size());
 				W(out, novr);
@@ -4612,7 +4682,7 @@ namespace {
 	void SanitizeGen(GenParams& g) {
 		if (g.ticks < 1) g.ticks = 1;
 		if (g.ticks > 100000) g.ticks = 100000;
-		if (g.yaw_mode < 0 || g.yaw_mode > 3) g.yaw_mode = 1;
+		if (g.yaw_mode < 1 || g.yaw_mode > 4) g.yaw_mode = 2;
 		g.opt_dir = (g.opt_dir < 0) ? -1 : 1;
 		if (g.opt_period < 1) g.opt_period = 1;
 		if (g.opt_period > 128) g.opt_period = 128;
@@ -4631,6 +4701,8 @@ namespace {
 		if (g.ps_ground_turn > 720.f) g.ps_ground_turn = 720.f;
 		g.ps_ground_dir = (g.ps_ground_dir < 0) ? -1 : 1;
 		g.ps_air_dir = (g.ps_air_dir < 0) ? -1 : 1;
+		if (g.ps_strafes < 1) g.ps_strafes = 1;
+		if (g.ps_strafes > 8) g.ps_strafes = 8;
 		if (!(g.ps_air_bias == g.ps_air_bias)) g.ps_air_bias = 0.f;
 		if (g.ps_air_bias < -20.f) g.ps_air_bias = -20.f;
 		if (g.ps_air_bias > 20.f) g.ps_air_bias = 20.f;
@@ -4751,6 +4823,8 @@ namespace {
 			g.ps_crouch_end = pcend != 0;
 			g.ps_crouch_auto = pcauto != 0;
 			g.ps_crouch_cached = -1;   // runtime-only; recomputed on the next sim
+			if (version >= 16 && !R(in, g.ps_strafes))
+				return false;
 		}
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
 		g.auto_key = autok != 0;
@@ -5013,14 +5087,52 @@ namespace {
 	}
 
 	// ----------------------------------------------------------------- tabs --
+	// Start/end stats for a segment's REAL simmed range: 2D + 3D speed, view
+	// yaw/pitch, and average air efficiency. "Start" is the state ENTERING the
+	// segment; "end" is the state after its LAST tick.
+	void DrawSegmentStats(int sel) {
+		if (!g_valid || g_states.empty() || sel < 0 || sel >= static_cast<int>(g_starts.size()))
+			return;
+		const int b = g_starts[sel];
+		int e = (sel + 1 < static_cast<int>(g_starts.size())) ? g_starts[sel + 1] : g_total;
+		if (e > static_cast<int>(g_states.size())) e = static_cast<int>(g_states.size());
+		if (e <= b)
+			return;
+		const int nf = static_cast<int>(g_frames.size());
+		const Vector v0 = (b > 0 && b - 1 < static_cast<int>(g_states.size()))
+			? g_states[b - 1].velocity : g_anchor.velocity;
+		const Vector v1 = g_states[e - 1].velocity;
+		auto sp2 = [](const Vector& v) { return sqrtf(v.X * v.X + v.Y * v.Y); };
+		auto sp3 = [](const Vector& v) { return sqrtf(v.X * v.X + v.Y * v.Y + v.Z * v.Z); };
+		const float y0 = (b < nf) ? g_frames[b].viewangles[1] : g_anchor.yaw;
+		const float p0 = (b < nf) ? g_frames[b].viewangles[0] : g_anchor.pitch;
+		const float y1 = (e - 1 < nf) ? g_frames[e - 1].viewangles[1] : y0;
+		const float p1 = (e - 1 < nf) ? g_frames[e - 1].viewangles[0] : p0;
+		float eff_sum = 0.f; int eff_n = 0;
+		for (int i = b; i < e; ++i)
+			if (i < static_cast<int>(g_maxgain.size()) && g_maxgain[i] > 0.001f) {
+				eff_sum += g_eff[i]; eff_n++;
+			}
+		ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.f, 1.f),
+			"Segment stats  (ticks %d - %d, %d ticks)", b, e - 1, e - b);
+		ImGui::Text("  START   speed %.1f u/s  (3D %.1f)   yaw %.2f   pitch %.2f",
+			sp2(v0), sp3(v0), y0, p0);
+		ImGui::Text("  END     speed %.1f u/s  (3D %.1f)   yaw %.2f   pitch %.2f",
+			sp2(v1), sp3(v1), y1, p1);
+		ImGui::Text("  change  %+.1f u/s        turned %+.2f deg   avg air eff %.0f%% (%d air ticks)",
+			sp2(v1) - sp2(v0), NormYaw(y1 - y0),
+			eff_n ? (eff_sum / eff_n) * 100.f : 0.f, eff_n);
+	}
+
 	void DrawRunTab() {
 		// --- anchor + test play ------------------------------------------
+		Theme::Heading("Anchor & test play");
 		if (g_anchor.valid)
 			ImGui::Text("Anchor: %.1f %.1f %.1f   yaw %.1f   vel %.0f u/s%s",
 				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
 				g_anchor.yaw, Speed2D(g_anchor.velocity), g_anchor.ducked ? "   (ducked)" : "");
 		else
-			ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f), "No anchor - capture one to simulate.");
+			ImGui::TextColored(Theme::Warning, "No anchor - capture one to simulate.");
 
 		if (ImGui::Button("Capture anchor from player")) {
 			StartState s;
@@ -5054,26 +5166,32 @@ namespace {
 		if (ImGui::Button("Stop test") && g_tas.IsPlaying())
 			g_tas.EmergencyStop();
 
-		ImGui::Separator();
-
-		// --- segment list -------------------------------------------------
-		ImGui::Text("Segments   (%d ticks total, %.2f s)", g_total,
+		// --- segment list (left) + selected-segment stats (right) ---------
+		Theme::Heading("Segments");
+		ImGui::TextDisabled("%d ticks total, %.2f s", g_total,
 			g_total * (Prediction::LastDiag().interval_per_tick > 0.f ? Prediction::LastDiag().interval_per_tick : 0.015f));
-		ImGui::BeginChild("segs", ImVec2(0, 100), true);
+		ImGui::BeginChild("segs", ImVec2(380, 132), true);
 		for (int k = 0; k < static_cast<int>(g_segs.size()); ++k) {
 			const EditSegment& s = g_segs[k];
 			char kind[64];
 			if (s.raw) {
 				strcpy_s(kind, "RAW");
 			} else if (s.is_solver) {
-				Sfmt(kind, "SOLVER ->#%d K%d%s", s.solver.target, s.solver.strafes,
-					s.solver.solved ? "" : " (unsolved)");
+				Sfmt(kind, "%s ->#%d%s", s.solver.applied_ride ? "RIDE" : "SOLVER",
+					s.solver.target, s.solver.solved ? "" : " (unsolved)");
+			} else if (s.gen.prestrafe) {
+				strcpy_s(kind, "PRESTRAFE");
+			} else if (s.gen.yaw_mode == 2) {
+				Sfmt(kind, "OPTIMAL %s", s.gen.opt_dir > 0 ? "left(A)" : "right(D)");
+			} else if (s.gen.yaw_mode == 3) {
+				strcpy_s(kind, "OPTIMAL straight");
+			} else if (s.gen.yaw_mode == 4) {
+				strcpy_s(kind, "OPTIMAL straight-skew");
 			} else {
-				const bool turning = s.gen.yaw_mode == 1 && fabsf(s.gen.yaw_rate) > 0.01f;
-				Sfmt(kind, "MOVE %s%s%s%s%s%s",
+				const bool turning = fabsf(s.gen.yaw_rate) > 0.01f;
+				Sfmt(kind, "MOVE %s%s%s%s%s",
 					s.gen.key_w ? "W" : "", s.gen.key_a ? "A" : "",
 					s.gen.key_s ? "S" : "", s.gen.key_d ? "D" : "",
-					(turning && s.gen.auto_key && !s.gen.key_a && !s.gen.key_d) ? "+auto" : "",
 					turning ? " turn" : "");
 			}
 			char label[256];
@@ -5085,6 +5203,14 @@ namespace {
 					g_cursor = g_starts[k];
 			}
 		}
+		ImGui::EndChild();
+		// Stats for the selected segment, in the free space to the right.
+		ImGui::SameLine();
+		ImGui::BeginChild("segstats", ImVec2(0, 132), true);
+		if (g_valid && !g_states.empty())
+			DrawSegmentStats(g_sel);
+		else
+			ImGui::TextDisabled("segment stats appear here after a sim runs");
 		ImGui::EndChild();
 
 		if (ImGui::Button("+ Segment")) {
@@ -5119,7 +5245,7 @@ namespace {
 		if (ImGui::Button("Split at playhead"))
 			SplitAtCursor();
 		ImGui::SameLine();
-		if (ImGui::Button("Remove selected") && g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) {
+		if (Theme::Danger("Remove selected") && g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) {
 			g_segs.erase(g_segs.begin() + g_sel);
 			if (g_sel >= static_cast<int>(g_segs.size()))
 				g_sel = static_cast<int>(g_segs.size()) - 1;
@@ -5128,19 +5254,21 @@ namespace {
 
 		// --- selected segment parameters ----------------------------------
 		if (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) {
-			ImGui::Separator();
+			Theme::Heading("Selected segment");
 			if (g_segs[g_sel].is_solver && !g_segs[g_sel].raw) {
 				EditSegment& s = g_segs[g_sel];
-				ImGui::TextWrapped(
-					"Solver segment (rebuilt): searches alternating A/D strafe schedules "
-					"whose path passes through the EXACT target point with the view yaw "
-					"at that moment EXACTLY the target's set yaw. The pass tick is "
-					"computed from gravity (never searched), the yaw equation is solved "
-					"algebraically (the real sim replays the same view stream, so yaw "
-					"cannot drift), and the remaining rates solve the 2D pass point. "
-					"The drawn line is the REAL engine sim; its measured pass is shown "
-					"below and auto-corrected against the target.");
+				if (ImGui::CollapsingHeader("How the solver works")) {
+					ImGui::TextWrapped(
+						"Searches alternating A/D strafe schedules whose path passes through the "
+						"EXACT target point with the view yaw at that moment EXACTLY the target's "
+						"set yaw. The pass tick is computed from gravity (never searched), the yaw "
+						"equation is solved algebraically (the real sim replays the same view "
+						"stream, so yaw cannot drift), and the remaining rates solve the 2D pass "
+						"point. The drawn line is the REAL engine sim; its measured pass is shown "
+						"below and auto-corrected against the target.");
+				}
 
+				ImGui::TextDisabled("Target & mode");
 				ImGui::PushItemWidth(260);
 				int target = s.solver.target;
 				if (ImGui::Combo("Board target", &target, TargetItemGetter, nullptr, BspWorld::TargetCount()))
@@ -5185,46 +5313,49 @@ namespace {
 				ImGui::SameLine();
 				ImGui::TextDisabled("(the model is airborne-only - a grounded start needs this)");
 
-				ImGui::PushItemWidth(150);
-				ImGui::InputFloat("Pass tolerance (u)", &g_sol_pos_tol, 0.25f, 1.f, 2);
-				ImGui::InputFloat("Max bump loss (u/s)", &g_sol_max_bump, 1.f, 5.f, 1);
-				ImGui::InputFloat("Collect within (u)", &g_sol_collect, 0.5f, 2.f, 1);
-				ImGui::PopItemWidth();
-				ImGui::TextDisabled("(everything passing within 'Collect' is kept and real-measured - "
-					"the tight gates only decide the 'exact' tag; data first, filtering later)");
-				ImGui::TextDisabled("(a kiss of the ramp shortly before the target is allowed and slides "
-					"into it - as long as the clip costs less than this)");
-				ImGui::PushItemWidth(150);
-				ImGui::InputFloat("Jump vz (0 = formula)", &g_jump_vz, 1.f, 10.f, 1);
-				ImGui::PopItemWidth();
-				// The engine probe: measured facts from the real sim's states.
-				// NEVER silently used - Adopt copies them into the inputs above.
-				if (g_meas_max_add > 0.f || g_meas_grav_n > 0) {
-					float interval = Prediction::LastDiag().interval_per_tick;
-					if (interval <= 0.f) interval = 0.015f;
-					const float model_amt = g_air_accel * g_wishspeed * interval;
-					ImGui::TextDisabled("engine probe: add/tick up to %.1f (model allows %.1f) | gravity %.0f [%d] | jump vz %.1f",
-						g_meas_max_add, model_amt, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
-					if (g_meas_max_add > model_amt + 2.f)
-						ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
-							"the engine granted MORE accel than the model allows -> the "
-							"sv_airaccelerate set here is too low for this server (surf servers run ~150)");
-					if (ImGui::Button("Adopt probe into model settings")) {
-						if (g_meas_max_add > 45.f)
-							g_air_accel = 150.f;
-						if (g_meas_grav_n >= 8)
-							g_gravity = g_meas_grav;
-						if (g_meas_jump_vz > 100.f)
-							g_jump_vz = g_meas_jump_vz;
-						MarkDirty();
-						g_status = "Adopted the probed engine values into the model settings (visible above/in the strafe model).";
+				if (ImGui::CollapsingHeader("Search gates & engine probe (advanced)")) {
+					ImGui::PushItemWidth(150);
+					ImGui::InputFloat("Pass tolerance (u)", &g_sol_pos_tol, 0.25f, 1.f, 2);
+					ImGui::InputFloat("Max bump loss (u/s)", &g_sol_max_bump, 1.f, 5.f, 1);
+					ImGui::InputFloat("Collect within (u)", &g_sol_collect, 0.5f, 2.f, 1);
+					ImGui::PopItemWidth();
+					ImGui::TextDisabled("(everything passing within 'Collect' is kept and real-measured - "
+						"the tight gates only decide the 'exact' tag; data first, filtering later)");
+					ImGui::TextDisabled("(a kiss of the ramp shortly before the target is allowed and slides "
+						"into it - as long as the clip costs less than this)");
+					ImGui::PushItemWidth(150);
+					ImGui::InputFloat("Jump vz (0 = formula)", &g_jump_vz, 1.f, 10.f, 1);
+					ImGui::PopItemWidth();
+					// The engine probe: measured facts from the real sim's states.
+					// NEVER silently used - Adopt copies them into the inputs above.
+					if (g_meas_max_add > 0.f || g_meas_grav_n > 0) {
+						float interval = Prediction::LastDiag().interval_per_tick;
+						if (interval <= 0.f) interval = 0.015f;
+						const float model_amt = g_air_accel * g_wishspeed * interval;
+						ImGui::TextDisabled("engine probe: add/tick up to %.1f (model allows %.1f) | gravity %.0f [%d] | jump vz %.1f",
+							g_meas_max_add, model_amt, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
+						if (g_meas_max_add > model_amt + 2.f)
+							ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
+								"the engine granted MORE accel than the model allows -> the "
+								"sv_airaccelerate set here is too low for this server (surf servers run ~150)");
+						if (ImGui::Button("Adopt probe into model settings")) {
+							if (g_meas_max_add > 45.f)
+								g_air_accel = 150.f;
+							if (g_meas_grav_n >= 8)
+								g_gravity = g_meas_grav;
+							if (g_meas_jump_vz > 100.f)
+								g_jump_vz = g_meas_jump_vz;
+							MarkDirty();
+							g_status = "Adopted the probed engine values into the model settings (visible above/in the strafe model).";
+						}
+					} else {
+						ImGui::TextDisabled("engine probe: no data yet - it fills in after any sim runs "
+							"with a solved solver segment");
 					}
-				} else {
-					ImGui::TextDisabled("engine probe: no data yet - it fills in after any sim runs "
-						"with a solved solver segment");
 				}
 
-				if (ImGui::Button("Search solutions"))
+				ImGui::Separator();
+				if (Theme::Primary("Search solutions"))
 					StartSearch(g_sel);
 				ImGui::SameLine();
 				ImGui::Checkbox("Deep search", &g_deep_search);
@@ -5233,8 +5364,12 @@ namespace {
 
 				if (g_search.seg == g_sel) {
 					if (g_search.active) {
-						ImGui::Text("searching...  %d%%   (%d passes collected - near-identical lines merge at the end)",
-							g_search.jobs_total ? (g_search.jobs_done * 100 / g_search.jobs_total) : 0,
+						const float frac = g_search.jobs_total
+							? static_cast<float>(g_search.jobs_done) / g_search.jobs_total : 0.f;
+						char ov[64];
+						Sfmt(ov, "searching  %d%%", static_cast<int>(frac * 100.f));
+						ImGui::ProgressBar(frac, ImVec2(-1.f, 0.f), ov);
+						ImGui::TextDisabled("%d passes collected (near-identical lines merge at the end)",
 							g_results_n.load(std::memory_order_relaxed));
 					} else if (g_search.done && g_search.results.empty()) {
 						ImGui::PushTextWrapPos(0.f);
@@ -5500,27 +5635,34 @@ namespace {
 				ch |= ImGui::Checkbox("Prestrafe recipe (startzone exit: WA -> jump -> air-strafe -> crouch)",
 					&g.prestrafe);
 				if (g.prestrafe) {
-					ImGui::TextDisabled("WA to max ground speed, jump + release the ground key, a "
-						"steerable optimal air-strafe, then crouch at the last airborne tick to skim "
-						"the floor. The engine sims the real physics, including the mid-air duck "
-						"hull-lift; only the inputs are emitted.");
+					ImGui::TextDisabled("WA to max ground speed, jump, then N alternating optimal "
+						"air-strafes steered by one bias, and crouch to skim the floor. The engine "
+						"sims the real physics (incl. the mid-air duck hull-lift); only inputs are emitted.");
 					ch |= IntRow("Total ticks", &g.ticks, 2, 2000);
-					ch |= IntRow("Ground accel ticks (W + strafe key)", &g.ps_ground_ticks, 0, g.ticks);
-					ch |= FloatRow("Ground view turn (total deg over the ground phase)",
-						&g.ps_ground_turn, -360.f, 360.f, "%+.1f deg", 1.f, 10.f, 1);
+
+					ImGui::TextDisabled("Ground phase (build speed)");
+					ch |= IntRow("  ground ticks (W + strafe key)", &g.ps_ground_ticks, 0, g.ticks);
 					ImGui::PushItemWidth(150);
 					int gdir = (g.ps_ground_dir > 0) ? 0 : 1;
-					if (ImGui::Combo("Ground strafe", &gdir, "A (left)\0D (right)\0")) {
+					if (ImGui::Combo("  ground strafe side", &gdir, "A (left)\0D (right)\0")) {
 						g.ps_ground_dir = (gdir == 0) ? 1 : -1; ch = true;
 					}
-					ImGui::SameLine();
+					ImGui::PopItemWidth();
+					ch |= FloatRow("  ground view turn (total deg)",
+						&g.ps_ground_turn, -360.f, 360.f, "%+.1f deg", 1.f, 10.f, 1);
+
+					ImGui::TextDisabled("Air phase (N optimal strafes)");
+					ch |= IntRow("  strafes (alternating)", &g.ps_strafes, 1, 8);
+					ImGui::PushItemWidth(150);
 					int adir = (g.ps_air_dir > 0) ? 0 : 1;
-					if (ImGui::Combo("Air strafe", &adir, "A (left)\0D (right)\0")) {
+					if (ImGui::Combo("  first strafe side", &adir, "A (left)\0D (right)\0")) {
 						g.ps_air_dir = (adir == 0) ? 1 : -1; ch = true;
 					}
 					ImGui::PopItemWidth();
-					ch |= FloatRow("Air steer bias (+ right / - left, 0 = pure optimal)",
+					ch |= FloatRow("  steer bias (+ right / - left, 0 = pure optimal)",
 						&g.ps_air_bias, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+
+					ImGui::TextDisabled("Crouch");
 					ch |= ImGui::Checkbox("Crouch at the end (dodge the floor)", &g.ps_crouch_end);
 					if (g.ps_crouch_end) {
 						ch |= ImGui::Checkbox("Auto-time to the last airborne tick", &g.ps_crouch_auto);
@@ -5562,66 +5704,84 @@ namespace {
 					ImGui::TextDisabled("airborne + turning: the strafe key is picked for you (check A or D to override)");
 
 				ch |= IntRow("Ticks (duration)", &g.ticks, 1, 1000);
-				// "Hold" retired: it's identical to turning at 0 deg/tick (old
-				// files are normalized at load). Mode 2 = OPTIMAL strafe (yaw
-				// rides the velocity heading + bias). Mode 3 = STRAIGHT SYNC
-				// (alternating optimal strafes; the net path holds heading).
-				if (g.yaw_mode < 1 || g.yaw_mode > 3)
-					g.yaw_mode = 1;
-				int vmode = (g.yaw_mode == 2) ? 1 : (g.yaw_mode == 3) ? 2 : 0;
+				// Two view modes now: TURN RATE (mode 1) and OPTIMAL (max gain).
+				// Optimal covers strafing LEFT, RIGHT, or STRAIGHT (alternating
+				// max-gain strafes whose net path holds its heading, mode 3) -
+				// the direction selector picks which, so straight-sync lives in
+				// optimal like every other max-gain path.
+				if (g.yaw_mode < 1 || g.yaw_mode > 4)
+					g.yaw_mode = 2;
+				int vmode = (g.yaw_mode == 1) ? 0 : 1;
 				ImGui::PushItemWidth(260);
 				if (ImGui::Combo("View mode", &vmode,
-					"Turn rate\0Optimal strafe (max gain)\0Straight sync strafe\0")) {
-					g.yaw_mode = (vmode == 1) ? 2 : (vmode == 2) ? 3 : 1;
+					"Turn rate\0Optimal strafe (max gain)\0")) {
+					g.yaw_mode = (vmode == 0) ? 1 : ((g.yaw_mode == 3 || g.yaw_mode == 4) ? g.yaw_mode : 2);
 					ch = true;
 				}
 				ImGui::PopItemWidth();
-				if (g.yaw_mode == 2) {
-					int dir_idx = (g.opt_dir > 0) ? 0 : 1;
-					ImGui::PushItemWidth(140);
-					if (ImGui::Combo("Direction", &dir_idx, "Left (A)\0Right (D)\0")) {
-						g.opt_dir = (dir_idx == 0) ? 1 : -1;
-						ch = true;
-					}
-					ImGui::SameLine();
-					if (ImGui::Combo("Bias kind", &g.bias_kind,
-						"Total heading (deg over segment)\0Per-tick (legacy)\0Steering L/R\0"))
-						ch = true;
-					ImGui::PopItemWidth();
-					if (g.bias_kind == 0) {
-						ch |= FloatRow("Total heading change   (into the strafe side, 0 = pure optimal)",
-							&g.yaw_rate, -180.f, 180.f, "%+.2f deg", 0.05f, 5.f);
-						ImGui::TextDisabled("the turn is re-spread over the remaining ticks every tick - "
-							"max speed for that total curvature");
-						ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f),
-							"length-DEPENDENT: changing this segment's tick count re-spreads the turn "
-							"and moves the path (splits re-fit both halves to the simulated headings).");
-					} else if (g.bias_kind == 2) {
-						ch |= FloatRow("Steering bias   (+ right / - left, 0 = pure optimal)",
-							&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-						ImGui::TextDisabled("a fixed angle off the max-gain line in screen sign, identical every "
-							"tick - the tick COUNT never enters the geometry, so splitting or resizing "
-							"leaves the existing path exactly where it was");
-					} else {
-						ch |= FloatRow("Turn bias   (+ tighter / - wider, 0 = pure optimal)",
-							&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-						ImGui::TextDisabled("bias trades speed (quadratic loss) for curvature (linear) - stays optimal for that curvature");
-					}
-				} else if (g.yaw_mode == 3) {
-					int dir_idx = (g.opt_dir > 0) ? 0 : 1;
-					ImGui::PushItemWidth(140);
-					if (ImGui::Combo("First side", &dir_idx, "Left (A)\0Right (D)\0")) {
-						g.opt_dir = (dir_idx == 0) ? 1 : -1;
-						ch = true;
-					}
-					ImGui::PopItemWidth();
-					ch |= IntRow("Ticks per strafe side (frequency)", &g.opt_period, 1, 64);
-					ch |= FloatRow("Heading steer bias   (0 = straight)",
-						&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-					ImGui::TextDisabled("alternating max-gain strafes; half-curls cancel so the path holds its "
-						"heading - the bias strengthens one side and curves the mean");
-				} else {
+				if (vmode == 0) {
 					ch |= FloatRow("View turn   (- left / + right, 0 = hold)", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
+				} else {
+					// Optimal: Left / Right / Straight (view-tilt) / Straight (skew).
+					int dir_idx = (g.yaw_mode == 4) ? 3 : (g.yaw_mode == 3) ? 2 : ((g.opt_dir > 0) ? 0 : 1);
+					ImGui::PushItemWidth(240);
+					if (ImGui::Combo("Direction", &dir_idx,
+						"Left (A)\0Right (D)\0Straight - steer by view\0Straight - steer by dwell\0")) {
+						if (dir_idx == 3) g.yaw_mode = 4;
+						else if (dir_idx == 2) g.yaw_mode = 3;
+						else { g.yaw_mode = 2; g.opt_dir = (dir_idx == 0) ? 1 : -1; }
+						ch = true;
+					}
+					ImGui::PopItemWidth();
+					if (g.yaw_mode == 3) {
+						// STRAIGHT (view tilt): alternating max-gain strafes; the
+						// left/right steering bias tilts the mean path in SCREEN
+						// sign, tick-independent (heading - bias every tick).
+						ch |= IntRow("Ticks per strafe side (alternation)", &g.opt_period, 1, 64);
+						ch |= FloatRow("Steering bias   (+ right / - left, 0 = straight)",
+							&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+						ImGui::TextDisabled("alternating max-gain strafes: half-curls cancel so the mean path "
+							"holds its heading; the bias tilts the VIEW to steer. Splice/resize safe.");
+					} else if (g.yaw_mode == 4) {
+						// STRAIGHT (dwell skew): the view stays pure max-gain; one
+						// side is held longer than the other, and that asymmetric
+						// DWELL bends the mean path - no view tilt at all.
+						ch |= IntRow("Base ticks per strafe side", &g.opt_period, 1, 64);
+						ch |= FloatRow("Dwell skew   (+ right side longer / - left longer)",
+							&g.yaw_rate, -32.f, 32.f, "%+.0f ticks", 1.f, 4.f, 0);
+						ImGui::TextDisabled("steers by holding one side longer (view stays exactly max-gain). "
+							"The opt_dir side is held base+skew ticks, the other base-skew.");
+					} else {
+						// Stored values: 0=Total, 1=Per-tick, 2=Steering. Display the
+						// DEFAULT (Steering) first without changing the stored codes.
+						int bk_disp = (g.bias_kind == 2) ? 0 : (g.bias_kind == 0) ? 1 : 2;
+						ImGui::PushItemWidth(210);
+						if (ImGui::Combo("Bias kind", &bk_disp,
+							"Steering L/R\0Total heading (deg over segment)\0Per-tick (legacy)\0")) {
+							g.bias_kind = (bk_disp == 0) ? 2 : (bk_disp == 1) ? 0 : 1;
+							ch = true;
+						}
+						ImGui::PopItemWidth();
+						if (g.bias_kind == 2) {
+							ch |= FloatRow("Steering bias   (+ right / - left, 0 = pure optimal)",
+								&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+							ImGui::TextDisabled("a fixed angle off the max-gain line in screen sign, identical every "
+								"tick - the tick COUNT never enters the geometry, so splitting or resizing "
+								"leaves the existing path exactly where it was");
+						} else if (g.bias_kind == 0) {
+							ch |= FloatRow("Total heading change   (into the strafe side, 0 = pure optimal)",
+								&g.yaw_rate, -180.f, 180.f, "%+.2f deg", 0.05f, 5.f);
+							ImGui::TextDisabled("the turn is re-spread over the remaining ticks every tick - "
+								"max speed for that total curvature");
+							ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f),
+								"length-DEPENDENT: changing this segment's tick count re-spreads the turn "
+								"and moves the path (splits re-fit both halves to the simulated headings).");
+						} else {
+							ch |= FloatRow("Turn bias   (+ tighter / - wider, 0 = pure optimal)",
+								&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+							ImGui::TextDisabled("bias trades speed (quadratic loss) for curvature (linear) - stays optimal for that curvature");
+						}
+					}
 				}
 				ch |= ImGui::Checkbox("Absolute start yaw", &g.yaw_abs);
 				if (g.yaw_abs) {
@@ -5712,12 +5872,13 @@ namespace {
 					ImGui::TextDisabled("(playhead is outside this segment)");
 				}
 			}
+
 		}
 
-		ImGui::Separator();
-
-		// --- playhead ------------------------------------------------------
+		// --- CURSOR -------------------------------------------------------
+		// Playhead position + navigation + the stats for the tick it sits on.
 		{
+			Theme::Heading("Cursor");
 			IntRow("Playhead (tick)", &g_cursor, 0, g_total > 0 ? g_total - 1 : 0);
 
 			const int seg = SegmentAtTick(g_cursor);
@@ -5758,29 +5919,22 @@ namespace {
 			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
 				const Prediction::SimState& st = g_states[g_cursor];
 				const bool air = (st.flags & FL_ONGROUND) == 0;
-				ImGui::Text("pos %.1f %.1f %.1f   %s%s", st.origin.X, st.origin.Y, st.origin.Z,
-					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " +duck" : "");
+				const float interval = Prediction::LastDiag().interval_per_tick > 0.f
+					? Prediction::LastDiag().interval_per_tick : 0.015f;
+				const float vz = st.velocity.Z;
+				const float sp3 = sqrtf(st.velocity.X * st.velocity.X
+					+ st.velocity.Y * st.velocity.Y + vz * vz);
+				ImGui::Text("tick %d   t = %.3f s   %s%s", g_cursor, g_cursor * interval,
+					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " + duck" : "");
+				ImGui::Text("  pos %.1f %.1f %.1f", st.origin.X, st.origin.Y, st.origin.Z);
+				ImGui::Text("  speed %.1f u/s  (3D %.1f, vz %+.0f)   yaw %.2f   pitch %.2f",
+					g_speed[g_cursor], sp3, vz,
+					g_frames[g_cursor].viewangles[1], g_frames[g_cursor].viewangles[0]);
 				if (g_maxgain[g_cursor] > 0.001f)
-					ImGui::Text("speed %.1f u/s   gain %+.2f (max %+.2f)   eff %.0f%%   yaw %.1f",
-						g_speed[g_cursor], g_gain[g_cursor], g_maxgain[g_cursor],
-						g_eff[g_cursor] * 100.f, g_frames[g_cursor].viewangles[1]);
+					ImGui::Text("  gain %+.2f (max %+.2f)   eff %.0f%%",
+						g_gain[g_cursor], g_maxgain[g_cursor], g_eff[g_cursor] * 100.f);
 				else
-					ImGui::Text("speed %.1f u/s   gain %+.2f   eff n/a (not an air tick)   yaw %.1f",
-						g_speed[g_cursor], g_gain[g_cursor], g_frames[g_cursor].viewangles[1]);
-
-				if (g_sel >= 0 && g_sel < static_cast<int>(g_starts.size())) {
-					const int b = g_starts[g_sel];
-					int e = (g_sel + 1 < static_cast<int>(g_starts.size())) ? g_starts[g_sel + 1] : g_total;
-					if (e > static_cast<int>(g_states.size()))
-						e = static_cast<int>(g_states.size());
-					float eff_sum = 0.f; int eff_n = 0;
-					for (int i = b; i < e; ++i)
-						if (g_maxgain[i] > 0.001f) { eff_sum += g_eff[i]; eff_n++; }
-					const float v0 = (b > 0 && b - 1 < static_cast<int>(g_speed.size())) ? g_speed[b - 1] : Speed2D(g_anchor.velocity);
-					const float v1 = (e > b) ? g_speed[e - 1] : v0;
-					ImGui::Text("segment: %.1f -> %.1f u/s (%+.1f)   avg air eff %.0f%% (%d ticks)",
-						v0, v1, v1 - v0, eff_n ? (eff_sum / eff_n) * 100.f : 0.f, eff_n);
-				}
+					ImGui::Text("  gain %+.2f   eff n/a (not an air tick)", g_gain[g_cursor]);
 			}
 		}
 
@@ -5948,7 +6102,21 @@ namespace {
 	}
 
 	void DrawRenderingTab() {
-		ImGui::Text("Player & world");
+		Theme::Heading("Menu appearance");
+		{
+			static bool s_op_dirty = false;
+			if (ImGui::SliderFloat("Menu opacity", &Theme::MenuOpacity(), 0.20f, 1.00f, "%.2f"))
+				s_op_dirty = true;
+			// Persist once, when the drag ends (not every frame).
+			if (s_op_dirty && !ImGui::IsItemActive()) {
+				s_op_dirty = false;
+				SaveUiSettings();
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled("(see-through panel; text stays crisp)");
+		}
+
+		Theme::Heading("Player & world");
 		ImGui::Checkbox("Test marker at world origin", &WorldDraw::draw_test_marker);
 		ImGui::SameLine();
 		ImGui::Checkbox("Player collision hull", &WorldDraw::draw_player_box);
@@ -5970,8 +6138,7 @@ namespace {
 			ImGui::TextDisabled("lines/hulls vanish during search+verify+correction; if the "
 				"silent crashes stop with this ON, the engine overlay race is confirmed");
 
-		ImGui::Separator();
-		ImGui::Text("Live prediction (from the player)");
+		Theme::Heading("Live prediction (from the player)");
 		ImGui::Checkbox("Predict path", &WorldDraw::draw_prediction);
 		ImGui::SameLine();
 		ImGui::Checkbox("Live input", &WorldDraw::pred_live_input);
@@ -5986,8 +6153,7 @@ namespace {
 			ImGui::Checkbox("Duck", &WorldDraw::pred_duck);
 		}
 
-		ImGui::Separator();
-		ImGui::Text("Hull corner trails (bottom corners of the hull, along every path line)");
+		Theme::Heading("Hull corner trails (bottom corners of the hull, along every path line)");
 		ImGui::Checkbox("+X+Y##ct", &WorldDraw::corner_trails[0]);
 		ImGui::SameLine();
 		ImGui::Checkbox("+X-Y##ct", &WorldDraw::corner_trails[1]);
@@ -6002,15 +6168,13 @@ namespace {
 		if (ImGui::SmallButton("none##ct"))
 			for (int c = 0; c < 4; ++c) WorldDraw::corner_trails[c] = false;
 
-		ImGui::Separator();
-		ImGui::Text("Editor run line");
+		Theme::Heading("Editor run line");
 		ImGui::Checkbox("Ghost hull at playhead", &g_show_hull);
 		ImGui::SameLine();
 		ImGui::Checkbox("Replay HUD", &WorldDraw::show_replay_hud);
 		FloatRow("Min efficiency (line coloring only)", &g_min_eff, 0.90f, 1.f, "%.2f", 0.005f, 0.02f);
 
-		ImGui::Separator();
-		ImGui::Text("World geometry (BSP)");
+		Theme::Heading("World geometry (BSP)");
 		ImGui::Checkbox("Brush wireframes", &BspWorld::draw_wireframe);
 		ImGui::SameLine();
 		ImGui::Checkbox("Tags & targets", &BspWorld::show_markers);
@@ -6400,6 +6564,7 @@ void DrawWindowImpl() {
 	if (!s_refreshed) {
 		s_refreshed = true;
 		RefreshFiles();
+		LoadUiSettings();
 	}
 
 	// Bottom-left by default (NoSavedSettings means this applies every launch).
@@ -6410,35 +6575,51 @@ void DrawWindowImpl() {
 		ImGui::SetNextWindowPos(ImVec2(12.f, wy), ImGuiSetCond_FirstUseEver);
 	}
 	ImGui::SetNextWindowSize(ImVec2(920, 820), ImGuiSetCond_FirstUseEver);
-	if (!ImGui::Begin("sourceTAS Editor", &g_open, ImGuiWindowFlags_NoSavedSettings)) {
+	// Translucent surfaces (backgrounds + buttons) so the game shows through the
+	// panel; text stays opaque. Restored after End() so the replay HUD and the
+	// in-world overlays are unaffected.
+	Theme::ApplyOpacity(Theme::MenuOpacity());
+	// Single panel now (record/run is a tab) - F8 controls visibility, so no
+	// per-window close button.
+	if (!ImGui::Begin("sourceTAS", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
 		ImGui::End();
+		Theme::ApplyOpacity(1.f);
 		return;
 	}
 
-	// Tab row.
-	const char* tabs[] = { "Run", "Targets", "Rendering", "Project" };
-	for (int i = 0; i < 4; ++i) {
-		const bool active = (g_tab == i);
-		if (active)
-			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.26f, 0.46f, 0.80f, 1.f));
-		if (ImGui::Button(tabs[i], ImVec2(110, 0)))
+	// Compact status strip at the top: sim state chip + the editor status line.
+	{
+		const char* simst = g_dirty ? "UPDATING" : g_sim_requested ? "SIMMING"
+			: g_sim_fault ? "SIM FAULT" : g_valid ? "READY" : "NO SIM";
+		const ImVec4 simcol = (g_dirty || g_sim_requested) ? Theme::Warning
+			: g_sim_fault ? Theme::Error : g_valid ? Theme::Success : Theme::Muted;
+		ImGui::TextColored(simcol, "%s", simst);
+		ImGui::SameLine();
+		ImGui::TextDisabled("|");
+		ImGui::SameLine();
+		ImGui::TextUnformatted(g_status.c_str());
+	}
+	ImGui::Spacing();
+
+	// Tab row (selected = blue).
+	const char* tabs[] = { "Record", "Run", "Targets", "Rendering", "Project" };
+	for (int i = 0; i < 5; ++i) {
+		if (Theme::Tab(tabs[i], g_tab == i, ImVec2(104, 0)))
 			g_tab = i;
-		if (active)
-			ImGui::PopStyleColor();
-		if (i < 3)
+		if (i < 4)
 			ImGui::SameLine();
 	}
-	ImGui::Separator();
+	ImGui::Spacing();
 
 	switch (g_tab) {
-	case 0: DrawRunTab(); break;
-	case 1: DrawTargetsTab(); break;
-	case 2: DrawRenderingTab(); break;
+	case 0: RecordPanel::Draw(); break;
+	case 1: DrawRunTab(); break;
+	case 2: DrawTargetsTab(); break;
+	case 3: DrawRenderingTab(); break;
 	default: DrawProjectTab(); break;
 	}
 
-	ImGui::Separator();
-	ImGui::TextWrapped("%s", g_status.c_str());
 	ImGui::End();
+	Theme::ApplyOpacity(1.f);   // restore the solid palette for HUD/overlays
 }
 }   // namespace (DrawWindowImpl)

@@ -5,6 +5,9 @@
 #include "../World/NetVars.h"
 #include "../World/BspWorld.h"
 #include "../Editor/TasEditor.h"
+#include "Theme.h"
+#include "RecordPanel.h"
+#include "Breadcrumb.h"
 
 #include <cmath>
 #include <cstdio>
@@ -100,100 +103,33 @@ namespace {
 	}
 }
 
-void BasehookInterface::OnEndScene() {
+// Load Segoe UI at 16px and apply the graphite/pink theme once, right after
+// ImGui has its device but before the first frame builds the font atlas.
+void BasehookInterface::OnInitialize() {
+	ImGuiIO& io = ImGui::GetIO();
+	io.Fonts->Clear();
+	if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f))
+		io.Fonts->AddFontDefault();   // fall back if the TTF is unavailable
+	Theme::Apply();
+}
 
-	// Editor sim orchestration + in-world overlays run every frame, independent
-	// of the menu. Both self-guard when out of game - and both run under
-	// hook-level SEH so a fault becomes a logged report, not a dead game
-	// (transient: the next frame tries again; the log has the evidence).
-	{
-		static int upd_reported = 0, wd_reported = 0;
-		int code = 0;
-		if (!GuardedEditorUpdate(&code) && upd_reported < 3) {
-			upd_reported++;
-			TasEditor::NoteExternalFault("TasEditor::Update", code);
-		}
-		if (!GuardedWorldDrawRender(&code) && wd_reported < 3) {
-			wd_reported++;
-			TasEditor::NoteExternalFault("WorldDraw::Render", code);
-		}
-	}
-
-	// Replay diagnostics HUD: non-interactive status while a run plays back,
-	// shown whether or not the menu is open.
-	if (WorldDraw::show_replay_hud && g_tas.IsPlaying()) {
-		ImGui::SetNextWindowPos(ImVec2(12, 52));
-		ImGui::Begin("##stas_replay_hud", nullptr, kOverlayFlags | ImGuiWindowFlags_NoInputs);
-
-		const std::vector<Run>& lib = g_tas.Library();
-		const int sel = g_tas.Selected();
-		if (g_tas.IsTestPlayback())
-			ImGui::Text("run: (editor test)   segment %d", g_tas.PlaybackSegment() + 1);
-		else if (sel >= 0 && sel < static_cast<int>(lib.size()))
-			ImGui::Text("run: %s   segment %d / %d", lib[sel].name.c_str(),
-				g_tas.PlaybackSegment() + 1, static_cast<int>(lib[sel].segments.size()));
-		ImGui::Text("tick %d / %d", static_cast<int>(g_tas.PlaybackPosition()),
-			static_cast<int>(g_tas.PlaybackTotal()));
-
-		if (engine && entitylist && engine->IsInGame()) {
-			void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
-			const int vel_off = NetVars::Offset("DT_CSPlayer", "m_vecVelocity[0]");
-			const int org_off = NetVars::Offset("DT_CSPlayer", "m_vecOrigin");
-			const int flags_off = NetVars::Offset("DT_CSPlayer", "m_fFlags");
-			if (player && vel_off) {
-				const Vector v = NetVars::Get<Vector>(player, vel_off);
-				ImGui::Text("speed %.1f u/s 2D   %.1f 3D",
-					sqrtf(v.X * v.X + v.Y * v.Y), v.Length());
-			}
-			if (player && org_off) {
-				const Vector o = NetVars::Get<Vector>(player, org_off);
-				ImGui::Text("pos %.1f %.1f %.1f", o.X, o.Y, o.Z);
-			}
-			if (player && flags_off) {
-				const int fl = NetVars::Get<int>(player, flags_off);
-				ImGui::Text("%s%s", (fl & FL_ONGROUND) ? "ground" : "air",
-					(fl & FL_DUCKING) ? " +duck" : "");
-			}
-		}
-		ImGui::End();
-	}
-
-	// Compact indicator while the menu is closed, so hotkey-only use has feedback.
-	if (!is_menu_visible) {
-		if (g_tas.IsRecording() || g_tas.IsPlaying()) {
-			ImGui::SetNextWindowPos(ImVec2(12, 12));
-			ImGui::Begin("##stas_indicator", nullptr, kOverlayFlags);
-			if (g_tas.IsRecording())
-				ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "REC   seg %d   +%d frames",
-					static_cast<int>(g_tas.SessionSegmentCount()), static_cast<int>(g_tas.ActiveSegmentSize()));
-			else
-				ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "PLAY   %d / %d",
-					static_cast<int>(g_tas.PlaybackPosition()), static_cast<int>(g_tas.PlaybackTotal()));
-			ImGui::End();
-		}
-		return;
-	}
-
-	ImGui::SetNextWindowSize(ImVec2(480, 600), ImGuiSetCond_FirstUseEver);
-	ImGui::Begin("sourceTAS", nullptr, ImGuiWindowFlags_NoSavedSettings);
-
+// The recording / run controls, drawn as a tab inside the editor window.
+void RecordPanel::Draw() {
 	// --- state + status --------------------------------------------------
 	const char* state_name =
 		g_tas.IsRecording() ? "RECORDING" : g_tas.IsPlaying() ? "PLAYBACK" : "IDLE";
-	ImGui::Text("State: %s", state_name);
-
+	const ImVec4 state_col = g_tas.IsRecording() ? Theme::Error
+		: g_tas.IsPlaying() ? Theme::Success : Theme::Muted;
+	ImGui::TextColored(state_col, "%s", state_name);
+	ImGui::SameLine();
 	if (g_tas.IsRecording())
-		ImGui::Text("Session: %d committed segment(s), %d frames in current",
+		ImGui::TextDisabled("%d segment(s), %d frames in current",
 			static_cast<int>(g_tas.SessionSegmentCount()), static_cast<int>(g_tas.ActiveSegmentSize()));
 	else if (g_tas.IsPlaying())
-		ImGui::Text("Progress: %d / %d frames",
+		ImGui::TextDisabled("%d / %d frames",
 			static_cast<int>(g_tas.PlaybackPosition()), static_cast<int>(g_tas.PlaybackTotal()));
 
-	ImGui::TextWrapped("%s", g_tas.Status());
-	ImGui::Separator();
-
-	// --- recordings library (finalized, immutable runs) -----------------
-	ImGui::Text("Recordings  (select one to play)");
+	Theme::Heading("Recordings");
 	ImGui::BeginChild("runs", ImVec2(0, 120), true);
 	const std::vector<Run>& library = g_tas.Library();
 	if (library.empty()) {
@@ -211,8 +147,6 @@ void BasehookInterface::OnEndScene() {
 	}
 	ImGui::EndChild();
 
-	// Rename / delete the selected run (run mode only; finalized runs are
-	// otherwise immutable). Renaming renames the .tas file on disk.
 	if (g_tas.State() == TasState::Idle && g_tas.Selected() >= 0
 		&& g_tas.Selected() < static_cast<int>(library.size())) {
 		static int synced = -1;
@@ -222,7 +156,6 @@ void BasehookInterface::OnEndScene() {
 			synced = sel;
 			strncpy_s(name_buffer, sizeof(name_buffer), library[sel].name.c_str(), _TRUNCATE);
 		}
-
 		ImGui::PushItemWidth(250);
 		if (ImGui::InputText("##rename", name_buffer, sizeof(name_buffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
 			g_tas.RenameSelected(name_buffer);
@@ -235,32 +168,38 @@ void BasehookInterface::OnEndScene() {
 			synced = -1;
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Delete")) {
+		if (Theme::Danger("Delete")) {
 			g_tas.DeleteSelected();
 			synced = -1;
 		}
 	}
 
-	ImGui::Separator();
-
-	// --- actions + hotkeys ----------------------------------------------
+	Theme::Heading("Actions & hotkeys");
 	for (int i = 0; i < kCommandCount; ++i) {
 		TasCommand& command = g_commands[i];
 		const bool available = command.available();
+		// Primary (blue) for the two headline actions; neutral otherwise.
+		const bool primary = available
+			&& (std::strcmp(command.name, "Start Recording") == 0
+				|| std::strcmp(command.name, "Play Selected Recording") == 0);
+		const bool danger = available && std::strcmp(command.name, "Emergency Stop") == 0;
 
+		bool clicked = false;
 		if (!available) {
-			const ImVec4 dim(0.25f, 0.25f, 0.25f, 1.0f);
+			const ImVec4 dim(0.16f, 0.16f, 0.18f, 1.0f);
 			ImGui::PushStyleColor(ImGuiCol_Button, dim);
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-		}
-
-		const bool clicked = ImGui::Button(command.name, ImVec2(250, 0));
-
-		if (!available)
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
+			clicked = ImGui::Button(command.name, ImVec2(250, 0));
 			ImGui::PopStyleColor(4);
-
+		} else if (primary) {
+			clicked = Theme::Primary(command.name, ImVec2(250, 0));
+		} else if (danger) {
+			clicked = Theme::Danger(command.name, ImVec2(250, 0));
+		} else {
+			clicked = ImGui::Button(command.name, ImVec2(250, 0));
+		}
 		if (clicked && available)
 			command.execute();
 
@@ -271,27 +210,15 @@ void BasehookInterface::OnEndScene() {
 			g_binding = (g_binding == i) ? -1 : i;
 		ImGui::PopID();
 	}
+	ImGui::TextDisabled("Click a key, then press one to bind it (Escape clears). Hotkeys work with the menu closed; F8 toggles the menu.");
 
-	ImGui::Separator();
-	if (ImGui::Button(TasEditor::IsOpen() ? "Close TAS Editor" : "Open TAS Editor", ImVec2(250, 0)))
-		TasEditor::Toggle();
-
-	ImGui::Separator();
-	ImGui::TextWrapped("Click a key, then press one to bind it (Escape clears). Hotkeys work with the menu closed. F8 toggles this menu. Rendering toggles live in the editor's Rendering tab.");
-
-	// --- diagnostics -----------------------------------------------------
-	// Dev readouts + the overlay vtable indices. All the visual toggles live in
-	// the editor's Rendering tab now.
-	ImGui::Separator();
+	// --- dev diagnostics -------------------------------------------------
 	if (ImGui::CollapsingHeader("Diagnostics")) {
 		ImGui::PushItemWidth(120);
 		ImGui::InputInt("Box overlay index", &g_overlay_box_index);
 		ImGui::InputInt("Line overlay index", &g_overlay_line_index);
 		ImGui::PopItemWidth();
 		ImGui::Checkbox("Line uses alpha form (8-arg)", &g_overlay_line_alpha);
-
-		// Keep indices inside the vtable (20 methods) so a mistap can't dispatch
-		// out of bounds.
 		if (g_overlay_box_index < 0)   g_overlay_box_index = 0;
 		if (g_overlay_box_index > 19)  g_overlay_box_index = 19;
 		if (g_overlay_line_index < 0)  g_overlay_line_index = 0;
@@ -299,18 +226,11 @@ void BasehookInterface::OnEndScene() {
 
 		ImGui::Separator();
 		const WorldDraw::Diagnostics d = WorldDraw::LastDiagnostics();
-		ImGui::Text("interfaces: %s", d.interfaces_ready ? "ready" : "MISSING");
-		ImGui::Text("in game: %s", d.in_game ? "yes" : "no");
-		ImGui::Text("local player index: %d", d.local_index);
-		ImGui::Text("m_vecOrigin offset: %d", d.origin_offset);
-		ImGui::Text("m_fFlags offset: %d", d.flags_offset);
+		ImGui::Text("interfaces: %s   in game: %s   player idx: %d",
+			d.interfaces_ready ? "ready" : "MISSING", d.in_game ? "yes" : "no", d.local_index);
 		if (d.have_player) {
-			ImGui::Text("origin: %.1f  %.1f  %.1f", d.origin.X, d.origin.Y, d.origin.Z);
-			ImGui::Text("flags: 0x%08X  %s", d.flags, d.ducking ? "(ducking)" : "(standing)");
-
-			// Basis check for the sim/preview: the movement pipeline's origin vs
-			// the netvar origin. Read STANDING STILL - any persistent dz here
-			// means the preview and live hull really do use different bases.
+			ImGui::Text("origin: %.1f  %.1f  %.1f   flags 0x%08X %s",
+				d.origin.X, d.origin.Y, d.origin.Z, d.flags, d.ducking ? "(ducking)" : "(standing)");
 			Vector move_origin;
 			if (Prediction::LastRealMoveOrigin(move_origin))
 				ImGui::Text("basis delta (net - movedata): %.2f  %.2f  %.2f",
@@ -319,30 +239,113 @@ void BasehookInterface::OnEndScene() {
 		} else {
 			ImGui::TextDisabled("no local player entity");
 		}
-
-		ImGui::Separator();
 		const Prediction::Diag pd = Prediction::LastDiag();
 		const char* pred_state =
-			pd.ran       ? "running" :
-			pd.installed ? "installed (idle)" : "not installed";
-		ImGui::Text("prediction: %s", pred_state);
-		ImGui::Text("interval/tick: %.4f   window: %d ticks (%.2f s)",
-			pd.interval_per_tick, pd.ticks, pd.ticks * pd.interval_per_tick);
-		if (pd.fault_count > 0) {
-			ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+			pd.ran ? "running" : pd.installed ? "installed (idle)" : "not installed";
+		ImGui::Text("prediction: %s   interval %.4f   window %d ticks (%.2f s)",
+			pred_state, pd.interval_per_tick, pd.ticks, pd.ticks * pd.interval_per_tick);
+		if (pd.fault_count > 0)
+			ImGui::TextColored(Theme::Warning,
 				"recovered faults: %d   last: client.dll+0x%llX  access 0x%llX",
 				pd.fault_count, pd.last_fault_rva, pd.last_fault_access);
+	}
+}
+
+void BasehookInterface::OnEndScene() {
+
+	// Editor sim orchestration + in-world overlays run every frame, independent
+	// of the menu. Both self-guard when out of game - and both run under
+	// hook-level SEH so a fault becomes a logged report, not a dead game
+	// (transient: the next frame tries again; the log has the evidence).
+	{
+		static int upd_reported = 0, wd_reported = 0;
+		int code = 0;
+		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: editor update");
+		if (!GuardedEditorUpdate(&code) && upd_reported < 3) {
+			upd_reported++;
+			TasEditor::NoteExternalFault("TasEditor::Update", code);
 		}
+		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: worlddraw");
+		if (!GuardedWorldDrawRender(&code) && wd_reported < 3) {
+			wd_reported++;
+			TasEditor::NoteExternalFault("WorldDraw::Render", code);
+		}
+		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: hud + menu");
 	}
 
-	ImGui::End();
+	// Replay HUD: small, translucent, information-focused. Shown while a run
+	// plays back whether or not the menu is open.
+	if (WorldDraw::show_replay_hud && g_tas.IsPlaying()) {
+		ImGui::SetNextWindowPos(ImVec2(12, 52));
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.05f, 0.05f, 0.07f, 0.55f));
+		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.93f, 0.29f, 0.60f, 0.30f));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 6.f));
+		ImGui::Begin("##stas_replay_hud", nullptr, kOverlayFlags | ImGuiWindowFlags_NoInputs);
+
+		float spd2 = 0.f; bool air = false, duck = false; bool have = false;
+		if (engine && entitylist && engine->IsInGame()) {
+			void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
+			const int vel_off = NetVars::Offset("DT_CSPlayer", "m_vecVelocity[0]");
+			const int flags_off = NetVars::Offset("DT_CSPlayer", "m_fFlags");
+			if (player && vel_off) {
+				const Vector v = NetVars::Get<Vector>(player, vel_off);
+				spd2 = sqrtf(v.X * v.X + v.Y * v.Y);
+				have = true;
+			}
+			if (player && flags_off) {
+				const int fl = NetVars::Get<int>(player, flags_off);
+				air = (fl & FL_ONGROUND) == 0;
+				duck = (fl & FL_DUCKING) != 0;
+			}
+		}
+		// Speed headline (accent), then a compact progress/state line.
+		if (have)
+			ImGui::TextColored(Theme::Pink, "%.0f u/s", spd2);
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s%s", air ? "air" : "ground", duck ? " +duck" : "");
+		ImGui::Text("seg %d   tick %d / %d", g_tas.PlaybackSegment() + 1,
+			static_cast<int>(g_tas.PlaybackPosition()), static_cast<int>(g_tas.PlaybackTotal()));
+		const int ptot = static_cast<int>(g_tas.PlaybackTotal());
+		ImGui::ProgressBar(ptot > 0 ? static_cast<float>(g_tas.PlaybackPosition()) / ptot : 0.f,
+			ImVec2(150.f, 6.f), "");
+		ImGui::End();
+		ImGui::PopStyleVar();
+		ImGui::PopStyleColor(2);
+	}
+
+	// Compact indicator while the menu is closed, so hotkey-only use has feedback.
+	if (!is_menu_visible) {
+		if (g_tas.IsRecording() || g_tas.IsPlaying()) {
+			ImGui::SetNextWindowPos(ImVec2(12, 12));
+			ImGui::Begin("##stas_indicator", nullptr, kOverlayFlags);
+			if (g_tas.IsRecording())
+				ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "REC   seg %d   +%d frames",
+					static_cast<int>(g_tas.SessionSegmentCount()), static_cast<int>(g_tas.ActiveSegmentSize()));
+			else
+				ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "PLAY   %d / %d",
+					static_cast<int>(g_tas.PlaybackPosition()), static_cast<int>(g_tas.PlaybackTotal()));
+			ImGui::End();
+		}
+		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: end (no menu)");
+		return;
+	}
+
 
 	// The editor is its own window (needs the cursor, so menu-visible only).
 	TasEditor::DrawWindow();
+	Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: end");
 }
 
 
 bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param) {
+
+	// Key-traffic breadcrumb (console typing flows through this hook too, so a
+	// death while typing names the exact key + state that preceded it).
+	if (type == WM_KEYDOWN || type == WM_KEYUP || type == WM_SYSKEYDOWN
+		|| type == WM_SYSKEYUP || type == WM_CHAR)
+		Breadcrumb::Note(Breadcrumb::SlotInput, "msg=0x%03X vk=%u menu=%d typing=%d",
+			type, static_cast<unsigned>(w_param), is_menu_visible ? 1 : 0,
+			(is_menu_visible && ImGui::GetIO().WantTextInput) ? 1 : 0);
 
 	// Toggle the menu with F8.
 	if (type == WM_KEYUP && w_param == VK_F8) {
@@ -373,7 +376,12 @@ bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param
 		if (w_param != VK_F8) {
 			for (TasCommand& command : g_commands) {
 				if (command.key == static_cast<int>(w_param) && command.available()) {
+					// EXEC without a matching DONE = the process died inside
+					// this command (the prime suspect for console-typing
+					// deaths: this dispatch does NOT know the console is open).
+					Breadcrumb::Note(Breadcrumb::SlotCommand, "EXEC %s", command.name);
 					command.execute();
+					Breadcrumb::Note(Breadcrumb::SlotCommand, "DONE %s", command.name);
 					break;
 				}
 			}
