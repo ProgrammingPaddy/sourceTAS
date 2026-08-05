@@ -12,6 +12,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <string>
 
 namespace {
 	// A run command, its bound hotkey, and the state(s) it is allowed in.
@@ -48,6 +50,54 @@ namespace {
 
 	// Index of the command currently capturing a key, or -1 when not rebinding.
 	int g_binding = -1;
+
+	// Master arm switch: when false, bound hotkeys dispatch NOTHING (typing in
+	// console/chat can't trigger commands). F8 and bind-capture stay live.
+	bool g_hotkeys_armed = true;
+
+	// ---- hotkey bind persistence (Documents\sourceTAS\binds.cfg) ----------
+	// One line per command: "<vk> <command name>". Matched by NAME on load, so
+	// reordering or extending the command table never mis-binds anything.
+	std::string BindsPath() {
+		char documents[MAX_PATH] = {};
+		if (FAILED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents)))
+			return {};
+		std::string base = std::string(documents) + "\\sourceTAS";
+		CreateDirectoryA(base.c_str(), nullptr);
+		return base + "\\binds.cfg";
+	}
+
+	void SaveBinds() {
+		const std::string p = BindsPath();
+		if (p.empty())
+			return;
+		std::ofstream f(p, std::ios::trunc);
+		if (!f)
+			return;
+		for (const TasCommand& command : g_commands)
+			f << command.key << " " << command.name << "\n";
+	}
+
+	void LoadBinds() {
+		const std::string p = BindsPath();
+		if (p.empty())
+			return;
+		std::ifstream f(p);
+		if (!f)
+			return;
+		int vk = 0;
+		std::string name;
+		while (f >> vk && std::getline(f, name)) {
+			const size_t first = name.find_first_not_of(' ');
+			if (first == std::string::npos)
+				continue;
+			name = name.substr(first);
+			for (TasCommand& command : g_commands)
+				if (name == command.name)
+					command.key = vk;
+		}
+	}
 
 	const ImGuiWindowFlags kOverlayFlags =
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -110,7 +160,15 @@ void BasehookInterface::OnInitialize() {
 	io.Fonts->Clear();
 	if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f))
 		io.Fonts->AddFontDefault();   // fall back if the TTF is unavailable
+	// Bold 18px for section headings (null = headings reuse the base font).
+	Theme::HeadingFont() =
+		io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeuib.ttf", 18.0f);
 	Theme::Apply();
+	LoadBinds();   // hotkeys persist across restarts
+}
+
+bool& RecordPanel::HotkeysArmed() {
+	return g_hotkeys_armed;
 }
 
 // The recording / run controls, drawn as a tab inside the editor window.
@@ -175,10 +233,18 @@ void RecordPanel::Draw() {
 	}
 
 	Theme::Heading("Actions & hotkeys");
+	ImGui::Checkbox("Arm hotkeys", &g_hotkeys_armed);
+	Theme::Help("Master switch for every bound hotkey. Disarm before typing in "
+		"console or chat - bound keys then dispatch nothing. Buttons here and "
+		"F8 always work; the state persists with the UI settings.");
+	if (!g_hotkeys_armed) {
+		ImGui::SameLine();
+		ImGui::TextColored(Theme::Warning, "DISARMED");
+	}
 	for (int i = 0; i < kCommandCount; ++i) {
 		TasCommand& command = g_commands[i];
 		const bool available = command.available();
-		// Primary (blue) for the two headline actions; neutral otherwise.
+		// Accent (pink) for the two headline actions; neutral otherwise.
 		const bool primary = available
 			&& (std::strcmp(command.name, "Start Recording") == 0
 				|| std::strcmp(command.name, "Play Selected Recording") == 0);
@@ -194,7 +260,7 @@ void RecordPanel::Draw() {
 			clicked = ImGui::Button(command.name, ImVec2(250, 0));
 			ImGui::PopStyleColor(4);
 		} else if (primary) {
-			clicked = Theme::Primary(command.name, ImVec2(250, 0));
+			clicked = Theme::Accent(command.name, ImVec2(250, 0));
 		} else if (danger) {
 			clicked = Theme::Danger(command.name, ImVec2(250, 0));
 		} else {
@@ -210,7 +276,9 @@ void RecordPanel::Draw() {
 			g_binding = (g_binding == i) ? -1 : i;
 		ImGui::PopID();
 	}
-	ImGui::TextDisabled("Click a key, then press one to bind it (Escape clears). Hotkeys work with the menu closed; F8 toggles the menu.");
+	ImGui::TextDisabled("binds: click the key button, press a key (Esc clears)");
+	Theme::Help("Hotkeys work with the menu closed; F8 toggles the menu. Binds save "
+		"to binds.cfg the moment you set them and load again on every restart.");
 
 	// --- dev diagnostics -------------------------------------------------
 	if (ImGui::CollapsingHeader("Diagnostics")) {
@@ -370,10 +438,11 @@ bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param
 			// Assign the pressed key (Escape clears it), then stop capturing.
 			g_commands[g_binding].key = (w_param == VK_ESCAPE) ? 0 : static_cast<int>(w_param);
 			g_binding = -1;
+			SaveBinds();   // persist immediately - restarts keep the binds
 			return false;
 		}
 
-		if (w_param != VK_F8) {
+		if (w_param != VK_F8 && g_hotkeys_armed) {
 			for (TasCommand& command : g_commands) {
 				if (command.key == static_cast<int>(w_param) && command.available()) {
 					// EXEC without a matching DONE = the process died inside

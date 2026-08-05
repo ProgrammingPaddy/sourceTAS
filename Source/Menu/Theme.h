@@ -11,8 +11,9 @@ namespace Theme {
 
 	// ---- palette --------------------------------------------------------
 	// Dark graphite base, pink accent, and consistent semantic colors.
-	static const ImVec4 Pink   (0.93f, 0.29f, 0.60f, 1.00f);  // accent
-	static const ImVec4 Blue   (0.26f, 0.55f, 0.96f, 1.00f);  // primary action / selected tab
+	static const ImVec4 Pink   (0.93f, 0.29f, 0.60f, 1.00f);  // accent / selected tab
+	static const ImVec4 PinkHi (1.00f, 0.39f, 0.68f, 1.00f);
+	static const ImVec4 Blue   (0.26f, 0.55f, 0.96f, 1.00f);  // primary action
 	static const ImVec4 BlueHi (0.36f, 0.63f, 1.00f, 1.00f);
 	static const ImVec4 Red    (0.84f, 0.24f, 0.28f, 1.00f);  // destructive action
 	static const ImVec4 RedHi  (0.92f, 0.34f, 0.38f, 1.00f);
@@ -111,11 +112,14 @@ namespace Theme {
 			return;
 		ImVec4* c = ImGui::GetStyle().Colors;
 		const ImVec4* b = BasePalette();
+		// PopupBg/ComboBg stay OPAQUE on purpose: dropdown lists and tooltips
+		// float over other text, which bleeds through and makes the options
+		// unreadable when translucent.
 		static const int surf[] = {
-			ImGuiCol_WindowBg, ImGuiCol_ChildWindowBg, ImGuiCol_PopupBg,
+			ImGuiCol_WindowBg, ImGuiCol_ChildWindowBg,
 			ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered, ImGuiCol_FrameBgActive,
 			ImGuiCol_TitleBg, ImGuiCol_TitleBgActive, ImGuiCol_TitleBgCollapsed,
-			ImGuiCol_MenuBarBg, ImGuiCol_ScrollbarBg, ImGuiCol_ComboBg,
+			ImGuiCol_MenuBarBg, ImGuiCol_ScrollbarBg,
 			ImGuiCol_Button, ImGuiCol_ButtonHovered, ImGuiCol_ButtonActive,
 			ImGuiCol_Header,
 		};
@@ -124,11 +128,22 @@ namespace Theme {
 	}
 
 	// ---- small helpers --------------------------------------------------
+	// Larger bold face for section headings (loaded in OnInitialize alongside
+	// the base font; null falls back to the base font).
+	inline ImFont*& HeadingFont() { static ImFont* f = nullptr; return f; }
+
+	// Forward: defined below, used by Heading's optional help marker.
+	inline void Help(const char* text);
+
 	// A colored section heading with a thin accent underline - replaces the
-	// repetitive gray Separator()/Text() pairs.
-	inline void Heading(const char* label) {
+	// repetitive gray Separator()/Text() pairs. Optional help text becomes a
+	// hover "(?)" marker at the end of the heading line.
+	inline void Heading(const char* label, const char* help = nullptr) {
 		ImGui::Spacing();
+		if (HeadingFont()) ImGui::PushFont(HeadingFont());
 		ImGui::TextColored(Pink, "%s", label);
+		if (HeadingFont()) ImGui::PopFont();
+		if (help) Help(help);
 		const ImVec2 p = ImGui::GetCursorScreenPos();
 		const float w = ImGui::GetContentRegionAvailWidth();
 		ImGui::GetWindowDrawList()->AddLine(
@@ -154,23 +169,42 @@ namespace Theme {
 	inline bool Primary(const char* label, const ImVec2& size = ImVec2(0, 0)) {
 		return ColorButton(label, Blue, BlueHi, size);
 	}
+	// Accent (pink) action button - the record/run headline actions.
+	inline bool Accent(const char* label, const ImVec2& size = ImVec2(0, 0)) {
+		return ColorButton(label, Pink, PinkHi, size);
+	}
 	// Destructive (red) action button.
 	inline bool Danger(const char* label, const ImVec2& size = ImVec2(0, 0)) {
 		return ColorButton(label, Red, RedHi, size);
 	}
 
-	// A tab button: blue when selected, neutral otherwise.
+	// A tab button: pink (the accent) when selected, neutral otherwise.
 	inline bool Tab(const char* label, bool selected, const ImVec2& size) {
 		if (selected) {
 			const float a = MenuOpacity();
-			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(Blue.x, Blue.y, Blue.z, Blue.w * a));
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(BlueHi.x, BlueHi.y, BlueHi.z, BlueHi.w * a));
-			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(BlueHi.x, BlueHi.y, BlueHi.z, BlueHi.w * a));
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(Pink.x, Pink.y, Pink.z, Pink.w * a));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(PinkHi.x, PinkHi.y, PinkHi.z, PinkHi.w * a));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(PinkHi.x, PinkHi.y, PinkHi.z, PinkHi.w * a));
 		}
 		const bool r = ImGui::Button(label, size);
 		if (selected)
 			ImGui::PopStyleColor(3);
 		return r;
+	}
+
+	// A small "(?)" marker appended to the current row; the verbose description
+	// lives in its hover tooltip instead of the panel. Deliberate hover only -
+	// nothing pops up while just mousing around the controls.
+	inline void Help(const char* text) {   // (forward-declared above Heading)
+		ImGui::SameLine();
+		ImGui::TextDisabled("(?)");
+		if (ImGui::IsItemHovered()) {
+			ImGui::BeginTooltip();
+			ImGui::PushTextWrapPos(340.f);
+			ImGui::TextUnformatted(text);
+			ImGui::PopTextWrapPos();
+			ImGui::EndTooltip();
+		}
 	}
 
 }   // namespace Theme

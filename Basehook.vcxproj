@@ -95,6 +95,7 @@
     <ClCompile Include="Source\Menu\Interface.cpp" />
     <ClCompile Include="Source\Recording\RecordingStore.cpp" />
     <ClCompile Include="Source\World\BspWorld.cpp" />
+    <ClCompile Include="Source\World\Cvars.cpp" />
     <ClCompile Include="Source\World\NetVars.cpp" />
     <ClCompile Include="Source\World\Prediction.cpp" />
     <ClCompile Include="Source\World\WorldDraw.cpp" />
@@ -131,6 +132,7 @@
     <ClInclude Include="Source\Menu\Interface.h" />
     <ClInclude Include="Source\Utilities\FindPattern.h" />
     <ClInclude Include="Source\World\BspWorld.h" />
+    <ClInclude Include="Source\World\Cvars.h" />
     <ClInclude Include="Source\World\NetVars.h" />
     <ClInclude Include="Source\World\Prediction.h" />
     <ClInclude Include="Source\World\WorldDraw.h" />

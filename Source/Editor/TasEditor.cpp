@@ -25,8 +25,11 @@
 
 #include "../World/WorldDraw.h"
 #include "../World/BspWorld.h"
+#include "../World/Cvars.h"
 #include "../Menu/Theme.h"
 #include "../Menu/RecordPanel.h"
+
+#include <sstream>
 
 namespace {
 	constexpr float kPi = 3.14159265358979f;
@@ -87,6 +90,18 @@ namespace {
 		if (*v < lo) *v = lo;
 		if (*v > hi) *v = hi;
 		return changed;
+	}
+
+	// ImGui 1.50 swallows the wheel over a NoScrollWithMouse child instead of
+	// bubbling it up, so fixed-content boxes would dead-zone page scrolling.
+	// Call straight after EndChild(): if the pointer is over that child, hand
+	// the wheel to the window we are back inside (the scrolling tab body).
+	void PassWheel() {
+		ImGuiIO& io = ImGui::GetIO();
+		if (io.MouseWheel != 0.f
+			&& ImGui::IsMouseHoveringRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))
+			ImGui::SetScrollY(ImGui::GetScrollY()
+				- io.MouseWheel * ImGui::GetTextLineHeight() * 5.f);
 	}
 
 	// ---------------------------------------------------------------- model --
@@ -199,15 +214,26 @@ namespace {
 		float  model_err = 0.f;
 	};
 
+	// Per-tick INPUT override bits (any input, not just jump): mask says which
+	// inputs this tick overrides, value carries the forced state for those bits.
+	enum : int {
+		OV_W = 1, OV_A = 2, OV_S = 4, OV_D = 8, OV_JUMP = 16, OV_DUCK = 32,
+	};
+	struct InputOvr {
+		int tick = 0;    // local tick within the segment
+		int mask = 0;    // which OV_ bits are overridden at this tick
+		int value = 0;   // forced state for the masked bits
+	};
+
 	struct EditSegment {
 		bool raw = false;             // raw = explicit per-tick frames
 		bool is_solver = false;       // solver-driven strafe route
 		GenParams gen;                // pitch/duck settings shared by all kinds
 		SolverData solver;
 		std::vector<Frame> frames;
-		// Per-tick jump overrides for generated segments: (local tick, 0=suppress
-		// / 1=force). Lets a single tick jump without baking the segment.
-		std::vector<std::pair<int, int>> jump_ovr;
+		// Per-tick input overrides for generated/solver segments: flip a single
+		// tick's key/jump/crouch without baking. Segment edits clear them.
+		std::vector<InputOvr> ovr;
 		int Ticks() const {
 			if (raw) return static_cast<int>(frames.size());
 			if (is_solver) return solver.solved ? solver.ticks : 0;
@@ -249,7 +275,7 @@ namespace {
 
 	// ---------------------------------------------------------------- state --
 	bool g_open = true;   // the editor IS the tool - visible whenever the menu is
-	int  g_tab = 1;                   // 0 Record, 1 Run, 2 Targets, 3 Rendering, 4 Project
+	int  g_tab = 2;                   // 0 Project, 1 Record, 2 Run, 3 Targets, 4 Rendering
 	char g_name[64] = "untitled";
 	StartState g_anchor;
 	std::vector<EditSegment> g_segs;
@@ -319,7 +345,13 @@ namespace {
 		int start; int ticks; bool raw; int raw_off; GenParams gen;
 		bool solver; SolverData sdata;
 	};
-	struct PlanOvr { int seg; int local; int value; };
+	struct PlanOvr { int seg; int local; int mask; int value; };
+
+	// NATURAL (pre-override) key state per GLOBAL tick, stamped by the
+	// provider on every sim. The override UI must show KEYS, not the collapsed
+	// move floats: A+D both held nets sidemove 0, and the display still has to
+	// light both keys pink.
+	uint8_t g_nat_keys[Prediction::kMaxSimTicks] = {};
 	PlanSeg g_plan[kMaxPlanSegs];
 	int     g_plan_count = 0;
 	PlanOvr g_plan_ovr[kMaxPlanOvr];
@@ -371,11 +403,11 @@ namespace {
 		return sqrtf(speed * speed + 2.f * cstar * add + add * add) - speed;
 	}
 
-	int FindJumpOverride(int seg, int local) {
+	const PlanOvr* FindOverride(int seg, int local) {
 		for (int i = 0; i < g_plan_ovr_count; ++i)
 			if (g_plan_ovr[i].seg == seg && g_plan_ovr[i].local == local)
-				return g_plan_ovr[i].value;
-		return -1;
+				return &g_plan_ovr[i];
+		return nullptr;
 	}
 
 	// Horizontal velocity heading in degrees (Source yaw space); falls back
@@ -656,10 +688,10 @@ namespace {
 
 		int buttons = 0;
 		if (g.prestrafe) {
-			// The prestrafe drives its own jump/duck; the generic jump/duck
-			// settings do not apply to it.
+			// The prestrafe drives its own jump and end-crouch; the generic
+			// jump setting does not apply, but a held crouch (g.duck) does.
 			if (ps_jump) buttons |= IN_JUMP;
-			if (ps_duck) buttons |= IN_DUCK;
+			if (ps_duck || g.duck) buttons |= IN_DUCK;
 		} else {
 			if (g.duck) buttons |= IN_DUCK;
 			if (g.jump_mode == JM_Hold)
@@ -670,10 +702,29 @@ namespace {
 		if (ps.solver && ps.sdata.start_jump && t == 0)
 			buttons |= IN_JUMP;   // solver's grounded-start hop
 
-		// Per-tick override: force or suppress jump on exactly this tick.
-		const int ovr = FindJumpOverride(g_pv_seg, t);
-		if (ovr == 1) buttons |= IN_JUMP;
-		else if (ovr == 0) buttons &= ~IN_JUMP;
+		// Per-tick INPUT overrides, applied at KEY level. The natural key
+		// state is derived from the composed movement (generators emit one
+		// side at +-450, so the reconstruction is lossless), stamped for the
+		// override UI, then the overridden bits replace their key - opposing
+		// keys COMBINE like the real input stack (A+D held nets sidemove 0).
+		{
+			uint8_t nat = 0;
+			if (fmove > 0.f) nat |= OV_W;
+			if (fmove < 0.f) nat |= OV_S;
+			if (smove < 0.f) nat |= OV_A;
+			if (smove > 0.f) nat |= OV_D;
+			if (buttons & IN_JUMP) nat |= OV_JUMP;
+			if (buttons & IN_DUCK) nat |= OV_DUCK;
+			if (tick >= 0 && tick < Prediction::kMaxSimTicks)
+				g_nat_keys[tick] = nat;
+			if (const PlanOvr* ov = FindOverride(g_pv_seg, t)) {
+				const int eff = (nat & ~ov->mask) | (ov->value & ov->mask);
+				fmove = ((eff & OV_W) ? 450.f : 0.f) + ((eff & OV_S) ? -450.f : 0.f);
+				smove = ((eff & OV_A) ? -450.f : 0.f) + ((eff & OV_D) ? 450.f : 0.f);
+				buttons = (eff & OV_JUMP) ? (buttons | IN_JUMP) : (buttons & ~IN_JUMP);
+				buttons = (eff & OV_DUCK) ? (buttons | IN_DUCK) : (buttons & ~IN_DUCK);
+			}
+		}
 
 		out->viewangles[0] = pitch;
 		out->viewangles[1] = yaw;
@@ -692,6 +743,7 @@ namespace {
 	bool BuildPlan() {
 		g_plan_count = 0;
 		g_plan_ovr_count = 0;
+		memset(g_nat_keys, 0, sizeof(g_nat_keys));
 		int raw_off = 0;
 		int start = 0;
 		for (const EditSegment& s : g_segs) {
@@ -713,9 +765,9 @@ namespace {
 				raw_off += ticks;
 			}
 			if (!s.raw) {
-				for (const std::pair<int, int>& o : s.jump_ovr)
-					if (o.first < ticks && g_plan_ovr_count < kMaxPlanOvr)
-						g_plan_ovr[g_plan_ovr_count++] = { g_plan_count, o.first, o.second };
+				for (const InputOvr& o : s.ovr)
+					if (o.tick < ticks && o.mask && g_plan_ovr_count < kMaxPlanOvr)
+						g_plan_ovr[g_plan_ovr_count++] = { g_plan_count, o.tick, o.mask, o.value };
 			}
 			p.ticks = ticks;
 			start += ticks;
@@ -4355,14 +4407,14 @@ namespace {
 	}
 
 	void SplitOverrides(EditSegment& prefix, EditSegment& suffix, int local) {
-		suffix.jump_ovr.clear();
-		for (const std::pair<int, int>& o : prefix.jump_ovr)
-			if (o.first >= local)
-				suffix.jump_ovr.push_back({ o.first - local, o.second });
-		prefix.jump_ovr.erase(
-			std::remove_if(prefix.jump_ovr.begin(), prefix.jump_ovr.end(),
-				[local](const std::pair<int, int>& o) { return o.first >= local; }),
-			prefix.jump_ovr.end());
+		suffix.ovr.clear();
+		for (const InputOvr& o : prefix.ovr)
+			if (o.tick >= local)
+				suffix.ovr.push_back({ o.tick - local, o.mask, o.value });
+		prefix.ovr.erase(
+			std::remove_if(prefix.ovr.begin(), prefix.ovr.end(),
+				[local](const InputOvr& o) { return o.tick >= local; }),
+			prefix.ovr.end());
 	}
 
 	// TOTAL-HEADING bias (kind 0) spreads its turn over the segment's tick
@@ -4484,8 +4536,10 @@ namespace {
 		return dir;
 	}
 
-	// Global UI preferences (not per-project): one value per line in
-	// Documents\sourceTAS\ui.cfg. Currently just the menu opacity.
+	// Global UI preferences (not per-project), one "key value" line each in
+	// Documents\sourceTAS\ui.cfg: the menu opacity plus every Rendering-tab
+	// option. Unknown keys are ignored so old and new builds can share the
+	// file; a legacy single-float file still loads as the opacity.
 	std::string SettingsPath() {
 		char documents[MAX_PATH];
 		if (FAILED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, documents)))
@@ -4495,25 +4549,130 @@ namespace {
 		return base + "\\ui.cfg";
 	}
 
+	// Every persisted option: X(key, lvalue). Serialize, parse, and the
+	// defaults snapshot all derive from this one list.
+	#define STAS_UI_PREFS(X) \
+		X("opacity",       Theme::MenuOpacity()) \
+		X("hotkeys_armed", RecordPanel::HotkeysArmed()) \
+		X("test_marker",   WorldDraw::draw_test_marker) \
+		X("player_box",    WorldDraw::draw_player_box) \
+		X("feet_marker",   WorldDraw::draw_player_marker) \
+		X("hull_alpha",    WorldDraw::player_box_alpha) \
+		X("overlay_life",  WorldDraw::overlay_life_scale) \
+		X("tag_end_speed", WorldDraw::tag_seg_end_speed) \
+		X("tag_cur_speed", WorldDraw::tag_cursor_speed) \
+		X("tag_end_eff",   WorldDraw::tag_seg_end_eff) \
+		X("tag_end_time",  WorldDraw::tag_seg_end_time) \
+		X("tag_cur_time",  WorldDraw::tag_cursor_time) \
+		X("pause_busy",    WorldDraw::pause_draw_busy) \
+		X("pred_path",     WorldDraw::draw_prediction) \
+		X("pred_live",     WorldDraw::pred_live_input) \
+		X("pred_bhop",     WorldDraw::pred_autobhop) \
+		X("pred_ticks",    WorldDraw::pred_ticks) \
+		X("pred_fwd",      WorldDraw::pred_forwardmove) \
+		X("pred_side",     WorldDraw::pred_sidemove) \
+		X("pred_jump",     WorldDraw::pred_jump) \
+		X("pred_duck",     WorldDraw::pred_duck) \
+		X("trail0",        WorldDraw::corner_trails[0]) \
+		X("trail1",        WorldDraw::corner_trails[1]) \
+		X("trail2",        WorldDraw::corner_trails[2]) \
+		X("trail3",        WorldDraw::corner_trails[3]) \
+		X("ghost_hull",    g_show_hull) \
+		X("replay_hud",    WorldDraw::show_replay_hud) \
+		X("min_eff",       g_min_eff) \
+		X("bsp_wire",      BspWorld::draw_wireframe) \
+		X("bsp_markers",   BspWorld::show_markers) \
+		X("bsp_radius",    BspWorld::draw_radius) \
+		X("bsp_budget",    BspWorld::line_budget) \
+		X("bsp_solid",     BspWorld::show_solid) \
+		X("bsp_clip",      BspWorld::show_playerclip) \
+		X("bsp_ladder",    BspWorld::show_ladder)
+
+	void PrefPut(std::string& out, const char* key, bool v) {
+		out += key; out += v ? " 1\n" : " 0\n";
+	}
+	void PrefPut(std::string& out, const char* key, int v) {
+		char b[64]; Sfmt(b, "%s %d\n", key, v); out += b;
+	}
+	void PrefPut(std::string& out, const char* key, float v) {
+		char b[64]; Sfmt(b, "%s %.6g\n", key, v); out += b;
+	}
+	void PrefSet(bool& dst, double v)  { dst = v != 0.0; }
+	void PrefSet(int& dst, double v)   { dst = static_cast<int>(v); }
+	void PrefSet(float& dst, double v) { dst = static_cast<float>(v); }
+
+	std::string SerializePrefs() {
+		std::string out;
+		#define X(key, lval) PrefPut(out, key, lval);
+		STAS_UI_PREFS(X)
+		#undef X
+		return out;
+	}
+
+	void ApplyPrefLine(const std::string& key, double val) {
+		#define X(k, lval) if (key == k) { PrefSet(lval, val); return; }
+		STAS_UI_PREFS(X)
+		#undef X
+	}
+
+	std::string g_prefs_defaults;   // serialized compile-time defaults
+	std::string g_prefs_saved;      // last state written to (or read from) disk
+
+	void SaveUiSettings() {
+		const std::string p = SettingsPath();
+		if (p.empty())
+			return;
+		g_prefs_saved = SerializePrefs();
+		std::ofstream f(p, std::ios::trunc);
+		if (f)
+			f << g_prefs_saved;
+	}
+
 	void LoadUiSettings() {
+		static bool s_loaded = false;
+		if (s_loaded)
+			return;
+		s_loaded = true;
+		// Snapshot the compile-time defaults BEFORE the file overrides them -
+		// this is what the reset button restores.
+		g_prefs_defaults = SerializePrefs();
+		g_prefs_saved = g_prefs_defaults;
 		const std::string p = SettingsPath();
 		if (p.empty())
 			return;
 		std::ifstream f(p);
 		if (!f)
 			return;
-		float op = Theme::MenuOpacity();
-		if (f >> op && op >= 0.05f && op <= 1.f)
-			Theme::MenuOpacity() = op;
+		std::string key;
+		double val = 0.0;
+		bool any = false;
+		while (f >> key) {
+			// Legacy format: the whole file is one bare float (the opacity).
+			char* end = nullptr;
+			const double asnum = strtod(key.c_str(), &end);
+			if (!any && end && *end == '\0') {
+				if (asnum >= 0.05 && asnum <= 1.0)
+					Theme::MenuOpacity() = static_cast<float>(asnum);
+				break;
+			}
+			if (!(f >> val))
+				break;
+			ApplyPrefLine(key, val);
+			any = true;
+		}
+		float& op = Theme::MenuOpacity();
+		if (op < 0.05f) op = 0.05f;
+		if (op > 1.f) op = 1.f;
+		g_prefs_saved = SerializePrefs();
 	}
 
-	void SaveUiSettings() {
-		const std::string p = SettingsPath();
-		if (p.empty())
-			return;
-		std::ofstream f(p, std::ios::trunc);
-		if (f)
-			f << Theme::MenuOpacity() << "\n";
+	void ResetUiSettings() {
+		std::istringstream in(g_prefs_defaults);
+		std::string key;
+		double val = 0.0;
+		while (in >> key >> val)
+			ApplyPrefLine(key, val);
+		SaveUiSettings();
 	}
 
 	std::string SanitizeName(const std::string& name) {
@@ -4562,7 +4721,9 @@ namespace {
 	// v14: solver gains ride (on-face ride solve).
 	// v15: gen gains smooth_ticks + the prestrafe recipe fields.
 	// v16: prestrafe gains ps_strafes (N alternating air strafes).
-	constexpr uint32_t kProjVersion = 16;
+	// v17: per-tick JUMP overrides generalized to INPUT overrides
+	//      (tick, mask, value) - old jump pairs load as OV_JUMP entries.
+	constexpr uint32_t kProjVersion = 17;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -4636,12 +4797,13 @@ namespace {
 				W(out, g.ps_crouch_lead);
 					W(out, g.ps_strafes);        // v16
 
-				const uint32_t novr = static_cast<uint32_t>(s.jump_ovr.size());
+				const uint32_t novr = static_cast<uint32_t>(s.ovr.size());
 				W(out, novr);
-				for (const std::pair<int, int>& o : s.jump_ovr) {
-					const int32_t local = o.first;
-					const uint8_t val = static_cast<uint8_t>(o.second);
-					W(out, local); W(out, val);
+				for (const InputOvr& o : s.ovr) {
+					const int32_t local = o.tick;
+					const uint8_t mask = static_cast<uint8_t>(o.mask);
+					const uint8_t val = static_cast<uint8_t>(o.value);
+					W(out, local); W(out, mask); W(out, val);
 				}
 
 				if (s.is_solver) {
@@ -4897,14 +5059,24 @@ namespace {
 					s.gen.yaw_rate = 0.f;
 				}
 				SanitizeGen(s.gen);
-				if (version >= 4) {
+				if (version >= 17) {
+					uint32_t novr = 0;
+					if (!R(in, novr) || novr > 4096) return false;
+					for (uint32_t o = 0; o < novr; ++o) {
+						int32_t local = 0;
+						uint8_t mask = 0, val = 0;
+						if (!R(in, local) || !R(in, mask) || !R(in, val)) return false;
+						s.ovr.push_back({ local, mask, val });
+					}
+				} else if (version >= 4) {
+					// Old format: per-tick JUMP pairs -> OV_JUMP input overrides.
 					uint32_t novr = 0;
 					if (!R(in, novr) || novr > 4096) return false;
 					for (uint32_t o = 0; o < novr; ++o) {
 						int32_t local = 0;
 						uint8_t val = 0;
 						if (!R(in, local) || !R(in, val)) return false;
-						s.jump_ovr.push_back({ local, val ? 1 : 0 });
+						s.ovr.push_back({ local, OV_JUMP, val ? OV_JUMP : 0 });
 					}
 				}
 				if (s.is_solver) {
@@ -5090,6 +5262,24 @@ namespace {
 	// Start/end stats for a segment's REAL simmed range: 2D + 3D speed, view
 	// yaw/pitch, and average air efficiency. "Start" is the state ENTERING the
 	// segment; "end" is the state after its LAST tick.
+	// Copy the engine probe's MEASURED values into the model inputs. The probe
+	// fills from real sim states (data, never guessed); with no data yet this
+	// is a no-op that says so.
+	void AdoptProbe() {
+		if (g_meas_max_add <= 0.f && g_meas_grav_n <= 0) {
+			g_status = "Engine probe has no data yet - run a sim with a solved solver segment first.";
+			return;
+		}
+		if (g_meas_max_add > 45.f)
+			g_air_accel = 150.f;
+		if (g_meas_grav_n >= 8)
+			g_gravity = g_meas_grav;
+		if (g_meas_jump_vz > 100.f)
+			g_jump_vz = g_meas_jump_vz;
+		MarkDirty();
+		g_status = "Adopted the probed engine values into the model settings.";
+	}
+
 	void DrawSegmentStats(int sel) {
 		if (!g_valid || g_states.empty() || sel < 0 || sel >= static_cast<int>(g_starts.size()))
 			return;
@@ -5113,15 +5303,26 @@ namespace {
 			if (i < static_cast<int>(g_maxgain.size()) && g_maxgain[i] > 0.001f) {
 				eff_sum += g_eff[i]; eff_n++;
 			}
+		// World positions: state[i] is the state AFTER tick i, so the segment's
+		// start position is the previous tick's origin (anchor for tick 0) -
+		// the same convention v0 already uses for the start velocity.
+		const Vector o0 = (b > 0 && b - 1 < static_cast<int>(g_states.size()))
+			? g_states[b - 1].origin : g_anchor.origin;
+		const Vector o1 = g_states[e - 1].origin;
+		const Vector d = o1 - o0;
 		ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.f, 1.f),
 			"Segment stats  (ticks %d - %d, %d ticks)", b, e - 1, e - b);
 		ImGui::Text("  START   speed %.1f u/s  (3D %.1f)   yaw %.2f   pitch %.2f",
 			sp2(v0), sp3(v0), y0, p0);
 		ImGui::Text("  END     speed %.1f u/s  (3D %.1f)   yaw %.2f   pitch %.2f",
 			sp2(v1), sp3(v1), y1, p1);
-		ImGui::Text("  change  %+.1f u/s        turned %+.2f deg   avg air eff %.0f%% (%d air ticks)",
+		ImGui::Text("  change  %+.1f u/s        turned %+.2f deg   avg air eff %.2f%% (%d air ticks)",
 			sp2(v1) - sp2(v0), NormYaw(y1 - y0),
 			eff_n ? (eff_sum / eff_n) * 100.f : 0.f, eff_n);
+		ImGui::Text("  START pos  %.1f  %.1f  %.1f", o0.X, o0.Y, o0.Z);
+		ImGui::Text("  END   pos  %.1f  %.1f  %.1f", o1.X, o1.Y, o1.Z);
+		ImGui::Text("  moved   %.1f u horizontal   %+.1f u height   (3D %.1f)",
+			sp2(d), d.Z, sp3(d));
 	}
 
 	void DrawRunTab() {
@@ -5166,11 +5367,164 @@ namespace {
 		if (ImGui::Button("Stop test") && g_tas.IsPlaying())
 			g_tas.EmergencyStop();
 
+		// --- CURSOR (playhead controls left, tick stats right) ------------
+		{
+			Theme::Heading("Cursor");
+			// Scrubbing anywhere auto-selects the segment under the playhead, so
+			// the segment scrubber and the Selected-segment section always talk
+			// about the tick being looked at.
+			static int s_prev_cursor = -1;
+			if (g_cursor != s_prev_cursor) {
+				s_prev_cursor = g_cursor;
+				const int cs = SegmentAtTick(g_cursor);
+				if (cs >= 0)
+					g_sel = cs;
+			}
+			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 190), true,
+				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+			const int last = g_total > 0 ? g_total - 1 : 0;
+			ImGui::TextDisabled("Run playhead");
+			ImGui::PushItemWidth(-1);
+			ImGui::SliderInt("##cursorall", &g_cursor, 0, last);
+			ImGui::PopItemWidth();
+
+			if (ImGui::SmallButton("|<")) g_cursor = 0;
+			ImGui::SameLine(); if (ImGui::SmallButton("<seg")) TasEditor::StepSegment(-1);
+			ImGui::SameLine(); if (ImGui::SmallButton("-10")) TasEditor::StepCursor(-10);
+			ImGui::SameLine(); if (ImGui::SmallButton("-1")) TasEditor::StepCursor(-1);
+			ImGui::SameLine(); if (ImGui::SmallButton("+1")) TasEditor::StepCursor(1);
+			ImGui::SameLine(); if (ImGui::SmallButton("+10")) TasEditor::StepCursor(10);
+			ImGui::SameLine(); if (ImGui::SmallButton("seg>")) TasEditor::StepSegment(1);
+			ImGui::SameLine(); if (ImGui::SmallButton(">|")) g_cursor = last;
+
+			// Selected-segment scrubber, two-way tied to the playhead: dragging
+			// here moves the global playhead inside the segment, and moving the
+			// playhead any other way is reflected straight back here.
+			if (g_sel >= 0 && g_sel < static_cast<int>(g_starts.size())) {
+				const int b = g_starts[g_sel];
+				int e = (g_sel + 1 < static_cast<int>(g_starts.size())) ? g_starts[g_sel + 1] : g_total;
+				if (e > b) {
+					int local = g_cursor - b;
+					if (local < 0) local = 0;
+					if (local > e - b - 1) local = e - b - 1;
+					ImGui::TextDisabled("Segment #%d scrub - tick %d / %d", g_sel, local, e - b);
+					ImGui::PushItemWidth(-1);
+					if (ImGui::SliderInt("##cursorseg", &local, 0, e - b - 1))
+						g_cursor = b + local;
+					ImGui::PopItemWidth();
+				}
+			}
+
+			// Per-tick INPUT overrides at the playhead: pink = held this tick
+			// (read from the composed plan), * = overridden. Clicking flips that
+			// input on exactly this tick; clicking an overridden key removes the
+			// override again. Segment edits clear the segment's overrides.
+			const int seg = SegmentAtTick(g_cursor);
+			if (seg >= 0 && seg < static_cast<int>(g_segs.size()) && !g_segs[seg].raw
+				&& g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_frames.size())
+				&& g_cursor < Prediction::kMaxSimTicks) {
+				EditSegment& ks = g_segs[seg];
+				const int local = g_cursor - g_starts[seg];
+				static const int bits[6] = { OV_W, OV_A, OV_S, OV_D, OV_JUMP, OV_DUCK };
+				static const char* names[6] = { "W", "A", "S", "D", "Jump", "Crouch" };
+				int ci = -1;
+				for (int i = 0; i < static_cast<int>(ks.ovr.size()); ++i)
+					if (ks.ovr[i].tick == local) { ci = i; break; }
+				// Effective key state = natural keys with the overridden bits
+				// replaced. KEY level, not move floats: adding D on a tick that
+				// naturally holds A keeps BOTH pink (they null sidemove, exactly
+				// like holding both keys in game).
+				const uint8_t nat = g_nat_keys[g_cursor];
+				const int eff = (ci >= 0)
+					? ((nat & ~ks.ovr[ci].mask) | (ks.ovr[ci].value & ks.ovr[ci].mask))
+					: nat;
+				bool held[6];
+				for (int i = 0; i < 6; ++i)
+					held[i] = (eff & bits[i]) != 0;
+				ImGui::TextDisabled("Tick inputs");
+				Theme::Help("Every input's state at the playhead tick - pink = held. "
+					"Click to flip that input on exactly this tick (marked *); click "
+					"again to remove the override. Editing the segment's parameters "
+					"clears its per-tick overrides.");
+				for (int i = 0; i < 6; ++i) {
+					if (i) ImGui::SameLine();
+					const bool ovr_bit = ci >= 0 && (ks.ovr[ci].mask & bits[i]) != 0;
+					char lbl[16];
+					Sfmt(lbl, "%s%s##ov%d", names[i], ovr_bit ? "*" : "", i);
+					if (held[i]) {
+						ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
+						ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
+						ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
+						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+					}
+					const bool clicked = ImGui::SmallButton(lbl);
+					if (held[i])
+						ImGui::PopStyleColor(4);
+					if (!clicked)
+						continue;
+					if (ovr_bit) {
+						// Second click: back to what the segment does naturally.
+						ks.ovr[ci].mask &= ~bits[i];
+						ks.ovr[ci].value &= ~bits[i];
+						if (ks.ovr[ci].mask == 0) {
+							ks.ovr.erase(ks.ovr.begin() + ci);
+							ci = -1;
+						}
+					} else {
+						if (ci < 0) {
+							ks.ovr.push_back({ local, 0, 0 });
+							ci = static_cast<int>(ks.ovr.size()) - 1;
+						}
+						ks.ovr[ci].mask |= bits[i];
+						if (!held[i]) ks.ovr[ci].value |= bits[i];
+						else          ks.ovr[ci].value &= ~bits[i];
+					}
+					MarkDirty();
+				}
+			}
+			ImGui::EndChild();
+			PassWheel();
+
+			// Stats for the tick the playhead sits on, in a narrow box so the
+			// scrub sliders keep most of the row's width.
+			ImGui::SameLine();
+			ImGui::BeginChild("cursorstats", ImVec2(0, 190), true,
+				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
+				const Prediction::SimState& st = g_states[g_cursor];
+				const bool air = (st.flags & FL_ONGROUND) == 0;
+				const float interval = Prediction::LastDiag().interval_per_tick > 0.f
+					? Prediction::LastDiag().interval_per_tick : 0.015f;
+				const float vz = st.velocity.Z;
+				const float sp3 = sqrtf(st.velocity.X * st.velocity.X
+					+ st.velocity.Y * st.velocity.Y + vz * vz);
+				ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.f, 1.f),
+					"Cursor - tick %d, seg %d", g_cursor, seg);
+				ImGui::Text("t %.3f s   %s%s", g_cursor * interval,
+					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " + duck" : "");
+				ImGui::Text("pos %.1f %.1f %.1f", st.origin.X, st.origin.Y, st.origin.Z);
+				ImGui::Text("speed %.1f   vz %+.0f", g_speed[g_cursor], vz);
+				ImGui::Text("3D speed %.1f", sp3);
+				ImGui::Text("yaw %.2f   pitch %.2f",
+					g_frames[g_cursor].viewangles[1], g_frames[g_cursor].viewangles[0]);
+				if (g_maxgain[g_cursor] > 0.001f) {
+					ImGui::Text("gain %+.2f   max %+.2f", g_gain[g_cursor], g_maxgain[g_cursor]);
+					ImGui::Text("eff %.2f%%", g_eff[g_cursor] * 100.f);
+				} else {
+					ImGui::Text("gain %+.2f (not air)", g_gain[g_cursor]);
+				}
+			} else {
+				ImGui::TextDisabled("stats appear after a sim runs");
+			}
+			ImGui::EndChild();
+			PassWheel();
+		}
+
 		// --- segment list (left) + selected-segment stats (right) ---------
 		Theme::Heading("Segments");
 		ImGui::TextDisabled("%d ticks total, %.2f s", g_total,
 			g_total * (Prediction::LastDiag().interval_per_tick > 0.f ? Prediction::LastDiag().interval_per_tick : 0.015f));
-		ImGui::BeginChild("segs", ImVec2(380, 132), true);
+		ImGui::BeginChild("segs", ImVec2(380, 172), true);
 		for (int k = 0; k < static_cast<int>(g_segs.size()); ++k) {
 			const EditSegment& s = g_segs[k];
 			char kind[64];
@@ -5196,7 +5550,7 @@ namespace {
 			}
 			char label[256];
 			Sfmt(label, "#%d  %s  %d ticks%s##seg%d", k, kind, s.Ticks(),
-				(!s.raw && !s.jump_ovr.empty()) ? "  [jump ovr]" : "", k);
+				(!s.raw && !s.ovr.empty()) ? "  [ovr]" : "", k);
 			if (ImGui::Selectable(label, g_sel == k)) {
 				g_sel = k;
 				if (k < static_cast<int>(g_starts.size()))
@@ -5206,12 +5560,14 @@ namespace {
 		ImGui::EndChild();
 		// Stats for the selected segment, in the free space to the right.
 		ImGui::SameLine();
-		ImGui::BeginChild("segstats", ImVec2(0, 132), true);
+		ImGui::BeginChild("segstats", ImVec2(0, 172), true,
+			ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 		if (g_valid && !g_states.empty())
 			DrawSegmentStats(g_sel);
 		else
 			ImGui::TextDisabled("segment stats appear here after a sim runs");
 		ImGui::EndChild();
+		PassWheel();
 
 		if (ImGui::Button("+ Segment")) {
 			EditSegment s;
@@ -5257,18 +5613,19 @@ namespace {
 			Theme::Heading("Selected segment");
 			if (g_segs[g_sel].is_solver && !g_segs[g_sel].raw) {
 				EditSegment& s = g_segs[g_sel];
-				if (ImGui::CollapsingHeader("How the solver works")) {
-					ImGui::TextWrapped(
-						"Searches alternating A/D strafe schedules whose path passes through the "
-						"EXACT target point with the view yaw at that moment EXACTLY the target's "
-						"set yaw. The pass tick is computed from gravity (never searched), the yaw "
-						"equation is solved algebraically (the real sim replays the same view "
-						"stream, so yaw cannot drift), and the remaining rates solve the 2D pass "
-						"point. The drawn line is the REAL engine sim; its measured pass is shown "
-						"below and auto-corrected against the target.");
-				}
-
+				// Target & mode on the left, search gates + probe on the right -
+				// side by side so the solver block wastes less vertical space.
+				ImGui::BeginChild("solvermode", ImVec2(-372.f, 240), true,
+					ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 				ImGui::TextDisabled("Target & mode");
+				Theme::Help("How the solver works: it searches alternating A/D strafe "
+					"schedules whose path passes through the EXACT target point with the "
+					"view yaw at that moment EXACTLY the target's set yaw. The pass tick "
+					"is computed from gravity (never searched), the yaw equation is "
+					"solved algebraically (the real sim replays the same view stream, so "
+					"yaw cannot drift), and the remaining rates solve the 2D pass point. "
+					"The drawn line is the REAL engine sim; its measured pass is shown "
+					"below and auto-corrected against the target.");
 				ImGui::PushItemWidth(260);
 				int target = s.solver.target;
 				if (ImGui::Combo("Board target", &target, TargetItemGetter, nullptr, BspWorld::TargetCount()))
@@ -5279,88 +5636,99 @@ namespace {
 				// is one press with a single mid-course steering adjustment).
 				if (!s.solver.ride) {
 					int strafes = s.solver.strafes;
-					if (ImGui::InputInt("Strafes (alternating)", &strafes))
+					if (ImGui::InputInt("Alternating strafes", &strafes))
 						s.solver.strafes = strafes < 1 ? 1 : strafes > 4 ? 4 : strafes;
 				}
 				ImGui::PopItemWidth();
-				ImGui::Checkbox("RIDE solve: this segment STARTS ON the target's ramp",
-					&s.solver.ride);
-				if (s.solver.ride)
-					ImGui::TextDisabled("ONE continuous strafe pressing into the ramp, riding the "
-						"face to the exact point. The search allows a single mid-course steering "
-						"change, and the solution family spreads the approach yaw and pass vz - "
-						"the flick lead-in. Strafe-count/optimal settings are ignored; "
-						"'Jump at start' should be OFF.");
+				ImGui::Checkbox("Ride solve: start on the target's ramp", &s.solver.ride);
+				Theme::Help("For a segment that STARTS ON the target's ramp: ONE continuous "
+					"strafe pressing into the ramp, riding the face to the exact point. "
+					"The search allows a single mid-course steering change, and the "
+					"solution family spreads the approach yaw and pass vz - the flick "
+					"lead-in. Strafe-count/optimal settings are ignored; 'Jump at start' "
+					"should be OFF.");
 				// The checkbox picks what the NEXT search runs. The applied
 				// schedule keeps ITS OWN mode (stamped at Apply) - toggling
 				// here must never reinterpret applied numbers.
-				ImGui::Checkbox("Optimal-rate strafes (max gain; search per-phase biases)",
-					&s.solver.want_opt);
+				ImGui::Checkbox("Optimal-rate strafes", &s.solver.want_opt);
+				Theme::Help("Max gain: each phase rides the max-gain line +- a solved "
+					"bias; the view BLENDS onto the target yaw over the last ticks "
+					"(exact at the pass). Unchecked = constant-rate strafes; with the "
+					"yaw constraint, 1-2 strafes only hit the point when a timing lines "
+					"up - 3+ solves it structurally.");
 				if (s.solver.solved && s.solver.opt != s.solver.want_opt)
 					ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f),
 						"applied line stays %s until the next search+apply",
 						s.solver.opt ? "OPTIMAL" : "CONSTANT-RATE");
 				if (s.solver.want_opt) {
-					ImGui::TextDisabled("each phase rides the max-gain line +- a solved bias; the view "
-						"BLENDS onto the target yaw over the last ticks (exact at the pass)");
-					IntRow("Yaw blend window (ticks before the pass)", &s.solver.want_blend, 1, 24);
+					ImGui::PushItemWidth(200);
+					ImGui::SliderInt("Yaw blend window", &s.solver.want_blend, 1, 24);
+					ImGui::PopItemWidth();
+					Theme::Help("Ticks before the pass over which the view blends onto "
+						"the target yaw.");
 				}
-				else if (s.solver.strafes < 3)
-					ImGui::TextDisabled("(with the yaw constraint, %d strafe(s) only hit the point when "
-						"a timing happens to line up - 3+ solves it structurally)", s.solver.strafes);
-
-				ImGui::Checkbox("Jump at start (grounded start)", &s.solver.start_jump);
+				ImGui::Checkbox("Jump at start", &s.solver.start_jump);
+				Theme::Help("The model is airborne-only - a grounded start needs this "
+					"first-tick hop to leave the floor.");
 				ImGui::SameLine();
-				ImGui::TextDisabled("(the model is airborne-only - a grounded start needs this)");
-
-				if (ImGui::CollapsingHeader("Search gates & engine probe (advanced)")) {
-					ImGui::PushItemWidth(150);
-					ImGui::InputFloat("Pass tolerance (u)", &g_sol_pos_tol, 0.25f, 1.f, 2);
-					ImGui::InputFloat("Max bump loss (u/s)", &g_sol_max_bump, 1.f, 5.f, 1);
-					ImGui::InputFloat("Collect within (u)", &g_sol_collect, 0.5f, 2.f, 1);
-					ImGui::PopItemWidth();
-					ImGui::TextDisabled("(everything passing within 'Collect' is kept and real-measured - "
-						"the tight gates only decide the 'exact' tag; data first, filtering later)");
-					ImGui::TextDisabled("(a kiss of the ramp shortly before the target is allowed and slides "
-						"into it - as long as the clip costs less than this)");
-					ImGui::PushItemWidth(150);
-					ImGui::InputFloat("Jump vz (0 = formula)", &g_jump_vz, 1.f, 10.f, 1);
-					ImGui::PopItemWidth();
-					// The engine probe: measured facts from the real sim's states.
-					// NEVER silently used - Adopt copies them into the inputs above.
-					if (g_meas_max_add > 0.f || g_meas_grav_n > 0) {
-						float interval = Prediction::LastDiag().interval_per_tick;
-						if (interval <= 0.f) interval = 0.015f;
-						const float model_amt = g_air_accel * g_wishspeed * interval;
-						ImGui::TextDisabled("engine probe: add/tick up to %.1f (model allows %.1f) | gravity %.0f [%d] | jump vz %.1f",
-							g_meas_max_add, model_amt, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
-						if (g_meas_max_add > model_amt + 2.f)
-							ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
-								"the engine granted MORE accel than the model allows -> the "
-								"sv_airaccelerate set here is too low for this server (surf servers run ~150)");
-						if (ImGui::Button("Adopt probe into model settings")) {
-							if (g_meas_max_add > 45.f)
-								g_air_accel = 150.f;
-							if (g_meas_grav_n >= 8)
-								g_gravity = g_meas_grav;
-							if (g_meas_jump_vz > 100.f)
-								g_jump_vz = g_meas_jump_vz;
-							MarkDirty();
-							g_status = "Adopted the probed engine values into the model settings (visible above/in the strafe model).";
-						}
-					} else {
-						ImGui::TextDisabled("engine probe: no data yet - it fills in after any sim runs "
-							"with a solved solver segment");
-					}
+				if (ImGui::Checkbox("Hold crouch", &s.gen.duck)) {
+					s.ovr.clear();
+					MarkDirty();
 				}
+				Theme::Help("Hold duck for the whole segment. Off by default; the engine "
+					"sim carries the smaller hull and duck physics through the solve.");
+				ImGui::EndChild();
+				PassWheel();
+				ImGui::SameLine();
+
+				ImGui::BeginChild("solvergates", ImVec2(0, 240), true);
+				ImGui::TextDisabled("Search gates & engine probe");
+				Theme::Help("Advanced. The gates only decide which passes earn the "
+					"'exact' tag - candidates are collected wider and real-measured "
+					"either way. The probe reports engine facts measured from the last "
+					"real sim.");
+				ImGui::PushItemWidth(120);
+				ImGui::InputFloat("Pass tolerance", &g_sol_pos_tol, 0.25f, 1.f, 2);
+				Theme::Help("Units from the target within which a pass earns the "
+					"'exact' tag. Filtering only - candidates are collected wider.");
+				ImGui::InputFloat("Max bump loss", &g_sol_max_bump, 1.f, 5.f, 1);
+				Theme::Help("A kiss of the ramp shortly before the target is allowed and "
+					"slides into it - as long as the clip costs less speed than this "
+					"(u/s).");
+				ImGui::InputFloat("Collect radius", &g_sol_collect, 0.5f, 2.f, 1);
+				Theme::Help("Everything passing within this many units is kept and "
+					"real-measured; the tight gates above only decide the 'exact' tag. "
+					"Data first, filtering later.");
+				ImGui::PopItemWidth();
+				// The engine probe: measured facts from the real sim's states.
+				// NEVER silently used - Adopt copies them into the inputs.
+				ImGui::PushTextWrapPos(0.f);
+				if (g_meas_max_add > 0.f || g_meas_grav_n > 0) {
+					float interval = Prediction::LastDiag().interval_per_tick;
+					if (interval <= 0.f) interval = 0.015f;
+					const float model_amt = g_air_accel * g_wishspeed * interval;
+					ImGui::TextDisabled("probe: add/tick <= %.1f (model %.1f) | gravity %.0f [%d] | jump vz %.1f",
+						g_meas_max_add, model_amt, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
+					if (g_meas_max_add > model_amt + 2.f)
+						ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f),
+							"the engine granted MORE accel than the model allows -> "
+							"sv_airaccelerate here is too low for this server (~150 on surf)");
+					if (ImGui::Button("Adopt probe into model settings"))
+						AdoptProbe();
+				} else {
+					ImGui::TextDisabled("probe: no data yet - it fills in after any sim "
+						"runs with a solved solver segment");
+				}
+				ImGui::PopTextWrapPos();
+				ImGui::EndChild();
 
 				ImGui::Separator();
-				if (Theme::Primary("Search solutions"))
+				if (Theme::Accent("Search solutions"))
 					StartSearch(g_sel);
 				ImGui::SameLine();
 				ImGui::Checkbox("Deep search", &g_deep_search);
-				ImGui::SameLine();
-				ImGui::TextDisabled("(tournament-full config: ~+4 u/s mean, up to +35; slower)");
+				Theme::Help("Tournament-full search config: ~+4 u/s mean, up to +35 on "
+					"some scenarios. Slower search.");
 
 				if (g_search.seg == g_sel) {
 					if (g_search.active) {
@@ -5622,7 +5990,7 @@ namespace {
 						s.raw = true;
 						s.is_solver = false;
 						s.frames.assign(g_frames.begin() + b, g_frames.begin() + e);
-						s.jump_ovr.clear();
+						s.ovr.clear();
 						g_status = "Baked solver segment to raw frames.";
 						MarkDirty();
 					}
@@ -5632,38 +6000,45 @@ namespace {
 				GenParams g = before;
 				bool ch = false;
 
-				ch |= ImGui::Checkbox("Prestrafe recipe (startzone exit: WA -> jump -> air-strafe -> crouch)",
-					&g.prestrafe);
+				ch |= ImGui::Checkbox("Prestrafe recipe", &g.prestrafe);
+				Theme::Help("Startzone exit: WA to max ground speed, jump, then N "
+					"alternating optimal air-strafes steered by one bias, and crouch to "
+					"skim the floor. The engine sims the real physics (incl. the mid-air "
+					"duck hull-lift); only inputs are emitted.");
 				if (g.prestrafe) {
-					ImGui::TextDisabled("WA to max ground speed, jump, then N alternating optimal "
-						"air-strafes steered by one bias, and crouch to skim the floor. The engine "
-						"sims the real physics (incl. the mid-air duck hull-lift); only inputs are emitted.");
-					ch |= IntRow("Total ticks", &g.ticks, 2, 2000);
+					ch |= IntRow("Duration (ticks)", &g.ticks, 2, 2000);
 
-					ImGui::TextDisabled("Ground phase (build speed)");
-					ch |= IntRow("  ground ticks (W + strafe key)", &g.ps_ground_ticks, 0, g.ticks);
+					ImGui::TextDisabled("Ground phase");
+					ch |= IntRow("  ground duration (ticks)", &g.ps_ground_ticks, 0, g.ticks);
+					Theme::Help("W plus the strafe key held for this many ticks before "
+						"the jump.");
 					ImGui::PushItemWidth(150);
 					int gdir = (g.ps_ground_dir > 0) ? 0 : 1;
 					if (ImGui::Combo("  ground strafe side", &gdir, "A (left)\0D (right)\0")) {
 						g.ps_ground_dir = (gdir == 0) ? 1 : -1; ch = true;
 					}
 					ImGui::PopItemWidth();
-					ch |= FloatRow("  ground view turn (total deg)",
+					ch |= FloatRow("  ground view turn",
 						&g.ps_ground_turn, -360.f, 360.f, "%+.1f deg", 1.f, 10.f, 1);
+					Theme::Help("Total degrees the view turns over the whole ground phase.");
 
-					ImGui::TextDisabled("Air phase (N optimal strafes)");
-					ch |= IntRow("  strafes (alternating)", &g.ps_strafes, 1, 8);
+					ImGui::TextDisabled("Air phase");
+					ch |= IntRow("  alternating strafes", &g.ps_strafes, 1, 8);
 					ImGui::PushItemWidth(150);
 					int adir = (g.ps_air_dir > 0) ? 0 : 1;
 					if (ImGui::Combo("  first strafe side", &adir, "A (left)\0D (right)\0")) {
 						g.ps_air_dir = (adir == 0) ? 1 : -1; ch = true;
 					}
 					ImGui::PopItemWidth();
-					ch |= FloatRow("  steer bias (+ right / - left, 0 = pure optimal)",
+					ch |= FloatRow("  steer bias",
 						&g.ps_air_bias, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+					Theme::Help("+ steers right, - left, 0 = pure optimal strafe.");
 
 					ImGui::TextDisabled("Crouch");
-					ch |= ImGui::Checkbox("Crouch at the end (dodge the floor)", &g.ps_crouch_end);
+					ch |= ImGui::Checkbox("Hold crouch for the whole segment", &g.duck);
+					ch |= ImGui::Checkbox("Crouch at the end", &g.ps_crouch_end);
+					Theme::Help("Crouch right before the floor to skim past it at maximum "
+						"speed (the last-moment startzone exit).");
 					if (g.ps_crouch_end) {
 						ch |= ImGui::Checkbox("Auto-time to the last airborne tick", &g.ps_crouch_auto);
 						if (!g.ps_crouch_auto)
@@ -5696,14 +6071,15 @@ namespace {
 				ImGui::SameLine(); ch |= ImGui::Checkbox("A", &g.key_a);
 				ImGui::SameLine(); ch |= ImGui::Checkbox("S", &g.key_s);
 				ImGui::SameLine(); ch |= ImGui::Checkbox("D", &g.key_d);
+				ImGui::SameLine(); ch |= ImGui::Checkbox("Crouch", &g.duck);
 				ImGui::SameLine();
 				ch |= ImGui::Checkbox("Auto A/D from turn direction", &g.auto_key);
+				Theme::Help("Airborne + turning: the strafe key is picked from the turn "
+					"direction for you (check A or D to override).");
 				ImGui::SameLine();
 				ch |= ImGui::Checkbox("Release W in air", &g.no_w_air);
-				if (g.auto_key && !g.key_a && !g.key_d)
-					ImGui::TextDisabled("airborne + turning: the strafe key is picked for you (check A or D to override)");
 
-				ch |= IntRow("Ticks (duration)", &g.ticks, 1, 1000);
+				ch |= IntRow("Duration (ticks)", &g.ticks, 1, 1000);
 				// Two view modes now: TURN RATE (mode 1) and OPTIMAL (max gain).
 				// Optimal covers strafing LEFT, RIGHT, or STRAIGHT (alternating
 				// max-gain strafes whose net path holds its heading, mode 3) -
@@ -5720,7 +6096,8 @@ namespace {
 				}
 				ImGui::PopItemWidth();
 				if (vmode == 0) {
-					ch |= FloatRow("View turn   (- left / + right, 0 = hold)", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
+					ch |= FloatRow("View turn", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
+					Theme::Help("- turns left, + turns right, 0 holds the view still.");
 				} else {
 					// Optimal: Left / Right / Straight (view-tilt) / Straight (skew).
 					int dir_idx = (g.yaw_mode == 4) ? 3 : (g.yaw_mode == 3) ? 2 : ((g.opt_dir > 0) ? 0 : 1);
@@ -5733,24 +6110,29 @@ namespace {
 						ch = true;
 					}
 					ImGui::PopItemWidth();
+					// One tooltip, text matching the selected direction mode.
+					Theme::Help(
+						g.yaw_mode == 3
+							? "STRAIGHT (steer by view): alternating max-gain strafes - the "
+							  "half-curls cancel so the mean path holds its heading; the bias "
+							  "tilts the VIEW to steer, identical every tick. Splice/resize safe."
+						: g.yaw_mode == 4
+							? "STRAIGHT (steer by dwell): the view stays pure max-gain; one side "
+							  "is held longer (base+skew ticks vs base-skew) and that asymmetric "
+							  "dwell bends the mean path - no view tilt at all."
+							: "OPTIMAL curl: yaw follows the velocity heading on the max-gain "
+							  "line toward the chosen side; the bias below steers off that line.");
 					if (g.yaw_mode == 3) {
-						// STRAIGHT (view tilt): alternating max-gain strafes; the
-						// left/right steering bias tilts the mean path in SCREEN
-						// sign, tick-independent (heading - bias every tick).
-						ch |= IntRow("Ticks per strafe side (alternation)", &g.opt_period, 1, 64);
-						ch |= FloatRow("Steering bias   (+ right / - left, 0 = straight)",
+						ch |= IntRow("Ticks per strafe side", &g.opt_period, 1, 64);
+						ch |= FloatRow("Steering bias",
 							&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-						ImGui::TextDisabled("alternating max-gain strafes: half-curls cancel so the mean path "
-							"holds its heading; the bias tilts the VIEW to steer. Splice/resize safe.");
+						Theme::Help("+ steers right, - steers left, 0 = dead straight.");
 					} else if (g.yaw_mode == 4) {
-						// STRAIGHT (dwell skew): the view stays pure max-gain; one
-						// side is held longer than the other, and that asymmetric
-						// DWELL bends the mean path - no view tilt at all.
 						ch |= IntRow("Base ticks per strafe side", &g.opt_period, 1, 64);
-						ch |= FloatRow("Dwell skew   (+ right side longer / - left longer)",
+						ch |= FloatRow("Dwell skew",
 							&g.yaw_rate, -32.f, 32.f, "%+.0f ticks", 1.f, 4.f, 0);
-						ImGui::TextDisabled("steers by holding one side longer (view stays exactly max-gain). "
-							"The opt_dir side is held base+skew ticks, the other base-skew.");
+						Theme::Help("+ holds the right side longer, - the left side; the "
+							"asymmetric dwell bends the mean path.");
 					} else {
 						// Stored values: 0=Total, 1=Per-tick, 2=Steering. Display the
 						// DEFAULT (Steering) first without changing the stored codes.
@@ -5762,24 +6144,30 @@ namespace {
 							ch = true;
 						}
 						ImGui::PopItemWidth();
+						// One tooltip on the bias row, text matching the bias kind;
+						// the length-dependence WARNING stays visible in the panel.
 						if (g.bias_kind == 2) {
-							ch |= FloatRow("Steering bias   (+ right / - left, 0 = pure optimal)",
+							ch |= FloatRow("Steering bias",
 								&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-							ImGui::TextDisabled("a fixed angle off the max-gain line in screen sign, identical every "
-								"tick - the tick COUNT never enters the geometry, so splitting or resizing "
-								"leaves the existing path exactly where it was");
+							Theme::Help("+ steers right, - left, 0 = pure optimal. A fixed "
+								"angle off the max-gain line in screen sign, identical every "
+								"tick - the tick COUNT never enters the geometry, so splitting "
+								"or resizing leaves the existing path exactly where it was.");
 						} else if (g.bias_kind == 0) {
-							ch |= FloatRow("Total heading change   (into the strafe side, 0 = pure optimal)",
+							ch |= FloatRow("Total heading change",
 								&g.yaw_rate, -180.f, 180.f, "%+.2f deg", 0.05f, 5.f);
-							ImGui::TextDisabled("the turn is re-spread over the remaining ticks every tick - "
-								"max speed for that total curvature");
+							Theme::Help("Degrees turned into the strafe side over the whole "
+								"segment, 0 = pure optimal. The turn is re-spread over the "
+								"remaining ticks every tick - max speed for that curvature.");
 							ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f),
 								"length-DEPENDENT: changing this segment's tick count re-spreads the turn "
 								"and moves the path (splits re-fit both halves to the simulated headings).");
 						} else {
-							ch |= FloatRow("Turn bias   (+ tighter / - wider, 0 = pure optimal)",
+							ch |= FloatRow("Turn bias",
 								&g.yaw_rate, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-							ImGui::TextDisabled("bias trades speed (quadratic loss) for curvature (linear) - stays optimal for that curvature");
+							Theme::Help("+ turns tighter, - wider, 0 = pure optimal. Bias "
+								"trades speed (quadratic loss) for curvature (linear) - stays "
+								"optimal for that curvature.");
 						}
 					}
 				}
@@ -5798,8 +6186,6 @@ namespace {
 					ch |= FloatRow("Pitch value", &g.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
 				else
 					ch |= FloatRow("Pitch multiplier", &g.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
-				ch |= ImGui::Checkbox("Duck", &g.duck);
-				ImGui::SameLine();
 				ImGui::PushItemWidth(220);
 				ch |= ImGui::Combo("Jump", &g.jump_mode, "None (walk)\0Hold\0Auto-bhop on landing\0");
 				ImGui::PopItemWidth();
@@ -5808,16 +6194,19 @@ namespace {
 				// so the per-tick rate is continuous with the previous segment
 				// (half the window in each). In optimal modes the wish stays
 				// max-gain, so it costs almost no speed.
-				ch |= IntRow("Boundary smoothing (blend view over N ticks across this segment's start)",
-					&g.smooth_ticks, 0, 32);
-				if (g.smooth_ticks > 0)
-					ImGui::TextDisabled("straddles the boundary: %d ticks eased in the previous "
-						"segment's tail, %d in this segment's head", g.smooth_ticks / 2,
-						g.smooth_ticks - g.smooth_ticks / 2);
+				ch |= IntRow("Boundary smoothing (ticks)", &g.smooth_ticks, 0, 32);
+				Theme::Help("Straddles the boundary: half the window eases the view in the "
+					"previous segment's tail, half in this segment's head, so the per-tick "
+					"view rate is continuous through the cut instead of snapping. In optimal "
+					"modes the wish stays max-gain, so it costs almost no speed.");
 
 				}   // end else (normal generated-segment controls)
 
 				if (ch) {
+					// Segment edits overwrite the per-tick input overrides (the
+					// override is a tweak of ONE composed plan, not a promise
+					// that survives re-planning).
+					g_segs[g_sel].ovr.clear();
 					// A prestrafe recipe is a whole-segment behavior - never
 					// auto-split it; other gen edits keep the forward-only split.
 					const int start = (g_sel < static_cast<int>(g_starts.size())) ? g_starts[g_sel] : 0;
@@ -5840,7 +6229,7 @@ namespace {
 						EditSegment& s = g_segs[g_sel];
 						s.raw = true;
 						s.frames.assign(g_frames.begin() + b, g_frames.begin() + e);
-						s.jump_ovr.clear();   // baked frames already contain them
+						s.ovr.clear();   // baked frames already contain them
 						g_status = "Baked segment to raw frames (per-tick editable).";
 						MarkDirty();
 					}
@@ -5875,81 +6264,51 @@ namespace {
 
 		}
 
-		// --- CURSOR -------------------------------------------------------
-		// Playhead position + navigation + the stats for the tick it sits on.
-		{
-			Theme::Heading("Cursor");
-			IntRow("Playhead (tick)", &g_cursor, 0, g_total > 0 ? g_total - 1 : 0);
-
-			const int seg = SegmentAtTick(g_cursor);
-			if (ImGui::SmallButton("|<")) g_cursor = 0;
-			ImGui::SameLine(); if (ImGui::SmallButton("<seg")) TasEditor::StepSegment(-1);
-			ImGui::SameLine(); if (ImGui::SmallButton("-10")) TasEditor::StepCursor(-10);
-			ImGui::SameLine(); if (ImGui::SmallButton("-1")) TasEditor::StepCursor(-1);
-			ImGui::SameLine(); if (ImGui::SmallButton("+1")) TasEditor::StepCursor(1);
-			ImGui::SameLine(); if (ImGui::SmallButton("+10")) TasEditor::StepCursor(10);
-			ImGui::SameLine(); if (ImGui::SmallButton("seg>")) TasEditor::StepSegment(1);
-			ImGui::SameLine(); if (ImGui::SmallButton(">|")) g_cursor = g_total > 0 ? g_total - 1 : 0;
-			ImGui::SameLine();
-			ImGui::Text("segment %d   (gray = locked history)", seg);
-
-			// Per-tick jump override at the playhead (generated segments).
-			if (seg >= 0 && seg < static_cast<int>(g_segs.size()) && !g_segs[seg].raw) {
-				EditSegment& ks = g_segs[seg];
-				const int local = g_cursor - g_starts[seg];
-				int current = 0;   // 0 = inherit, 1 = suppress, 2 = force
-				for (const std::pair<int, int>& o : ks.jump_ovr)
-					if (o.first == local)
-						current = (o.second == 0) ? 1 : 2;
-				int pick = current;
-				ImGui::PushItemWidth(220);
-				ImGui::Combo("Jump this tick", &pick, "Inherit (segment rule)\0Suppress jump\0Force jump\0");
-				ImGui::PopItemWidth();
-				if (pick != current) {
-					ks.jump_ovr.erase(
-						std::remove_if(ks.jump_ovr.begin(), ks.jump_ovr.end(),
-							[local](const std::pair<int, int>& o) { return o.first == local; }),
-						ks.jump_ovr.end());
-					if (pick == 1) ks.jump_ovr.push_back({ local, 0 });
-					else if (pick == 2) ks.jump_ovr.push_back({ local, 1 });
-					MarkDirty();
-				}
-			}
-
-			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
-				const Prediction::SimState& st = g_states[g_cursor];
-				const bool air = (st.flags & FL_ONGROUND) == 0;
-				const float interval = Prediction::LastDiag().interval_per_tick > 0.f
-					? Prediction::LastDiag().interval_per_tick : 0.015f;
-				const float vz = st.velocity.Z;
-				const float sp3 = sqrtf(st.velocity.X * st.velocity.X
-					+ st.velocity.Y * st.velocity.Y + vz * vz);
-				ImGui::Text("tick %d   t = %.3f s   %s%s", g_cursor, g_cursor * interval,
-					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " + duck" : "");
-				ImGui::Text("  pos %.1f %.1f %.1f", st.origin.X, st.origin.Y, st.origin.Z);
-				ImGui::Text("  speed %.1f u/s  (3D %.1f, vz %+.0f)   yaw %.2f   pitch %.2f",
-					g_speed[g_cursor], sp3, vz,
-					g_frames[g_cursor].viewangles[1], g_frames[g_cursor].viewangles[0]);
-				if (g_maxgain[g_cursor] > 0.001f)
-					ImGui::Text("  gain %+.2f (max %+.2f)   eff %.0f%%",
-						g_gain[g_cursor], g_maxgain[g_cursor], g_eff[g_cursor] * 100.f);
-				else
-					ImGui::Text("  gain %+.2f   eff n/a (not an air tick)", g_gain[g_cursor]);
-			}
-		}
-
 		ImGui::Separator();
 
-		if (ImGui::CollapsingHeader("Strafe model (match server cvars)")) {
+		if (ImGui::CollapsingHeader("Strafe model")) {
 			bool ch = false;
 			ImGui::PushItemWidth(120);
 			ch |= ImGui::InputFloat("Air speed cap", &g_air_cap, 1.f, 10.f, 1);
 			ch |= ImGui::InputFloat("sv_airaccelerate", &g_air_accel, 1.f, 10.f, 1);
 			ch |= ImGui::InputFloat("Wish speed", &g_wishspeed, 10.f, 50.f, 0);
 			ch |= ImGui::InputFloat("sv_gravity", &g_gravity, 10.f, 50.f, 0);
+			// Model jump velocity, part of the model - not a search gate (it
+			// used to hide in the solver's gates section, which read as one).
+			ImGui::InputFloat("Jump vz (0 = engine formula)", &g_jump_vz, 1.f, 10.f, 1);
+			Theme::Help("Vertical velocity the model gives a jump. 0 uses the engine "
+				"formula sqrt(2*g*57). The engine probe below measures the real value "
+				"from sim data; Refresh adopts it.");
 			ImGui::PopItemWidth();
 			if (ch)
 				MarkDirty();
+
+			if (ImGui::Button("Refresh")) {
+				float aa = 0.f, gr = 0.f;
+				const bool ok_a = Cvars::GetFloat("sv_airaccelerate", &aa);
+				const bool ok_g = Cvars::GetFloat("sv_gravity", &gr);
+				if (ok_a || ok_g) {
+					if (ok_a) g_air_accel = aa;
+					if (ok_g) g_gravity = gr;
+					MarkDirty();
+					g_status = FmtStr("Read live server cvars: sv_airaccelerate %.1f, sv_gravity %.1f.",
+						aa, gr);
+				} else {
+					// No validated live reads on this build - fall back to the
+					// engine probe's MEASURED values (never guesses).
+					AdoptProbe();
+				}
+			}
+			Theme::Help("Reads the LIVE replicated server cvars (sv_airaccelerate, "
+				"sv_gravity) straight out of client.dll - the values the server "
+				"enforces right now, no solver run needed. The ConVar layout is "
+				"discovered and validated from data at runtime and logged to "
+				"cvar_probe.log; if validation fails, Refresh falls back to the "
+				"engine probe's sim-measured values.");
+			ImGui::TextDisabled("%s", Cvars::Status());
+			if (g_meas_max_add > 0.f || g_meas_grav_n > 0)
+				ImGui::TextDisabled("probe: add/tick <= %.1f | gravity %.0f [%d samples] | jump vz %.1f",
+					g_meas_max_add, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
 		}
 
 		const float sim_ms = Prediction::LastDiag().sim_ms;
@@ -5980,12 +6339,12 @@ namespace {
 			return;
 		}
 
-		ImGui::TextWrapped(
-			"Aim at a surface and Pick. Tag mode marks a face as surfable (gold "
-			"outline); Target mode rests the player hull against the face exactly "
-			"where the prediction would drop it, storing position + view angles - "
-			"these are the solver's destinations. Bind the 'Editor: Pick At "
-			"Crosshair' hotkey to pick with the menu closed.");
+		ImGui::TextDisabled("Aim at a surface and Pick.");
+		Theme::Help("Tag mode marks a face as surfable (gold outline); Target mode "
+			"rests the player hull against the face exactly where the prediction "
+			"would drop it, storing position + view angles - these are the solver's "
+			"destinations. Bind the 'Editor: Pick At Crosshair' hotkey to pick with "
+			"the menu closed.");
 
 		ImGui::RadioButton("Tag surf face", &g_pick_mode, 0);
 		ImGui::SameLine();
@@ -6103,18 +6462,10 @@ namespace {
 
 	void DrawRenderingTab() {
 		Theme::Heading("Menu appearance");
-		{
-			static bool s_op_dirty = false;
-			if (ImGui::SliderFloat("Menu opacity", &Theme::MenuOpacity(), 0.20f, 1.00f, "%.2f"))
-				s_op_dirty = true;
-			// Persist once, when the drag ends (not every frame).
-			if (s_op_dirty && !ImGui::IsItemActive()) {
-				s_op_dirty = false;
-				SaveUiSettings();
-			}
-			ImGui::SameLine();
-			ImGui::TextDisabled("(see-through panel; text stays crisp)");
-		}
+		ImGui::SliderFloat("Menu opacity", &Theme::MenuOpacity(), 0.20f, 1.00f, "%.2f");
+		Theme::Help("Backgrounds and buttons go see-through so the game shows "
+			"through the panel; text and dropdown lists stay opaque so readings "
+			"stay crisp. Saved to ui.cfg with every other option on this tab.");
 
 		Theme::Heading("Player & world");
 		ImGui::Checkbox("Test marker at world origin", &WorldDraw::draw_test_marker);
@@ -6122,23 +6473,25 @@ namespace {
 		ImGui::Checkbox("Player collision hull", &WorldDraw::draw_player_box);
 		ImGui::SameLine();
 		ImGui::Checkbox("Feet marker", &WorldDraw::draw_player_marker);
-		IntRow("Hull alpha (0 = wireframe)", &WorldDraw::player_box_alpha, 0, 160);
-		FloatRow("Overlay lifetime (x frame)", &WorldDraw::overlay_life_scale, 0.5f, 4.f, "%.2f", 0.05f, 0.2f);
+		IntRow("Hull alpha", &WorldDraw::player_box_alpha, 0, 160);
+		Theme::Help("Fill opacity of the drawn hull; 0 draws wireframe only.");
+		FloatRow("Overlay lifetime", &WorldDraw::overlay_life_scale, 0.5f, 4.f, "%.2f", 0.05f, 0.2f);
+		Theme::Help("Multiplier of the frame time each overlay stays alive.");
 		ImGui::Checkbox("Speed tag: segment end", &WorldDraw::tag_seg_end_speed);
 		ImGui::SameLine();
 		ImGui::Checkbox("Speed tag: playhead", &WorldDraw::tag_cursor_speed);
-		ImGui::Checkbox("Tag: % of optimal gain (segment end, green)",
-			&WorldDraw::tag_seg_end_eff);
+		ImGui::Checkbox("Tag: efficiency at segment end", &WorldDraw::tag_seg_end_eff);
+		Theme::Help("Green in-world tag showing % of optimal gain at the segment end.");
 		ImGui::Checkbox("Tag: time at segment end", &WorldDraw::tag_seg_end_time);
 		ImGui::SameLine();
 		ImGui::Checkbox("Tag: time at playhead", &WorldDraw::tag_cursor_time);
 		ImGui::Checkbox("Pause in-world draws while the solver works (crash isolation)",
 			&WorldDraw::pause_draw_busy);
-		if (WorldDraw::pause_draw_busy)
-			ImGui::TextDisabled("lines/hulls vanish during search+verify+correction; if the "
-				"silent crashes stop with this ON, the engine overlay race is confirmed");
+		Theme::Help("Lines/hulls vanish during search+verify+correction. If the "
+			"silent crashes stop with this ON, the engine overlay race is confirmed.");
 
-		Theme::Heading("Live prediction (from the player)");
+		Theme::Heading("Live prediction",
+			"Predicted path drawn from the live player state every frame.");
 		ImGui::Checkbox("Predict path", &WorldDraw::draw_prediction);
 		ImGui::SameLine();
 		ImGui::Checkbox("Live input", &WorldDraw::pred_live_input);
@@ -6153,7 +6506,8 @@ namespace {
 			ImGui::Checkbox("Duck", &WorldDraw::pred_duck);
 		}
 
-		Theme::Heading("Hull corner trails (bottom corners of the hull, along every path line)");
+		Theme::Heading("Hull corner trails",
+			"Trails of the hull's bottom corners, drawn along every path line.");
 		ImGui::Checkbox("+X+Y##ct", &WorldDraw::corner_trails[0]);
 		ImGui::SameLine();
 		ImGui::Checkbox("+X-Y##ct", &WorldDraw::corner_trails[1]);
@@ -6172,9 +6526,12 @@ namespace {
 		ImGui::Checkbox("Ghost hull at playhead", &g_show_hull);
 		ImGui::SameLine();
 		ImGui::Checkbox("Replay HUD", &WorldDraw::show_replay_hud);
-		FloatRow("Min efficiency (line coloring only)", &g_min_eff, 0.90f, 1.f, "%.2f", 0.005f, 0.02f);
+		FloatRow("Min efficiency", &g_min_eff, 0.90f, 1.f, "%.2f", 0.005f, 0.02f);
+		Theme::Help("Line coloring only: ticks below this efficiency color the "
+			"run line toward red.");
 
-		Theme::Heading("World geometry (BSP)");
+		Theme::Heading("World geometry",
+			"Brush geometry parsed straight from the map's BSP file.");
 		ImGui::Checkbox("Brush wireframes", &BspWorld::draw_wireframe);
 		ImGui::SameLine();
 		ImGui::Checkbox("Tags & targets", &BspWorld::show_markers);
@@ -6201,6 +6558,14 @@ namespace {
 		} else {
 			ImGui::TextDisabled("BSP: not loaded (enable wireframes while in a map)");
 		}
+
+		Theme::Heading("Defaults");
+		if (Theme::Danger("Reset rendering options to defaults")) {
+			ResetUiSettings();
+			g_status = "Rendering options reset to defaults.";
+		}
+		Theme::Help("Restores every option on this tab (including menu opacity) "
+			"to its built-in default and saves.");
 	}
 
 	void DrawProjectTab() {
@@ -6251,6 +6616,8 @@ void TasEditor::Update() {
 		std::set_terminate(&TerminateHandler);
 		_set_purecall_handler(&PureCallHandler);
 		signal(SIGABRT, &SignalHandler);
+		// Rendering/UI prefs apply from the first frame, menu open or not.
+		LoadUiSettings();
 	}
 
 	// Pump the solver search (time-sliced; no-op when idle).
@@ -6601,8 +6968,8 @@ void DrawWindowImpl() {
 	}
 	ImGui::Spacing();
 
-	// Tab row (selected = blue).
-	const char* tabs[] = { "Record", "Run", "Targets", "Rendering", "Project" };
+	// Tab row (selected = pink accent).
+	const char* tabs[] = { "Project", "Record", "Run", "Targets", "Rendering" };
 	for (int i = 0; i < 5; ++i) {
 		if (Theme::Tab(tabs[i], g_tab == i, ImVec2(104, 0)))
 			g_tab = i;
@@ -6611,12 +6978,27 @@ void DrawWindowImpl() {
 	}
 	ImGui::Spacing();
 
+	// The tab body scrolls inside its own child, so the status strip and the
+	// tab row above stay PINNED while the content scrolls. Transparent child
+	// bg: the window's translucent surface is already behind it.
+	ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+	ImGui::BeginChild("##tabbody", ImVec2(0, 0), false);
 	switch (g_tab) {
-	case 0: RecordPanel::Draw(); break;
-	case 1: DrawRunTab(); break;
-	case 2: DrawTargetsTab(); break;
-	case 3: DrawRenderingTab(); break;
-	default: DrawProjectTab(); break;
+	case 0: DrawProjectTab(); break;
+	case 1: RecordPanel::Draw(); break;
+	case 2: DrawRunTab(); break;
+	case 3: DrawTargetsTab(); break;
+	default: DrawRenderingTab(); break;
+	}
+	ImGui::EndChild();
+	ImGui::PopStyleColor();
+
+	// Persist any UI-pref change (any tab) once the interaction is done -
+	// the options survive game restarts via ui.cfg.
+	if (!ImGui::IsAnyItemActive()) {
+		const std::string cur = SerializePrefs();
+		if (cur != g_prefs_saved)
+			SaveUiSettings();
 	}
 
 	ImGui::End();
