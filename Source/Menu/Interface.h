@@ -18,6 +18,7 @@ class BasehookInterface: public DX9RenderMgr {
 			return instance;
 		}
 
+		virtual void OnInitialize();
 		virtual void OnEndScene();
 		virtual bool OnInputMessage(UINT, WPARAM, LPARAM);
 };

@@ -6,8 +6,6 @@
 #include <imgui/imgui.h>
 #include <imgui/imgui_impl_dx9.h>
 
-#include <vmthook/vmthook.h>
-
 // Function prototypes for IDirect3DDevice9::Reset and IDirect3DDevice9::EndScene.
 typedef HRESULT (STDMETHODCALLTYPE *EndScene_t) (IDirect3DDevice9*);
 typedef HRESULT (STDMETHODCALLTYPE *Reset_t) (IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
@@ -20,27 +18,37 @@ class DX9RenderMgr {
 		DX9RenderMgr(void) = default;
 		~DX9RenderMgr(void);
 
-		IDirect3DDevice9* d3d9_device;
-		std::unique_ptr<VMTHook> d3d9_hook;
+		IDirect3DDevice9* d3d9_device = nullptr;
 
-		HWND window;
+		// The shared device vtable we patch, so we can restore it on unload.
+		void** d3d9_vtable = nullptr;
+
+		// ImGui is initialised lazily on the first EndScene (we need the game's
+		// real device, which the dummy-device hook setup never sees).
+		bool initialized = false;
+
+		HWND window = nullptr;
 	public:
 		// Disable copy and assignment constructors.
 		DX9RenderMgr(DX9RenderMgr const&) = delete;
 		DX9RenderMgr& operator=(DX9RenderMgr const&) = delete;
 
 		// The original WndProc function from the specified window handle.
-		WNDPROC WndProc;
+		WNDPROC WndProc = nullptr;
 
 		// The original Reset and EndScene functions.
-		Reset_t Reset;
-		EndScene_t EndScene;
+		Reset_t Reset = nullptr;
+		EndScene_t EndScene = nullptr;
 
-		// Returns a reference to the singleton instance.
-		static DX9RenderMgr& GetInstance();
+		// Diagnostics filled in by Initialize when something fails.
+		const char* init_error = nullptr;
+		HRESULT init_hr = 0;
 
-		// Hooks virtual functions and replaces WndProc.
-		bool Initialize(IDirect3DDevice9*, const HWND&);
+		// Hooks Reset/EndScene via a throwaway device and replaces WndProc.
+		bool Initialize(const HWND&);
+
+		// Lazily initialises ImGui with the game's device, then draws a frame.
+		void RenderFrame(IDirect3DDevice9*);
 
 		// Called after 'ImGui_ImplDX9_Init' succeeds.
 		virtual void OnInitialize() {};

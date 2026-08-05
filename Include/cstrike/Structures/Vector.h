@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 struct Vector {
 	float X, Y, Z;
 
@@ -9,19 +11,19 @@ struct Vector {
 		this->Z = Z;
 	}
 
-	Vector operator + (const Vector& input) {
+	Vector operator + (const Vector& input) const {
 		return Vector(X + input.X, Y + input.Y, Z + input.Z);
 	}
 
-	Vector operator - (const Vector& input) {
+	Vector operator - (const Vector& input) const {
 		return Vector(X - input.X, Y - input.Y, Z - input.Z);
 	}
 
-	Vector operator * (const Vector& input) {
+	Vector operator * (const Vector& input) const {
 		return Vector(X * input.X, Y * input.Y, Z * input.Z);
 	}
 
-	Vector operator / (const Vector& input) {
+	Vector operator / (const Vector& input) const {
 		return Vector(X / input.X, Y / input.Y, Z / input.Z);
 	}
 

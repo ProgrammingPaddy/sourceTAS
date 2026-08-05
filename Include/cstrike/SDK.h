@@ -12,11 +12,9 @@
 
 #include "Classes/CUserCmd.h"
 #include "Classes/ClientModeShared.h"
-#include "Classes/ClientClass.h"
-#include "Classes/IClientEntity.h"
-#include "Classes/RecvTable.h"
 
-#include "Interfaces/IClientEntityList.h"
 #include "Interfaces/IVEngineClient.h"
 #include "Interfaces/IBaseClientDLL.h"
 #include "Interfaces/ISurface.h"
+#include "Interfaces/IClientEntityList.h"
+#include "Interfaces/IVDebugOverlay.h"

@@ -3,7 +3,7 @@
 class ISurface {
 	public:
 		void SetCursorAlwaysVisible(bool visible) {
-			return GetVirtualFunction<void(__thiscall*)(ISurface*, bool)>(this, 52)(this, visible);
+			return GetVirtualFunction<void(*)(ISurface*, bool)>(this, 52)(this, visible);
 		}
 };
 

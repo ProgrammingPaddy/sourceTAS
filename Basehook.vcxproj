@@ -1,13 +1,13 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|Win32">
+    <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
-      <Platform>Win32</Platform>
+      <Platform>x64</Platform>
     </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|Win32">
+    <ProjectConfiguration Include="Release|x64">
       <Configuration>Release</Configuration>
-      <Platform>Win32</Platform>
+      <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -17,16 +17,16 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v142</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -35,26 +35,26 @@
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
     <OutDir>$(SolutionDir)Output\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)Output\$(Configuration)\</IntDir>
     <IncludePath>$(SolutionDir)Include;$(IncludePath)</IncludePath>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
     <IncludePath>$(SolutionDir)Include;$(IncludePath)</IncludePath>
     <OutDir>$(SolutionDir)Output\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)Output\$(Configuration)\</IntDir>
   </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <PrecompiledHeader>
       </PrecompiledHeader>
@@ -62,12 +62,12 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;WIN32_LEAN_AND_MEAN;_DEBUG;_WINDOWS;_USRDLL;BASEHOOK_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
-    <Link>
+    <Link><GenerateMapFile>true</GenerateMapFile><MapFileName>$(OutDir)Basehook.map</MapFileName>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <PrecompiledHeader>
@@ -77,7 +77,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;WIN32_LEAN_AND_MEAN;NDEBUG;_WINDOWS;_USRDLL;BASEHOOK_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
-    <Link>
+    <Link><GenerateMapFile>true</GenerateMapFile><MapFileName>$(OutDir)Basehook.map</MapFileName>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
@@ -91,7 +91,14 @@
     <ClCompile Include="Include\renderer\Renderer.cpp" />
     <ClCompile Include="Source\Basehook.cpp" />
     <ClCompile Include="Source\Hooks\CreateMove.cpp" />
+    <ClCompile Include="Source\Editor\TasEditor.cpp" />
     <ClCompile Include="Source\Menu\Interface.cpp" />
+    <ClCompile Include="Source\Recording\RecordingStore.cpp" />
+    <ClCompile Include="Source\World\BspWorld.cpp" />
+    <ClCompile Include="Source\World\Cvars.cpp" />
+    <ClCompile Include="Source\World\NetVars.cpp" />
+    <ClCompile Include="Source\World\Prediction.cpp" />
+    <ClCompile Include="Source\World\WorldDraw.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="shareddefs.h" />
@@ -105,6 +112,7 @@
     <ClInclude Include="Include\cstrike\Interfaces\IBaseClientDLL.h" />
     <ClInclude Include="Include\cstrike\Interfaces\IClientEntityList.h" />
     <ClInclude Include="Include\cstrike\Interfaces\ISurface.h" />
+    <ClInclude Include="Include\cstrike\Interfaces\IVDebugOverlay.h" />
     <ClInclude Include="Include\cstrike\Interfaces\IVEngineClient.h" />
     <ClInclude Include="Include\cstrike\SDK.h" />
     <ClInclude Include="Include\cstrike\Structures\Vector.h" />
@@ -119,9 +127,15 @@
     <ClInclude Include="Include\imgui\stb_truetype.h" />
     <ClInclude Include="Include\renderer\Renderer.h" />
     <ClInclude Include="Include\vmthook\vmthook.h" />
+    <ClInclude Include="Source\Editor\TasEditor.h" />
     <ClInclude Include="Source\Hooks\Hooks.h" />
     <ClInclude Include="Source\Menu\Interface.h" />
     <ClInclude Include="Source\Utilities\FindPattern.h" />
+    <ClInclude Include="Source\World\BspWorld.h" />
+    <ClInclude Include="Source\World\Cvars.h" />
+    <ClInclude Include="Source\World\NetVars.h" />
+    <ClInclude Include="Source\World\Prediction.h" />
+    <ClInclude Include="Source\World\WorldDraw.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

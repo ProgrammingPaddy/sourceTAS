@@ -1,5 +1,10 @@
 #pragma once
 
+// Matches the typedef in IClientEntity.h (a redundant identical typedef is legal),
+// so this header compiles standalone without pulling in the Vector-dependent
+// IClientEntity definition. We only use the returned entity as an opaque pointer.
+typedef unsigned long CBaseHandle;
+
 class IClientEntity;
 class IClientNetworkable;
 class IClientUnknown;

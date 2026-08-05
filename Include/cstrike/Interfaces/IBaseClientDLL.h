@@ -5,7 +5,7 @@ class ClientClass;
 class IBaseClientDLL {
 	public:
 		ClientClass* GetAllClasses() {
-			return GetVirtualFunction<ClientClass*(__thiscall*)(IBaseClientDLL*)>(this, 8)(this);
+			return GetVirtualFunction<ClientClass*(*)(IBaseClientDLL*)>(this, 8)(this);
 		}
 };
 
