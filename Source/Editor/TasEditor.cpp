@@ -159,12 +159,21 @@ namespace {
 		// mid-air FinishDuck origin lift) from these inputs; this only emits
 		// the button/view stream.
 		bool  prestrafe = false;
-		int   ps_ground_ticks = 22;   // W + ground-key accel duration
-		float ps_ground_turn = 100.f; // total view turn over the ground phase (deg)
+		int   ps_ground_ticks = 70;   // legacy pre-v18 duration; the provider now
+		                              // ends the ground phase by DISTANCE
+		float ps_ground_turn = 75.f;  // WINDUP swing (deg): the view swings out this
+		                              // far opposite the carve, then returns to the
+		                              // start aim exactly at the jump (measured 60-90)
+		float ps_jump_dist = 500.f;   // AUTO-SOLVED: ground distance before the
+		                              // jump; the editor iterates it after each
+		                              // sim so the LANDING hits the goal ray tip
+		float ps_goal_dist = 900.f;   // the RAY's magnitude: horizontal distance
+		                              // from the segment start to the LANDING goal
 		int   ps_ground_dir = 1;      // ground strafe key (+1 A/left, -1 D/right)
 		int   ps_air_dir = 1;         // FIRST air strafe key
 		int   ps_strafes = 1;         // air phase = N alternating optimal strafes
-		float ps_air_bias = 0.f;      // air steering bias (deg, screen sign + = right)
+		float ps_air_bias = 0.f;      // the RAY's direction off the aim (deg,
+		                              // screen sign + = right; 0 = straight ahead)
 		bool  ps_crouch_end = true;   // crouch near the end (dodge the floor)
 		bool  ps_crouch_auto = true;  // auto-time the crouch to the last airborne tick
 		int   ps_crouch_lead = 2;     // manual: ticks before the segment end to crouch
@@ -352,6 +361,30 @@ namespace {
 	// move floats: A+D both held nets sidemove 0, and the display still has to
 	// light both keys pink.
 	uint8_t g_nat_keys[Prediction::kMaxSimTicks] = {};
+
+	// ---- FREECAM state (functions live near the draw code) -------------
+	bool     g_freecam = false;
+	Vector   g_fc_pos = Vector(0.f, 0.f, 0.f);
+	float    g_fc_pitch = 0.f, g_fc_yaw = 0.f;
+	float    g_fc_speed = 600.f;          // u/s (Shift = x3); persisted pref
+	// Slot + layout discovery: every candidate virtual is sampled; a slot
+	// pins when its argument matches the engine view (angles + eye) at
+	// STABLE offsets over several samples. Per-slot state, first pin wins.
+	int      g_fc_slot = -1;              // pinned OverrideView slot
+	int      g_fc_org_off = -1, g_fc_ang_off = -1;   // pinned CViewSetup offsets
+	bool     g_fc_pinned = false, g_fc_dead = false;
+	int      g_fc_samples = 0;            // total in-game samples (give-up counter)
+	int      g_fc_s_org[32] = {}, g_fc_s_ang[32] = {};   // per-slot candidate offs
+	int      g_fc_s_streak[32] = {};
+	uint64_t g_fc_s_last_ms[32] = {};     // per-slot probe throttle
+	// High-resolution frame timing (GetTickCount64's ~15.6 ms resolution
+	// quantized flight into visible bursts at high fps) + optional visual
+	// position smoothing. g_fc_pos is the true integrator; g_fc_pos_vis is
+	// what the camera renders (and what picks ray from, so the crosshair
+	// never lies) - with smoothing off they are identical.
+	int64_t  g_fc_qpc_last = 0;
+	bool     g_fc_smooth = true;          // persisted pref
+	Vector   g_fc_pos_vis = Vector(0.f, 0.f, 0.f);
 	PlanSeg g_plan[kMaxPlanSegs];
 	int     g_plan_count = 0;
 	PlanOvr g_plan_ovr[kMaxPlanOvr];
@@ -367,6 +400,11 @@ namespace {
 	float g_pv_entry_yaw = 0.f;
 	float g_pv_entry_heading = 0.f;   // velocity heading at segment entry (opt modes)
 	bool  g_pv_prev_jump = false;
+	// Prestrafe distance tracking: segment-entry origin (the jump fires by
+	// TRAVELED DISTANCE, the map-intuitive control) and the tick the air
+	// phase actually started at (for the strafe alternation split).
+	Vector g_pv_ps_org = Vector(0.f, 0.f, 0.f);
+	int    g_pv_ps_gt = 0;
 
 	void Layout() {
 		g_starts.clear();
@@ -545,41 +583,80 @@ namespace {
 				yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
 			smove = (side > 0) ? -450.f : 450.f;   // +1 = A (left), -1 = D (right)
 		} else if (g.prestrafe) {
-			// PRESTRAFE recipe: WA ground accel -> jump + release the ground
-			// key -> steerable optimal air-strafe -> crouch to skim the floor.
-			// Only inputs are emitted; the engine sims the real ground/air
-			// physics and the mid-air FinishDuck origin lift.
-			const int gt = (g.ps_ground_ticks < 0) ? 0
-				: (g.ps_ground_ticks > ps.ticks ? ps.ticks : g.ps_ground_ticks);
-			if (t < gt) {
-				// Ground accel: W + the ground strafe key, view turning steadily
-				// into that side to build prestrafe speed (A = left = Source yaw
-				// UP, so + ps_ground_dir raises yaw). ps_ground_turn is the total
-				// turn the user tunes for max ground speed.
-				const float frac = (gt > 1) ? static_cast<float>(t) / static_cast<float>(gt - 1) : 1.f;
-				yaw = NormYaw(g_pv_entry_yaw
-					+ static_cast<float>(g.ps_ground_dir) * g.ps_ground_turn * frac);
+			// PRESTRAFE, point-and-shoot: the user points a 2D RAY from the
+			// segment start (direction + magnitude = the LANDING goal) and the
+			// recipe emits the whole input set - wind-and-return ground carve
+			// aimed down the ray, jump (distance auto-solved so the landing
+			// hits the ray tip - see UpdatePrestrafeJumpDist), goal-homing
+			// optimal air strafes, crouch skim. Only inputs are emitted; the
+			// engine sims the real physics.
+			if (t == 0) {
+				g_pv_ps_org = prev.origin;   // the ray starts here
+				g_pv_ps_gt = 0;
+			}
+			// The ray: screen sign (+ = right of the aim), like every knob.
+			const float ray_yaw = NormYaw(g_pv_entry_yaw - g.ps_air_bias);
+			const float ray_rad = ray_yaw * (kPi / 180.f);
+			const float gx = g_pv_ps_org.X + cosf(ray_rad) * g.ps_goal_dist;
+			const float gy = g_pv_ps_org.Y + sinf(ray_rad) * g.ps_goal_dist;
+			const float pdx = prev.origin.X - g_pv_ps_org.X;
+			const float pdy = prev.origin.Y - g_pv_ps_org.Y;
+			const float traveled = sqrtf(pdx * pdx + pdy * pdy);
+			const float target = (g.ps_jump_dist < 10.f) ? 10.f : g.ps_jump_dist;
+			// Ground until the (auto-solved) jump distance is covered; a couple
+			// of ticks stay reserved so the air phase always exists.
+			const bool ground_phase = onground && traveled < target && t < ps.ticks - 2;
+			if (ground_phase) {
+				g_pv_ps_gt = t + 1;   // the air phase starts after this tick
+				// Wind-and-return carve (shape measured from human runs 4-6:
+				// swing out ~58% of the way, faster accelerating return), run
+				// on TRAVELED DISTANCE and aimed down the RAY: the view morphs
+				// from the entry aim onto the ray while the S-swing plays out,
+				// so yaw(jump) = the ray direction exactly.
+				float u = traveled / target;
+				if (u > 1.f) u = 1.f;
+				const float fp = 0.58f;   // out-swing fraction (measured)
+				const float s = (u < fp)
+					? 0.5f - 0.5f * cosf(kPi * (u / fp))
+					: 0.5f + 0.5f * cosf(kPi * ((u - fp) / (1.f - fp)));
+				const float base = g_pv_entry_yaw + NormYaw(ray_yaw - g_pv_entry_yaw) * u;
+				yaw = NormYaw(base
+					- static_cast<float>(g.ps_ground_dir) * g.ps_ground_turn * s);
 				fmove = 450.f;   // W
 				smove = (g.ps_ground_dir > 0) ? -450.f : 450.f;   // A / D
 			} else {
-				// Air: N alternating optimal strafes (max gain, view follows the
-				// velocity heading) steered by one bias. The air ticks split into
-				// ps_strafes equal strafes; the side alternates from ps_air_dir.
-				// N = 1 is a single continuous strafe (max speed build).
-				const int air_ticks = ps.ticks - gt;
-				const int at = t - gt;
+				// Air: N alternating optimal strafes HOMING on the goal point.
+				// Same view-tilt steering law as the straight modes, but the
+				// desired heading is recomputed toward the goal every tick, so
+				// the flight line passes through the ray tip no matter how the
+				// ground phase went. Near the goal the steering freezes (the
+				// bearing would flip as it passes); the tilt cap keeps the
+				// cost tiny (cos^2 4 deg = 99.5% of max gain).
+				const int air_ticks = ps.ticks - g_pv_ps_gt;
+				const int at = t - g_pv_ps_gt;
 				const int N = (g.ps_strafes < 1) ? 1 : g.ps_strafes;
 				int si = (air_ticks > 0) ? (at * N) / air_ticks : 0;
+				if (si < 0) si = 0;
 				if (si >= N) si = N - 1;
 				const int side = (si % 2 == 0) ? g.ps_air_dir : -g.ps_air_dir;
 				const float h = HeadingDeg(prev.velocity, g_pv_last_yaw);
-				yaw = NormYaw(h - g.ps_air_bias);
+				const float tgx = gx - prev.origin.X;
+				const float tgy = gy - prev.origin.Y;
+				const float tgd = sqrtf(tgx * tgx + tgy * tgy);
+				float tilt = 0.f;
+				if (tgd > 50.f) {
+					const float desired = Deg(atan2f(tgy, tgx));
+					tilt = NormYaw(desired - h) * 0.25f;
+					if (tilt > 4.f) tilt = 4.f;
+					if (tilt < -4.f) tilt = -4.f;
+				}
+				yaw = NormYaw(h + tilt);
 				fmove = 0.f;
 				smove = (side > 0) ? -450.f : 450.f;
 			}
-			// Launch on the first air tick while still grounded (releases the
-			// ground key that same tick since smove already switched sides).
-			if (t == gt && onground)
+			// Launch on the first air-phase tick while still grounded (releases
+			// the ground key that same tick since smove already switched sides).
+			if (t == g_pv_ps_gt && onground)
 				ps_jump = true;
 			// Crouch at the last airborne tick (auto, from the last sim) or a
 			// manual lead before the end - lifts the hull ~18u to skim the floor.
@@ -3026,6 +3103,79 @@ namespace {
 		else settle = 0;
 	}
 
+	// PRESTRAFE goal solve. Two coupled fixed-point loops per sim:
+	//   1. DURATION is fully automatic (the tick slider is gone - the recipe
+	//      owns its length): while the sim never lands inside the segment the
+	//      duration GROWS, and once a landing exists it snaps to landing+3.
+	//      This is what un-deadlocks everything - without a landing the jump
+	//      distance could never correct, and the default duration was far too
+	//      short to ever produce one (the "2-tick air phase" bug).
+	//   2. JUMP DISTANCE walks by the landing's radial error to the goal ray
+	//      tip (damped 0.8; the air distance is nearly invariant to small
+	//      jump-distance changes, so it converges in a few rounds). Pinned at
+	//      its bounds when the goal is unreachable - the readout says so.
+	void UpdatePrestrafeJumpDist() {
+		static int settle = 0;
+		if (!g_valid || g_states.empty()) { settle = 0; return; }
+		bool changed = false;
+		for (size_t k = 0; k < g_segs.size(); ++k) {
+			EditSegment& s = g_segs[k];
+			if (s.raw || s.is_solver || !s.gen.prestrafe)
+				continue;
+			const int start = (k < g_starts.size()) ? g_starts[k] : 0;
+			int end = start + s.Ticks();
+			if (end > static_cast<int>(g_states.size())) end = static_cast<int>(g_states.size());
+			if (end <= start + 2)
+				continue;
+			const Vector o0 = (start > 0 && start - 1 < static_cast<int>(g_states.size()))
+				? g_states[start - 1].origin : g_anchor.origin;
+			int jt = -1, lt = -1;
+			for (int i = start; i < end; ++i) {
+				const bool on = (g_states[i].flags & FL_ONGROUND) != 0;
+				if (jt < 0) {
+					if (!on) jt = i;
+				} else if (on) {
+					lt = i;
+					break;
+				}
+			}
+			if (lt < 0) {
+				// No landing inside the segment (ground still carving, or the
+				// flight outlives the duration): GROW, bounded.
+				if (s.gen.ticks < 1200) {
+					int nt = s.gen.ticks + s.gen.ticks / 2 + 30;
+					if (nt > 1200) nt = 1200;
+					s.gen.ticks = nt;
+					changed = true;
+				}
+				continue;
+			}
+			// Landing exists: the segment IS the recipe - snap the duration
+			// just past the landing...
+			const int want_ticks = (lt - start) + 3;
+			if (want_ticks >= 16 && want_ticks != s.gen.ticks) {
+				s.gen.ticks = want_ticks;
+				changed = true;
+			}
+			// ...and walk the jump distance by the landing's error to the goal.
+			const float dx = g_states[lt].origin.X - o0.X;
+			const float dy = g_states[lt].origin.Y - o0.Y;
+			const float land_dist = sqrtf(dx * dx + dy * dy);
+			const float err = s.gen.ps_goal_dist - land_dist;
+			if (fabsf(err) > 2.f) {
+				float nd = s.gen.ps_jump_dist + err * 0.8f;
+				if (nd < 10.f) nd = 10.f;
+				if (nd > s.gen.ps_goal_dist) nd = s.gen.ps_goal_dist;
+				if (fabsf(nd - s.gen.ps_jump_dist) > 0.5f) {
+					s.gen.ps_jump_dist = nd;
+					changed = true;
+				}
+			}
+		}
+		if (changed && settle < 14) { settle++; MarkDirty(); }
+		else settle = 0;
+	}
+
 	// Everything that runs when a sim lands, with a stage marker so a fault
 	// names its location. Lives behind SimLandedGuarded's POD-only SEH frame.
 	void SimLandedStage() {
@@ -3043,6 +3193,8 @@ namespace {
 		AnalyzeRealPass();
 		g_stage_name = "PrestrafeCrouch";
 		UpdatePrestrafeCrouch();
+		g_stage_name = "PrestrafeJumpDist";
+		UpdatePrestrafeJumpDist();
 		if (g_batch.active) {
 			g_stage_name = "BatchPump";
 			BatchPump();
@@ -4554,6 +4706,8 @@ namespace {
 	#define STAS_UI_PREFS(X) \
 		X("opacity",       Theme::MenuOpacity()) \
 		X("hotkeys_armed", RecordPanel::HotkeysArmed()) \
+		X("freecam_speed", g_fc_speed) \
+		X("freecam_smooth", g_fc_smooth) \
 		X("test_marker",   WorldDraw::draw_test_marker) \
 		X("player_box",    WorldDraw::draw_player_box) \
 		X("feet_marker",   WorldDraw::draw_player_marker) \
@@ -4723,7 +4877,10 @@ namespace {
 	// v16: prestrafe gains ps_strafes (N alternating air strafes).
 	// v17: per-tick JUMP overrides generalized to INPUT overrides
 	//      (tick, mask, value) - old jump pairs load as OV_JUMP entries.
-	constexpr uint32_t kProjVersion = 17;
+	// v18: prestrafe gains ps_jump_dist (ground phase ends by DISTANCE).
+	// v19: prestrafe gains ps_goal_dist (point-and-shoot goal ray; ps_air_bias
+	//      is reinterpreted as the ray's direction off the aim).
+	constexpr uint32_t kProjVersion = 19;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -4796,6 +4953,8 @@ namespace {
 				W(out, pcauto);
 				W(out, g.ps_crouch_lead);
 					W(out, g.ps_strafes);        // v16
+				W(out, g.ps_jump_dist);      // v18
+				W(out, g.ps_goal_dist);      // v19
 
 				const uint32_t novr = static_cast<uint32_t>(s.ovr.size());
 				W(out, novr);
@@ -4858,16 +5017,24 @@ namespace {
 		if (g.smooth_ticks > 64) g.smooth_ticks = 64;
 		if (g.ps_ground_ticks < 0) g.ps_ground_ticks = 0;
 		if (g.ps_ground_ticks > 2000) g.ps_ground_ticks = 2000;
-		if (!(g.ps_ground_turn == g.ps_ground_turn)) g.ps_ground_turn = 0.f;   // NaN
-		if (g.ps_ground_turn < -720.f) g.ps_ground_turn = -720.f;
-		if (g.ps_ground_turn > 720.f) g.ps_ground_turn = 720.f;
+		// Windup is a magnitude now (the swing side comes from ps_ground_dir);
+		// old projects' signed totals fold into the same range.
+		if (!(g.ps_ground_turn == g.ps_ground_turn)) g.ps_ground_turn = 75.f;   // NaN
+		g.ps_ground_turn = fabsf(g.ps_ground_turn);
+		if (g.ps_ground_turn > 170.f) g.ps_ground_turn = 170.f;
+		if (!(g.ps_jump_dist == g.ps_jump_dist)) g.ps_jump_dist = 500.f;   // NaN
+		if (g.ps_jump_dist < 10.f) g.ps_jump_dist = 10.f;
+		if (g.ps_jump_dist > 10000.f) g.ps_jump_dist = 10000.f;
 		g.ps_ground_dir = (g.ps_ground_dir < 0) ? -1 : 1;
 		g.ps_air_dir = (g.ps_air_dir < 0) ? -1 : 1;
 		if (g.ps_strafes < 1) g.ps_strafes = 1;
 		if (g.ps_strafes > 8) g.ps_strafes = 8;
 		if (!(g.ps_air_bias == g.ps_air_bias)) g.ps_air_bias = 0.f;
-		if (g.ps_air_bias < -20.f) g.ps_air_bias = -20.f;
-		if (g.ps_air_bias > 20.f) g.ps_air_bias = 20.f;
+		if (g.ps_air_bias < -180.f) g.ps_air_bias = -180.f;   // ray direction
+		if (g.ps_air_bias > 180.f) g.ps_air_bias = 180.f;
+		if (!(g.ps_goal_dist == g.ps_goal_dist)) g.ps_goal_dist = 900.f;   // NaN
+		if (g.ps_goal_dist < 50.f) g.ps_goal_dist = 50.f;
+		if (g.ps_goal_dist > 20000.f) g.ps_goal_dist = 20000.f;
 		if (g.ps_crouch_lead < 0) g.ps_crouch_lead = 0;
 		if (g.ps_crouch_lead > 200) g.ps_crouch_lead = 200;
 		g.ps_crouch_cached = -1;   // runtime-only
@@ -4986,6 +5153,10 @@ namespace {
 			g.ps_crouch_auto = pcauto != 0;
 			g.ps_crouch_cached = -1;   // runtime-only; recomputed on the next sim
 			if (version >= 16 && !R(in, g.ps_strafes))
+				return false;
+			if (version >= 18 && !R(in, g.ps_jump_dist))
+				return false;
+			if (version >= 19 && !R(in, g.ps_goal_dist))
 				return false;
 		}
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
@@ -5262,6 +5433,176 @@ namespace {
 	// Start/end stats for a segment's REAL simmed range: 2D + 3D speed, view
 	// yaw/pitch, and average air efficiency. "Start" is the state ENTERING the
 	// segment; "end" is the state after its LAST tick.
+	// ---- FREECAM ------------------------------------------------------
+	// The OverrideView hook feeds every frame's CViewSetup through here. The
+	// struct layout is NEVER assumed: the origin/angles offsets are pinned
+	// only after the struct's own floats MATCH engine truth (GetViewAngles +
+	// the player's eye position) at the SAME offsets over several consecutive
+	// frames. Until pinned - or if probing fails - nothing is ever written,
+	// so even a wrong vtable slot degrades to "freecam unavailable".
+	bool FcSafeCopy(void* dst, const void* src, size_t n) {
+		__try {
+			memcpy(dst, src, n);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	void FcLog(const char* line) {
+		const std::string dir = CalibDir();
+		if (dir.empty())
+			return;
+		std::ofstream f(dir + "\\freecam_probe.log", std::ios::app);
+		if (f)
+			f << line << "\n";
+	}
+
+	// One sample from candidate slot `slot` with its (unvalidated) second
+	// argument. Before a pin: throttled per-slot matching against engine
+	// truth. After a pin: only the winning slot applies the camera.
+	void FreecamSample(int slot, void* arg) {
+		if (g_fc_dead || slot < 0 || slot >= 32)
+			return;
+		if (g_fc_pinned) {
+			if (slot != g_fc_slot || !g_freecam || !arg)
+				return;
+			float org[3] = { g_fc_pos_vis.X, g_fc_pos_vis.Y, g_fc_pos_vis.Z };
+			float ang[3] = { g_fc_pitch, g_fc_yaw, 0.f };
+			unsigned char* base = static_cast<unsigned char*>(arg);
+			FcSafeCopy(base + g_fc_org_off, org, sizeof(org));
+			FcSafeCopy(base + g_fc_ang_off, ang, sizeof(ang));
+			return;
+		}
+		if (!arg)
+			return;
+		// Throttle: some candidate virtuals fire hundreds of times per frame
+		// (per-entity queries); one look every 50 ms per slot is plenty.
+		const uint64_t now = GetTickCount64();
+		if (now - g_fc_s_last_ms[slot] < 50)
+			return;
+		g_fc_s_last_ms[slot] = now;
+
+		unsigned char buf[0x140];
+		if (!FcSafeCopy(buf, arg, sizeof(buf)))
+			return;   // unreadable arg just means "not this slot right now"
+		StartState st;
+		if (!Prediction::CaptureStartState(st))
+			return;   // needs a live player for the eye anchor - out-of-game
+			          // samples must not burn the give-up budget
+		g_fc_samples++;
+		QAngle va(0.f, 0.f, 0.f);
+		if (engine)
+			engine->GetViewAngles(va);
+		const float* f = reinterpret_cast<const float*>(buf);
+		const int nf = static_cast<int>(sizeof(buf) / 4) - 3;
+		int aoff = -1, ooff = -1;
+		for (int i = 0; i <= nf; ++i) {
+			if (aoff < 0
+				&& fabsf(f[i] - va.X) < 0.01f
+				&& fabsf(NormYaw(f[i + 1] - va.Y)) < 0.01f
+				&& fabsf(f[i + 2]) < 0.01f)   // roll = 0
+				aoff = i * 4;
+			if (ooff < 0) {
+				const float dx = f[i] - st.origin.X;
+				const float dy = f[i + 1] - st.origin.Y;
+				const float dz = f[i + 2] - st.origin.Z;
+				if (fabsf(dx) < 4.f && fabsf(dy) < 4.f && dz > 20.f && dz < 96.f)
+					ooff = i * 4;   // eye = origin + view offset
+			}
+		}
+		if (aoff >= 0 && ooff >= 0 && aoff != ooff) {
+			if (aoff == g_fc_s_ang[slot] && ooff == g_fc_s_org[slot])
+				g_fc_s_streak[slot]++;
+			else {
+				g_fc_s_ang[slot] = aoff;
+				g_fc_s_org[slot] = ooff;
+				g_fc_s_streak[slot] = 1;
+			}
+			if (g_fc_s_streak[slot] >= 5) {
+				// Offsets first, THEN the pin flag: the apply path reads them
+				// only after seeing pinned == true.
+				g_fc_slot = slot;
+				g_fc_org_off = g_fc_s_org[slot];
+				g_fc_ang_off = g_fc_s_ang[slot];
+				g_fc_pinned = true;
+				char line[192];
+				Sfmt(line, "freecam: OverrideView pinned - SLOT %d, origin+0x%X angles+0x%X "
+					"(%d in-game samples across candidates)",
+					slot, g_fc_org_off, g_fc_ang_off, g_fc_samples);
+				FcLog(line);
+			}
+		}
+		if (!g_fc_pinned && g_fc_samples > 5000) {
+			g_fc_dead = true;
+			FcLog("freecam: no candidate slot 12..20 ever matched the engine view "
+				"after 5000 in-game samples - freecam disabled");
+		}
+	}
+
+	// Fly the camera (called every frame from Update). LOOK comes straight
+	// from the engine: the mouse still feeds the (frozen, input-blocked)
+	// player's view angles through CInput's own pipeline - native
+	// sensitivity/accel, and no cursor-recenter war (the v1 bug: CInput
+	// polls + recenters the cursor itself, so a second recenter loop here
+	// fed both sides constant fake deltas). MOVE is WASD/Space/Ctrl relative
+	// to that view, Shift for speed; keyboard is captured by the input hook.
+	void FreecamMove() {
+		if (!g_freecam) {
+			g_fc_qpc_last = 0;
+			return;
+		}
+		// High-resolution dt: GetTickCount64 ticks every ~15.6 ms, which at
+		// high fps made most frames dt = 0 and then a burst - the "updating
+		// on tickrate" jerk. QPC is sub-microsecond.
+		LARGE_INTEGER qn, qf;
+		QueryPerformanceCounter(&qn);
+		QueryPerformanceFrequency(&qf);
+		float dt = 0.f;
+		if (g_fc_qpc_last)
+			dt = static_cast<float>(qn.QuadPart - g_fc_qpc_last)
+				/ static_cast<float>(qf.QuadPart);
+		g_fc_qpc_last = qn.QuadPart;
+		if (dt > 0.1f) dt = 0.1f;
+		if (dt < 0.f) dt = 0.f;
+		// The engine's view angles ARE the freecam look.
+		if (engine) {
+			QAngle va(0.f, 0.f, 0.f);
+			engine->GetViewAngles(va);
+			g_fc_pitch = va.X;
+			g_fc_yaw = va.Y;
+		}
+		if (ImGui::GetIO().MouseDrawCursor)   // menu open: hold position
+			return;
+		const float sp = g_fc_speed * ((GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 3.f : 1.f);
+		const float pr = g_fc_pitch * (kPi / 180.f);
+		const float yr = g_fc_yaw * (kPi / 180.f);
+		const float fwd[3] = { cosf(pr) * cosf(yr), cosf(pr) * sinf(yr), -sinf(pr) };
+		const float right[3] = { sinf(yr), -cosf(yr), 0.f };
+		float wish[3] = { 0.f, 0.f, 0.f };
+		if (GetAsyncKeyState('W') & 0x8000) { wish[0] += fwd[0]; wish[1] += fwd[1]; wish[2] += fwd[2]; }
+		if (GetAsyncKeyState('S') & 0x8000) { wish[0] -= fwd[0]; wish[1] -= fwd[1]; wish[2] -= fwd[2]; }
+		if (GetAsyncKeyState('D') & 0x8000) { wish[0] += right[0]; wish[1] += right[1]; }
+		if (GetAsyncKeyState('A') & 0x8000) { wish[0] -= right[0]; wish[1] -= right[1]; }
+		if (GetAsyncKeyState(VK_SPACE) & 0x8000)   wish[2] += 1.f;
+		if (GetAsyncKeyState(VK_CONTROL) & 0x8000) wish[2] -= 1.f;
+		g_fc_pos.X += wish[0] * sp * dt;
+		g_fc_pos.Y += wish[1] * sp * dt;
+		g_fc_pos.Z += wish[2] * sp * dt;
+		// Visual smoothing (toggle): ease the RENDERED position toward the
+		// integrator with a ~55 ms time constant, framerate-independent.
+		// Look stays raw (the engine's angles are already per-frame smooth,
+		// and smoothing them would put lag between crosshair and picks).
+		if (g_fc_smooth) {
+			const float a = 1.f - expf(-dt * 18.f);
+			g_fc_pos_vis.X += (g_fc_pos.X - g_fc_pos_vis.X) * a;
+			g_fc_pos_vis.Y += (g_fc_pos.Y - g_fc_pos_vis.Y) * a;
+			g_fc_pos_vis.Z += (g_fc_pos.Z - g_fc_pos_vis.Z) * a;
+		} else {
+			g_fc_pos_vis = g_fc_pos;
+		}
+	}
+
 	// Copy the engine probe's MEASURED values into the model inputs. The probe
 	// fills from real sim states (data, never guessed); with no data yet this
 	// is a no-op that says so.
@@ -6001,28 +6342,44 @@ namespace {
 				bool ch = false;
 
 				ch |= ImGui::Checkbox("Prestrafe recipe", &g.prestrafe);
-				Theme::Help("Startzone exit: WA to max ground speed, jump, then N "
-					"alternating optimal air-strafes steered by one bias, and crouch to "
-					"skim the floor. The engine sims the real physics (incl. the mid-air "
-					"duck hull-lift); only inputs are emitted.");
+				Theme::Help("Point and shoot: aim a 2D ray from the segment start "
+					"(direction + distance = where the run should LAND) and the "
+					"recipe emits the whole input set - human-shaped ground carve "
+					"aimed down the ray, jump at an auto-solved distance so the "
+					"landing hits the ray tip, goal-homing optimal air strafes, "
+					"crouch skim. The engine sims the real physics; only inputs "
+					"are emitted.");
 				if (g.prestrafe) {
-					ch |= IntRow("Duration (ticks)", &g.ticks, 2, 2000);
+					// No duration slider: the recipe owns its own length (it
+					// grows/snaps to landing+3 every sim - see the goal solve).
+					ImGui::TextDisabled("Goal ray");
+					Theme::Help("The landing goal: a ray on the 2D yaw plane from "
+						"the segment start. The recipe self-solves the jump point "
+						"every sim so the run LANDS at the ray tip - telemetry "
+						"below shows the achieved landing and error.");
+					ch |= FloatRow("  direction", &g.ps_air_bias, -180.f, 180.f, "%+.1f deg", 0.1f, 1.f, 1);
+					Theme::Help("0 = straight along the segment's aim; + points "
+						"right, - left. The ground carve and the flight both follow "
+						"the ray.");
+					ch |= FloatRow("  distance", &g.ps_goal_dist, 100.f, 4000.f, "%.0f u", 5.f, 50.f, 0);
+					Theme::Help("The ray's magnitude - horizontal distance from the "
+						"segment start to the landing point.");
 
-					ImGui::TextDisabled("Ground phase");
-					ch |= IntRow("  ground duration (ticks)", &g.ps_ground_ticks, 0, g.ticks);
-					Theme::Help("W plus the strafe key held for this many ticks before "
-						"the jump.");
+					ImGui::TextDisabled("Ground");
 					ImGui::PushItemWidth(150);
 					int gdir = (g.ps_ground_dir > 0) ? 0 : 1;
 					if (ImGui::Combo("  ground strafe side", &gdir, "A (left)\0D (right)\0")) {
 						g.ps_ground_dir = (gdir == 0) ? 1 : -1; ch = true;
 					}
 					ImGui::PopItemWidth();
-					ch |= FloatRow("  ground view turn",
-						&g.ps_ground_turn, -360.f, 360.f, "%+.1f deg", 1.f, 10.f, 1);
-					Theme::Help("Total degrees the view turns over the whole ground phase.");
+					ch |= FloatRow("  windup swing",
+						&g.ps_ground_turn, 0.f, 170.f, "%.0f deg", 1.f, 10.f, 0);
+					Theme::Help("How far the view swings OUT (opposite the carve side) "
+						"before sweeping back onto the ray. Bigger swing = more carve "
+						"speed; real human prestrafes measured 60-90 degrees. The jump "
+						"always leaves aimed down the ray, whatever the swing.");
 
-					ImGui::TextDisabled("Air phase");
+					ImGui::TextDisabled("Air");
 					ch |= IntRow("  alternating strafes", &g.ps_strafes, 1, 8);
 					ImGui::PushItemWidth(150);
 					int adir = (g.ps_air_dir > 0) ? 0 : 1;
@@ -6030,9 +6387,6 @@ namespace {
 						g.ps_air_dir = (adir == 0) ? 1 : -1; ch = true;
 					}
 					ImGui::PopItemWidth();
-					ch |= FloatRow("  steer bias",
-						&g.ps_air_bias, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
-					Theme::Help("+ steers right, - left, 0 = pure optimal strafe.");
 
 					ImGui::TextDisabled("Crouch");
 					ch |= ImGui::Checkbox("Hold crouch for the whole segment", &g.duck);
@@ -6046,6 +6400,63 @@ namespace {
 						else if (g.ps_crouch_cached >= 0)
 							ImGui::TextDisabled("auto crouch tick: local %d (last airborne of the last sim)",
 								g.ps_crouch_cached);
+					}
+					// ---- recipe telemetry: the "am I at max" numbers ----------
+					// Ground and air speed limits with tick timing, plus the
+					// landing vs the goal ray - everything measured from the
+					// REAL sim, so a shortfall is visible immediately.
+					if (g_valid && !g_dirty && g_sel < static_cast<int>(g_starts.size())) {
+						const int start = g_starts[g_sel];
+						int end = start + g_segs[g_sel].Ticks();
+						if (end > static_cast<int>(g_states.size()))
+							end = static_cast<int>(g_states.size());
+						if (end > start + 2) {
+							const Vector ro = (start > 0) ? g_states[start - 1].origin : g_anchor.origin;
+							int jt = -1, lt = -1;
+							float peak_ground = 0.f;
+							for (int i = start; i < end; ++i) {
+								const bool on = (g_states[i].flags & FL_ONGROUND) != 0;
+								if (jt < 0) {
+									const float s2 = Speed2D(g_states[i].velocity);
+									if (s2 > peak_ground) peak_ground = s2;
+									if (!on) jt = i;
+								} else if (on) {
+									lt = i;
+									break;
+								}
+							}
+							ImGui::TextDisabled("Recipe telemetry");
+							if (jt >= 0) {
+								ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.f, 1.f),
+									"ground %d ticks   jump speed %.1f   peak ground %.1f",
+									jt - start, g_speed[jt], peak_ground);
+								float esum = 0.f;
+								int en = 0;
+								const int ae = (lt >= 0) ? lt : end;
+								for (int i = jt; i < ae; ++i)
+									if (i < static_cast<int>(g_maxgain.size()) && g_maxgain[i] > 0.001f) {
+										esum += g_eff[i];
+										en++;
+									}
+								ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.f, 1.f),
+									"air %d ticks   avg eff %.2f%% of optimal gain",
+									ae - jt, en ? (esum / en) * 100.f : 0.f);
+								if (lt >= 0) {
+									const float ldx = g_states[lt].origin.X - ro.X;
+									const float ldy = g_states[lt].origin.Y - ro.Y;
+									const float ld = sqrtf(ldx * ldx + ldy * ldy);
+									ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.f, 1.f),
+										"landing tick %d   %.0f u out   goal err %+.1f u",
+										lt - start, ld, g.ps_goal_dist - ld);
+									ImGui::TextDisabled("auto: duration %d ticks   jump dist %.0f u",
+										g.ticks, g.ps_jump_dist);
+								} else {
+									ImGui::TextDisabled("sizing the segment to the recipe (auto-growing)...");
+								}
+							} else {
+								ImGui::TextDisabled("solving the ground run (auto-growing the segment)...");
+							}
+						}
 					}
 					// Live 3D-speed readout at the crouch tick (the "475 total"):
 					// the real simmed velocity magnitude including the downward vz.
@@ -6559,6 +6970,34 @@ namespace {
 			ImGui::TextDisabled("BSP: not loaded (enable wireframes while in a map)");
 		}
 
+		Theme::Heading("Freecam");
+		{
+			bool fc = g_freecam;
+			if (ImGui::Checkbox("Freecam", &fc))
+				TasEditor::ToggleFreecam();
+			Theme::Help("Detached inspection camera: close the menu, then WASD + "
+				"mouse to fly, Space/Ctrl vertical, Shift for speed. Player input "
+				"is blocked while active; opening the menu pauses flight. Picks "
+				"aim from the CAMERA, so targets store the freecam's view angles. "
+				"Bind 'Freecam Toggle' in the Record tab to flip it without the "
+				"menu. The render-view layout is validated against engine data "
+				"before the camera ever writes.");
+			FloatRow("Fly speed", &g_fc_speed, 100.f, 3000.f, "%.0f u/s", 10.f, 100.f, 0);
+			ImGui::Checkbox("Smooth motion", &g_fc_smooth);
+			Theme::Help("Eases the rendered camera position (~55 ms) for buttery "
+				"flight. Look stays raw so the crosshair and picks never lag. "
+				"Off = the camera renders the integrator directly.");
+			if (g_fc_pinned)
+				ImGui::TextDisabled("view slot: pinned (slot %d, origin+0x%X, angles+0x%X)",
+					g_fc_slot, g_fc_org_off, g_fc_ang_off);
+			else if (g_fc_dead)
+				ImGui::TextColored(Theme::Error,
+					"view slot: none validated - freecam unavailable (freecam_probe.log)");
+			else
+				ImGui::TextDisabled("view slot: identifying from engine data (be in game; %d samples)...",
+					g_fc_samples);
+		}
+
 		Theme::Heading("Defaults");
 		if (Theme::Danger("Reset rendering options to defaults")) {
 			ResetUiSettings();
@@ -6622,6 +7061,9 @@ void TasEditor::Update() {
 
 	// Pump the solver search (time-sliced; no-op when idle).
 	StepSearch();
+
+	// Freecam flight (no-op unless active).
+	FreecamMove();
 
 	// Teleport landing check: report the measured delta from the anchor, and
 	// persist it (a later crash or status overwrite must not eat the number).
@@ -6756,11 +7198,20 @@ void TasEditor::PickAtCrosshair() {
 		return;
 	}
 
+	// FREECAM line of sight: while detached, the pick ray AND the stored view
+	// angles are the CAMERA's - inspecting from the freecam must place targets
+	// exactly where (and how) the camera is looking.
+	if (g_freecam) {
+		s.pitch = g_fc_pitch;
+		s.yaw = g_fc_yaw;
+	}
 	const float d2r = kPi / 180.f;
 	const float pr = s.pitch * d2r;
 	const float yr = s.yaw * d2r;
 	const Vector dir(cosf(pr) * cosf(yr), cosf(pr) * sinf(yr), -sinf(pr));
-	const Vector eye = s.origin + Vector(0.f, 0.f, s.ducked ? 46.f : 64.f);
+	const Vector eye = g_freecam
+		? g_fc_pos_vis
+		: s.origin + Vector(0.f, 0.f, s.ducked ? 46.f : 64.f);
 
 	const BspWorld::RayHit hit = BspWorld::Pick(eye, dir, 8192.f);
 	BspWorld::NotePickDebug(eye, dir, hit);
@@ -6798,6 +7249,49 @@ void TasEditor::PickAtCrosshair() {
 		}
 	}
 	g_status = message;
+}
+
+void TasEditor::ToggleFreecam() {
+	// NEVER engage (and never block player input) before the view slot is
+	// pinned - a freecam that can't show its camera must not eat controls.
+	if (!g_freecam && !g_fc_pinned) {
+		g_status = g_fc_dead
+			? "Freecam unavailable: no view slot validated on this build (freecam_probe.log)."
+			: "Freecam: still identifying the engine's view slot - be in game a few seconds, then retry.";
+		return;
+	}
+	g_freecam = !g_freecam;
+	if (g_freecam) {
+		// Seed the camera from the CURRENT view (engine truth).
+		QAngle va(0.f, 0.f, 0.f);
+		if (engine)
+			engine->GetViewAngles(va);
+		g_fc_pitch = va.X;
+		g_fc_yaw = va.Y;
+		StartState st;
+		if (Prediction::CaptureStartState(st))
+			g_fc_pos = st.origin + Vector(0.f, 0.f, st.ducked ? 46.f : 64.f);
+		g_fc_pos_vis = g_fc_pos;
+		g_status = "Freecam ON: mouse looks, WASD flies, Space/Ctrl vertical, Shift fast.";
+	} else {
+		g_status = "Freecam off.";
+	}
+}
+
+bool TasEditor::FreecamActive() {
+	return g_freecam;
+}
+
+bool TasEditor::FreecamEye(Vector* eye) {
+	if (!g_freecam)
+		return false;
+	if (eye)
+		*eye = g_fc_pos_vis;   // what the camera renders is what tags face
+	return true;
+}
+
+void TasEditor::ViewSlotSample(int slot, void* arg) {
+	FreecamSample(slot, arg);
 }
 
 bool TasEditor::SearchBusy() {

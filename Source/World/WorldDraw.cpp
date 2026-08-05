@@ -468,7 +468,8 @@ void WorldDraw::Render() {
 		// tick, the same state a solution row's `speed` claims (never the
 		// post-pass slide/overrun). Playhead: speed (cyan, +96), time (white,
 		// +110).
-		const Vector eye(d.origin.X, d.origin.Y, d.origin.Z + 64.f);
+		Vector eye(d.origin.X, d.origin.Y, d.origin.Z + 64.f);
+		TasEditor::FreecamEye(&eye);   // freecam engaged: tags face the camera
 		if (ed.sel_end > 0 && ed.sel_end <= ed.count) {
 			const int ei = ed.sel_end - 1;
 			const Vector& ev = ed.states[ei].velocity;

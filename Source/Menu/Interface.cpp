@@ -44,6 +44,7 @@ namespace {
 		{ "Editor: Prev Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(-1); } },
 		{ "Editor: Next Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(1); } },
 		{ "Editor: Pick At Crosshair", 0, [] { return true; }, [] { TasEditor::PickAtCrosshair(); } },
+		{ "Freecam Toggle", 0, [] { return true; }, [] { TasEditor::ToggleFreecam(); } },
 	};
 
 	constexpr int kCommandCount = static_cast<int>(sizeof(g_commands) / sizeof(g_commands[0]));
@@ -460,5 +461,21 @@ bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param
 	if (is_menu_visible)
 		ImGui_ImplDX9_WndProcHandler(window, type, w_param, l_param);
 
+	// Freecam captures the KEYBOARD only (the player must not walk while the
+	// camera flies). The MOUSE passes through untouched: CInput's mouse
+	// pipeline is polled (GetCursorPos), not WM-driven, so blocking WM mouse
+	// only starves ImGui - the engine keeps turning mouse into the (frozen)
+	// player's view angles, and the freecam reads those back as its look.
+	// Fighting that pipeline with our own cursor recentering was the v1 bug:
+	// two recenter loops feeding each other constant fake deltas.
+	if (!is_menu_visible && TasEditor::FreecamActive()) {
+		const bool keyboard = type == WM_KEYDOWN || type == WM_KEYUP
+			|| type == WM_SYSKEYDOWN || type == WM_SYSKEYUP || type == WM_CHAR;
+		// Mouse BUTTONS and wheel are blocked too (no shooting/weapon-switch
+		// from the flying camera); 0x0201..0x020E spans L/R/M/X down/up/dblclk
+		// + both wheels. WM_MOUSEMOVE (0x0200) stays live for CInput's look.
+		const bool mouse_btn = type >= WM_LBUTTONDOWN && type <= 0x020E;
+		return !(keyboard || mouse_btn);
+	}
 	return !is_menu_visible;
 }

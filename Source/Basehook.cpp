@@ -89,6 +89,11 @@ DWORD WINAPI basehook_init(LPVOID dll_instance) {
 	if (clientmode) {
 		clientmode_hook = new VMTHook(clientmode);
 		clientmode_hook->HookFunction(&Hooks::CreateMove, 21);
+		// Freecam view-slot discovery: transparent probes on the candidate
+		// virtuals below CreateMove; the slot whose argument matches the
+		// engine's own view gets pinned as OverrideView (data, not layout
+		// guesses - the fixed index 18 was never called on this build).
+		Hooks::InstallViewProbes(clientmode_hook);
 	}
 
 	// Install the movement look-ahead (hooks IPrediction::FinishMove so it runs

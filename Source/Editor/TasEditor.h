@@ -27,8 +27,22 @@ namespace TasEditor {
 
 	// Crosshair pick (also bound to a hotkey): acts per the Targets tab's mode -
 	// tag/untag the aimed surf face, or place a board target where the hull
-	// would rest on the aimed surface.
+	// would rest on the aimed surface. While the freecam is active the ray and
+	// the stored view angles are the CAMERA's.
 	void PickAtCrosshair();
+
+	// FREECAM: detached inspection camera (WASD + mouse, menu closed). While
+	// active, player input is blocked and OverrideView repositions the render
+	// view. Both the OverrideView SLOT and the CViewSetup field layout are
+	// pinned from engine data before any write - and the toggle refuses to
+	// engage (and to block input) until they are.
+	void ToggleFreecam();
+	bool FreecamActive();
+	// Called by every view-probe thunk: sample candidate slot's 2nd argument.
+	void ViewSlotSample(int slot, void* arg);
+	// While the freecam is engaged, overwrite *eye with the camera position
+	// and return true - in-world tags/billboards must face the CAMERA then.
+	bool FreecamEye(Vector* eye);
 
 	// Snapshot of everything WorldDraw needs to render the run line.
 	struct DrawData {
