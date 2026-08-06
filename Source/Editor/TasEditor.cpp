@@ -165,18 +165,30 @@ namespace {
 		float ps_ground_turn = 75.f;  // WINDUP swing (deg): the view swings out this
 		                              // far opposite the carve, then returns to the
 		                              // start aim exactly at the jump (measured 60-90)
-		float ps_jump_dist = 500.f;   // AUTO-SOLVED: ground distance before the
-		                              // jump; the editor iterates it after each
-		                              // sim so the LANDING hits the goal ray tip
-		float ps_goal_dist = 900.f;   // the RAY's magnitude: horizontal distance
-		                              // from the segment start to the LANDING goal
+		float ps_jump_dist = 500.f;   // legacy (v18/v19 goal solver) - serialized,
+		float ps_goal_dist = 900.f;   // unused since the v3 recipe rework
 		int   ps_ground_dir = 1;      // ground strafe key (+1 A/left, -1 D/right)
 		int   ps_air_dir = 1;         // FIRST air strafe key
-		int   ps_strafes = 1;         // air phase = N alternating optimal strafes
-		float ps_air_bias = 0.f;      // the RAY's direction off the aim (deg,
-		                              // screen sign + = right; 0 = straight ahead)
+		int   ps_strafes = 2;         // AIR recipe: N alternating optimal strafes
+		                              // (spec default: two, optional 1..8)
+		int   ps_strafe_ticks = 24;   // AIR: FIXED ticks per strafe (human first
+		                              // strafes measured 22-25). Fixed-length
+		                              // alternation means the auto-duration can
+		                              // never re-shuffle the strafe layout - the
+		                              // old span-divided split flip-flopped the
+		                              // sides whenever the duration snapped
+		float ps_air_bias = 0.f;      // AIR steering tilt (deg, + = right, 0 =
+		                              // straight; bends the air path)
+		int   ps_air_ticks = 0;       // AIR duration; 0 = AUTO: the segment ends
+		                              // one tick past the landing (timing-based,
+		                              // slider for non-flat startzones)
+		int   ps_ground_extra = 0;    // extra build ticks past max ground speed
+		                              // (0 = the minimum-distance default)
 		bool  ps_crouch_end = true;   // crouch near the end (dodge the floor)
-		bool  ps_crouch_auto = true;  // auto-time the crouch to the last airborne tick
+		bool  ps_crouch_auto = true;  // legacy (serialized, ignored since the
+		                              // crouch went pure-timing: its landing
+		                              // detection re-timed against the hull
+		                              // lift = a feedback loop, "solving")
 		int   ps_crouch_lead = 2;     // manual: ticks before the segment end to crouch
 		int   ps_crouch_cached = -1;  // auto: last-airborne tick from the last sim (runtime)
 	};
@@ -380,13 +392,21 @@ namespace {
 	constexpr int kFcSlot = 16;
 	constexpr int kFcOrgOff = 0x40;
 	constexpr int kFcAngOff = 0x4C;
-	bool     g_fc_pinned = false, g_fc_dead = false;   // pinned = verified
-	int      g_fc_streak = 0;             // consecutive verify matches
-	int      g_fc_checks = 0;             // in-game verify attempts (give-up)
-	// Hook-context stash: the wrapper only ever memcpys into here; the
-	// verification against engine truth runs on Update's proven-safe path.
-	unsigned char g_fc_stash[0x140] = {};
-	volatile LONG g_fc_stash_set = 0;
+	// TRUSTED, not re-derived: six independent sessions measured the SAME
+	// slot and offsets (freecam_probe.log). The background check below is a
+	// diagnostic that can only LOG - it never gates the camera. (It used to,
+	// and it locked freecam out: OverrideView fires several times per frame -
+	// main view, 3D SKYBOX camera, others - so single-sample-per-frame
+	// checking kept grabbing the sky setup, failing, and finally tripping a
+	// give-up counter that disabled the feature outright.)
+	bool     g_fc_confirmed = false;      // background sanity check passed
+	int      g_fc_checks = 0;             // sanity-check attempts
+	// Hook-context stash RING: the wrapper memcpys EVERY call of the frame
+	// into its own slot, so the pump sees the main view even when the sky
+	// camera is also flowing through.
+	constexpr int kFcRing = 4;
+	unsigned char g_fc_stash[kFcRing][0x140] = {};
+	volatile LONG g_fc_stash_idx = 0;
 	// High-resolution frame timing (GetTickCount64's ~15.6 ms resolution
 	// quantized flight into visible bursts at high fps) + optional visual
 	// position smoothing. g_fc_pos is the true integrator; g_fc_pos_vis is
@@ -410,11 +430,16 @@ namespace {
 	float g_pv_entry_yaw = 0.f;
 	float g_pv_entry_heading = 0.f;   // velocity heading at segment entry (opt modes)
 	bool  g_pv_prev_jump = false;
-	// Prestrafe distance tracking: segment-entry origin (the jump fires by
-	// TRAVELED DISTANCE, the map-intuitive control) and the tick the air
-	// phase actually started at (for the strafe alternation split).
+	// Prestrafe walk state: segment-entry origin (the ray + jump distance are
+	// measured from here), the tick the air phase actually started at (strafe
+	// alternation split), the tick the ground CARVE began (-1 = still in the
+	// build phase), and the view at the jump (the air blend's start).
 	Vector g_pv_ps_org = Vector(0.f, 0.f, 0.f);
 	int    g_pv_ps_gt = 0;
+	int    g_pv_ps_carve = -1;
+	int    g_pv_ps_plateau = -1;      // tick ground speed stopped climbing
+	float  g_pv_ps_prev_spd = -1.f;   // previous tick's 2D speed (plateau detect)
+	float  g_pv_ps_jump_view = 0.f;
 
 	void Layout() {
 		g_starts.clear();
@@ -593,45 +618,67 @@ namespace {
 				yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
 			smove = (side > 0) ? -450.f : 450.f;   // +1 = A (left), -1 = D (right)
 		} else if (g.prestrafe) {
-			// PRESTRAFE, point-and-shoot: the user points a 2D RAY from the
-			// segment start (direction + magnitude = the LANDING goal) and the
-			// recipe emits the whole input set - wind-and-return ground carve
-			// aimed down the ray, jump (distance auto-solved so the landing
-			// hits the ray tip - see UpdatePrestrafeJumpDist), goal-homing
-			// optimal air strafes, crouch skim. Only inputs are emitted; the
-			// engine sims the real physics.
+			// PRESTRAFE v3 (user spec 2026-08-06): TWO RECIPES, sliders, NO
+			// solvers - "the final location is all that matters, the path is
+			// the mixture of recipes."
+			//   GROUND recipe: W+A speed-build until ground speed PLATEAUS
+			//   (max ground speed in the minimum distance) plus an optional
+			//   extra, then the carve sweeps the VELOCITY onto the segment
+			//   aim as hard as the server's ground accel allows, and the jump
+			//   fires the moment the heading ALIGNS with the aim. Getting max
+			//   speed then jumping is the whole job.
+			//   AIR recipe: N alternating optimal strafes (default two) with
+			//   a constant steering tilt - a convenient default shape. Its
+			//   duration is the air slider, or AUTO = one tick past landing
+			//   (the segment length snaps to it - see the duration snap).
+			//   Crouch: the tick before landing by default (adjustable).
+			// View per tick = whatever makes the WISH lead the velocity by
+			// the steer command (W+A's wish sits 45 deg to the A-side of the
+			// view): view = vel_heading + steer - dir*45.
 			if (t == 0) {
-				g_pv_ps_org = prev.origin;   // the ray starts here
 				g_pv_ps_gt = 0;
+				g_pv_ps_carve = -1;
+				g_pv_ps_plateau = -1;
+				g_pv_ps_prev_spd = -1.f;
+				g_pv_ps_jump_view = g_pv_entry_yaw;
 			}
-			// The ray: screen sign (+ = right of the aim), like every knob.
-			const float ray_yaw = NormYaw(g_pv_entry_yaw - g.ps_air_bias);
-			const float ray_rad = ray_yaw * (kPi / 180.f);
-			const float gx = g_pv_ps_org.X + cosf(ray_rad) * g.ps_goal_dist;
-			const float gy = g_pv_ps_org.Y + sinf(ray_rad) * g.ps_goal_dist;
-			const float pdx = prev.origin.X - g_pv_ps_org.X;
-			const float pdy = prev.origin.Y - g_pv_ps_org.Y;
-			const float traveled = sqrtf(pdx * pdx + pdy * pdy);
-			const float target = (g.ps_jump_dist < 10.f) ? 10.f : g.ps_jump_dist;
-			// Ground until the (auto-solved) jump distance is covered; a couple
-			// of ticks stay reserved so the air phase always exists.
-			const bool ground_phase = onground && traveled < target && t < ps.ticks - 2;
+			const float aim = g_pv_entry_yaw;   // straight-ahead by default
+			const float spd = Speed2D(prev.velocity);
+			// Plateau = the build stopped gaining: max ground speed reached
+			// in the minimum distance.
+			if (g_pv_ps_plateau < 0 && onground && t >= 4
+				&& spd > 100.f && spd - g_pv_ps_prev_spd < 0.25f)
+				g_pv_ps_plateau = t;
+			g_pv_ps_prev_spd = spd;
+			const int extra = (g.ps_ground_extra < 0) ? 0 : g.ps_ground_extra;
+			if (g_pv_ps_carve < 0 && g_pv_ps_plateau >= 0
+				&& t >= g_pv_ps_plateau + extra)
+				g_pv_ps_carve = t;
+			// The carve completes by ALIGNMENT, not by a clock: the jump fires
+			// the moment the velocity heading reaches the aim. The sweep runs
+			// at whatever rate the server's ground accel physically allows
+			// (the steer clamp saturates), so changing sv_accelerate reshapes
+			// the carve's length but can never break the recipe - the launch
+			// is ALWAYS down the aim. (The old timed sweep was tuned to one
+			// accel setting and launched off-aim on any other.)
+			const float vh = HeadingDeg(prev.velocity,
+				NormYaw(aim - static_cast<float>(g.ps_ground_dir) * g.ps_ground_turn));
+			const bool aligned = g_pv_ps_carve >= 0
+				&& fabsf(NormYaw(aim - vh)) < 2.f;
+			const bool ground_phase = onground && !aligned && t < ps.ticks - 2;
 			if (ground_phase) {
 				g_pv_ps_gt = t + 1;   // the air phase starts after this tick
-				// Wind-and-return carve (shape measured from human runs 4-6:
-				// swing out ~58% of the way, faster accelerating return), run
-				// on TRAVELED DISTANCE and aimed down the RAY: the view morphs
-				// from the entry aim onto the ray while the S-swing plays out,
-				// so yaw(jump) = the ray direction exactly.
-				float u = traveled / target;
-				if (u > 1.f) u = 1.f;
-				const float fp = 0.58f;   // out-swing fraction (measured)
-				const float s = (u < fp)
-					? 0.5f - 0.5f * cosf(kPi * (u / fp))
-					: 0.5f + 0.5f * cosf(kPi * ((u - fp) / (1.f - fp)));
-				const float base = g_pv_entry_yaw + NormYaw(ray_yaw - g_pv_entry_yaw) * u;
-				yaw = NormYaw(base
-					- static_cast<float>(g.ps_ground_dir) * g.ps_ground_turn * s);
+				// Build holds the velocity off-aim; the carve steers straight
+				// onto the aim (the clamped P gives a natural fast-then-ease
+				// sweep as the error shrinks).
+				const float off = (g_pv_ps_carve >= 0) ? 0.f : g.ps_ground_turn;
+				const float desired = NormYaw(aim
+					- static_cast<float>(g.ps_ground_dir) * off);
+				float steer = NormYaw(desired - vh) * 0.6f;
+				if (steer > 70.f) steer = 70.f;
+				if (steer < -70.f) steer = -70.f;
+				yaw = NormYaw(vh + steer - static_cast<float>(g.ps_ground_dir) * 45.f);
+				g_pv_ps_jump_view = yaw;   // the air blend starts from here
 				fmove = 450.f;   // W
 				smove = (g.ps_ground_dir > 0) ? -450.f : 450.f;   // A / D
 			} else {
@@ -642,34 +689,30 @@ namespace {
 				// ground phase went. Near the goal the steering freezes (the
 				// bearing would flip as it passes); the tilt cap keeps the
 				// cost tiny (cos^2 4 deg = 99.5% of max gain).
-				const int air_ticks = ps.ticks - g_pv_ps_gt;
+				// FIXED-LENGTH strafes: each lasts ps_strafe_ticks, alternation
+				// runs through N strafes, then the last side HOLDS. The layout
+				// depends only on ticks-since-jump - the segment's auto-sizing
+				// can never re-shuffle it (the old span-divided split moved the
+				// side boundaries every time the duration snapped, flip-
+				// flopping the path: the reported "solver behavior").
 				const int at = t - g_pv_ps_gt;
 				const int N = (g.ps_strafes < 1) ? 1 : g.ps_strafes;
-				int si = (air_ticks > 0) ? (at * N) / air_ticks : 0;
-				if (si < 0) si = 0;
+				const int per = (g.ps_strafe_ticks < 6) ? 6 : g.ps_strafe_ticks;
+				int si = (at < 0) ? 0 : at / per;
 				if (si >= N) si = N - 1;
 				const int side = (si % 2 == 0) ? g.ps_air_dir : -g.ps_air_dir;
 				const float h = HeadingDeg(prev.velocity, g_pv_last_yaw);
-				const float tgx = gx - prev.origin.X;
-				const float tgy = gy - prev.origin.Y;
-				const float tgd = sqrtf(tgx * tgx + tgy * tgy);
-				float tilt = 0.f;
-				if (tgd > 50.f) {
-					const float desired = Deg(atan2f(tgy, tgx));
-					tilt = NormYaw(desired - h) * 0.25f;
-					if (tilt > 4.f) tilt = 4.f;
-					if (tilt < -4.f) tilt = -4.f;
-				}
-				float ay = NormYaw(h + tilt);
-				// The carve's velocity lags the view, so the first air tick's
-				// heading-based yaw sits well off the ray the view just aimed
-				// down - blend from the ray onto the optimal line over a few
-				// ticks so the jump has no visible snap (same straddle idea as
-				// boundary smoothing; the brief off-optimal wish costs ~nothing).
+				// Max-gain line + a constant steering tilt (+ = right): the
+				// path continues the launch direction, bent only by the slider.
+				float ay = NormYaw(h - g.ps_air_bias);
+				// Blend from the LAST GROUND VIEW onto the optimal air line
+				// over a few ticks so the jump has no visible snap (same
+				// straddle idea as boundary smoothing; the brief off-optimal
+				// wish costs ~nothing).
 				const int ab = 8;
 				if (at >= 0 && at < ab) {
 					const float w = static_cast<float>(at) / static_cast<float>(ab);
-					ay = NormYaw(ay + NormYaw(ray_yaw - ay) * (1.f - w));
+					ay = NormYaw(ay + NormYaw(g_pv_ps_jump_view - ay) * (1.f - w));
 				}
 				yaw = ay;
 				fmove = 0.f;
@@ -679,15 +722,16 @@ namespace {
 			// the ground key that same tick since smove already switched sides).
 			if (t == g_pv_ps_gt && onground)
 				ps_jump = true;
-			// Crouch at the last airborne tick (auto, from the last sim) or a
-			// manual lead before the end - lifts the hull ~18u to skim the floor.
+			// Crouch: PURE TIMING - this many ticks before the segment end,
+			// nothing else. The end sits one tick past the landing by default
+			// (the duration snap), so lead 2 = crouch the tick before landing
+			// with zero landing detection here. (The old auto-timer looked at
+			// the sim's ground flags, and the crouch's own ~18u hull lift then
+			// MOVED the landing it was timed against - a feedback loop the
+			// user rightly called solving behavior.)
 			if (g.ps_crouch_end) {
-				int ctick = g.ps_crouch_auto
-					? g.ps_crouch_cached
-					: (ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead));
-				if (g.ps_crouch_auto && ctick < 0)   // no sim yet: manual fallback
-					ctick = ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead);
-				if (ctick >= 0 && t >= ctick)
+				const int ctick = ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead);
+				if (t >= ctick)
 					ps_duck = true;
 			}
 		} else {
@@ -3095,47 +3139,20 @@ namespace {
 	void VerifyPump();        // fwd
 	void CorrectPump();       // fwd
 
-	// PRESTRAFE auto-crouch: after a sim, set each auto prestrafe segment's
-	// crouch tick to its LAST AIRBORNE tick (the max-speed moment, right
-	// before the floor). Crouching lifts the hull ~18u and delays landing,
-	// so the tick can shift a little on the re-sim - settle a few rounds then
-	// stop (the manual offset covers any last-tick preference).
-	void UpdatePrestrafeCrouch() {
-		static int settle = 0;
-		if (!g_valid || g_states.empty()) { settle = 0; return; }
-		bool changed = false;
-		for (size_t k = 0; k < g_segs.size(); ++k) {
-			EditSegment& s = g_segs[k];
-			if (s.raw || s.is_solver || !s.gen.prestrafe || !s.gen.ps_crouch_auto)
-				continue;
-			const int start = (k < g_starts.size()) ? g_starts[k] : 0;
-			int end = start + s.Ticks();
-			if (end > static_cast<int>(g_states.size())) end = static_cast<int>(g_states.size());
-			int last_air = -1;
-			for (int i = start; i < end; ++i)
-				if (!(g_states[i].flags & FL_ONGROUND))
-					last_air = i - start;
-			if (last_air >= 0 && last_air != s.gen.ps_crouch_cached) {
-				s.gen.ps_crouch_cached = last_air;
-				changed = true;
-			}
-		}
-		if (changed && settle < 6) { settle++; MarkDirty(); }
-		else settle = 0;
-	}
+	// (The old auto-crouch solver is GONE - 2026-08-06, user: "stop solving
+	// behavior for prestrafe". It timed the crouch off the sim's ground
+	// flags, and the crouch's own hull lift then moved the landing it was
+	// timed against - an oscillating feedback loop. Crouch is now a pure
+	// ticks-before-end lead applied in the provider.)
 
-	// PRESTRAFE goal solve. Two coupled fixed-point loops per sim:
-	//   1. DURATION is fully automatic (the tick slider is gone - the recipe
-	//      owns its length): while the sim never lands inside the segment the
-	//      duration GROWS, and once a landing exists it snaps to landing+3.
-	//      This is what un-deadlocks everything - without a landing the jump
-	//      distance could never correct, and the default duration was far too
-	//      short to ever produce one (the "2-tick air phase" bug).
-	//   2. JUMP DISTANCE walks by the landing's radial error to the goal ray
-	//      tip (damped 0.8; the air distance is nearly invariant to small
-	//      jump-distance changes, so it converges in a few rounds). Pinned at
-	//      its bounds when the goal is unreachable - the readout says so.
-	void UpdatePrestrafeJumpDist() {
+	// PRESTRAFE duration snap (v3: recipes, NOT solvers). The recipes are
+	// feed-forward; the only thing measured from the sim is WHERE things
+	// happened, to place the segment END:
+	//   air slider > 0 -> end = jump tick + slider ticks (timing-based, for
+	//                     non-flat startzones and edge cases);
+	//   auto (0)       -> end = ONE TICK PAST the landing (clearing the edge).
+	// No goal feedback loop exists anymore, so this converges in a sim or two.
+	void UpdatePrestrafeDuration() {
 		static int settle = 0;
 		if (!g_valid || g_states.empty()) { settle = 0; return; }
 		bool changed = false;
@@ -3148,8 +3165,6 @@ namespace {
 			if (end > static_cast<int>(g_states.size())) end = static_cast<int>(g_states.size());
 			if (end <= start + 2)
 				continue;
-			const Vector o0 = (start > 0 && start - 1 < static_cast<int>(g_states.size()))
-				? g_states[start - 1].origin : g_anchor.origin;
 			int jt = -1, lt = -1;
 			for (int i = start; i < end; ++i) {
 				const bool on = (g_states[i].flags & FL_ONGROUND) != 0;
@@ -3160,53 +3175,25 @@ namespace {
 					break;
 				}
 			}
-			if (lt < 0) {
-				// No landing inside the segment yet. Size it ANALYTICALLY in
-				// one jump instead of geometric growth: every re-sim of a long
-				// segment runs synchronously inside the prediction hook (tens
-				// of ms), so extra rounds are visible in-game hitches - and
-				// long hitch frames stack overlay lifetimes into the engine's
-				// overflow warning. Ground: the carve accelerates 0->~290 u/s,
-				// ~150 average -> ticks ~ dist/2.2. Air: 220 ticks covers any
-				// jump arc with margin. Falls back to geometric growth if the
-				// estimate was still too small.
-				const int est_ground = static_cast<int>(s.gen.ps_jump_dist / 2.2f) + 20;
-				int nt = ((jt >= 0) ? (jt - start) : est_ground) + 220;
-				if (nt <= s.gen.ticks)
-					nt = s.gen.ticks + s.gen.ticks / 2 + 30;
-				if (nt > 1200) nt = 1200;
-				if (nt != s.gen.ticks) {
-					s.gen.ticks = nt;
-					changed = true;
-				}
-				continue;
-			}
-			// Landing exists: the segment IS the recipe - snap the duration
-			// just past the landing. Hysteresis (>2 ticks) keeps the coupled
-			// crouch/jump-dist loops from re-triggering each other over a
-			// one-tick landing wobble (the visible flicker while settling).
-			const int want_ticks = (lt - start) + 3;
-			const int dtk = want_ticks - s.gen.ticks;
-			if (want_ticks >= 16 && (dtk > 2 || dtk < -2)) {
-				s.gen.ticks = want_ticks;
+			int want;
+			if (jt >= 0 && s.gen.ps_air_ticks > 0)
+				want = (jt - start) + s.gen.ps_air_ticks;   // manual air duration
+			else if (lt >= 0)
+				want = (lt - start) + 2;                    // one tick past landing
+			else if (jt >= 0)
+				want = (jt - start) + 220;                  // auto, still airborne:
+				                                            // generous flight window
+			else
+				want = s.gen.ticks + s.gen.ticks / 2 + 30;  // never even jumped: grow
+			if (want < 16) want = 16;
+			if (want > 1200) want = 1200;
+			const int dtk = want - s.gen.ticks;
+			if (dtk > 1 || dtk < -1) {
+				s.gen.ticks = want;
 				changed = true;
 			}
-			// ...and walk the jump distance by the landing's error to the goal.
-			const float dx = g_states[lt].origin.X - o0.X;
-			const float dy = g_states[lt].origin.Y - o0.Y;
-			const float land_dist = sqrtf(dx * dx + dy * dy);
-			const float err = s.gen.ps_goal_dist - land_dist;
-			if (fabsf(err) > 2.f) {
-				float nd = s.gen.ps_jump_dist + err * 0.8f;
-				if (nd < 10.f) nd = 10.f;
-				if (nd > s.gen.ps_goal_dist) nd = s.gen.ps_goal_dist;
-				if (fabsf(nd - s.gen.ps_jump_dist) > 0.5f) {
-					s.gen.ps_jump_dist = nd;
-					changed = true;
-				}
-			}
 		}
-		if (changed && settle < 14) { settle++; MarkDirty(); }
+		if (changed && settle < 10) { settle++; MarkDirty(); }
 		else settle = 0;
 	}
 
@@ -3225,10 +3212,8 @@ namespace {
 		RecomputeDiag();
 		g_stage_name = "AnalyzeRealPass";
 		AnalyzeRealPass();
-		g_stage_name = "PrestrafeCrouch";
-		UpdatePrestrafeCrouch();
-		g_stage_name = "PrestrafeJumpDist";
-		UpdatePrestrafeJumpDist();
+		g_stage_name = "PrestrafeDuration";
+		UpdatePrestrafeDuration();
 		if (g_batch.active) {
 			g_stage_name = "BatchPump";
 			BatchPump();
@@ -4914,7 +4899,10 @@ namespace {
 	// v18: prestrafe gains ps_jump_dist (ground phase ends by DISTANCE).
 	// v19: prestrafe gains ps_goal_dist (point-and-shoot goal ray; ps_air_bias
 	//      is reinterpreted as the ray's direction off the aim).
-	constexpr uint32_t kProjVersion = 19;
+	// v20: prestrafe v3 recipes - gains ps_air_ticks + ps_ground_extra;
+	//      ps_air_bias returns to a steering tilt; jump/goal dists legacy.
+	// v21: prestrafe gains ps_strafe_ticks (fixed-length air strafes).
+	constexpr uint32_t kProjVersion = 21;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -4989,6 +4977,9 @@ namespace {
 					W(out, g.ps_strafes);        // v16
 				W(out, g.ps_jump_dist);      // v18
 				W(out, g.ps_goal_dist);      // v19
+				W(out, g.ps_air_ticks);      // v20
+				W(out, g.ps_ground_extra);   // v20
+				W(out, g.ps_strafe_ticks);   // v21
 
 				const uint32_t novr = static_cast<uint32_t>(s.ovr.size());
 				W(out, novr);
@@ -5055,7 +5046,10 @@ namespace {
 		// old projects' signed totals fold into the same range.
 		if (!(g.ps_ground_turn == g.ps_ground_turn)) g.ps_ground_turn = 75.f;   // NaN
 		g.ps_ground_turn = fabsf(g.ps_ground_turn);
-		if (g.ps_ground_turn > 170.f) g.ps_ground_turn = 170.f;
+		// v2 semantics: windup is the VELOCITY's offset from the goal heading
+		// during the build - past ~85 deg the build stops closing on the goal
+		// and the carve can never trigger.
+		if (g.ps_ground_turn > 85.f) g.ps_ground_turn = 85.f;
 		if (!(g.ps_jump_dist == g.ps_jump_dist)) g.ps_jump_dist = 500.f;   // NaN
 		if (g.ps_jump_dist < 10.f) g.ps_jump_dist = 10.f;
 		if (g.ps_jump_dist > 10000.f) g.ps_jump_dist = 10000.f;
@@ -5064,11 +5058,15 @@ namespace {
 		if (g.ps_strafes < 1) g.ps_strafes = 1;
 		if (g.ps_strafes > 8) g.ps_strafes = 8;
 		if (!(g.ps_air_bias == g.ps_air_bias)) g.ps_air_bias = 0.f;
-		if (g.ps_air_bias < -180.f) g.ps_air_bias = -180.f;   // ray direction
-		if (g.ps_air_bias > 180.f) g.ps_air_bias = 180.f;
-		if (!(g.ps_goal_dist == g.ps_goal_dist)) g.ps_goal_dist = 900.f;   // NaN
-		if (g.ps_goal_dist < 50.f) g.ps_goal_dist = 50.f;
-		if (g.ps_goal_dist > 20000.f) g.ps_goal_dist = 20000.f;
+		if (g.ps_air_bias < -20.f) g.ps_air_bias = -20.f;   // air steering tilt
+		if (g.ps_air_bias > 20.f) g.ps_air_bias = 20.f;
+		if (!(g.ps_goal_dist == g.ps_goal_dist)) g.ps_goal_dist = 900.f;   // legacy
+		if (g.ps_air_ticks < 0) g.ps_air_ticks = 0;
+		if (g.ps_air_ticks > 1000) g.ps_air_ticks = 1000;
+		if (g.ps_strafe_ticks < 6) g.ps_strafe_ticks = 6;
+		if (g.ps_strafe_ticks > 64) g.ps_strafe_ticks = 64;
+		if (g.ps_ground_extra < 0) g.ps_ground_extra = 0;
+		if (g.ps_ground_extra > 200) g.ps_ground_extra = 200;
 		if (g.ps_crouch_lead < 0) g.ps_crouch_lead = 0;
 		if (g.ps_crouch_lead > 200) g.ps_crouch_lead = 200;
 		g.ps_crouch_cached = -1;   // runtime-only
@@ -5192,6 +5190,15 @@ namespace {
 				return false;
 			if (version >= 19 && !R(in, g.ps_goal_dist))
 				return false;
+			if (version >= 20
+				&& (!R(in, g.ps_air_ticks) || !R(in, g.ps_ground_extra)))
+				return false;
+			if (version >= 21 && !R(in, g.ps_strafe_ticks))
+				return false;
+			// Pre-v20 files carried the RAY meaning in ps_air_bias (up to
+			// +-180); as a steering tilt that would slam the air path - reset.
+			if (version < 20 && fabsf(g.ps_air_bias) > 20.f)
+				g.ps_air_bias = 0.f;
 		}
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
 		g.auto_key = autok != 0;
@@ -5497,32 +5504,32 @@ namespace {
 	// frame's CViewSetup. May only do guarded MEMCPYS - verified: pinned
 	// writes the camera; unverified: stash a copy for Update's checker.
 	void FreecamSample(int slot, void* arg) {
-		if (g_fc_dead || slot != kFcSlot || !arg)
+		if (slot != kFcSlot || !arg)
 			return;
-		if (g_fc_pinned) {
-			if (!g_freecam)
-				return;
+		// Camera write (guarded memcpys, the only thing this must do).
+		if (g_freecam) {
 			float org[3] = { g_fc_pos_vis.X, g_fc_pos_vis.Y, g_fc_pos_vis.Z };
 			float ang[3] = { g_fc_pitch, g_fc_yaw, 0.f };
 			unsigned char* base = static_cast<unsigned char*>(arg);
 			FcSafeCopy(base + kFcOrgOff, org, sizeof(org));
 			FcSafeCopy(base + kFcAngOff, ang, sizeof(ang));
-			return;
 		}
-		if (FcSafeCopy(g_fc_stash, arg, sizeof(g_fc_stash)))
-			InterlockedExchange(&g_fc_stash_set, 1);
+		// Diagnostic stash (until the sanity check confirms once).
+		if (!g_fc_confirmed) {
+			const LONG i = InterlockedIncrement(&g_fc_stash_idx) - 1;
+			FcSafeCopy(g_fc_stash[((i % kFcRing) + kFcRing) % kFcRing], arg,
+				sizeof(g_fc_stash[0]));
+		}
 	}
 
-	// Verification half, on the editor's own frame path: the stashed
-	// CViewSetup must show the engine's OWN view (GetViewAngles + the player
-	// eye) at EXACTLY the measured offsets, several frames in a row, before
-	// the hook is allowed to write. A mismatching game update ends in a loud
-	// "unavailable", never a blind write.
+	// Background SANITY CHECK on the editor's frame path: does ANY of this
+	// frame's stashed CViewSetups show the engine's own view at the measured
+	// offsets? Purely informational - it flips a status line and stops
+	// sampling once satisfied. It can never disable the camera (that gating
+	// is exactly what locked freecam out).
 	void FreecamVerifyPump() {
-		if (g_fc_pinned || g_fc_dead)
-			return;
-		if (!InterlockedExchange(&g_fc_stash_set, 0))
-			return;
+		if (g_fc_confirmed || g_freecam)
+			return;   // while flying, the stash holds OUR values, not the engine's
 		if (!engine || !engine->IsInGame())
 			return;
 		StartState st;
@@ -5531,46 +5538,37 @@ namespace {
 		g_fc_checks++;
 		QAngle va(0.f, 0.f, 0.f);
 		engine->GetViewAngles(va);
-		const float* fo = reinterpret_cast<const float*>(g_fc_stash + kFcOrgOff);
-		const float* fa = reinterpret_cast<const float*>(g_fc_stash + kFcAngOff);
-		const float dz = fo[2] - st.origin.Z;
-		// CROSS-FRAME tolerances: the stash is up to one frame older than the
-		// engine reads here, so the view can have moved a few degrees and the
-		// player a few units in between. This is CONFIRMATION of a known
-		// layout at fixed offsets (5 frames in a row), not discovery - the
-		// slack costs nothing. (0.01-degree tolerance starved verification
-		// whenever the mouse was moving: the "freecam does nothing" report.)
-		const bool ok =
-			fabsf(fo[0] - st.origin.X) < 8.f
-			&& fabsf(fo[1] - st.origin.Y) < 8.f
-			&& dz > 16.f && dz < 100.f
-			&& fabsf(NormYaw(fa[0] - va.X)) < 3.f
-			&& fabsf(NormYaw(fa[1] - va.Y)) < 3.f
-			&& fabsf(fa[2]) < 0.5f;   // roll ~ 0
-		g_fc_streak = ok ? g_fc_streak + 1 : 0;
-		if (g_fc_streak >= 5) {
-			g_fc_pinned = true;
-			char line[192];
-			Sfmt(line, "freecam: layout VERIFIED (slot %d, origin+0x%X angles+0x%X, %d checks)",
-				kFcSlot, kFcOrgOff, kFcAngOff, g_fc_checks);
-			FcLog(line);
-			return;
+		for (int i = 0; i < kFcRing; ++i) {
+			const float* fo = reinterpret_cast<const float*>(g_fc_stash[i] + kFcOrgOff);
+			const float* fa = reinterpret_cast<const float*>(g_fc_stash[i] + kFcAngOff);
+			const float dz = fo[2] - st.origin.Z;
+			// Cross-frame tolerances: the stash is up to a frame older than
+			// these engine reads, so allow a few degrees / units of drift.
+			if (fabsf(fo[0] - st.origin.X) < 8.f
+				&& fabsf(fo[1] - st.origin.Y) < 8.f
+				&& dz > 16.f && dz < 100.f
+				&& fabsf(NormYaw(fa[0] - va.X)) < 3.f
+				&& fabsf(NormYaw(fa[1] - va.Y)) < 3.f
+				&& fabsf(fa[2]) < 0.5f) {   // roll ~ 0
+				g_fc_confirmed = true;
+				char line[192];
+				Sfmt(line, "freecam: layout confirmed (slot %d, origin+0x%X angles+0x%X, %d checks)",
+					kFcSlot, kFcOrgOff, kFcAngOff, g_fc_checks);
+				FcLog(line);
+				return;
+			}
 		}
-		// If it can't verify, say WHY (one-shot): the measured deltas name the
-		// mismatching term instead of a silent "verifying..." forever.
-		if (g_fc_checks == 120 || g_fc_checks == 500) {
+		if (g_fc_checks == 300) {
+			const float* fo = reinterpret_cast<const float*>(g_fc_stash[0] + kFcOrgOff);
+			const float* fa = reinterpret_cast<const float*>(g_fc_stash[0] + kFcAngOff);
 			char line[256];
-			Sfmt(line, "freecam: verify still failing after %d checks - stash org (%.1f %.1f %.1f) "
-				"vs eye (%.1f %.1f %.1f+z), stash ang (%.1f %.1f %.1f) vs view (%.1f %.1f)",
+			Sfmt(line, "freecam: sanity check unconfirmed after %d checks (camera still "
+				"active) - ring[0] org (%.1f %.1f %.1f) vs eye (%.1f %.1f %.1f+z), "
+				"ang (%.1f %.1f %.1f) vs view (%.1f %.1f)",
 				g_fc_checks, fo[0], fo[1], fo[2],
 				st.origin.X, st.origin.Y, st.origin.Z,
 				fa[0], fa[1], fa[2], va.X, va.Y);
 			FcLog(line);
-		}
-		if (g_fc_checks > 600) {
-			g_fc_dead = true;
-			FcLog("freecam: measured layout no longer matches this client.dll "
-				"(600 in-game checks) - freecam disabled, re-measure needed");
 		}
 	}
 
@@ -6384,36 +6382,29 @@ namespace {
 					"crouch skim. The engine sims the real physics; only inputs "
 					"are emitted.");
 				if (g.prestrafe) {
-					// No duration slider: the recipe owns its own length (it
-					// grows/snaps to landing+3 every sim - see the goal solve).
-					ImGui::TextDisabled("Goal ray");
-					Theme::Help("The landing goal: a ray on the 2D yaw plane from "
-						"the segment start. The recipe self-solves the jump point "
-						"every sim so the run LANDS at the ray tip - telemetry "
-						"below shows the achieved landing and error.");
-					// Anchor the ray in WORLD space so editing neighbor segments
-					// can never rotate a tuned prestrafe (the ray direction is
-					// otherwise relative to whatever yaw the previous segment
-					// ends at).
-					ch |= ImGui::Checkbox("  anchor ray to absolute yaw", &g.yaw_abs);
-					Theme::Help("ON: the ray base is this fixed world yaw instead "
-						"of the previous segment's exit aim - neighboring edits "
-						"can't swing a tuned prestrafe.");
+					// Direction anchor: the recipes follow the segment AIM,
+					// world-anchored by default so neighbor edits can't rotate
+					// a tuned prestrafe.
+					ch |= ImGui::Checkbox("  anchor aim to absolute yaw", &g.yaw_abs);
+					Theme::Help("OFF (default): the recipe aims straight ahead from "
+						"wherever the segment starts - the normal map/stage-start "
+						"case. ON: pin a fixed world yaw instead, for prestrafes "
+						"mid-run where upstream edits could swing the entry aim.");
 					if (g.yaw_abs) {
 						ImGui::SameLine();
 						ImGui::PushItemWidth(kInputW);
 						ch |= ImGui::InputFloat("##psyawabs", &g.yaw_start, 0.1f, 5.f, 1);
 						ImGui::PopItemWidth();
 					}
-					ch |= FloatRow("  direction", &g.ps_air_bias, -180.f, 180.f, "%+.1f deg", 0.1f, 1.f, 1);
-					Theme::Help("0 = straight along the segment's aim; + points "
-						"right, - left. The ground carve and the flight both follow "
-						"the ray.");
-					ch |= FloatRow("  distance", &g.ps_goal_dist, 100.f, 4000.f, "%.0f u", 5.f, 50.f, 0);
-					Theme::Help("The ray's magnitude - horizontal distance from the "
-						"segment start to the landing point.");
 
-					ImGui::TextDisabled("Ground");
+					ImGui::TextDisabled("Ground recipe");
+					Theme::Help("W + strafe key builds to MAX ground speed in the "
+						"minimum distance (the build ends the moment speed stops "
+						"climbing), then the carve sweeps the velocity onto the aim "
+						"as hard as the server's ground accel allows, and the jump "
+						"fires the moment the heading reaches the aim - so changing "
+						"sv_accelerate reshapes the carve, never the launch "
+						"direction. Recipe, not a solver.");
 					ImGui::PushItemWidth(150);
 					int gdir = (g.ps_ground_dir > 0) ? 0 : 1;
 					if (ImGui::Combo("  ground strafe side", &gdir, "A (left)\0D (right)\0")) {
@@ -6421,20 +6412,39 @@ namespace {
 					}
 					ImGui::PopItemWidth();
 					ch |= FloatRow("  windup swing",
-						&g.ps_ground_turn, 0.f, 170.f, "%.0f deg", 1.f, 10.f, 0);
-					Theme::Help("How far the view swings OUT (opposite the carve side) "
-						"before sweeping back onto the ray. Bigger swing = more carve "
-						"speed; real human prestrafes measured 60-90 degrees. The jump "
-						"always leaves aimed down the ray, whatever the swing.");
+						&g.ps_ground_turn, 0.f, 85.f, "%.0f deg", 1.f, 10.f, 0);
+					Theme::Help("How far the velocity runs off the aim during the "
+						"build before the carve sweeps it back on. Bigger swing = "
+						"longer, harder carve = more jump speed; measured human runs "
+						"used 60-90. The carve always ends exactly on the aim.");
+					ch |= IntRow("  extra build ticks", &g.ps_ground_extra, 0, 100);
+					Theme::Help("Extends the speed-build past the max-speed point "
+						"(0 = the minimum-distance default). Use it to place the "
+						"jump deeper into a long startzone.");
 
-					ImGui::TextDisabled("Air");
+					ImGui::TextDisabled("Air recipe");
 					ch |= IntRow("  alternating strafes", &g.ps_strafes, 1, 8);
+					ch |= IntRow("  ticks per strafe", &g.ps_strafe_ticks, 6, 64);
+					Theme::Help("Fixed length of each air strafe (human first strafes "
+						"measured 22-25 ticks). Fixed-length alternation means the "
+						"segment's auto-duration can never re-shuffle the strafes; "
+						"after the last one, the final side holds.");
 					ImGui::PushItemWidth(150);
 					int adir = (g.ps_air_dir > 0) ? 0 : 1;
 					if (ImGui::Combo("  first strafe side", &adir, "A (left)\0D (right)\0")) {
 						g.ps_air_dir = (adir == 0) ? 1 : -1; ch = true;
 					}
 					ImGui::PopItemWidth();
+					ch |= FloatRow("  steer bias",
+						&g.ps_air_bias, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+					Theme::Help("Constant tilt off the optimal line: + bends the air "
+						"path right, - left, 0 = straight. Same feel as the straight "
+						"modes' steering.");
+					ch |= IntRow("  air duration", &g.ps_air_ticks, 0, 400);
+					Theme::Help("Ticks of flight after the jump. 0 = AUTO: the segment "
+						"ends ONE TICK PAST the landing (clearing the startzone edge). "
+						"Set it manually for non-flat startzones and other edge cases - "
+						"purely timing-based.");
 
 					ImGui::TextDisabled("Crouch");
 					ch |= ImGui::Checkbox("Hold crouch for the whole segment", &g.duck);
@@ -6442,12 +6452,11 @@ namespace {
 					Theme::Help("Crouch right before the floor to skim past it at maximum "
 						"speed (the last-moment startzone exit).");
 					if (g.ps_crouch_end) {
-						ch |= ImGui::Checkbox("Auto-time to the last airborne tick", &g.ps_crouch_auto);
-						if (!g.ps_crouch_auto)
-							ch |= IntRow("Crouch this many ticks before the end", &g.ps_crouch_lead, 0, 60);
-						else if (g.ps_crouch_cached >= 0)
-							ImGui::TextDisabled("auto crouch tick: local %d (last airborne of the last sim)",
-								g.ps_crouch_cached);
+						ch |= IntRow("  crouch lead", &g.ps_crouch_lead, 0, 60);
+						Theme::Help("Ticks before the segment END to crouch - pure "
+							"timing, no landing detection. The end sits one tick past "
+							"the landing by default, so lead 2 = crouch the tick "
+							"before landing. Adjust for edge cases.");
 					}
 					// ---- recipe telemetry: the "am I at max" numbers ----------
 					// Ground and air speed limits with tick timing, plus the
@@ -6494,15 +6503,17 @@ namespace {
 									const float ldy = g_states[lt].origin.Y - ro.Y;
 									const float ld = sqrtf(ldx * ldx + ldy * ldy);
 									ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.f, 1.f),
-										"landing tick %d   %.0f u out   goal err %+.1f u",
-										lt - start, ld, g.ps_goal_dist - ld);
-									ImGui::TextDisabled("auto: duration %d ticks   jump dist %.0f u",
-										g.ticks, g.ps_jump_dist);
+										"lands tick %d   %.0f u out   ends %s",
+										lt - start, ld,
+										g.ps_air_ticks > 0 ? "at the air-duration slider"
+										                   : "one tick past the landing");
 								} else {
-									ImGui::TextDisabled("sizing the segment to the recipe (auto-growing)...");
+									ImGui::TextDisabled(g.ps_air_ticks > 0
+										? "airborne at segment end (manual air duration)"
+										: "sizing the segment to the recipe (auto)...");
 								}
 							} else {
-								ImGui::TextDisabled("solving the ground run (auto-growing the segment)...");
+								ImGui::TextDisabled("building ground speed (segment auto-sizing)...");
 							}
 						}
 					}
@@ -6510,8 +6521,7 @@ namespace {
 					// the real simmed velocity magnitude including the downward vz.
 					if (g_valid && !g_dirty && g_sel < static_cast<int>(g_starts.size())) {
 						const int start = g_starts[g_sel];
-						int ct = g.ps_crouch_auto ? g.ps_crouch_cached
-							: (g.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead));
+						int ct = g.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead);
 						if (ct < 0) ct = g.ticks - 1;
 						const int gi = start + ct;
 						if (gi >= 0 && gi < static_cast<int>(g_states.size())) {
@@ -6742,6 +6752,19 @@ namespace {
 			if (ch)
 				MarkDirty();
 
+			if (ImGui::Button("Surf setup")) {
+				if (engine) {
+					engine->ClientCmd_Unrestricted(
+						"sv_cheats 1; sv_accelerate 10; sv_airaccelerate 150");
+					g_air_accel = 150.f;   // the model follows what was just set
+					MarkDirty();
+					g_status = "Sent sv_cheats 1, sv_accelerate 10, sv_airaccelerate 150 - model updated.";
+				}
+			}
+			Theme::Help("One click for a listen-server surf setup: sv_cheats 1, "
+				"sv_accelerate 10, sv_airaccelerate 150. The strafe model's "
+				"sv_airaccelerate follows immediately.");
+			ImGui::SameLine();
 			if (ImGui::Button("Refresh")) {
 				float aa = 0.f, gr = 0.f;
 				const bool ok_a = Cvars::GetFloat("sv_airaccelerate", &aa);
@@ -7035,15 +7058,9 @@ namespace {
 			Theme::Help("Eases the rendered camera position (~55 ms) for buttery "
 				"flight. Look stays raw so the crosshair and picks never lag. "
 				"Off = the camera renders the integrator directly.");
-			if (g_fc_pinned)
-				ImGui::TextDisabled("view write: verified (slot %d, origin+0x%X, angles+0x%X)",
-					kFcSlot, kFcOrgOff, kFcAngOff);
-			else if (g_fc_dead)
-				ImGui::TextColored(Theme::Error,
-					"view write: measured layout no longer matches - freecam unavailable");
-			else
-				ImGui::TextDisabled("view write: verifying the measured layout (be in game; %d checks)...",
-					g_fc_checks);
+			ImGui::TextDisabled("view write: slot %d, origin+0x%X, angles+0x%X%s",
+				kFcSlot, kFcOrgOff, kFcAngOff,
+				g_fc_confirmed ? " (confirmed)" : " (sanity check pending)");
 		}
 
 		Theme::Heading("Defaults");
@@ -7312,14 +7329,6 @@ void TasEditor::PickAtCrosshair() {
 }
 
 void TasEditor::ToggleFreecam() {
-	// NEVER engage (and never block player input) before the view slot is
-	// pinned - a freecam that can't show its camera must not eat controls.
-	if (!g_freecam && !g_fc_pinned) {
-		g_status = g_fc_dead
-			? "Freecam unavailable: the measured view layout no longer matches this build."
-			: "Freecam: verifying the view layout - be in game a second or two, then retry.";
-		return;
-	}
 	g_freecam = !g_freecam;
 	if (g_freecam) {
 		// Seed the camera from the CURRENT view (engine truth).

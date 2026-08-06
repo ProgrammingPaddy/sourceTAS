@@ -30,6 +30,11 @@ namespace {
 	bool Idle()      { return g_tas.State() == TasState::Idle; }
 	bool Recording() { return g_tas.State() == TasState::Recording; }
 
+	// Master arm switch (declared before the command table - the arm-toggle
+	// command's lambda flips it). When false, bound hotkeys dispatch NOTHING;
+	// the toggle command itself bypasses the gate (see dispatch).
+	bool g_hotkeys_armed = true;
+
 	TasCommand g_commands[] = {
 		{ "Start Recording", 0, [] { return Idle(); }, [] { g_tas.StartRecording(); } },
 		{ "Save Segment", 0, [] { return Recording(); }, [] { g_tas.SaveSegment(); } },
@@ -45,6 +50,10 @@ namespace {
 		{ "Editor: Next Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(1); } },
 		{ "Editor: Pick At Crosshair", 0, [] { return true; }, [] { TasEditor::PickAtCrosshair(); } },
 		{ "Freecam Toggle", 0, [] { return true; }, [] { TasEditor::ToggleFreecam(); } },
+		// Default-bound to TILDE: the key that opens the console also flips
+		// the arm state, so opening the console disarms every other bind and
+		// closing it (tilde again) re-arms - no detection, purely key-driven.
+		{ "Toggle Hotkey Arm", VK_OEM_3, [] { return true; }, [] { g_hotkeys_armed = !g_hotkeys_armed; } },
 	};
 
 	constexpr int kCommandCount = static_cast<int>(sizeof(g_commands) / sizeof(g_commands[0]));
@@ -52,9 +61,12 @@ namespace {
 	// Index of the command currently capturing a key, or -1 when not rebinding.
 	int g_binding = -1;
 
-	// Master arm switch: when false, bound hotkeys dispatch NOTHING (typing in
-	// console/chat can't trigger commands). F8 and bind-capture stay live.
-	bool g_hotkeys_armed = true;
+	// NOTE: console auto-disarm DETECTION was attempted twice and removed for
+	// good (2026-08-06): a derived Con_IsVisible vtable index returned
+	// nothing, and the cursor-visibility heuristic reported the cursor
+	// showing during normal gameplay - silently gating EVERY hotkey. The
+	// replacement is the "Toggle Hotkey Arm" COMMAND default-bound to tilde:
+	// the console key itself flips the arm state. Key-driven, no detection.
 
 	// ---- hotkey bind persistence (Documents\sourceTAS\binds.cfg) ----------
 	// One line per command: "<vk> <command name>". Matched by NAME on load, so
@@ -445,17 +457,22 @@ bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param
 			return false;
 		}
 
-		if (w_param != VK_F8 && g_hotkeys_armed) {
+		if (w_param != VK_F8) {
 			for (TasCommand& command : g_commands) {
-				if (command.key == static_cast<int>(w_param) && command.available()) {
+				if (command.key != static_cast<int>(w_param) || !command.available())
+					continue;
+				// "Toggle Hotkey Arm" bypasses the master gate - it must fire
+				// while DISARMED, or disarming would be a one-way trap. Every
+				// other command needs the switch armed.
+				if (g_hotkeys_armed
+					|| std::strcmp(command.name, "Toggle Hotkey Arm") == 0) {
 					// EXEC without a matching DONE = the process died inside
-					// this command (the prime suspect for console-typing
-					// deaths: this dispatch does NOT know the console is open).
+					// this command.
 					Breadcrumb::Note(Breadcrumb::SlotCommand, "EXEC %s", command.name);
 					command.execute();
 					Breadcrumb::Note(Breadcrumb::SlotCommand, "DONE %s", command.name);
-					break;
 				}
+				break;
 			}
 		}
 	}

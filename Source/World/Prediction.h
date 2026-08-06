@@ -55,6 +55,12 @@ namespace Prediction {
 	// standing still - in motion they differ by one tick of movement).
 	bool LastRealMoveOrigin(Vector& out);
 
+	// The engine's live gpGlobals->curtime (pinned RVA; see Prediction.cpp).
+	// Frozen while the game is paused - overlay submission keys off it, since
+	// debug overlays expire against curtime and a frozen clock means nothing
+	// ever expires. Returns a constant sentinel when unavailable.
+	float CurTime();
+
 	// Live diagnostics for the menu.
 	struct Diag {
 		bool  installed = false;

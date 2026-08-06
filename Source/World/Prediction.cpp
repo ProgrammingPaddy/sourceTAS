@@ -407,6 +407,17 @@ namespace {
 	}
 }
 
+float Prediction::CurTime() {
+	if (!g_gpg_holder)
+		return -1.f;
+	if (s_p_curtime)
+		return *s_p_curtime;
+	void* gpg = *g_gpg_holder;
+	if (!gpg)
+		return -1.f;
+	return *reinterpret_cast<float*>(reinterpret_cast<char*>(gpg) + kCurtimeOff);
+}
+
 void Prediction::Install() {
 	HMODULE client = GetModuleHandleA("client.dll");
 	if (!client)

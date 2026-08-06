@@ -274,6 +274,23 @@ void WorldDraw::Render() {
 	d.in_game = engine->IsInGame();
 	if (!d.in_game) { g_diag = d; return; }
 
+	// PAUSED GAME (ESC on a listen server) freezes curtime - and debug
+	// overlays EXPIRE against curtime, so a frozen clock means nothing ever
+	// expires while we submit thousands per frame. The engine's overlay list
+	// then grows until its hard overflow terminates the process (2026-08-06:
+	// death inside the worlddraw section ~10 s after ESC; the earlier
+	// on-screen overflow warning + hitch were the same mechanism during
+	// brief pauses). Submit ONLY when curtime advances: exactly one
+	// submission per expiry cycle - what is already drawn stays visible
+	// between ticks precisely because nothing expires, and high-fps overlay
+	// churn drops several-fold for free.
+	{
+		static float s_last_ct = -1e9f;
+		const float ct = Prediction::CurTime();
+		if (ct == s_last_ct) { g_diag = d; return; }
+		s_last_ct = ct;
+	}
+
 	// Crash isolation: while the solver's HEAVY phases churn (search /
 	// verify / batch), submit NOTHING. The engine expires its overlay list
 	// on the game thread while we add from the render hook; if the silent
@@ -412,8 +429,18 @@ void WorldDraw::Render() {
 				r = 120; g = 120; b = 120;
 			} else {
 				if (ed.eff && ed.maxgain && ed.maxgain[i] > 0.001f) {
-					if (ed.eff[i] >= ed.min_eff) { r = 60; g = 255; b = 120; }   // optimal enough
-					else                          { r = 255; g = 140; b = 30; }  // below threshold
+					// Efficiency GRADIENT: everything at/above the min-eff cap
+					// draws the same bright green; below it the color slides
+					// through orange down to red across a 15%-wide band, so
+					// the line itself says HOW far off optimal a stretch is.
+					const float hi = ed.min_eff;
+					const float lo = hi - 0.15f;
+					float t = (hi > lo) ? (ed.eff[i] - lo) / (hi - lo) : 1.f;
+					if (t < 0.f) t = 0.f;
+					if (t > 1.f) t = 1.f;
+					r = static_cast<int>(255.f + (60.f - 255.f) * t);
+					g = static_cast<int>(60.f + (255.f - 60.f) * t);
+					b = static_cast<int>(40.f + (120.f - 40.f) * t);
 				} else {
 					r = 50; g = 190; b = 110;                    // not scoreable (ground/landing)
 				}
