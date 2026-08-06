@@ -70,9 +70,14 @@ namespace {
 	const unsigned char kSevenSeg[10] = {
 		0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
 
+	// Shared overlay budget (reset each Render frame; see WorldDraw.h).
+	int g_ovl_left = 0;
+
 	void DrawSegDigit(int digit, const Vector& org, const Vector& right,
 	                  float h, int r, int g, int b, float dur) {
 		if (digit < 0 || digit > 9)
+			return;
+		if (!WorldDraw::OverlayTake(7))
 			return;
 		const float w = h * 0.55f;
 		auto P = [&](float x, float y) {
@@ -252,8 +257,16 @@ namespace {
 	}
 }
 
+bool WorldDraw::OverlayTake(int count) {
+	if (g_ovl_left < count)
+		return false;
+	g_ovl_left -= count;
+	return true;
+}
+
 void WorldDraw::Render() {
 	Diagnostics d;
+	g_ovl_left = 2000;   // this frame's shared overlay budget
 
 	d.interfaces_ready = (engine && debugoverlay && entitylist && clientdll);
 	if (!d.interfaces_ready) { g_diag = d; return; }
@@ -330,10 +343,12 @@ void WorldDraw::Render() {
 			for (const Vector& p : path) {
 				if (!FiniteWorldPoint(p))
 					break;   // prediction diverged; stop before feeding garbage to the overlay
+				if (!OverlayTake(2))
+					break;   // shared frame budget spent
 				debugoverlay->AddLineOverlay(prev, p, 40, 220, 90, false, g_dur_live);
 				debugoverlay->AddBoxOverlay(p, dmin, dmax, kNoRotation, 40, 255, 90, 255, g_dur_live);
 				for (int c = 0; c < 4; ++c)
-					if (corner_trails[c])
+					if (corner_trails[c] && OverlayTake(1))
 						debugoverlay->AddLineOverlay(prev + kCornerOff[c], p + kCornerOff[c],
 						                             120, 170, 200, false, g_dur_live);
 				prev = p;
@@ -370,6 +385,8 @@ void WorldDraw::Render() {
 			const Vector p = ed.states[i].origin;
 			if (!FiniteWorldPoint(p))
 				break;
+			if (!OverlayTake(2))
+				break;   // shared frame budget spent - the line ends here
 
 			// Splice the measured pass point in as a vertex (and never decimate
 			// its tick): the drawn line visibly runs through the exact point
@@ -406,7 +423,7 @@ void WorldDraw::Render() {
 			if (prev_ok) {
 				debugoverlay->AddLineOverlay(prev, p, r, g, b, false, duration);
 				for (int c = 0; c < 4; ++c)
-					if (corner_trails[c])
+					if (corner_trails[c] && OverlayTake(1))
 						debugoverlay->AddLineOverlay(prev + kCornerOff[c], p + kCornerOff[c],
 						                             120, 170, 200, false, duration);
 			}

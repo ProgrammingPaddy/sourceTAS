@@ -2,6 +2,7 @@
 #include "../shareddefs.h"
 #include "../World/Prediction.h"
 #include "../Editor/TasEditor.h"
+#include "../Menu/Breadcrumb.h"
 
 // Raw + leaked on purpose: the atexit destructor restored the vtable into
 // game memory that is already gone at process exit (crash.log 2026-07-25,
@@ -13,6 +14,12 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 	// Don't do anything when called from CInput::ExtraMouseSample.
 	if (!command->command_number)
 		return false;
+
+	// Game-thread breadcrumb: enter-without-exit after a freeze = the game
+	// thread died in here (recording/replay); a stale pair with a LOWER seq
+	// than the frame/update slots = the game thread stopped being scheduled
+	// first (the engine froze elsewhere, not in our hook).
+	Breadcrumb::Note(Breadcrumb::SlotGame, "createmove: enter");
 
 	if (g_tas.IsRecording()) {
 		// Anchor every segment to the absolute world state at its FIRST tick
@@ -33,40 +40,32 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 			engine->SetViewAngles(command->viewangles);
 	}
 
+	Breadcrumb::Note(Breadcrumb::SlotGame, "createmove: exit");
 	return false;
 }
 
 namespace {
-	// View-slot discovery thunks. Each candidate slot forwards all four x64
-	// register args to its original (transparent for any <=4-arg virtual),
-	// then hands the second argument to the prober. Originals are captured
-	// BEFORE hooking; the template gives each slot its own function identity.
-	constexpr int kViewSlotLo = 12;
-	constexpr int kViewSlotHi = 20;   // CreateMove(21) excluded
+	// Slot 16 = ClientModeShared::OverrideView on this client.dll build
+	// (measured by the retired discovery sweep). The wrapper forwards all
+	// four x64 register args (OverrideView takes 2 - forwarding spares is
+	// harmless) and hands the CViewSetup to TasEditor, whose hook-context
+	// half only ever does guarded memcpys.
+	constexpr int kViewSlot = 16;
 	using GenFn = void* (*)(void*, void*, void*, void*);
-	uintptr_t g_view_originals[32] = {};
+	uintptr_t g_view_original = 0;
 
-	template <int SLOT>
-	void* ViewProbeThunk(void* thisptr, void* a, void* b, void* c) {
-		void* const r = reinterpret_cast<GenFn>(g_view_originals[SLOT])(thisptr, a, b, c);
-		TasEditor::ViewSlotSample(SLOT, a);
+	void* ViewThunk(void* thisptr, void* a, void* b, void* c) {
+		void* const r = reinterpret_cast<GenFn>(g_view_original)(thisptr, a, b, c);
+		TasEditor::ViewSlotSample(kViewSlot, a);
 		return r;
 	}
 }
 
-void Hooks::InstallViewProbes(VMTHook* hook) {
-	static GenFn const thunks[] = {
-		&ViewProbeThunk<12>, &ViewProbeThunk<13>, &ViewProbeThunk<14>,
-		&ViewProbeThunk<15>, &ViewProbeThunk<16>, &ViewProbeThunk<17>,
-		&ViewProbeThunk<18>, &ViewProbeThunk<19>, &ViewProbeThunk<20>,
-	};
-	const std::size_t total = hook->GetTotalFunctions();
-	for (int s = kViewSlotLo; s <= kViewSlotHi; ++s) {
-		if (static_cast<std::size_t>(s) >= total)
-			break;
-		g_view_originals[s] = reinterpret_cast<uintptr_t>(
-			hook->GetOriginalFunction<void*>(static_cast<std::size_t>(s)));
-		hook->HookFunction(reinterpret_cast<void*>(thunks[s - kViewSlotLo]),
-			static_cast<std::size_t>(s));
-	}
+void Hooks::InstallViewHook(VMTHook* hook) {
+	if (static_cast<std::size_t>(kViewSlot) >= hook->GetTotalFunctions())
+		return;
+	g_view_original = reinterpret_cast<uintptr_t>(
+		hook->GetOriginalFunction<void*>(static_cast<std::size_t>(kViewSlot)));
+	hook->HookFunction(reinterpret_cast<void*>(&ViewThunk),
+		static_cast<std::size_t>(kViewSlot));
 }

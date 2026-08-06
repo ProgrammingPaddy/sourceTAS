@@ -885,6 +885,10 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 		const Brush& brush = g_brushes[entry.second];
 		if (lines + static_cast<int>(brush.edges.size()) > budget)
 			break;
+		// Wires spend from the SHARED per-frame overlay budget too (they draw
+		// after the run line, so the line always wins the contention).
+		if (!WorldDraw::OverlayTake(static_cast<int>(brush.edges.size())))
+			break;
 
 		int r = 200, g = 200, b = 210;                       // solid: light gray
 		if (brush.contents & BSP_CONTENTS_PLAYERCLIP) { r = 255; g = 80;  b = 80; }

@@ -408,10 +408,12 @@ void BasehookInterface::OnEndScene() {
 
 bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param) {
 
-	// Key-traffic breadcrumb (console typing flows through this hook too, so a
-	// death while typing names the exact key + state that preceded it).
+	// Key + mouse-button breadcrumb (console typing and clicks flow through
+	// this hook too, so a death right after one names the exact message that
+	// preceded it - the 2026-08-05 freeze followed a single click).
 	if (type == WM_KEYDOWN || type == WM_KEYUP || type == WM_SYSKEYDOWN
-		|| type == WM_SYSKEYUP || type == WM_CHAR)
+		|| type == WM_SYSKEYUP || type == WM_CHAR
+		|| (type >= WM_LBUTTONDOWN && type <= 0x020E))
 		Breadcrumb::Note(Breadcrumb::SlotInput, "msg=0x%03X vk=%u menu=%d typing=%d",
 			type, static_cast<unsigned>(w_param), is_menu_visible ? 1 : 0,
 			(is_menu_visible && ImGui::GetIO().WantTextInput) ? 1 : 0);

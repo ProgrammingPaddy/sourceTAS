@@ -28,6 +28,7 @@
 #include "../World/Cvars.h"
 #include "../Menu/Theme.h"
 #include "../Menu/RecordPanel.h"
+#include "../Menu/Breadcrumb.h"
 
 #include <sstream>
 
@@ -370,13 +371,22 @@ namespace {
 	// Slot + layout discovery: every candidate virtual is sampled; a slot
 	// pins when its argument matches the engine view (angles + eye) at
 	// STABLE offsets over several samples. Per-slot state, first pin wins.
-	int      g_fc_slot = -1;              // pinned OverrideView slot
-	int      g_fc_org_off = -1, g_fc_ang_off = -1;   // pinned CViewSetup offsets
-	bool     g_fc_pinned = false, g_fc_dead = false;
-	int      g_fc_samples = 0;            // total in-game samples (give-up counter)
-	int      g_fc_s_org[32] = {}, g_fc_s_ang[32] = {};   // per-slot candidate offs
-	int      g_fc_s_streak[32] = {};
-	uint64_t g_fc_s_last_ms[32] = {};     // per-slot probe throttle
+	// The CViewSetup layout for THIS client.dll build, measured by the
+	// retired 12..20 discovery sweep (freecam_probe.log, four consistent
+	// sessions, 2026-08-05): OverrideView = slot 16, view origin at +0x40,
+	// view angles at +0x4C. NEVER trusted blind: every session re-verifies
+	// them against engine truth (below) before a single write, so a game
+	// update that moves anything turns freecam off loudly.
+	constexpr int kFcSlot = 16;
+	constexpr int kFcOrgOff = 0x40;
+	constexpr int kFcAngOff = 0x4C;
+	bool     g_fc_pinned = false, g_fc_dead = false;   // pinned = verified
+	int      g_fc_streak = 0;             // consecutive verify matches
+	int      g_fc_checks = 0;             // in-game verify attempts (give-up)
+	// Hook-context stash: the wrapper only ever memcpys into here; the
+	// verification against engine truth runs on Update's proven-safe path.
+	unsigned char g_fc_stash[0x140] = {};
+	volatile LONG g_fc_stash_set = 0;
 	// High-resolution frame timing (GetTickCount64's ~15.6 ms resolution
 	// quantized flight into visible bursts at high fps) + optional visual
 	// position smoothing. g_fc_pos is the true integrator; g_fc_pos_vis is
@@ -650,7 +660,18 @@ namespace {
 					if (tilt > 4.f) tilt = 4.f;
 					if (tilt < -4.f) tilt = -4.f;
 				}
-				yaw = NormYaw(h + tilt);
+				float ay = NormYaw(h + tilt);
+				// The carve's velocity lags the view, so the first air tick's
+				// heading-based yaw sits well off the ray the view just aimed
+				// down - blend from the ray onto the optimal line over a few
+				// ticks so the jump has no visible snap (same straddle idea as
+				// boundary smoothing; the brief off-optimal wish costs ~nothing).
+				const int ab = 8;
+				if (at >= 0 && at < ab) {
+					const float w = static_cast<float>(at) / static_cast<float>(ab);
+					ay = NormYaw(ay + NormYaw(ray_yaw - ay) * (1.f - w));
+				}
+				yaw = ay;
 				fmove = 0.f;
 				smove = (side > 0) ? -450.f : 450.f;
 			}
@@ -3140,20 +3161,33 @@ namespace {
 				}
 			}
 			if (lt < 0) {
-				// No landing inside the segment (ground still carving, or the
-				// flight outlives the duration): GROW, bounded.
-				if (s.gen.ticks < 1200) {
-					int nt = s.gen.ticks + s.gen.ticks / 2 + 30;
-					if (nt > 1200) nt = 1200;
+				// No landing inside the segment yet. Size it ANALYTICALLY in
+				// one jump instead of geometric growth: every re-sim of a long
+				// segment runs synchronously inside the prediction hook (tens
+				// of ms), so extra rounds are visible in-game hitches - and
+				// long hitch frames stack overlay lifetimes into the engine's
+				// overflow warning. Ground: the carve accelerates 0->~290 u/s,
+				// ~150 average -> ticks ~ dist/2.2. Air: 220 ticks covers any
+				// jump arc with margin. Falls back to geometric growth if the
+				// estimate was still too small.
+				const int est_ground = static_cast<int>(s.gen.ps_jump_dist / 2.2f) + 20;
+				int nt = ((jt >= 0) ? (jt - start) : est_ground) + 220;
+				if (nt <= s.gen.ticks)
+					nt = s.gen.ticks + s.gen.ticks / 2 + 30;
+				if (nt > 1200) nt = 1200;
+				if (nt != s.gen.ticks) {
 					s.gen.ticks = nt;
 					changed = true;
 				}
 				continue;
 			}
 			// Landing exists: the segment IS the recipe - snap the duration
-			// just past the landing...
+			// just past the landing. Hysteresis (>2 ticks) keeps the coupled
+			// crouch/jump-dist loops from re-triggering each other over a
+			// one-tick landing wobble (the visible flicker while settling).
 			const int want_ticks = (lt - start) + 3;
-			if (want_ticks >= 16 && want_ticks != s.gen.ticks) {
+			const int dtk = want_ticks - s.gen.ticks;
+			if (want_ticks >= 16 && (dtk > 2 || dtk < -2)) {
 				s.gen.ticks = want_ticks;
 				changed = true;
 			}
@@ -5458,85 +5492,85 @@ namespace {
 			f << line << "\n";
 	}
 
-	// One sample from candidate slot `slot` with its (unvalidated) second
-	// argument. Before a pin: throttled per-slot matching against engine
-	// truth. After a pin: only the winning slot applies the camera.
+
+	// Hook-context half: called by the single OverrideView wrapper with the
+	// frame's CViewSetup. May only do guarded MEMCPYS - verified: pinned
+	// writes the camera; unverified: stash a copy for Update's checker.
 	void FreecamSample(int slot, void* arg) {
-		if (g_fc_dead || slot < 0 || slot >= 32)
+		if (g_fc_dead || slot != kFcSlot || !arg)
 			return;
 		if (g_fc_pinned) {
-			if (slot != g_fc_slot || !g_freecam || !arg)
+			if (!g_freecam)
 				return;
 			float org[3] = { g_fc_pos_vis.X, g_fc_pos_vis.Y, g_fc_pos_vis.Z };
 			float ang[3] = { g_fc_pitch, g_fc_yaw, 0.f };
 			unsigned char* base = static_cast<unsigned char*>(arg);
-			FcSafeCopy(base + g_fc_org_off, org, sizeof(org));
-			FcSafeCopy(base + g_fc_ang_off, ang, sizeof(ang));
+			FcSafeCopy(base + kFcOrgOff, org, sizeof(org));
+			FcSafeCopy(base + kFcAngOff, ang, sizeof(ang));
 			return;
 		}
-		if (!arg)
-			return;
-		// Throttle: some candidate virtuals fire hundreds of times per frame
-		// (per-entity queries); one look every 50 ms per slot is plenty.
-		const uint64_t now = GetTickCount64();
-		if (now - g_fc_s_last_ms[slot] < 50)
-			return;
-		g_fc_s_last_ms[slot] = now;
+		if (FcSafeCopy(g_fc_stash, arg, sizeof(g_fc_stash)))
+			InterlockedExchange(&g_fc_stash_set, 1);
+	}
 
-		unsigned char buf[0x140];
-		if (!FcSafeCopy(buf, arg, sizeof(buf)))
-			return;   // unreadable arg just means "not this slot right now"
+	// Verification half, on the editor's own frame path: the stashed
+	// CViewSetup must show the engine's OWN view (GetViewAngles + the player
+	// eye) at EXACTLY the measured offsets, several frames in a row, before
+	// the hook is allowed to write. A mismatching game update ends in a loud
+	// "unavailable", never a blind write.
+	void FreecamVerifyPump() {
+		if (g_fc_pinned || g_fc_dead)
+			return;
+		if (!InterlockedExchange(&g_fc_stash_set, 0))
+			return;
+		if (!engine || !engine->IsInGame())
+			return;
 		StartState st;
 		if (!Prediction::CaptureStartState(st))
-			return;   // needs a live player for the eye anchor - out-of-game
-			          // samples must not burn the give-up budget
-		g_fc_samples++;
+			return;
+		g_fc_checks++;
 		QAngle va(0.f, 0.f, 0.f);
-		if (engine)
-			engine->GetViewAngles(va);
-		const float* f = reinterpret_cast<const float*>(buf);
-		const int nf = static_cast<int>(sizeof(buf) / 4) - 3;
-		int aoff = -1, ooff = -1;
-		for (int i = 0; i <= nf; ++i) {
-			if (aoff < 0
-				&& fabsf(f[i] - va.X) < 0.01f
-				&& fabsf(NormYaw(f[i + 1] - va.Y)) < 0.01f
-				&& fabsf(f[i + 2]) < 0.01f)   // roll = 0
-				aoff = i * 4;
-			if (ooff < 0) {
-				const float dx = f[i] - st.origin.X;
-				const float dy = f[i + 1] - st.origin.Y;
-				const float dz = f[i + 2] - st.origin.Z;
-				if (fabsf(dx) < 4.f && fabsf(dy) < 4.f && dz > 20.f && dz < 96.f)
-					ooff = i * 4;   // eye = origin + view offset
-			}
+		engine->GetViewAngles(va);
+		const float* fo = reinterpret_cast<const float*>(g_fc_stash + kFcOrgOff);
+		const float* fa = reinterpret_cast<const float*>(g_fc_stash + kFcAngOff);
+		const float dz = fo[2] - st.origin.Z;
+		// CROSS-FRAME tolerances: the stash is up to one frame older than the
+		// engine reads here, so the view can have moved a few degrees and the
+		// player a few units in between. This is CONFIRMATION of a known
+		// layout at fixed offsets (5 frames in a row), not discovery - the
+		// slack costs nothing. (0.01-degree tolerance starved verification
+		// whenever the mouse was moving: the "freecam does nothing" report.)
+		const bool ok =
+			fabsf(fo[0] - st.origin.X) < 8.f
+			&& fabsf(fo[1] - st.origin.Y) < 8.f
+			&& dz > 16.f && dz < 100.f
+			&& fabsf(NormYaw(fa[0] - va.X)) < 3.f
+			&& fabsf(NormYaw(fa[1] - va.Y)) < 3.f
+			&& fabsf(fa[2]) < 0.5f;   // roll ~ 0
+		g_fc_streak = ok ? g_fc_streak + 1 : 0;
+		if (g_fc_streak >= 5) {
+			g_fc_pinned = true;
+			char line[192];
+			Sfmt(line, "freecam: layout VERIFIED (slot %d, origin+0x%X angles+0x%X, %d checks)",
+				kFcSlot, kFcOrgOff, kFcAngOff, g_fc_checks);
+			FcLog(line);
+			return;
 		}
-		if (aoff >= 0 && ooff >= 0 && aoff != ooff) {
-			if (aoff == g_fc_s_ang[slot] && ooff == g_fc_s_org[slot])
-				g_fc_s_streak[slot]++;
-			else {
-				g_fc_s_ang[slot] = aoff;
-				g_fc_s_org[slot] = ooff;
-				g_fc_s_streak[slot] = 1;
-			}
-			if (g_fc_s_streak[slot] >= 5) {
-				// Offsets first, THEN the pin flag: the apply path reads them
-				// only after seeing pinned == true.
-				g_fc_slot = slot;
-				g_fc_org_off = g_fc_s_org[slot];
-				g_fc_ang_off = g_fc_s_ang[slot];
-				g_fc_pinned = true;
-				char line[192];
-				Sfmt(line, "freecam: OverrideView pinned - SLOT %d, origin+0x%X angles+0x%X "
-					"(%d in-game samples across candidates)",
-					slot, g_fc_org_off, g_fc_ang_off, g_fc_samples);
-				FcLog(line);
-			}
+		// If it can't verify, say WHY (one-shot): the measured deltas name the
+		// mismatching term instead of a silent "verifying..." forever.
+		if (g_fc_checks == 120 || g_fc_checks == 500) {
+			char line[256];
+			Sfmt(line, "freecam: verify still failing after %d checks - stash org (%.1f %.1f %.1f) "
+				"vs eye (%.1f %.1f %.1f+z), stash ang (%.1f %.1f %.1f) vs view (%.1f %.1f)",
+				g_fc_checks, fo[0], fo[1], fo[2],
+				st.origin.X, st.origin.Y, st.origin.Z,
+				fa[0], fa[1], fa[2], va.X, va.Y);
+			FcLog(line);
 		}
-		if (!g_fc_pinned && g_fc_samples > 5000) {
+		if (g_fc_checks > 600) {
 			g_fc_dead = true;
-			FcLog("freecam: no candidate slot 12..20 ever matched the engine view "
-				"after 5000 in-game samples - freecam disabled");
+			FcLog("freecam: measured layout no longer matches this client.dll "
+				"(600 in-game checks) - freecam disabled, re-measure needed");
 		}
 	}
 
@@ -6357,6 +6391,20 @@ namespace {
 						"the segment start. The recipe self-solves the jump point "
 						"every sim so the run LANDS at the ray tip - telemetry "
 						"below shows the achieved landing and error.");
+					// Anchor the ray in WORLD space so editing neighbor segments
+					// can never rotate a tuned prestrafe (the ray direction is
+					// otherwise relative to whatever yaw the previous segment
+					// ends at).
+					ch |= ImGui::Checkbox("  anchor ray to absolute yaw", &g.yaw_abs);
+					Theme::Help("ON: the ray base is this fixed world yaw instead "
+						"of the previous segment's exit aim - neighboring edits "
+						"can't swing a tuned prestrafe.");
+					if (g.yaw_abs) {
+						ImGui::SameLine();
+						ImGui::PushItemWidth(kInputW);
+						ch |= ImGui::InputFloat("##psyawabs", &g.yaw_start, 0.1f, 5.f, 1);
+						ImGui::PopItemWidth();
+					}
 					ch |= FloatRow("  direction", &g.ps_air_bias, -180.f, 180.f, "%+.1f deg", 0.1f, 1.f, 1);
 					Theme::Help("0 = straight along the segment's aim; + points "
 						"right, - left. The ground carve and the flight both follow "
@@ -6988,14 +7036,14 @@ namespace {
 				"flight. Look stays raw so the crosshair and picks never lag. "
 				"Off = the camera renders the integrator directly.");
 			if (g_fc_pinned)
-				ImGui::TextDisabled("view slot: pinned (slot %d, origin+0x%X, angles+0x%X)",
-					g_fc_slot, g_fc_org_off, g_fc_ang_off);
+				ImGui::TextDisabled("view write: verified (slot %d, origin+0x%X, angles+0x%X)",
+					kFcSlot, kFcOrgOff, kFcAngOff);
 			else if (g_fc_dead)
 				ImGui::TextColored(Theme::Error,
-					"view slot: none validated - freecam unavailable (freecam_probe.log)");
+					"view write: measured layout no longer matches - freecam unavailable");
 			else
-				ImGui::TextDisabled("view slot: identifying from engine data (be in game; %d samples)...",
-					g_fc_samples);
+				ImGui::TextDisabled("view write: verifying the measured layout (be in game; %d checks)...",
+					g_fc_checks);
 		}
 
 		Theme::Heading("Defaults");
@@ -7059,12 +7107,20 @@ void TasEditor::Update() {
 		LoadUiSettings();
 	}
 
+	// Stage breadcrumbs through the WHOLE of Update: the 2026-08-05 freeze's
+	// last record was "endscene: editor update" with nothing finer - the hang
+	// is somewhere in here, and the next one must name its exact stage.
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: search");
 	// Pump the solver search (time-sliced; no-op when idle).
 	StepSearch();
 
-	// Freecam flight (no-op unless active).
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: freecam");
+	// Freecam flight + layout verification (no-ops once irrelevant; the
+	// verification runs HERE, never inside the view hook).
 	FreecamMove();
+	FreecamVerifyPump();
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: teleport");
 	// Teleport landing check: report the measured delta from the anchor, and
 	// persist it (a later crash or status overwrite must not eat the number).
 	if (g_tp_check && GetTickCount64() - g_tp_ms >= 400) {
@@ -7092,6 +7148,7 @@ void TasEditor::Update() {
 		}
 	}
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: correct");
 	// Slider settled? Start the deferred auto-correction (one, not per notch).
 	if (g_pick_correct_pending && GetTickCount64() - g_pick_settle_ms >= 350
 		&& !g_verify.active && !g_batch.active && !g_search.active) {
@@ -7114,6 +7171,7 @@ void TasEditor::Update() {
 		g_stage_name = "";
 	}
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: simland");
 	// Land a finished sim, measure the REAL pass, feed the correction loop.
 	// The whole chain runs under the same fault guard as the search jobs: a
 	// crash anywhere in it becomes a NAMED stage in solver_fault.log and the
@@ -7138,6 +7196,7 @@ void TasEditor::Update() {
 		}
 	}
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: simreq");
 	// Live preview: resim as fast as the sim itself allows (measured, not
 	// guessed); only long runs get a short debounce to protect the framerate.
 	const float sim_ms = Prediction::LastDiag().sim_ms;
@@ -7162,6 +7221,7 @@ void TasEditor::Update() {
 			}
 		}
 	}
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: end");
 }
 
 bool TasEditor::IsOpen() { return g_open; }
@@ -7256,8 +7316,8 @@ void TasEditor::ToggleFreecam() {
 	// pinned - a freecam that can't show its camera must not eat controls.
 	if (!g_freecam && !g_fc_pinned) {
 		g_status = g_fc_dead
-			? "Freecam unavailable: no view slot validated on this build (freecam_probe.log)."
-			: "Freecam: still identifying the engine's view slot - be in game a few seconds, then retry.";
+			? "Freecam unavailable: the measured view layout no longer matches this build."
+			: "Freecam: verifying the view layout - be in game a second or two, then retry.";
 		return;
 	}
 	g_freecam = !g_freecam;

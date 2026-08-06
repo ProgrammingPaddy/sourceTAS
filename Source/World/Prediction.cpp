@@ -1,5 +1,6 @@
 #include "Prediction.h"
 #include "NetVars.h"
+#include "../Menu/Breadcrumb.h"
 
 #include <cstdint>
 #include <cstring>
@@ -310,22 +311,35 @@ namespace {
 	// frame in the same valid context: a pending editor sim, else the live
 	// look-ahead.
 	void OnFinishMove(void* thisptr, void* player, void* ucmd, void* movedata) {
+		// Freeze-hunt breadcrumbs (2026-08-05): the frozen sessions' journals
+		// show every OTHER instrumented path completing cleanly - this hook
+		// runs on the main thread OUTSIDE those paths and fires the first
+		// weapon-prediction work right after a click. enter-without-exit
+		// after a freeze = the main thread died in here.
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: enter");
 		g_orig_finishmove(thisptr, player, ucmd, movedata);   // real movement, unchanged
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: orig done");
 
-		if (g_in_hook_work || !g_pred || !g_gm || !g_helper || !g_gpg_holder)
+		if (g_in_hook_work || !g_pred || !g_gm || !g_helper || !g_gpg_holder) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit early");
 			return;
+		}
 		// Only the newest command (skip re-predicted history) -> once per frame.
-		if (!GetVirtualFunction<bool(*)(void*)>(thisptr, kIsFirstTimePredictedIdx)(thisptr))
+		if (!GetVirtualFunction<bool(*)(void*)>(thisptr, kIsFirstTimePredictedIdx)(thisptr)) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit repredict");
 			return;
+		}
 
 		if (movedata) {
 			g_real_move_origin = *reinterpret_cast<Vector*>(reinterpret_cast<char*>(movedata) + kMoveDataOriginOff);
 			g_real_move_valid = true;
 		}
 
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: resolve");
 		ResolveOffsets();
 
 		if (s_sim_pending) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: editor sim");
 			LARGE_INTEGER freq, t0, t1;
 			QueryPerformanceFrequency(&freq);
 			QueryPerformanceCounter(&t0);
@@ -356,12 +370,16 @@ namespace {
 			g_diag.fault_count = g_fault_count;
 			g_diag.last_fault_rva = g_last_fault_rva;
 			g_diag.last_fault_access = g_last_fault_access;
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit sim");
 			return;
 		}
 
-		if (!WorldDraw::draw_prediction)
+		if (!WorldDraw::draw_prediction) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit");
 			return;
+		}
 
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: lookahead");
 		int ticks = WorldDraw::pred_ticks;
 		if (ticks < 1)   ticks = 1;
 		if (ticks > 256) ticks = 256;
@@ -385,6 +403,7 @@ namespace {
 		d.last_fault_rva = g_last_fault_rva;
 		d.last_fault_access = g_last_fault_access;
 		g_diag = d;
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit lookahead");
 	}
 }
 
