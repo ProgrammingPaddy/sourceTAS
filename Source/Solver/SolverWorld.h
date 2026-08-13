@@ -61,9 +61,16 @@ namespace Solver {
 
 	class World {
 	public:
-		// Loads collision + spawn from the .bsp. False on any structural error
+		// Loads collision + spawn from the .bsp. False on any structural error.
+		// edge_bevels: load the compiler's NON-AXIAL bevel sides too (corner
+		// separating planes for AABB hulls). Measured 2026-08-13: without
+		// them the core clips a ramp face ONE TICK LONGER than the engine
+		// when the box slides off the brush end mid-surf (604 tape, tick 284
+		// vs real playback - the engine flew free because the edge bevel
+		// separated the box at the corner). false = the pre-fix clip set.
 		// (err gets the reason). Never trusts sizeof() for on-disk strides.
-		bool Load(const std::string& bsp_path, const Hulls& hulls, std::string* err);
+		bool Load(const std::string& bsp_path, const Hulls& hulls, std::string* err,
+		          bool edge_bevels = true);
 
 		// Swept trace of the hull ORIGIN from a to b (planes are pre-expanded;
 		// `ducked` picks the distance set). Returns the earliest entry fraction
@@ -95,6 +102,12 @@ namespace Solver {
 		std::string entities_text;   // raw entities lump (zone/trigger work later)
 
 		std::vector<WorldBrush> brushes;   // collidable set only
+
+		// Corner-release semantics (engine-measured 2026-08-13, 604-tape
+		// capture): the hit test uses the TRUE un-padded crossing interval;
+		// DIST_EPSILON pads the reported position only. false = the legacy
+		// epsilon-padded hit test (pre-fix control arm).
+		bool true_interval_corner = true;
 
 	private:
 		Hulls hulls_;

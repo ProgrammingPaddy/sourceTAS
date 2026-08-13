@@ -39,7 +39,8 @@ namespace Solver {
 		}
 	}
 
-	bool World::Load(const std::string& bsp_path, const Hulls& hulls, std::string* err) {
+	bool World::Load(const std::string& bsp_path, const Hulls& hulls, std::string* err,
+	                 bool edge_bevels) {
 		hulls_ = hulls;
 		brushes.clear();
 
@@ -262,11 +263,31 @@ namespace Solver {
 				if (bevel == 0 || planenum >= nplanes)
 					continue;
 				const Vec3 n = plane_n[planenum];
-				if (!(fabsf(n.X) > 0.999f || fabsf(n.Y) > 0.999f || fabsf(n.Z) > 0.999f))
+				const bool axial = (fabsf(n.X) > 0.999f || fabsf(n.Y) > 0.999f
+					|| fabsf(n.Z) > 0.999f);
+				if (axial) {
+					wb.n.push_back(n);
+					wb.d.push_back(plane_d[planenum]);
+					wb.pid.push_back(-2);
+					continue;
+				}
+				// NON-AXIAL edge bevels: the corner separating planes VBSP
+				// adds so AABB hulls release at brush edges instead of
+				// snagging. Proven necessary by the 604-tape capture (core
+				// clipped a ramp face one tick past the engine when sliding
+				// off the brush end). Dedup against the real sides - a bevel
+				// side can share a real side's plane and add nothing.
+				if (!edge_bevels)
+					continue;
+				bool dup = false;
+				for (int rp : wb.pid)
+					if (rp == static_cast<int>(planenum))
+						{ dup = true; break; }
+				if (dup)
 					continue;
 				wb.n.push_back(n);
 				wb.d.push_back(plane_d[planenum]);
-				wb.pid.push_back(-2);
+				wb.pid.push_back(-3);
 			}
 			if (wb.n.empty())
 				continue;
@@ -382,6 +403,16 @@ namespace Solver {
 					continue;
 				const std::vector<float>& pd = ducked ? bc.d_duck : bc.d_stand;
 				float tmin = -1.f, tmax = 1.f;   // engine: enterfrac -1, leavefrac 1
+				// TRUE (un-padded) crossing interval. Measured 2026-08-13 via
+				// the 604-tape capture: sliding off a brush END mid-surf, the
+				// real engine reported NO HIT even though the epsilon-padded
+				// interval was non-empty (face enterfrac ~0 < cap leavefrac
+				// 0.0032). The un-padded times explain it exactly: true face
+				// entry 0.0684 comes AFTER true cap exit 0.0063 - the box
+				// leaves the brush extent before it would actually re-touch
+				// the face. DIST_EPSILON pads the reported POSITION only,
+				// never the hit topology.
+				float tmin_t = -1.f, tmax_t = 1.f;
 				int enter = -1;
 				bool outside = false, miss = false;
 				const int np = static_cast<int>(bc.n.size());
@@ -395,14 +426,20 @@ namespace Solver {
 						// least-negative enterfrac (the engine's tie-break).
 						const float tt = (d0 - kDistEpsilon) / (d0 - d1);
 						if (tt > tmin) { tmin = tt; enter = pi; }
+						const float tn = d0 / (d0 - d1);
+						if (tn > tmin_t) tmin_t = tn;
 					} else if (d1 > 0.f) {
 						float tt = (d0 + kDistEpsilon) / (d0 - d1);
 						if (tt > 1.f) tt = 1.f;
 						if (tt < tmax) tmax = tt;
+						const float tn = d0 / (d0 - d1);
+						if (tn < tmax_t) tmax_t = tn;
 					}
 				}
 				if (miss || !outside || enter < 0 || tmin >= tmax)
 					continue;
+				if (true_interval_corner && tmin_t >= tmax_t)
+					continue;   // corner release: true interval is empty
 				if (tmin < best) {
 					best = (tmin > 0.f) ? tmin : 0.f;
 					best_brush = bi;

@@ -777,9 +777,73 @@ questions for the user: is a hard board ever deliberately correct (speed-kill be
 transfer), and is the 604's end-stretch bhop chain a real technique here or an
 artifact the tighten rounds should erase?
 
+### CORNER-RELEASE FIX — the 604 tape's in-game failure (2026-08-13, user-reported)
+
+**User report:** the 604 tape does not finish in-game (exported capture). Diff vs the
+real playback: perfect to tick 283, then at 284 the core gains dv (0, +23.74, +18.99)
+— exactly 30.4 u/s along brush 9's face normal (0, 0.780869, 0.624695): the core
+performed ONE MORE face clip than the engine at the moment the box slid off the
+brush's END (origin x 335.94, expanded end-cap at exactly 336).
+
+**Dead hypothesis (tested, refuted):** non-axial edge bevels. Loaded them from the
+lump behind `--no-edge-bevels` — THE LUMP HAS NONE for these brushes (ramps carry 6
+real sides + 1 axial bevel only; brush 9 raw sides dumped side-by-side). Diff
+identical both arms. (The loader change stays — it is lump-correct and loads nothing
+here; the prior-attempt "bevels broke proven lines" warning was about synthesized
+bevels, still dead.)
+
+**Measured mechanism (scratchpad/corner.py, exact BSP planes + capture rows):** both
+models rest at face d0 = +0.0312 (= DIST_EPSILON) identically, tick after tick. At
+the 284 move: face enterfrac (eps-padded) = −0.000128, end-cap leavefrac = +0.003226
+→ the padded interval says HIT (and the old core hit). But the TRUE un-padded
+crossings say: face entry 0.0684 AFTER cap exit 0.0063 → the box exits the brush's
+extent before it would actually re-touch the face → the REAL ENGINE reports no hit
+and flies free. **DIST_EPSILON pads the reported position, never the hit topology.**
+The Q2-family reference code conflates them; this engine does not. Neither our
+Solver port nor the DLL's validated TraceHullWorld carried the distinction — no
+previously captured route ever slid off a ramp's end mid-surf.
+
+**Fix:** TraceHull now tracks the true interval (tmin_t/tmax_t, no epsilon) alongside
+the padded one; a brush hit additionally requires the true interval be non-empty.
+`--legacy-corner` keeps the old rule as a control arm. Position math, enterfrac
+tie-break (unclamped, apex-validated) all unchanged.
+
+**Validation:**
+- 604 tape vs its real capture: first >0.1u divergence 284 → **544**; max 3.542u at
+  602; ground/duck flag mismatches: NEVER. The corrected core reproduces the real
+  (failing) playback — the tape was invalid plan output from the old physics, same
+  failure class as every prior model bug.
+- Regression battery, all prior captures: seeded 430 = 0.000u (both captures),
+  unseeded 1125 = 0.137u @1123 (identical to proven), solved2 1208 = 0.024u max.
+  Replay invariants: human 431, seeded-opt 429, unseeded-opt 1206 — unchanged.
+- Bench: 15.26 → 14.2M ticks/s single-thread (~7% for two extra divides per
+  crossing plane).
+
+**Open sub-item:** remaining 544+ tail (0.1→3.5u over the last 60 ticks, during the
+ducked ramp-11 spine ride, no flag flips; dv direction (0.59, 0.33, 0.73) matches no
+single face — partial-fraction resolution differences). Needs its own micro-study;
+40× smaller than the fixed bug but 3.5u can still flip a knife-edge ending.
+
+**User surf calibration recorded this round:** (1) energy: at the current
+poor-quality horizon dissipation won't correlate with best tick among solver runs,
+but vs human/seeded runs lower needless loss still tracks quality; expect the
+correlation to STRENGTHEN as runs approach the efficient horizon. (2) **Tangent
+boarding**: landing basically tangent to the ramp plane is faster ~95%+ of the time
+and is a PRIMARY efficiency driver (the tangent target shifts with approach angle to
+minimize loss) — strong prior for contact-anchored operators; validate weights in
+the segment lab regardless. (3) **Spine bhops are generally bad — discourage** (the
+604's ending hopped brush 11's spine at z 257.5). Mechanism: bias/operators, not
+bans; check whether corrected physics + eloss bias already avoids them before adding
+machinery. (4) The human's pre-landing crouch compensated for an imperfect line —
+but note the real micro-tech: a faster, flatter ballistic ending can use the
+duck's leg-lift (+8.5u) to land EARLIER. The optimizer dropping the crouch on the
+seeded run was consistent with (4).
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
   halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
+- 544+ capture tail on the 604 route (ducked spine-ride resolution, ≤3.5u) — the
+  next capture-precision target.
 - Phase 2 v3 operators (themes-motivated): contact-anchored mutation (target board-
   entry knots), archive-splice, tighten-loop automation ({explore capped at best−1 →
   optimize} rounds — machinery proven, single capped round on rng 1337 found nothing).

@@ -105,6 +105,8 @@ namespace {
 		int threads = 0;            // explorer/optimizer workers; 0 = auto
 		bool goal_touch = false;
 		bool eloss_bias = true;
+		bool edge_bevels = true;    // false = pre-fix clip set (control arm)
+		bool corner_true = true;    // false = legacy epsilon-padded hit test
 	};
 
 	bool ParseCommon(int argc, char** argv, int first, ReplayOpts& o) {
@@ -180,6 +182,8 @@ namespace {
 				} else ok = false;
 			}
 			else if (a == "--no-eloss-bias") o.eloss_bias = false;
+			else if (a == "--no-edge-bevels") o.edge_bevels = false;
+			else if (a == "--legacy-corner") o.corner_true = false;
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
 		}
@@ -198,7 +202,8 @@ namespace {
 	              const ReplayOpts& o) {
 		World w;
 		std::string err;
-		if (!w.Load(map_path, o.hulls, &err)) {
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
 			printf("LOAD FAILED (bsp): %s\n", err.c_str());
 			return 1;
 		}
@@ -374,7 +379,8 @@ namespace {
 	            const std::string& csv_path, const ReplayOpts& o) {
 		World w;
 		std::string err;
-		if (!w.Load(map_path, o.hulls, &err)) {
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
 			printf("LOAD FAILED (bsp): %s\n", err.c_str());
 			return 1;
 		}
@@ -505,7 +511,8 @@ namespace {
 	int CmdSolve(const std::string& map_path, const ReplayOpts& o) {
 		World w;
 		std::string err;
-		if (!w.Load(map_path, o.hulls, &err)) {
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
 			printf("LOAD FAILED (bsp): %s\n", err.c_str());
 			return 1;
 		}
