@@ -74,6 +74,14 @@ namespace Solver {
 		float yaw = root_yaw_;
 		int tick = 0;
 		int zone_jumps = 0;
+		// Zone clock: -1 while inside the startzone; scored ticks = tick -
+		// exit. Anchors outside any zone start the clock immediately.
+		int exit_tick = InsideStartZone(s.pos) ? -1 : 0;
+		auto scored = [&]() {
+			if (!cfg_.zone_clock)
+				return tick;
+			return exit_tick >= 0 ? tick - exit_tick : 0;
+		};
 		float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
 		if (loss_top)
 			loss_top->clear();
@@ -126,11 +134,14 @@ namespace Solver {
 						NoteLoss(*loss_top, e_prev - e_now, -1);
 					e_prev = e_now;
 				}
+				if (exit_tick < 0 && !InsideStartZone(s.pos))
+					exit_tick = tick;
 				yaw = f.yaw;
 				const int c = check(ev);
-				if (c != 0 || tick >= abort_at) {
+				if (c != 0 || scored() >= abort_at) {
 					res.finished = (c == 1);
 					res.tick = tick;
+					res.rel = scored();
 					return res;
 				}
 			}
@@ -156,24 +167,30 @@ namespace Solver {
 							static_cast<int>(ki));
 					e_prev = e_now;
 				}
+				if (exit_tick < 0 && !InsideStartZone(s.pos))
+					exit_tick = tick;
 				const int c = check(ev);
 				if (c == 1) {
 					res.finished = true;
 					res.tick = tick;
+					res.rel = scored();
 					return res;
 				}
-				if (c == -1 || tick >= abort_at) {
+				if (c == -1 || scored() >= abort_at) {
 					res.tick = tick;
+					res.rel = scored();
 					return res;
 				}
 			}
 		}
 		res.tick = tick;
+		res.rel = scored();
 		return res;
 	}
 
 	bool Optimizer::BuildFrames(const Explorer::FlatGenome& g,
-	                            std::vector<TapeFrame>& out, int* finish_tick) {
+	                            std::vector<TapeFrame>& out, int* finish_tick,
+	                            int* finish_rel) {
 		long long tk = 0;
 		const Eval e = Run(g, cfg_.max_path_ticks, &out, &tk);
 		if (!e.finished)
@@ -181,6 +198,8 @@ namespace Solver {
 		out.resize(e.tick);   // truncate AT the finish
 		if (finish_tick)
 			*finish_tick = e.tick;
+		if (finish_rel)
+			*finish_rel = e.rel;
 		return true;
 	}
 
@@ -227,8 +246,10 @@ namespace Solver {
 			return res;
 		}
 		res.ok = true;
-		res.initial_tick = e0.tick;
-		int best_tick = e0.tick;
+		// All scores are SCORED ticks (since zone exit under the zone clock;
+		// Run reports rel == tick when the clock is off).
+		res.initial_tick = e0.rel;
+		int best_tick = e0.rel;
 		RefreshAim(g);
 
 		// Half of the knot-picking mutations aim at the measured loss knots
@@ -355,9 +376,9 @@ namespace Solver {
 				continue;
 			const Eval e = Run(cand, best_tick, nullptr, &res.ticks_simulated);
 			res.evals++;
-			if (e.finished && e.tick < best_tick) {
+			if (e.finished && e.rel < best_tick) {
 				g = cand;
-				best_tick = e.tick;
+				best_tick = e.rel;
 				res.improvements++;
 				RefreshAim(g);   // knot indices shift after every accept
 			}

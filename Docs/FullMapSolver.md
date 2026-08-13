@@ -942,15 +942,63 @@ pattern is back in the record holder and eloss pricing did not kill it; the zone
 jump stays unused. Spine-discouragement mechanism question is now LIVE (bias vs
 operator), and endgame structure is the next target.
 
+### ZONE CLOCK + TAIL DIAGNOSIS (2026-08-13, user-directed)
+
+**Zone clock (user directive): the timer starts at STARTZONE EXIT.** Fitness,
+cell-replacement hysteresis, abort-at-incumbent, tighten caps, and finisher ranking
+all run on ticks-since-exit ("scored"); absolute ticks still bound the simulation
+(max_path_ticks backstop; `max_rel_ticks` carries the scored caps). Prestrafe is
+FREE — this also structurally removes the tick-greedy cell pressure that suppressed
+investment starts (a long prestrafe no longer loses its cells to a quick walk-off).
+`--clock anchor` restores the old absolute clock. Entry carries exit_tick; replay
+prints the zone-clock score for any tape. Caveat logged: the replay's exit detector
+is XY-only while the solver's InsideStartZone is XY+z (identical for normal exits
+over the lip; differs only for under-platform paths). solved6's in-game FAILURE
+(user: falls just short of red) is consistent with the 544-tail residual (below) —
+its landing margin was ~3 u.
+
+**Zone-clock baselines (replay, scored ticks):** human 319 (exit 112, finish 431);
+seeded-opt 317; solved5 877 (exit 87); solved6 542 (in-game INVALID). The target
+number is now 319.
+
+**Zone-clock solve (rng 1337, 150 s + 45 s + tighten 1, FULLY UNSEEDED): 617
+scored ticks** (708 abs; primary 1242 → tighten round found a 620-family deviation
+→ optimized 617). Shipped `surf_basictest_solved7.tas`. Structure: 90-tick
+prestrafe to 333 u/s (the free clock stretched the opening past the old 87t/316),
+double-touch pump off ramp 1 exiting 864, clean ramps 2-3 (peak 872), then STILL
+~350 ticks in the ramp-4 pocket (near-stall at 70 u/s) and a spine-top jump @453
+to red. Landing margin 11.7 u past the edge (vs solved6's fatal 3.4 u). Scored
+ladder now: human 319 / solved7 617 / solved5 877. The pocket + ending remain the
+whole gap — consistent with the user's "not enough energy at the last ramp"
+diagnosis; the endgame needs the compromise-equation work once the settle residual
+is fixed.
+
+**544+ tail DIAGNOSED (existing 604 capture vs current core):** the whole ≤3.5u
+tail is ONE 5-tick event at ticks 544-548 — during a progressive settle onto ramp
+4's face (ducked, dvz sequence +77/+53/+40/+32/+27/+24 then DIVERGENT: eng +15.5 vs
+core +20.7, converging by 549). Before: bit-perfect. After: BOTH models track the
+identical ride rate (−7.32/tick exactly) and the offset just propagates
+(+0.04-0.06 u/tick, parallel dynamics). Same knife-edge family as the corner bug,
+40× smaller: sub-epsilon clip-fraction resolution while pressing onto a plane.
+NEXT DATA NEEDED: a fresh capture of a failing endgame tape (solved6 playback
+export) for a second instance to fit the rule against — one event is not enough to
+fix without guessing.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
   halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
-- 544+ capture tail on the 604 route (ducked spine-ride resolution, ≤3.5u) — the
-  next capture-precision target.
+- 544-548 settle event (ducked plane-settle clip resolution, ~5 u/s once) — BLOCKING
+  for knife-edge endgames; needs the solved6 capture as a second data point.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump
   discouragement mechanism (bias vs operator — user wants them discouraged).
+- User's compromise-equation frame for the endgame (board next ramp with max
+  energy / leave previous cleanly / preserve reach to the one after): the design
+  brief for chained-segment value assessment — build AFTER the settle fix, tested
+  in the segment lab.
+- Robustness idea (from the 3u-margin miss): prefer winners that survive small
+  state perturbations (verify-with-jitter before shipping) — candidate v4, unbuilt.
 - Phase 2 v3 operators (themes-motivated): contact-anchored mutation (target board-
   entry knots), archive-splice, tighten-loop automation ({explore capped at best−1 →
   optimize} rounds — machinery proven, single capped round on rng 1337 found nothing).

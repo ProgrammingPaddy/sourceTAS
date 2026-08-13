@@ -46,7 +46,8 @@ namespace {
 		printf("  solve   <map.bsp> --end-brush N [--seed-tas run.tas] [--budget-s S]\n");
 		printf("          [--flips F] [--rng N] [--out path.tas] [--cell U]\n");
 		printf("          [--rollouts N] [--max-ticks N] [--threads N] [--tighten N]\n");
-		printf("          [--aim] [physics options]\n");
+		printf("          [--aim] [--clock zone|anchor] [--seed-ticks N]\n");
+		printf("          [--out-eloss path] [physics options]\n");
 		printf("          archive route search; best route written as a playable .tas\n");
 		printf("  bench   <map.bsp> [ticks]\n");
 		printf("All commands auto-load Documents\\sourceTAS\\solver\\server_params.cfg\n");
@@ -111,6 +112,8 @@ namespace {
 		bool eloss_bias = true;
 		bool aim = false;           // contact-anchored targeting (measured
 		                            // neutral on segments; --aim to enable)
+		bool zone_clock = true;     // score = ticks from startzone exit
+		                            // (--clock anchor for the old absolute)
 		bool edge_bevels = true;    // false = pre-fix clip set (control arm)
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
 	};
@@ -195,6 +198,14 @@ namespace {
 			else if (a == "--aim") o.aim = true;
 			else if (a == "--no-aim") o.aim = false;
 			else if (a == "--tighten") ok = next_i(&o.tighten);
+			else if (a == "--clock") {
+				if (i + 1 < argc) {
+					const std::string cv = argv[++i];
+					if (cv == "zone") o.zone_clock = true;
+					else if (cv == "anchor") o.zone_clock = false;
+					else { printf("--clock must be zone|anchor\n"); return false; }
+				} else ok = false;
+			}
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
 		}
@@ -272,6 +283,7 @@ namespace {
 
 		std::vector<int> prev_touch;
 		bool zone_exited = false;
+		int zone_exit_tick = -1;
 		int zone_jumps = 0;
 		int first_finish = -1;
 		float max_speed = 0.f;
@@ -317,6 +329,7 @@ namespace {
 			if (!zone_exited && start_idx >= 0
 				&& !InsideXY(s.pos, w.brushes[start_idx])) {
 				zone_exited = true;
+				zone_exit_tick = t;
 				printf("tick %5d  STARTZONE EXIT  pos (%.1f,%.1f,%.1f) speed %.1f\n",
 					t, s.pos.X, s.pos.Y, s.pos.Z, sp2);
 			}
@@ -349,6 +362,11 @@ namespace {
 			first_finish >= 0 ? (std::string("tick ") + std::to_string(first_finish)
 				+ " (" + std::to_string(first_finish * o.params.dt) + " s)").c_str()
 			: (end_idx >= 0 ? "NOT reached" : "not checked"));
+		// Zone-clock view (user-directed): the score everyone is compared on.
+		if (first_finish >= 0 && zone_exit_tick >= 0)
+			printf("zone clock: exit tick %d -> %d SCORED ticks (%.3f s)\n",
+				zone_exit_tick, first_finish - zone_exit_tick,
+				(first_finish - zone_exit_tick) * o.params.dt);
 		fflush(stdout);
 		return 0;
 	}
@@ -526,9 +544,10 @@ namespace {
 	                     const ReplayOpts& o, Explorer& ex,
 	                     const ExploreResult& res, int nthreads,
 	                     const Tape* seed_tape, std::vector<TapeFrame>& frames,
-	                     int* ftick) {
+	                     int* ftick, int* frel) {
 		frames.clear();
 		*ftick = 0;
+		*frel = 0;
 		if (o.optimize_s > 0.5) {
 			OptimizeConfig ocfg;
 			ocfg.params = cfg.params;
@@ -540,6 +559,7 @@ namespace {
 				/ (cfg.params.dt * cfg.flips_per_sec)) + 1;
 			ocfg.max_path_ticks = cfg.max_path_ticks;
 			ocfg.goal_touch = o.goal_touch;
+			ocfg.zone_clock = o.zone_clock;
 			ocfg.aim_contacts = o.aim;
 			PlayerState root;
 			float root_yaw = 0.f;
@@ -607,10 +627,10 @@ namespace {
 			fflush(stdout);
 			if (best_tick > 0) {
 				Optimizer optb(w, ocfg, root, root_yaw, seed_tape);
-				if (optb.BuildFrames(best_g, frames, ftick)) {
-					printf("solve: OPTIMIZED best %d ticks (%.3f s) vs "
-						"explorer best %d\n", *ftick, *ftick * cfg.params.dt,
-						res.finishers[0].tick);
+				if (optb.BuildFrames(best_g, frames, ftick, frel)) {
+					printf("solve: OPTIMIZED best %d scored ticks (%.3f s; "
+						"%d abs) vs explorer best %d\n", *frel,
+						*frel * cfg.params.dt, *ftick, res.finishers[0].rel);
 					return true;
 				}
 			}
@@ -619,6 +639,7 @@ namespace {
 			printf("solve: BuildFrames FAILED for the best route - not writing\n");
 			return false;
 		}
+		*frel = res.finishers[0].rel;
 		return true;
 	}
 
@@ -705,9 +726,13 @@ namespace {
 		cfg.max_path_ticks = o.max_ticks;
 		cfg.threads = o.threads;
 		cfg.seed_limit_ticks = o.seed_ticks;
+		cfg.zone_clock = o.zone_clock;
 		cfg.goal_touch = o.goal_touch;
 		cfg.eloss_bias = o.eloss_bias;
 		const int nthreads = ResolveThreadCount(o.threads);
+		printf("solve: clock = %s\n", o.zone_clock
+			? "ZONE (score starts at startzone exit; prestrafe is free)"
+			: "anchor (absolute ticks)");
 		if (o.goal_touch)
 			printf("solve: GOAL = TOUCH brush %d (segment experiment mode)\n",
 				o.end_brush);
@@ -752,15 +777,22 @@ namespace {
 		const int show = res.finishers.size() < 10
 			? static_cast<int>(res.finishers.size()) : 10;
 		for (int i = 0; i < show; ++i)
-			printf("  #%d  %d ticks (%.3f s)  spd %.1f  eloss %.0fk  finish "
-				"(%.0f, %.0f, z %.2f)\n", i + 1, res.finishers[i].tick,
-				res.finishers[i].tick * cfg.params.dt, res.finishers[i].speed,
+			printf("  #%d  %d scored (%.3f s; %d abs)  spd %.1f  eloss %.0fk  "
+				"finish (%.0f, %.0f, z %.2f)\n", i + 1, res.finishers[i].rel,
+				res.finishers[i].rel * cfg.params.dt, res.finishers[i].tick,
+				res.finishers[i].speed,
 				res.finishers[i].eloss / 1000.f,
 				res.finishers[i].pos.X, res.finishers[i].pos.Y,
 				res.finishers[i].pos.Z);
-		if (ex.SeedFinishTick() >= 0)
-			printf("  incumbent (seed tape): %d ticks (%.3f s)\n",
-				ex.SeedFinishTick(), ex.SeedFinishTick() * cfg.params.dt);
+		if (ex.SeedFinishTick() >= 0) {
+			const int srel = ex.SeedExitTick() >= 0
+				? ex.SeedFinishTick() - ex.SeedExitTick()
+				: ex.SeedFinishTick();
+			printf("  incumbent (seed tape): %d scored (%.3f s; %d abs)\n",
+				o.zone_clock ? srel : ex.SeedFinishTick(),
+				(o.zone_clock ? srel : ex.SeedFinishTick()) * cfg.params.dt,
+				ex.SeedFinishTick());
+		}
 
 		// Cleanest routes - the finisher list re-ranked by cumulative
 		// dissipation (the segment lab's "get there while wasting the least
@@ -777,10 +809,10 @@ namespace {
 			printf("solve: cleanest routes (lowest dissipation):\n");
 			for (int i = 0; i < showe; ++i) {
 				const Finisher& f = res.finishers[order[i]];
-				printf("  e%d  %d ticks (%.3f s)  spd %.1f  eloss %.1fk  "
-					"finish (%.0f, %.0f, z %.2f)\n", i + 1, f.tick,
-					f.tick * cfg.params.dt, f.speed, f.eloss / 1000.f,
-					f.pos.X, f.pos.Y, f.pos.Z);
+				printf("  e%d  %d scored (%.3f s; %d abs)  spd %.1f  "
+					"eloss %.1fk  finish (%.0f, %.0f, z %.2f)\n", i + 1,
+					f.rel, f.rel * cfg.params.dt, f.tick, f.speed,
+					f.eloss / 1000.f, f.pos.X, f.pos.Y, f.pos.Z);
 			}
 			if (!o.out_eloss.empty() && !order.empty()) {
 				std::vector<TapeFrame> ef;
@@ -804,22 +836,26 @@ namespace {
 		// ---- Phase 2: optimize the best finishers (fitness = finish tick,
 		// strict improvements only, every eval through the proven core).
 		std::vector<TapeFrame> frames;
-		int ftick = 0;
+		int ftick = 0, frel = 0;
 		if (!BuildBestFrames(w, cfg, o, ex, res, nthreads,
-			have_seed ? &seed : nullptr, frames, &ftick))
+			have_seed ? &seed : nullptr, frames, &ftick, &frel))
 			return 3;
 
-		// ---- Tighten rounds: re-explore with the tick cap just below the
+		// ---- Tighten rounds: re-explore with the SCORED cap just below the
 		// incumbent, SEEDED from the incumbent's own tape (restart points all
 		// along the best route - the search only has to find where to deviate,
 		// not rediscover the whole line). Every finish in a capped round is a
-		// strict improvement by construction.
+		// strict improvement by construction. Under the zone clock the cap is
+		// on post-exit ticks, so rounds may spend MORE prestrafe freely.
 		for (int round = 1; round <= o.tighten; ++round) {
 			ExploreConfig tcfg = cfg;
-			tcfg.max_path_ticks = ftick - 1;
+			if (o.zone_clock)
+				tcfg.max_rel_ticks = frel - 1;
+			else
+				tcfg.max_path_ticks = ftick - 1;
 			tcfg.rng_seed = o.rng + 7777u * static_cast<unsigned>(round);
-			printf("--- tighten round %d/%d: cap %d ticks, rng %u ---\n",
-				round, o.tighten, tcfg.max_path_ticks, tcfg.rng_seed);
+			printf("--- tighten round %d/%d: cap %d scored ticks, rng %u ---\n",
+				round, o.tighten, frel - 1, tcfg.rng_seed);
 			fflush(stdout);
 			Explorer ex2(w, tcfg);
 			ex2.SetAnchor(anchor);
@@ -828,8 +864,8 @@ namespace {
 			inc.start.valid = true;
 			inc.frames = frames;
 			const int sn = ex2.SeedFromTape(inc);
-			printf("tighten: seeded %d restart points from the %d-tick "
-				"incumbent\n", sn, ftick);
+			printf("tighten: seeded %d restart points from the incumbent "
+				"(%d scored, %d abs)\n", sn, frel, ftick);
 			fflush(stdout);
 			ExploreResult r2 = ex2.Run();
 			printf("tighten: %lld rollouts, %d finishes%s\n", r2.rollouts,
@@ -840,14 +876,16 @@ namespace {
 			if (r2.finishers.empty())
 				continue;
 			std::vector<TapeFrame> f2;
-			int t2 = 0;
-			if (!BuildBestFrames(w, tcfg, o, ex2, r2, nthreads, &inc, f2, &t2))
+			int t2 = 0, r2rel = 0;
+			if (!BuildBestFrames(w, tcfg, o, ex2, r2, nthreads, &inc, f2,
+				&t2, &r2rel))
 				continue;
-			if (t2 < ftick) {
-				printf("tighten: IMPROVED %d -> %d ticks (%.3f s)\n",
-					ftick, t2, t2 * cfg.params.dt);
+			if (r2rel < frel) {
+				printf("tighten: IMPROVED %d -> %d scored ticks (%.3f s)\n",
+					frel, r2rel, r2rel * cfg.params.dt);
 				frames = f2;
 				ftick = t2;
+				frel = r2rel;
 			}
 			fflush(stdout);
 		}
@@ -884,8 +922,8 @@ namespace {
 			printf("solve: WriteTas failed: %s\n", err.c_str());
 			return 3;
 		}
-		printf("solve: best route (%d ticks) written -> %s\n", ftick,
-			out_path.c_str());
+		printf("solve: best route (%d scored ticks, %d abs) written -> %s\n",
+			frel, ftick, out_path.c_str());
 		printf("solve: play it in-game from the Record tab (it loads like any "
 			"recording; teleport-to-anchor + play).\n");
 		fflush(stdout);

@@ -41,6 +41,10 @@ namespace Solver {
 		int min_knot = 14;
 		int max_path_ticks = 4000;
 		bool goal_touch = false;
+		// Zone clock: fitness and abort-at-incumbent use ticks since the
+		// startzone exit (prestrafe is free). Must match the explorer's
+		// setting - the genomes' scores are compared across both.
+		bool zone_clock = true;
 		// Contact-anchored aiming measured NEUTRAL on the segment lab
 		// (2026-08-13: ties on touch-11, slightly worse on touch-9) - the
 		// acceptance bottleneck is not proposal targeting at ~1M evals per
@@ -71,14 +75,17 @@ namespace Solver {
 		OptimizeResult Improve(Explorer::FlatGenome& g);
 
 		// Roll a genome into engine-replayable frames, truncated AT the
-		// finish tick. False when the genome doesn't finish.
+		// finish tick. False when the genome doesn't finish. finish_rel
+		// (optional) receives the SCORED length (ticks since zone exit).
 		bool BuildFrames(const Explorer::FlatGenome& g,
-		                 std::vector<TapeFrame>& out, int* finish_tick);
+		                 std::vector<TapeFrame>& out, int* finish_tick,
+		                 int* finish_rel = nullptr);
 
 	private:
 		struct Eval {
 			bool finished = false;
-			int tick = 0;
+			int tick = 0;       // absolute ticks from the anchor
+			int rel = 0;        // scored ticks (since zone exit)
 		};
 		// loss_top (optional): the route's top-8 one-tick energy drops as
 		// (drop, active knot index); knot -1 = seed-prefix tick (not aimable).

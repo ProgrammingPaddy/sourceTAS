@@ -64,6 +64,16 @@ namespace Solver {
 		// the archive JUST a route's opening (e.g. the human prestrafe+jump)
 		// without the rest of the line.
 		int seed_limit_ticks = 0;
+		// ZONE CLOCK (user-directed 2026-08-13): the timer starts when the
+		// player leaves the startzone - prestrafe time is FREE, so selection
+		// optimizes exit energy/geometry instead of skimping the opening
+		// (tick-greedy cells were structurally suppressing investment
+		// starts). Fitness, cell hysteresis, caps, and finisher ranking all
+		// use ticks-since-exit; absolute tick keeps bounding the simulation.
+		bool zone_clock = true;
+		// Cap on the SCORED (post-exit) length; 0 = off. Tighten rounds cap
+		// this, not the absolute length, under the zone clock.
+		int max_rel_ticks = 0;
 		// GOAL: false = grounded ON the end platform (full-map contract);
 		// true = any contact with the end brush (segment experiments -
 		// "fastest to ramp N" as a theory test lab).
@@ -79,6 +89,8 @@ namespace Solver {
 
 	struct Finisher {
 		int tick = 0;               // ticks from anchor to the goal
+		int rel = 0;                // ticks from STARTZONE EXIT (the score
+		                            // under the zone clock; == tick without)
 		float speed = 0.f;          // 2D speed at the finish tick
 		float eloss = 0.f;          // cumulative energy dissipated en route
 		Vec3 pos;                   // finish position (z proves ON-TOP)
@@ -118,6 +130,8 @@ namespace Solver {
 		// Tick at which the seed tape itself finished (-1 = it didn't / no
 		// seed). The incumbent the explorer is trying to beat.
 		int SeedFinishTick() const { return seed_finish_tick_; }
+		// The seed tape's startzone-exit tick (-1 = never left / no seed).
+		int SeedExitTick() const { return seed_exit_tick_; }
 
 		// Flatten a finisher's chain into an optimizer genome: seed-prefix
 		// length + concatenated knots + the flip state at the branch point.
@@ -144,6 +158,7 @@ namespace Solver {
 			signed char last_side = 0;
 			short ticks_since_flip = 999;
 			short zone_jumps = 0;
+			short exit_tick = -1;       // startzone-exit tick (-1 = inside)
 			short cbrush = -1;          // cell contact brush (census/diagnostics)
 			signed char ckind = 0;      // 0 air, 1 ground, 2 touch
 			float eloss = 0.f;          // cumulative dissipation along the path
@@ -207,6 +222,7 @@ namespace Solver {
 		int min_knot_ = 14;
 		int start_idx_ = -1, end_idx_ = -1;
 		int seed_finish_tick_ = -1;
+		short seed_exit_tick_ = -1;
 		Vec3 end_center_;
 		const Tape* seed_tape_ = nullptr;
 		void* cellmap_ = nullptr;   // sharded hash maps behind a pimpl to
@@ -218,6 +234,13 @@ namespace Solver {
 			const int cap = kMaxEntries + kBufSlack;
 			return n < cap ? n : cap;
 		}
+		// Scored ticks under the active clock: since zone exit when the zone
+		// clock is on (0 while still inside), absolute otherwise.
+		int RelTicks(int tick, short exit_tick) const {
+			if (!cfg_.zone_clock)
+				return tick;
+			return exit_tick >= 0 ? tick - exit_tick : 0;
+		}
 		unsigned long long CellKey(const PlayerState& s, int contact_kind,
 		                           int contact_brush) const;
 		bool InsideZoneXY(const Vec3& p, int brush_idx) const;
@@ -228,8 +251,8 @@ namespace Solver {
 		               int parent, int seed_ticks,
 		               const std::vector<Knot>& knots, int cur_knot,
 		               int ticks_into_knot, signed char last_side,
-		               short since_flip, short zone_jumps, float eloss,
-		               const TickEvents& ev, bool finished_flag);
+		               short since_flip, short zone_jumps, short exit_tick,
+		               float eloss, const TickEvents& ev, bool finished_flag);
 		bool GoalReached(const PlayerState& s, const TickEvents& ev) const;
 		void WorkerLoop(int wid, std::chrono::steady_clock::time_point t0);
 	};

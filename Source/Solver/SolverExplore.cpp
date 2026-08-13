@@ -118,6 +118,9 @@ namespace Solver {
 		e.parent = -1;
 		e.seed_ticks = -1;
 		e.ticks_since_flip = 999;
+		// Zone clock: the root is inside the startzone (-1 = clock not yet
+		// running); an anchor outside any zone starts the clock immediately.
+		e.exit_tick = InsideStartZone(e.st.pos) ? -1 : 0;
 		entries_[0] = e;
 		ready_[0].store(1, std::memory_order_release);
 		nentries_.store(1, std::memory_order_relaxed);
@@ -248,8 +251,9 @@ namespace Solver {
 	                         int parent, int seed_ticks,
 	                         const std::vector<Knot>& knots, int cur_knot,
 	                         int ticks_into_knot, signed char last_side,
-	                         short since_flip, short zone_jumps, float eloss,
-	                         const TickEvents& ev, bool finished_flag) {
+	                         short since_flip, short zone_jumps, short exit_tick,
+	                         float eloss, const TickEvents& ev,
+	                         bool finished_flag) {
 		int kind = 0, brush = -1;
 		if (s.on_ground) {
 			kind = 1;
@@ -269,9 +273,15 @@ namespace Solver {
 			auto it = sh.map.find(key);
 			// Hysteresis: replace only a meaningfully earlier arrival (tick-
 			// level churn was flooding the archive in the first unseeded
-			// runs).
-			if (it != sh.map.end() && entries_[it->second].tick <= tick + 4)
-				return -1;
+			// runs). Under the zone clock "earlier" means fewer SCORED ticks
+			// - a long free prestrafe no longer loses its cells to a quick
+			// walk-off that arrives sooner on the wall clock.
+			if (it != sh.map.end()) {
+				const Entry& old = entries_[it->second];
+				if (RelTicks(old.tick, old.exit_tick)
+					<= RelTicks(tick, exit_tick) + 4)
+					return -1;
+			}
 			idx = AllocEntry(finished_flag);
 			if (idx < 0)
 				return -1;
@@ -284,6 +294,7 @@ namespace Solver {
 			e.last_side = last_side;
 			e.ticks_since_flip = since_flip;
 			e.zone_jumps = zone_jumps;
+			e.exit_tick = exit_tick;
 			e.eloss = eloss;
 			e.cbrush = static_cast<short>(brush);
 			e.ckind = static_cast<signed char>(kind);
@@ -361,6 +372,7 @@ namespace Solver {
 		signed char last_side = 0;
 		short since_flip = 999;
 		short zone_jumps = 0;
+		short exit_tick = entries_[0].exit_tick;
 		float eloss = 0.f;
 		float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
 		int seeded = 0;
@@ -391,11 +403,18 @@ namespace Solver {
 			if (since_flip < 999) since_flip++;
 			if (ev.jumped && InsideStartZone(s.pos))
 				zone_jumps++;
+			if (exit_tick < 0 && !InsideStartZone(s.pos))
+				exit_tick = static_cast<short>(t + 1);
+			if (cfg_.max_rel_ticks > 0 && exit_tick >= 0
+				&& (t + 1) - exit_tick >= cfg_.max_rel_ticks)
+				break;   // scored cap reached: further seeds are dead
 			RecordCell(s, f.yaw, t + 1, -1, t + 1, none, -1, 0,
-			           last_side, since_flip, zone_jumps, eloss, ev, false);
+			           last_side, since_flip, zone_jumps, exit_tick, eloss,
+			           ev, false);
 			seeded++;
 			if (GoalReached(s, ev)) {
 				seed_finish_tick_ = t + 1;
+				seed_exit_tick_ = exit_tick;
 				break;   // restart points past the finish are useless
 			}
 		}
@@ -511,6 +530,7 @@ namespace Solver {
 			signed char last_side = entries_[base].last_side;
 			short since_flip = entries_[base].ticks_since_flip;
 			short zone_jumps = entries_[base].zone_jumps;
+			short exit_tick = entries_[base].exit_tick;
 			float eloss = entries_[base].eloss;
 			float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
 			rollouts_.fetch_add(1, std::memory_order_relaxed);
@@ -545,8 +565,15 @@ namespace Solver {
 							break;
 						}
 					}
+					if (exit_tick < 0 && !InsideStartZone(s.pos))
+						exit_tick = static_cast<short>(tick);
 					if (tick >= cfg_.max_path_ticks) {
 						aborted = true;
+						break;
+					}
+					if (cfg_.max_rel_ticks > 0 && exit_tick >= 0
+						&& tick - exit_tick >= cfg_.max_rel_ticks) {
+						aborted = true;   // scored cap (tighten rounds)
 						break;
 					}
 					// Event-aligned recording (contact/ground/duck/jump ticks,
@@ -561,7 +588,7 @@ namespace Solver {
 					if (eventful || t == kn.dur - 1 || (tick & 3) == 0)
 						idx = RecordCell(s, yaw, tick, base, -1, knots,
 							k, t + 1, last_side, since_flip, zone_jumps,
-							eloss, ev, goal);
+							exit_tick, eloss, ev, goal);
 					if (goal) {
 						int fi = idx;
 						if (fi < 0) {
@@ -578,6 +605,7 @@ namespace Solver {
 								e.last_side = last_side;
 								e.ticks_since_flip = since_flip;
 								e.zone_jumps = zone_jumps;
+								e.exit_tick = exit_tick;
 								e.eloss = eloss;
 								e.finished = true;
 								e.nknots = static_cast<unsigned char>(k + 1);
@@ -590,6 +618,7 @@ namespace Solver {
 						if (fi >= 0) {
 							Finisher fin;
 							fin.tick = tick;
+							fin.rel = RelTicks(tick, exit_tick);
 							fin.speed = Len2D(s.vel);
 							fin.eloss = eloss;
 							fin.pos = s.pos;
@@ -601,9 +630,9 @@ namespace Solver {
 							fin_count_.fetch_add(1, std::memory_order_relaxed);
 							int cur = best_fin_tick_.load(
 								std::memory_order_relaxed);
-							while ((cur < 0 || tick < cur)
+							while ((cur < 0 || fin.rel < cur)
 								&& !best_fin_tick_.compare_exchange_weak(
-									cur, tick)) {}
+									cur, fin.rel)) {}
 						}
 						aborted = true;
 						break;
@@ -703,7 +732,9 @@ namespace Solver {
 		}
 		std::vector<Finisher> finishers = fins_;
 		std::sort(finishers.begin(), finishers.end(),
-			[](const Finisher& a, const Finisher& b) { return a.tick < b.tick; });
+			[](const Finisher& a, const Finisher& b) {
+				return a.rel != b.rel ? a.rel < b.rel : a.tick < b.tick;
+			});
 		res.finishers = std::move(finishers);
 		res.rollouts = rollouts_.load(std::memory_order_relaxed);
 		res.ticks_simulated = ticks_sim_.load(std::memory_order_relaxed);
