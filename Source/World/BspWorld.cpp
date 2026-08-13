@@ -31,6 +31,12 @@ namespace BspWorld {
 	bool  show_markers    = true;
 	int   highlight_target = -1;
 	int   highlight_tag    = -1;
+	bool  apply_triggers  = true;
+	bool  show_triggers   = true;
+	bool  show_trig_tp    = true;
+	bool  show_trig_push  = true;
+	bool  show_trig_grav  = true;
+	bool  show_trig_links = true;
 }
 
 namespace {
@@ -43,10 +49,16 @@ namespace {
 	// aries, doors) - a trigger_teleport slab is CONTENTS_SOLID on disk but
 	// blocks nothing, and surf maps carpet the void with them. Walking the
 	// world tree is how the engine itself decides, so it is exact.
+	constexpr int kLumpEntities = 0;   // plain-text keyvalue blocks, the same
+	                                   // data the server spawns entities from
 	constexpr int kLumpNodes = 5;
 	constexpr int kLumpLeafs = 10;
 	constexpr int kLumpModels = 14;
 	constexpr int kLumpLeafBrushes = 17;
+
+	// SDK trigger constants (public 2013 SDK, triggers.cpp/entityoutput):
+	constexpr int kSfTriggerAllowClients = 0x01;   // players may fire the trigger
+	constexpr int kSfTeleportPreserveAngles = 0x20;
 
 #pragma pack(push, 1)
 	struct dlump_t { int32_t fileofs; int32_t filelen; int32_t version; char fourCC[4]; };
@@ -93,6 +105,8 @@ namespace {
 		                                // apex top-vs-face branch flips on their
 		                                // exact dists, so approximations are out
 		bool world = true;              // reachable from model 0 = real collision
+		int  model = -1;                // BSP model this brush belongs to (-1 =
+		                                // unreached; 0 = worldspawn; 1+ = entity)
 		std::vector<std::pair<Vector, Vector>> edges;   // deduped outline
 	};
 
@@ -104,6 +118,29 @@ namespace {
 	// Tags + board targets for the loaded map (persisted to a per-map .geo file).
 	std::set<std::pair<int, int>> g_tags;             // (brush, plane)
 	std::vector<BspWorld::BoardTarget> g_targets;
+
+	// --- triggers (parsed from the entity lump) ------------------------------
+	struct TriggerVol {
+		int    model = -1;            // "*N" brush model holding the volume
+		bool   teleport = false;
+		bool   push = false;          // neither = gravity
+		int    spawnflags = 0;
+		float  gravity = 1.f;         // trigger_gravity keyvalue (player scale)
+		Vector push_dir;              // trigger_push: world-space direction
+		float  push_speed = 0.f;      // trigger_push "speed"
+		Vector ent_origin;            // entity "origin" key (brush offset; usually 0)
+		// teleport destination, resolved at parse:
+		bool   dest_ok = false;
+		Vector dest_origin;
+		float  dest_pitch = 0.f, dest_yaw = 0.f;
+		bool   landmark_ok = false;   // landmark mode: dest + (player - landmark)
+		Vector landmark_origin;
+		Vector center;                // volume center (drawing)
+		std::vector<int> brushes;     // member brush indices (per-tick test set)
+	};
+	std::vector<TriggerVol> g_trigvols;
+	int g_trig_teleports = 0, g_trig_gravities = 0, g_trig_pushes = 0;
+	std::vector<int> g_brush_model;   // parse-time: brush index -> model index
 
 	// Last pick's ray + hit, drawn briefly for debugging.
 	bool g_dbg_pick = false;
@@ -208,6 +245,128 @@ namespace {
 		return ok;
 	}
 
+	// --- entity lump: triggers + destinations --------------------------------
+	// Plain text, repeated { "key" "value" ... } blocks - the same data the
+	// server spawns entities from. Only the classes the sim needs are kept;
+	// every named entity's origin/angles is collected so destination and
+	// landmark lookup matches the server's FindEntityByName (any class).
+	Vector ParseV3(const std::string& s) {
+		Vector v(0.f, 0.f, 0.f);
+		sscanf_s(s.c_str(), "%f %f %f", &v.X, &v.Y, &v.Z);
+		return v;
+	}
+
+	void ParseEntities(const char* txt, size_t len) {
+		g_trigvols.clear();
+		g_trig_teleports = g_trig_gravities = g_trig_pushes = 0;
+		if (!txt || !len)
+			return;
+
+		struct Ent {
+			std::string classname, targetname, target, landmark;
+			std::string model, origin, angles, pushdir;
+			int spawnflags = 0;
+			float gravity = 1.f;
+			float speed = 0.f;
+		};
+		std::vector<Ent> trigs;
+		struct Named { std::string name; Vector origin; float pitch, yaw; };
+		std::vector<Named> named;
+
+		size_t i = 0;
+		int guard = 0;
+		while (i < len && guard++ < 65536) {
+			while (i < len && txt[i] != '{') ++i;
+			if (i >= len) break;
+			++i;
+			Ent e;
+			while (i < len && txt[i] != '}') {
+				while (i < len && txt[i] != '"' && txt[i] != '}') ++i;
+				if (i >= len || txt[i] == '}') break;
+				++i;
+				const size_t k0 = i;
+				while (i < len && txt[i] != '"') ++i;
+				std::string key(txt + k0, i - k0);
+				if (i < len) ++i;
+				while (i < len && txt[i] != '"' && txt[i] != '}') ++i;
+				if (i >= len || txt[i] == '}') break;
+				++i;
+				const size_t v0 = i;
+				while (i < len && txt[i] != '"') ++i;
+				std::string val(txt + v0, i - v0);
+				if (i < len) ++i;
+				if (key == "classname") e.classname = val;
+				else if (key == "targetname") e.targetname = val;
+				else if (key == "target") e.target = val;
+				else if (key == "landmark") e.landmark = val;
+				else if (key == "model") e.model = val;
+				else if (key == "origin") e.origin = val;
+				else if (key == "angles") e.angles = val;
+				else if (key == "spawnflags") e.spawnflags = atoi(val.c_str());
+				else if (key == "gravity") e.gravity = static_cast<float>(atof(val.c_str()));
+				else if (key == "pushdir") e.pushdir = val;
+				else if (key == "speed") e.speed = static_cast<float>(atof(val.c_str()));
+			}
+			if (i < len) ++i;   // past '}'
+			if (!e.targetname.empty() && !e.origin.empty()) {
+				Named n;
+				n.name = e.targetname;
+				n.origin = ParseV3(e.origin);
+				const Vector a = ParseV3(e.angles);   // "pitch yaw roll"
+				n.pitch = a.X;
+				n.yaw = a.Y;
+				named.push_back(std::move(n));
+			}
+			if (e.classname == "trigger_teleport" || e.classname == "trigger_gravity"
+				|| e.classname == "trigger_push")
+				trigs.push_back(std::move(e));
+		}
+
+		for (const Ent& e : trigs) {
+			if (e.model.size() < 2 || e.model[0] != '*')
+				continue;   // no brush model: nothing to touch
+			TriggerVol tv;
+			tv.model = atoi(e.model.c_str() + 1);
+			tv.spawnflags = e.spawnflags;
+			tv.ent_origin = e.origin.empty() ? Vector(0.f, 0.f, 0.f) : ParseV3(e.origin);
+			tv.teleport = (e.classname == "trigger_teleport");
+			tv.push = (e.classname == "trigger_push");
+			if (tv.teleport) {
+				for (const Named& n : named)
+					if (n.name == e.target) {
+						tv.dest_ok = true;
+						tv.dest_origin = n.origin;
+						tv.dest_pitch = n.pitch;
+						tv.dest_yaw = n.yaw;
+						break;
+					}
+				if (!e.landmark.empty())
+					for (const Named& n : named)
+						if (n.name == e.landmark) {
+							tv.landmark_ok = true;
+							tv.landmark_origin = n.origin;
+							break;
+						}
+				if (!tv.dest_ok)
+					continue;   // unresolvable destination: skip the trigger
+				g_trig_teleports++;
+			} else if (tv.push) {
+				// SDK: "pushdir" is angles; the world direction is the forward
+				// vector (brush triggers carry no rotation of their own).
+				const Vector a = ParseV3(e.pushdir);   // "pitch yaw roll"
+				const float pr = a.X * 3.14159265f / 180.f;
+				const float yr = a.Y * 3.14159265f / 180.f;
+				tv.push_dir = Vector(cosf(pr) * cosf(yr), cosf(pr) * sinf(yr), -sinf(pr));
+				tv.push_speed = e.speed;
+				g_trig_pushes++;
+			} else {
+				tv.gravity = e.gravity;
+				g_trig_gravities++;
+			}
+			g_trigvols.push_back(tv);
+		}
+	}
+
 	bool LoadFromFile(const std::string& path) {
 		g_brushes.clear();
 		g_status = BspWorld::Status();
@@ -288,27 +447,42 @@ namespace {
 				? static_cast<int>(static_cast<size_t>(ll.filelen) / leaf_stride) : 0;
 			if (nleafs > 0 && ll.fileofs >= 0
 				&& static_cast<size_t>(ll.fileofs) + static_cast<size_t>(ll.filelen) <= data.size()) {
+				// Walk EVERY model's tree (not just worldspawn) and record which
+				// model each brush belongs to: model 0 = the collision world,
+				// 1+ = brush entities - which is exactly what trigger volumes
+				// need ("*N" in the entity lump names model N's brush set).
+				const int nmodels = header->lumps[kLumpModels].filelen
+					/ static_cast<int>(sizeof(dmodel_t));
+				g_brush_model.assign(nbrushes, -1);
 				std::vector<int> stack;
-				stack.push_back(models[0].headnode);
-				int guard = 0;
-				while (!stack.empty() && guard++ < 4000000) {
-					const int idx = stack.back();
-					stack.pop_back();
-					if (idx >= 0) {
-						if (idx >= nnodes) continue;
-						stack.push_back(nodes[idx].children[0]);
-						stack.push_back(nodes[idx].children[1]);
-						continue;
-					}
-					const int leaf = -1 - idx;
-					if (leaf < 0 || leaf >= nleafs) continue;
-					const dleaf_common_t* lf = reinterpret_cast<const dleaf_common_t*>(
-						data.data() + ll.fileofs + static_cast<size_t>(leaf) * leaf_stride);
-					for (int b = 0; b < lf->numleafbrushes; ++b) {
-						const int lbi = lf->firstleafbrush + b;
-						if (lbi < 0 || lbi >= nleafbrushes) continue;
-						const int br = leafbrushes[lbi];
-						if (br >= 0 && br < nbrushes) world_brush[br] = true;
+				for (int m = 0; m < nmodels; ++m) {
+					stack.clear();
+					stack.push_back(models[m].headnode);
+					int guard = 0;
+					while (!stack.empty() && guard++ < 4000000) {
+						const int idx = stack.back();
+						stack.pop_back();
+						if (idx >= 0) {
+							if (idx >= nnodes) continue;
+							stack.push_back(nodes[idx].children[0]);
+							stack.push_back(nodes[idx].children[1]);
+							continue;
+						}
+						const int leaf = -1 - idx;
+						if (leaf < 0 || leaf >= nleafs) continue;
+						const dleaf_common_t* lf = reinterpret_cast<const dleaf_common_t*>(
+							data.data() + ll.fileofs + static_cast<size_t>(leaf) * leaf_stride);
+						for (int b = 0; b < lf->numleafbrushes; ++b) {
+							const int lbi = lf->firstleafbrush + b;
+							if (lbi < 0 || lbi >= nleafbrushes) continue;
+							const int br = leafbrushes[lbi];
+							if (br >= 0 && br < nbrushes) {
+								if (m == 0)
+									world_brush[br] = true;
+								if (g_brush_model[br] < 0)
+									g_brush_model[br] = m;
+							}
+						}
 					}
 				}
 				world_set_ok = true;
@@ -364,6 +538,8 @@ namespace {
 			// If the world set couldn't be built, assume every brush is world
 			// (the old behavior) rather than silently emptying the map.
 			brush.world = world_set_ok ? world_brush[bi] : true;
+			brush.model = (world_set_ok && bi < static_cast<int>(g_brush_model.size()))
+				? g_brush_model[bi] : (brush.world ? 0 : -1);
 			brush.mins = Vector(1e9f, 1e9f, 1e9f);
 			brush.maxs = Vector(-1e9f, -1e9f, -1e9f);
 
@@ -407,6 +583,38 @@ namespace {
 				face_total += static_cast<int>(brush.faces.size());
 				edge_total += static_cast<int>(brush.edges.size());
 				g_brushes.push_back(std::move(brush));
+			}
+		}
+
+		// Triggers: parse the entity lump, then index each trigger's member
+		// brushes + volume center from the model-tagged brush list.
+		{
+			const dlump_t& el = header->lumps[kLumpEntities];
+			if (el.fileofs >= 0 && el.filelen > 0
+				&& static_cast<size_t>(el.fileofs) + static_cast<size_t>(el.filelen) <= data.size())
+				ParseEntities(reinterpret_cast<const char*>(data.data() + el.fileofs),
+					static_cast<size_t>(el.filelen));
+			else
+				ParseEntities(nullptr, 0);
+			for (TriggerVol& tv : g_trigvols) {
+				Vector mn(1e9f, 1e9f, 1e9f), mx(-1e9f, -1e9f, -1e9f);
+				for (int bi2 = 0; bi2 < static_cast<int>(g_brushes.size()); ++bi2) {
+					const Brush& b = g_brushes[bi2];
+					if (b.model != tv.model)
+						continue;
+					tv.brushes.push_back(bi2);
+					if (b.mins.X < mn.X) mn.X = b.mins.X;
+					if (b.mins.Y < mn.Y) mn.Y = b.mins.Y;
+					if (b.mins.Z < mn.Z) mn.Z = b.mins.Z;
+					if (b.maxs.X > mx.X) mx.X = b.maxs.X;
+					if (b.maxs.Y > mx.Y) mx.Y = b.maxs.Y;
+					if (b.maxs.Z > mx.Z) mx.Z = b.maxs.Z;
+				}
+				tv.center = tv.brushes.empty()
+					? tv.ent_origin
+					: Vector((mn.X + mx.X) * 0.5f + tv.ent_origin.X,
+					         (mn.Y + mx.Y) * 0.5f + tv.ent_origin.Y,
+					         (mn.Z + mx.Z) * 0.5f + tv.ent_origin.Z);
 			}
 		}
 
@@ -815,9 +1023,93 @@ void BspWorld::Unload() {
 	g_planes.clear();
 	g_tags.clear();
 	g_targets.clear();
+	g_trigvols.clear();
+	g_brush_model.clear();
+	g_trig_teleports = g_trig_gravities = g_trig_pushes = 0;
 	g_level.clear();
 	g_status = Status();
 }
+
+// Hull-vs-trigger-volume, engine-style: the brush planes (regular + the
+// compiler's exact bevels) expanded by the hull via the support corner - with
+// bevels included this IS the Minkowski sum, the same math CM_BoxTrace uses,
+// so the touch condition matches the engine's trigger touch exactly.
+bool BspWorld::CheckTriggers(const Vector& origin, const Vector& mins,
+                             const Vector& maxs, TriggerHit* out) {
+	if (!apply_triggers || g_trigvols.empty() || !g_status.loaded || !out)
+		return false;
+	bool any = false;
+	for (const TriggerVol& tv : g_trigvols) {
+		// SDK: players only fire triggers with the Clients spawnflag.
+		if (!(tv.spawnflags & kSfTriggerAllowClients))
+			continue;
+		// Entity "origin" offsets the brush model: test in local space.
+		const Vector p(origin.X - tv.ent_origin.X,
+		               origin.Y - tv.ent_origin.Y,
+		               origin.Z - tv.ent_origin.Z);
+		bool touching = false;
+		for (const int bi : tv.brushes) {
+			const Brush& b = g_brushes[bi];
+			bool inside = true;
+			auto plane_ok = [&](int pid) {
+				if (pid < 0 || pid >= static_cast<int>(g_planes.size()))
+					return true;
+				const Vector& n = g_planes[pid].first;
+				const float d = g_planes[pid].second;
+				// Support corner minimizing n.x over the hull.
+				const float cx = p.X + (n.X > 0.f ? mins.X : maxs.X);
+				const float cy = p.Y + (n.Y > 0.f ? mins.Y : maxs.Y);
+				const float cz = p.Z + (n.Z > 0.f ? mins.Z : maxs.Z);
+				return n.X * cx + n.Y * cy + n.Z * cz - d <= 0.f;
+			};
+			for (const int pid : b.clip_planes)
+				if (!plane_ok(pid)) { inside = false; break; }
+			if (inside)
+				for (const int pid : b.bevel_planes)
+					if (!plane_ok(pid)) { inside = false; break; }
+			if (inside) { touching = true; break; }
+		}
+		if (!touching)
+			continue;
+		any = true;
+		if (tv.teleport && !out->teleported) {
+			// SDK CTriggerTeleport::Touch: landmark keeps the player's offset
+			// from the landmark and never sets angles; otherwise destination
+			// origin (player origin is at the feet, WorldAlignMins().z == 0,
+			// so no z adjustment) and destination angles unless the preserve
+			// spawnflag. Velocity is ALWAYS zeroed (vec3_origin is passed).
+			Vector dst = tv.dest_origin;
+			if (tv.landmark_ok) {
+				dst.X += origin.X - tv.landmark_origin.X;
+				dst.Y += origin.Y - tv.landmark_origin.Y;
+				dst.Z += origin.Z - tv.landmark_origin.Z;
+				out->tp_set_angles = false;
+			} else {
+				out->tp_set_angles = !(tv.spawnflags & kSfTeleportPreserveAngles);
+				out->tp_pitch = tv.dest_pitch;
+				out->tp_yaw = tv.dest_yaw;
+			}
+			out->teleported = true;
+			out->tp_origin = dst;
+		} else if (tv.push) {
+			// SDK CTriggerPush::Touch: base velocity = pushdir * speed (the
+			// FL_BASEVELOCITY accumulation happens at the apply site, which
+			// knows the player's current flags/base velocity).
+			out->pushed = true;
+			out->push_vec = Vector(tv.push_dir.X * tv.push_speed,
+			                       tv.push_dir.Y * tv.push_speed,
+			                       tv.push_dir.Z * tv.push_speed);
+		} else if (!tv.teleport) {
+			out->grav_touched = true;
+			out->gravity = tv.gravity;
+		}
+	}
+	return any;
+}
+
+int BspWorld::TriggerTeleportCount() { return g_trig_teleports; }
+int BspWorld::TriggerGravityCount() { return g_trig_gravities; }
+int BspWorld::TriggerPushCount() { return g_trig_pushes; }
 
 void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 	g_status.drawn_brushes = 0;
@@ -825,8 +1117,81 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 
 	if (!engine || !debugoverlay || !engine->IsInGame())
 		return;
-	if (!draw_wireframe && !show_markers)
+	if (!draw_wireframe && !show_markers && !show_triggers)
 		return;
+
+	// Teleport destination arrows: volume center -> destination, plus a small
+	// box at the landing point. Budgeted like everything else. Gated by the
+	// per-type toggles so a hidden type hides its links too.
+	if (show_triggers && show_trig_links && g_status.loaded) {
+		for (const TriggerVol& tv : g_trigvols) {
+			if (tv.teleport && tv.dest_ok && show_trig_tp) {
+				if (!WorldDraw::OverlayTake(2))
+					break;
+				debugoverlay->AddLineOverlay(tv.center, tv.dest_origin,
+					255, 170, 40, false, duration);
+				debugoverlay->AddBoxOverlay(tv.dest_origin,
+					Vector(-4.f, -4.f, 0.f), Vector(4.f, 4.f, 8.f), Vector(0.f, 0.f, 0.f),
+					255, 170, 40, 90, duration);
+			} else if (tv.push && tv.push_speed > 0.f && show_trig_push) {
+				// Booster direction ray from the volume center.
+				if (!WorldDraw::OverlayTake(1))
+					break;
+				float len = tv.push_speed * 0.25f;
+				if (len > 160.f) len = 160.f;
+				debugoverlay->AddLineOverlay(tv.center,
+					Vector(tv.center.X + tv.push_dir.X * len,
+					       tv.center.Y + tv.push_dir.Y * len,
+					       tv.center.Z + tv.push_dir.Z * len),
+					90, 255, 130, false, duration);
+			}
+		}
+	}
+
+	// Trigger VOLUME wires, per type, drawn INDEPENDENTLY of the full brush
+	// wireframe - so a booster route stays visible without paying for the
+	// whole map's lines. Same radius + shared overlay budget as everything
+	// else. The generic wireframe loop below skips these brushes to avoid a
+	// double draw.
+	if (show_triggers && g_status.loaded && have_center) {
+		bool budget_dry = false;
+		for (const TriggerVol& tv : g_trigvols) {
+			if (budget_dry)
+				break;
+			const bool type_on = tv.teleport ? show_trig_tp
+				: tv.push ? show_trig_push : show_trig_grav;
+			if (!type_on)
+				continue;
+			int r = 80, g = 170, b = 255;                        // gravity: blue
+			if (tv.teleport)  { r = 255; g = 170; b = 40; }      // gold
+			else if (tv.push) { r = 90;  g = 255; b = 130; }     // green
+			for (int bi : tv.brushes) {
+				if (bi < 0 || bi >= static_cast<int>(g_brushes.size()))
+					continue;
+				const Brush& brush = g_brushes[bi];
+				float dist2 = 0.f;
+				const float cx[3] = { center.X, center.Y, center.Z };
+				const float mn[3] = { brush.mins.X, brush.mins.Y, brush.mins.Z };
+				const float mx[3] = { brush.maxs.X, brush.maxs.Y, brush.maxs.Z };
+				for (int a = 0; a < 3; ++a) {
+					float dd = 0.f;
+					if (cx[a] < mn[a]) dd = mn[a] - cx[a];
+					else if (cx[a] > mx[a]) dd = cx[a] - mx[a];
+					dist2 += dd * dd;
+				}
+				if (dist2 > draw_radius * draw_radius)
+					continue;
+				if (!WorldDraw::OverlayTake(static_cast<int>(brush.edges.size()))) {
+					budget_dry = true;
+					break;
+				}
+				for (const std::pair<Vector, Vector>& edge : brush.edges)
+					debugoverlay->AddLineOverlay(edge.first, edge.second, r, g, b, false, duration);
+				g_status.drawn_brushes++;
+				g_status.drawn_lines += static_cast<int>(brush.edges.size());
+			}
+		}
+	}
 
 	// Auto-(re)load when the level changes. Markers alone only trigger a parse
 	// when this map has saved geometry, so uninvolved maps never pay for it.
@@ -885,6 +1250,10 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 		const Brush& brush = g_brushes[entry.second];
 		if (lines + static_cast<int>(brush.edges.size()) > budget)
 			break;
+		// Wires spend from the SHARED per-frame overlay budget too (they draw
+		// after the run line, so the line always wins the contention).
+		if (!WorldDraw::OverlayTake(static_cast<int>(brush.edges.size())))
+			break;
 
 		int r = 200, g = 200, b = 210;                       // solid: light gray
 		if (brush.contents & BSP_CONTENTS_PLAYERCLIP) { r = 255; g = 80;  b = 80; }
@@ -894,7 +1263,19 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 		// but the engine never traces movement against them, so they are NOT
 		// in the physics model either. Draw them dim purple so a wireframe
 		// slab can never be mistaken for a floor that the solver ignores.
-		if (!brush.world) { r = 90; g = 60; b = 110; }
+		// Recognized TRIGGER volumes are the dedicated per-type pass's job
+		// while Show triggers is on (skipped here - a disabled type stays
+		// hidden); with the master off they fall back to dim purple.
+		if (!brush.world) {
+			r = 90; g = 60; b = 110;
+			if (show_triggers) {
+				bool is_trigger = false;
+				for (const TriggerVol& tv : g_trigvols)
+					if (tv.model == brush.model) { is_trigger = true; break; }
+				if (is_trigger)
+					continue;
+			}
+		}
 
 		for (const std::pair<Vector, Vector>& edge : brush.edges) {
 			debugoverlay->AddLineOverlay(edge.first, edge.second, r, g, b, false, duration);
@@ -902,11 +1283,26 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 		}
 		g_status.drawn_brushes++;
 	}
-	g_status.drawn_lines = lines;
+	g_status.drawn_lines += lines;   // on top of the trigger pass's wires
 }
 
 BspWorld::Status BspWorld::GetStatus() {
 	return g_status;
+}
+
+bool BspWorld::CurrentMapName(char* out, int cap) {
+	if (!out || cap <= 0)
+		return false;
+	out[0] = 0;
+	if (!engine)
+		return false;
+	std::string level;
+	if (!SafeLevelName(level))
+		return false;
+	// SafeLevelName validated the "maps/<name>.bsp" shape.
+	const std::string name = level.substr(5, level.size() - 9);
+	strncpy_s(out, static_cast<rsize_t>(cap), name.c_str(), _TRUNCATE);
+	return true;
 }
 
 BspWorld::RayHit BspWorld::Pick(const Vector& eye, const Vector& dir, float max_dist) {

@@ -24,6 +24,14 @@ namespace WorldDraw {
 	// session proves or clears the theory.
 	extern bool  pause_draw_busy;
 
+	// Shared per-frame budget for engine debug overlays, drawn down by every
+	// emitter (run line, trails, tags, prediction path, BSP wires). The
+	// engine's overlay pool is finite: overflowing it shows an on-screen
+	// warning and hitches, and a hitch stretches overlay lifetimes so two
+	// frames' worth coexist - the hard cap bounds that worst case. Returns
+	// false when the frame's budget is spent; the caller stops emitting.
+	bool OverlayTake(int count);
+
 	// Bottom hull-corner trails: parallel path lines offset to each bottom corner
 	// of the (axis-aligned) player hull, for lining up and checking ramp boards.
 	// Applies to both the live prediction line and the editor run line.
@@ -37,6 +45,10 @@ namespace WorldDraw {
 	extern bool tag_seg_end_eff;     // % of optimal speed gain over the segment
 	extern bool tag_seg_end_time;    // elapsed seconds at the segment's end
 	extern bool tag_cursor_time;     // elapsed seconds at the playhead
+
+	// Markers on the run line where the last sim fired a trigger (gold =
+	// teleport landing, green = booster, blue = gravity zone).
+	extern bool show_trig_events;
 
 	// Prediction input (held for the whole predicted window).
 	extern int   pred_ticks;         // number of ticks to predict

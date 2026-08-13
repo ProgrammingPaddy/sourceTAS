@@ -63,6 +63,8 @@ struct StartState {
 struct Run {
 	std::string name;
 	std::string filepath;                    // on-disk .tas file ("" if unsaved)
+	std::string map;                         // level recorded on (.tas v3; "" if unknown)
+	unsigned long long mtime = 0;            // last-write FILETIME, raw (display only)
 	StartState start;                        // absolute anchor (v2 files; may be invalid)
 	std::vector<Segment> segments;
 
@@ -113,6 +115,7 @@ private:
 	// to an empty session re-captures instead of keeping a stale start.
 	std::vector<StartState> session_starts;  // parallel to session_segments
 	StartState active_start;                 // anchor for the active segment
+	std::string session_map;                 // level this session records on
 
 	std::vector<Run> library;                // finalized, immutable runs
 	int selected = -1;                       // run used by playback
@@ -128,6 +131,10 @@ private:
 	bool scratch_active = false;
 	int playback_delay = 0;                   // ticks to wait before feeding input
 	                                          // (lets a teleport-to-anchor settle)
+
+	// Recently deleted runs (record tab), newest last - session-scoped stash
+	// so a mis-click is one button away from undone. Capped small.
+	std::vector<Run> deleted_stack;
 
 	std::string status = "Idle.";
 
@@ -176,6 +183,12 @@ public:
 		if (state == TasState::Recording && active_segment.empty())
 			active_start = s;
 	}
+	// The map this recording session is on (stamped by the CreateMove hook,
+	// which has the level name; captured once per session).
+	void SetSessionMap(const char* m) {
+		if (state == TasState::Recording && m && session_map.empty())
+			session_map = m;
+	}
 
 	// --- editor export ----------------------------------------------------
 	// Add a finalized run to the library and select it (run mode only). The
@@ -196,7 +209,19 @@ public:
 	void LoadFromDisk();          // populate the library from disk on startup
 	void PersistSelected();       // write the selected run to disk
 	bool RenameSelected(const char* newName);
-	void DeleteSelected();
+	void DeleteSelected();        // stashes the run for UndeleteLast
+
+	// --- delete undo (record tab) ----------------------------------------
+	bool CanUndelete() const { return !deleted_stack.empty(); }
+	void UndeleteLast() {
+		if (state != TasState::Idle || deleted_stack.empty())
+			return;
+		library.push_back(std::move(deleted_stack.back()));
+		deleted_stack.pop_back();
+		selected = static_cast<int>(library.size()) - 1;
+		PersistSelected();        // rewrites the same file path on disk
+		status = "Restored " + library.back().name + ".";
+	}
 
 	// --- selection (run mode only) --------------------------------------
 	void Select(int index) {
@@ -221,6 +246,7 @@ public:
 		active_segment.clear();
 		session_starts.clear();
 		active_start = StartState();
+		session_map.clear();
 		state = TasState::Recording;
 		status = "Recording... (Save Segment to split, Stop & Save to finish)";
 	}
@@ -269,6 +295,7 @@ public:
 		}
 
 		Run run;
+		run.map = session_map;
 		for (size_t i = 0; i < session_segments.size(); ++i) {
 			if (session_segments[i].empty())
 				continue;
@@ -278,6 +305,7 @@ public:
 		}
 		session_segments.clear();
 		session_starts.clear();
+		session_map.clear();
 		state = TasState::Idle;
 
 		if (run.segments.empty()) {
@@ -339,6 +367,7 @@ public:
 		active_segment.clear();
 		session_starts.clear();
 		active_start = StartState();
+		session_map.clear();
 		scratch_active = false;
 		playback_delay = 0;
 		state = TasState::Idle;

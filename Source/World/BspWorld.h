@@ -98,10 +98,50 @@ namespace BspWorld {
 	void RestTargetOnFace(int index);           // re-seat after a duck change
 	void SaveGeo();                             // call after editing a target
 
+	// --- TRIGGERS (teleport + gravity) ---------------------------------------
+	// Parsed from the BSP's entity lump (the same keyvalues the server spawns
+	// from): trigger_teleport / trigger_gravity brush entities, their volumes
+	// (per-model brush sets), destinations and landmarks. The client's
+	// prediction NEVER runs server trigger logic, so the editor sim applies
+	// these itself - semantics copied from the SDK's CTriggerTeleport::Touch /
+	// CTriggerGravity::GravityTouch exactly.
+	extern bool apply_triggers;     // sim applies trigger effects (persisted)
+	extern bool show_triggers;      // master: color-coded trigger volumes. The
+	                                // volume wires draw INDEPENDENTLY of the
+	                                // full brush wireframe, per-type below.
+	extern bool show_trig_tp;       // teleport volumes (gold)
+	extern bool show_trig_push;     // push/booster volumes (green)
+	extern bool show_trig_grav;     // gravity volumes (blue)
+	extern bool show_trig_links;    // teleport dest arrows + booster rays
+
+	struct TriggerHit {
+		bool   teleported = false;
+		Vector tp_origin;            // destination (landmark math already applied)
+		bool   tp_set_angles = false;
+		float  tp_pitch = 0.f, tp_yaw = 0.f;
+		bool   grav_touched = false;
+		float  gravity = 1.f;        // player gravity SCALE (trigger keyvalue)
+		bool   pushed = false;       // trigger_push (booster)
+		Vector push_vec;             // pushdir * speed (base velocity per SDK)
+	};
+	// Hull-vs-trigger-volume test for one sim tick. `origin` is the player
+	// feet origin, mins/maxs the current collision hull. First touched
+	// teleport wins (engine touch order); gravity reports the last touched
+	// value. Returns true when anything fired.
+	bool CheckTriggers(const Vector& origin, const Vector& mins, const Vector& maxs,
+	                   TriggerHit* out);
+	int  TriggerTeleportCount();
+	int  TriggerGravityCount();
+	int  TriggerPushCount();
+
 	// Parse the currently loaded map. Called automatically by Render() when the
 	// level changes; exposed for the menu's Reload button.
 	bool LoadCurrentMap();
 	void Unload();
+
+	// The bare current level name ("maps/x.bsp" -> "x") via the validated
+	// engine call. False when not in game - callers store "" then.
+	bool CurrentMapName(char* out, int cap);
 
 	// Queue wireframe overlays around `center`. Self-guards when disabled, out
 	// of game, or unloaded (auto-loads on level change).

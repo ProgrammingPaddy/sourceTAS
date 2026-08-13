@@ -25,6 +25,12 @@ namespace TasEditor {
 	void StepCursor(int delta);
 	void StepSegment(int direction);
 
+	// Undo/redo over segments + anchor (snapshot-based; user edits coalesce
+	// per ~0.8 s burst, machine refinements never open a step). Ctrl+Z/Ctrl+Y
+	// in the input hook and buttons in the Segments row both land here.
+	void Undo();
+	void Redo();
+
 	// Crosshair pick (also bound to a hotkey): acts per the Targets tab's mode -
 	// tag/untag the aimed surf face, or place a board target where the hull
 	// would rest on the aimed surface. While the freecam is active the ray and
@@ -38,11 +44,22 @@ namespace TasEditor {
 	// engage (and to block input) until they are.
 	void ToggleFreecam();
 	bool FreecamActive();
+
+	// COAST line: gray no-input trajectory off the run's end (see DrawData).
+	// Toggle is on the Rendering tab, persisted, and bindable as a hotkey.
+	void ToggleCoastLine();
 	// Called by every view-probe thunk: sample candidate slot's 2nd argument.
 	void ViewSlotSample(int slot, void* arg);
 	// While the freecam is engaged, overwrite *eye with the camera position
 	// and return true - in-world tags/billboards must face the CAMERA then.
 	bool FreecamEye(Vector* eye);
+
+	// Test-play divergence: the CreateMove hook reports each replayed frame's
+	// index; the editor compares the REAL player origin against the sim and
+	// verdicts when playback ends. DivergencePoint exposes the worst spot of
+	// the last test play (> 0.5 u) for the in-world marker.
+	void NotePlaybackTick(int index);
+	bool DivergencePoint(Vector* p);
 
 	// Snapshot of everything WorldDraw needs to render the run line.
 	struct DrawData {
@@ -70,6 +87,11 @@ namespace TasEditor {
 		                                      // segment (-1 = not scoreable)
 		float seg_time;                       // time at the segment's end (-1 = n/a)
 		float cursor_time;                    // time at the playhead (-1 = n/a)
+		// COAST line: a gray "release everything now" trajectory off the run's
+		// end (last segment). Peeled from the sim so it never touches the run
+		// states above; draw-only. Empty unless the toggle is on.
+		const Vector* coast;                  // per-tick origins after the run end
+		int coast_count;                      // 0 = none
 	};
 	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
 	// True while the solver machinery hitches frames (search/verify/batch/

@@ -1,5 +1,7 @@
 #include "Prediction.h"
 #include "NetVars.h"
+#include "BspWorld.h"
+#include "../Menu/Breadcrumb.h"
 
 #include <cstdint>
 #include <cstring>
@@ -70,6 +72,8 @@ namespace {
 	// menu compare the movement pipeline's origin against the netvar origin).
 	Vector g_real_move_origin;
 	bool   g_real_move_valid = false;
+	int    g_pred_flags = 0;          // player m_fFlags after the newest
+	bool   g_pred_flags_valid = false;// first-time-predicted command
 	bool   g_in_hook_work = false;
 	float  g_interval = 0.f;
 	int    g_fault_count = 0;
@@ -106,6 +110,7 @@ namespace {
 		int origin = 0, velocity = 0, flags = 0, eye_angles = 0;
 		int stamina = 0, ducked = 0, ducking = 0, ducktime = 0;
 		int mins = 0, maxs = 0;
+		int gravity = 0, basevel = 0;
 		bool init = false;
 	} g_off;
 
@@ -122,8 +127,25 @@ namespace {
 		// CCollisionProperty's bounds - the hull the engine actually sweeps.
 		g_off.mins       = NetVars::Offset("DT_CSPlayer", "m_vecMins");
 		g_off.maxs       = NetVars::Offset("DT_CSPlayer", "m_vecMaxs");
+		// Player gravity scale (trigger_gravity writes it; CGameMovement reads
+		// it every tick). Networked in DT_BasePlayer; try the leaf class first
+		// in case the walk is flat.
+		g_off.gravity    = NetVars::Offset("DT_CSPlayer", "m_flGravity");
+		if (!g_off.gravity)
+			g_off.gravity = NetVars::Offset("DT_BasePlayer", "m_flGravity");
+		// Base velocity (trigger_push boosters write it; the movement code
+		// applies + decays it natively, so the push physics stay engine code).
+		g_off.basevel    = NetVars::Offset("DT_CSPlayer", "m_vecBaseVelocity");
+		if (!g_off.basevel)
+			g_off.basevel = NetVars::Offset("DT_BasePlayer", "m_vecBaseVelocity");
 		g_off.init = true;
 	}
+
+	// Trigger events fired by the last editor sim (whole-player snapshot
+	// restore makes the gravity write safe; teleports rewrite origin/velocity
+	// mid-sim exactly like the server's Touch would).
+	Prediction::TriggerEvent s_trig_events[64];
+	int s_trig_event_count = 0;
 
 	// Last STANDING hull read off the live player. Cached because the live
 	// value shrinks while ducked and the model simulates standing.
@@ -217,6 +239,41 @@ namespace {
 				g_path[i] = *reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff);
 				g_orig_finishmove(g_pred, player, cmd, movebuf);
 				*s_p_curtime += g_interval;
+
+				// Triggers apply to the live look-ahead too (same rules as the
+				// editor sim; no event recording here).
+				{
+					const int fl2 = g_off.flags
+						? *reinterpret_cast<int*>(reinterpret_cast<char*>(player) + g_off.flags) : 0;
+					Vector hmin = g_hull_min, hmax = g_hull_max;
+					if (fl2 & FL_DUCKING)
+						hmax.Z = 54.f;
+					BspWorld::TriggerHit th;
+					if (BspWorld::CheckTriggers(g_path[i], hmin, hmax, &th)) {
+						char* pb2 = reinterpret_cast<char*>(player);
+						if (th.grav_touched && g_off.gravity)
+							*reinterpret_cast<float*>(pb2 + g_off.gravity) = th.gravity;
+						if (th.pushed && g_off.basevel && g_off.flags) {
+							int fl3 = *reinterpret_cast<int*>(pb2 + g_off.flags);
+							Vector push = th.push_vec;
+							if (fl3 & FL_BASEVELOCITY) {
+								const Vector& bv = *reinterpret_cast<Vector*>(pb2 + g_off.basevel);
+								push.X += bv.X; push.Y += bv.Y; push.Z += bv.Z;
+							}
+							if (push.Z > 0.f && (fl3 & FL_ONGROUND)) {
+								fl3 &= ~FL_ONGROUND;
+								reinterpret_cast<Vector*>(pb2 + g_off.origin)->Z += 1.f;
+							}
+							*reinterpret_cast<Vector*>(pb2 + g_off.basevel) = push;
+							*reinterpret_cast<int*>(pb2 + g_off.flags) = fl3 | FL_BASEVELOCITY;
+						}
+						if (th.teleported) {
+							g_path[i] = th.tp_origin;
+							*reinterpret_cast<Vector*>(pb2 + g_off.origin) = th.tp_origin;
+							*reinterpret_cast<Vector*>(pb2 + g_off.velocity) = Vector(0.f, 0.f, 0.f);
+						}
+					}
+				}
 			}
 
 			EndStateGuard();
@@ -265,6 +322,7 @@ namespace {
 			unsigned char movebuf[kMoveDataBufSize];
 			Frame f;
 
+			s_trig_event_count = 0;
 			const int n = s_sim_req_ticks;
 			for (int i = 0; i < n; ++i) {
 				s_sim_provider(i, prev, &f);
@@ -291,6 +349,65 @@ namespace {
 				*s_p_curtime += g_interval;
 
 				st.flags = g_off.flags ? *reinterpret_cast<int*>(pb + g_off.flags) : 0;
+
+				// TRIGGERS: server-side entities the client prediction never
+				// runs - fire touched trigger_teleport / trigger_gravity here
+				// so the simulated line matches the real run. The whole-player
+				// snapshot restore covers every field written.
+				{
+					Vector hmin = g_hull_min, hmax = g_hull_max;
+					if (st.flags & FL_DUCKING)
+						hmax.Z = 54.f;   // SDK VEC_DUCK_HULL_MAX height
+					BspWorld::TriggerHit th;
+					if (BspWorld::CheckTriggers(st.origin, hmin, hmax, &th)) {
+						if (th.grav_touched && g_off.gravity) {
+							*reinterpret_cast<float*>(pb + g_off.gravity) = th.gravity;
+							if (s_trig_event_count < 64) {
+								Prediction::TriggerEvent& ev = s_trig_events[s_trig_event_count++];
+								ev.tick = i; ev.type = 2;
+								ev.to = st.origin; ev.gravity = th.gravity;
+							}
+						}
+						if (th.pushed && g_off.basevel && g_off.flags) {
+							// SDK CTriggerPush::Touch for players: accumulate
+							// onto an existing base velocity, unground + 1u
+							// nudge for upward pushes, set FL_BASEVELOCITY -
+							// the engine's own movement applies and decays it.
+							int fl2 = *reinterpret_cast<int*>(pb + g_off.flags);
+							Vector push = th.push_vec;
+							if (fl2 & FL_BASEVELOCITY) {
+								const Vector& bv = *reinterpret_cast<Vector*>(pb + g_off.basevel);
+								push.X += bv.X; push.Y += bv.Y; push.Z += bv.Z;
+							}
+							if (push.Z > 0.f && (fl2 & FL_ONGROUND)) {
+								fl2 &= ~FL_ONGROUND;
+								reinterpret_cast<Vector*>(pb + g_off.origin)->Z += 1.f;
+								st.origin.Z += 1.f;
+							}
+							*reinterpret_cast<Vector*>(pb + g_off.basevel) = push;
+							fl2 |= FL_BASEVELOCITY;
+							*reinterpret_cast<int*>(pb + g_off.flags) = fl2;
+							st.flags = fl2;
+							if (s_trig_event_count < 64) {
+								Prediction::TriggerEvent& ev = s_trig_events[s_trig_event_count++];
+								ev.tick = i; ev.type = 3;
+								ev.to = st.origin; ev.gravity = 0.f;
+							}
+						}
+						if (th.teleported) {
+							st.origin = th.tp_origin;
+							st.velocity = Vector(0.f, 0.f, 0.f);   // SDK zeroes it
+							*reinterpret_cast<Vector*>(pb + g_off.origin) = st.origin;
+							*reinterpret_cast<Vector*>(pb + g_off.velocity) = st.velocity;
+							if (s_trig_event_count < 64) {
+								Prediction::TriggerEvent& ev = s_trig_events[s_trig_event_count++];
+								ev.tick = i; ev.type = 1;
+								ev.to = st.origin; ev.gravity = 0.f;
+							}
+						}
+					}
+				}
+
 				s_sim_frames[i] = f;
 				s_sim_states[i] = st;
 				prev = st;
@@ -310,22 +427,45 @@ namespace {
 	// frame in the same valid context: a pending editor sim, else the live
 	// look-ahead.
 	void OnFinishMove(void* thisptr, void* player, void* ucmd, void* movedata) {
+		// Freeze-hunt breadcrumbs (2026-08-05): the frozen sessions' journals
+		// show every OTHER instrumented path completing cleanly - this hook
+		// runs on the main thread OUTSIDE those paths and fires the first
+		// weapon-prediction work right after a click. enter-without-exit
+		// after a freeze = the main thread died in here.
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: enter");
 		g_orig_finishmove(thisptr, player, ucmd, movedata);   // real movement, unchanged
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: orig done");
 
-		if (g_in_hook_work || !g_pred || !g_gm || !g_helper || !g_gpg_holder)
+		if (g_in_hook_work || !g_pred || !g_gm || !g_helper || !g_gpg_holder) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit early");
 			return;
+		}
 		// Only the newest command (skip re-predicted history) -> once per frame.
-		if (!GetVirtualFunction<bool(*)(void*)>(thisptr, kIsFirstTimePredictedIdx)(thisptr))
+		if (!GetVirtualFunction<bool(*)(void*)>(thisptr, kIsFirstTimePredictedIdx)(thisptr)) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit repredict");
 			return;
+		}
 
 		if (movedata) {
 			g_real_move_origin = *reinterpret_cast<Vector*>(reinterpret_cast<char*>(movedata) + kMoveDataOriginOff);
 			g_real_move_valid = true;
 		}
 
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: resolve");
 		ResolveOffsets();
 
+		// Post-move flags of this newest first-time-predicted command: the
+		// tick-exact grounded signal. The m_fFlags netvar read at CreateMove
+		// time can lag prediction by a tick (the entity is restored to
+		// NETWORKED values around each packet), and a one-tick-late autohop
+		// press costs a full friction tick on every landing.
+		if (player && g_off.flags) {
+			g_pred_flags = NetVars::Get<int>(player, g_off.flags);
+			g_pred_flags_valid = true;
+		}
+
 		if (s_sim_pending) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: editor sim");
 			LARGE_INTEGER freq, t0, t1;
 			QueryPerformanceFrequency(&freq);
 			QueryPerformanceCounter(&t0);
@@ -356,12 +496,16 @@ namespace {
 			g_diag.fault_count = g_fault_count;
 			g_diag.last_fault_rva = g_last_fault_rva;
 			g_diag.last_fault_access = g_last_fault_access;
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit sim");
 			return;
 		}
 
-		if (!WorldDraw::draw_prediction)
+		if (!WorldDraw::draw_prediction) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit");
 			return;
+		}
 
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: lookahead");
 		int ticks = WorldDraw::pred_ticks;
 		if (ticks < 1)   ticks = 1;
 		if (ticks > 256) ticks = 256;
@@ -385,7 +529,29 @@ namespace {
 		d.last_fault_rva = g_last_fault_rva;
 		d.last_fault_access = g_last_fault_access;
 		g_diag = d;
+		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit lookahead");
 	}
+}
+
+int Prediction::TriggerEventCount() {
+	return s_trig_event_count;
+}
+
+const Prediction::TriggerEvent* Prediction::TriggerEventAt(int i) {
+	if (i < 0 || i >= s_trig_event_count)
+		return nullptr;
+	return &s_trig_events[i];
+}
+
+float Prediction::CurTime() {
+	if (!g_gpg_holder)
+		return -1.f;
+	if (s_p_curtime)
+		return *s_p_curtime;
+	void* gpg = *g_gpg_holder;
+	if (!gpg)
+		return -1.f;
+	return *reinterpret_cast<float*>(reinterpret_cast<char*>(gpg) + kCurtimeOff);
 }
 
 void Prediction::Install() {
@@ -506,6 +672,26 @@ bool Prediction::CaptureStartState(StartState& out) {
 
 	out.stamina = g_off.stamina ? NetVars::Get<float>(player, g_off.stamina) : 0.f;
 	out.valid = true;
+	return true;
+}
+
+bool Prediction::PredictedFlags(int* out) {
+	if (!out || !g_pred_flags_valid || !engine || !engine->IsInGame())
+		return false;
+	*out = g_pred_flags;
+	return true;
+}
+
+bool Prediction::LiveFlags(int* out) {
+	if (!out || !engine || !entitylist || !engine->IsInGame())
+		return false;
+	void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
+	if (!player)
+		return false;
+	ResolveOffsets();
+	if (!g_off.flags)
+		return false;
+	*out = NetVars::Get<int>(player, g_off.flags);
 	return true;
 }
 

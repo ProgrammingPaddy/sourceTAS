@@ -16,9 +16,12 @@
 namespace Breadcrumb {
 
 	enum Slot {
-		SlotInput   = 0,   // last key message seen by the input hook
+		SlotInput   = 0,   // last key/mouse-button message seen by the input hook
 		SlotCommand = 1,   // last hotkey command dispatched (EXEC -> DONE)
 		SlotFrame   = 2,   // last render-frame section reached
+		SlotUpdate  = 3,   // last stage reached INSIDE TasEditor::Update
+		SlotGame    = 4,   // game thread: CreateMove enter/exit
+		SlotPred    = 5,   // game thread: FinishMove hook stages
 		SlotCount
 	};
 

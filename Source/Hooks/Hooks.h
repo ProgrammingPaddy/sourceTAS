@@ -10,12 +10,13 @@ namespace Hooks {
 	// calling convention, so 'this' is the first parameter (no __fastcall/edx).
 	bool CreateMove(ClientModeShared*, float, CUserCmd*);
 
-	// OverrideView slot DISCOVERY (the fixed-index guess of 18 was never
-	// called on this build - see freecam_probe.log 2026-08-04): every
-	// candidate ClientModeShared virtual below the verified CreateMove(21)
-	// gets a transparent 4-register forwarder that hands its second argument
-	// to TasEditor's prober. The slot whose argument repeatedly matches the
-	// engine's OWN view (GetViewAngles + player eye position) IS OverrideView
-	// and gets pinned; every other wrapper stays a pure passthrough forever.
-	void InstallViewProbes(VMTHook* hook);
+	// Freecam view hook: ONLY OverrideView's slot (16 on this build, measured
+	// by the retired 12..20 discovery sweep - freecam_probe.log, four
+	// sessions). The broad sweep wrapped hot per-entity/key virtuals and was
+	// convicted by bisect for the map-load freezes (2026-08-05: probes out =
+	// freezes gone, ~100% repro before). One slot, memcpy-only wrapper;
+	// TasEditor re-verifies the layout against engine truth every session
+	// before any write, so a game update turns freecam off loudly instead of
+	// writing blind.
+	void InstallViewHook(VMTHook* hook);
 }

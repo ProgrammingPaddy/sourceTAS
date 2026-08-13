@@ -28,6 +28,7 @@
 #include "../World/Cvars.h"
 #include "../Menu/Theme.h"
 #include "../Menu/RecordPanel.h"
+#include "../Menu/Breadcrumb.h"
 
 #include <sstream>
 
@@ -45,7 +46,10 @@ namespace {
 	// Every tunable value = a LONG slider (coarse feel) + a numeric box with
 	// +-step arrows (precision), both bound to the same variable.
 	constexpr float kSliderW = 520.f;
-	constexpr float kInputW = 110.f;
+	// Wide enough for a sign + 4 digits + 2 decimals NEXT TO the InputFloat's
+	// two step buttons (which eat ~50px of the item width) - 110 clipped
+	// "-889.50"-class values.
+	constexpr float kInputW = 150.f;
 
 	bool FloatRow(const char* label, float* v, float lo, float hi,
 	              const char* fmt, float step = 0.1f, float fast = 1.f, int decimals = 2) {
@@ -104,11 +108,74 @@ namespace {
 				- io.MouseWheel * ImGui::GetTextLineHeight() * 5.f);
 	}
 
+	// The scrollABLE-child variant: such a child consumes the wheel itself,
+	// which dead-zones page scrolling even once the child has hit its end.
+	// Call straight after EndChild() with the scroll values captured INSIDE
+	// the child, plus a per-callsite `prev` holding LAST frame's scroll: this
+	// frame's wheel already landed on the child before our code ran, so the
+	// current position can't tell "was already at the end" from "this notch
+	// just clamped into the end". Only the former passes to the outer window
+	// - a notch that lands inside the child (even clamping into its edge)
+	// belongs to the child alone, so one wheel step can never move both.
+	void PassWheelAtEdge(float* prev, float scroll_y, float scroll_max) {
+		ImGuiIO& io = ImGui::GetIO();
+		const float was = *prev;    // where the child stood BEFORE this wheel
+		*prev = scroll_y;
+		if (io.MouseWheel == 0.f
+			|| !ImGui::IsMouseHoveringRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()))
+			return;
+		const bool was_top    = was <= 0.5f;
+		const bool was_bottom = was >= scroll_max - 0.5f;
+		if ((io.MouseWheel > 0.f && was_top) || (io.MouseWheel < 0.f && was_bottom))
+			ImGui::SetScrollY(ImGui::GetScrollY()
+				- io.MouseWheel * ImGui::GetTextLineHeight() * 5.f);
+	}
+
+	// Exclusive-choice row: one button per option, the selected one pink -
+	// combo semantics (pick exactly one) without the extra click into a
+	// dropdown, for the options that get flipped constantly. Only a CHANGE
+	// returns true, so re-clicking the active option never re-dirties the
+	// project. The label sits to the right like every other row.
+	bool ChoiceRow(const char* label, int* v, const char* const* opts, int count) {
+		bool changed = false;
+		ImGui::PushID(label);
+		for (int i = 0; i < count; ++i) {
+			if (i) ImGui::SameLine();
+			ImGui::PushID(i);
+			if (Theme::Tab(opts[i], *v == i, ImVec2(0, 0)) && *v != i) {
+				*v = i;
+				changed = true;
+			}
+			ImGui::PopID();
+		}
+		if (label[0] && !(label[0] == '#' && label[1] == '#')) {
+			ImGui::SameLine();
+			ImGui::Text("%s", label);
+		}
+		ImGui::PopID();
+		return changed;
+	}
+
+	// Sub-section divider: a muted label with a thin grey full-width underline,
+	// the quieter sibling of Theme::Heading's pink accent line. Groups related
+	// controls without boxing them (a full border doubled up on the child's
+	// own frame and read as heavy).
+	void SubHeading(const char* label) {
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s", label);
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		const float w = ImGui::GetContentRegionAvailWidth();
+		ImGui::GetWindowDrawList()->AddLine(
+			ImVec2(p.x, p.y + 1.f), ImVec2(p.x + w, p.y + 1.f),
+			ImGui::ColorConvertFloat4ToU32(ImVec4(0.55f, 0.55f, 0.62f, 0.30f)), 1.0f);
+		ImGui::Dummy(ImVec2(0.f, 3.f));
+	}
+
 	// ---------------------------------------------------------------- model --
 	// One segment type: held keyboard keys + a view that either holds or turns
 	// at a fixed rate. While airborne and turning, the strafe key (A/D) is
 	// auto-selected from the turn direction unless A or D is explicitly held.
-	enum PitchMode { PM_Const = 0, PM_Follow };
+	enum PitchMode { PM_Const = 0, PM_Follow, PM_Dynamic };
 	enum JumpMode  { JM_None = 0, JM_Hold, JM_AutoBhop };
 
 	struct GenParams {
@@ -140,9 +207,18 @@ namespace {
 		                              // segment's tick count
 		bool  yaw_abs = false;
 		float yaw_start = 0.f;
-		int   pitch_mode = PM_Const;
-		float pitch_val = 0.f;
+		int   pitch_mode = PM_Dynamic;   // DYNAMIC (human recipe) is the default
+		float pitch_val = 20.f;          // dynamic base / constant value, + = down
 		float pitch_mult = 1.f;
+		// DYNAMIC pitch recipe (v23), parameterized from the 7 recorded runs
+		// (scratchpad pitch_analyze.py, 2026-08-12): humans surf looking DOWN
+		// - straight-flight base ~+8..+27, another +20..+48 while carving
+		// (pitch tracks |yaw rate|; dyaw~dpitch corr up to +0.70), deeper
+		// when descending (watching the landing), motion rate-limited
+		// (|dpitch| p90 ~1, p99 ~1.7 deg/tick) and smooth.
+		float pitch_turn = 8.f;      // extra down-deg per deg/tick of |yaw rate|
+		float pitch_rate = 1.2f;     // max response, deg/tick
+		float pitch_desc = 0.35f;    // descent-follow strength (0..1.5)
 		bool  duck = false;
 		int   jump_mode = JM_None;
 		// Boundary SMOOTHING (straddle): >0 blends the view across this
@@ -164,18 +240,30 @@ namespace {
 		float ps_ground_turn = 75.f;  // WINDUP swing (deg): the view swings out this
 		                              // far opposite the carve, then returns to the
 		                              // start aim exactly at the jump (measured 60-90)
-		float ps_jump_dist = 500.f;   // AUTO-SOLVED: ground distance before the
-		                              // jump; the editor iterates it after each
-		                              // sim so the LANDING hits the goal ray tip
-		float ps_goal_dist = 900.f;   // the RAY's magnitude: horizontal distance
-		                              // from the segment start to the LANDING goal
+		float ps_jump_dist = 500.f;   // legacy (v18/v19 goal solver) - serialized,
+		float ps_goal_dist = 900.f;   // unused since the v3 recipe rework
 		int   ps_ground_dir = 1;      // ground strafe key (+1 A/left, -1 D/right)
 		int   ps_air_dir = 1;         // FIRST air strafe key
-		int   ps_strafes = 1;         // air phase = N alternating optimal strafes
-		float ps_air_bias = 0.f;      // the RAY's direction off the aim (deg,
-		                              // screen sign + = right; 0 = straight ahead)
+		int   ps_strafes = 2;         // AIR recipe: N alternating optimal strafes
+		                              // (spec default: two, optional 1..8)
+		int   ps_strafe_ticks = 24;   // AIR: FIXED ticks per strafe (human first
+		                              // strafes measured 22-25). Fixed-length
+		                              // alternation means the auto-duration can
+		                              // never re-shuffle the strafe layout - the
+		                              // old span-divided split flip-flopped the
+		                              // sides whenever the duration snapped
+		float ps_air_bias = 0.f;      // AIR steering tilt (deg, + = right, 0 =
+		                              // straight; bends the air path)
+		int   ps_air_ticks = 0;       // AIR duration; 0 = AUTO: the segment ends
+		                              // one tick past the landing (timing-based,
+		                              // slider for non-flat startzones)
+		int   ps_ground_extra = 0;    // extra build ticks past max ground speed
+		                              // (0 = the minimum-distance default)
 		bool  ps_crouch_end = true;   // crouch near the end (dodge the floor)
-		bool  ps_crouch_auto = true;  // auto-time the crouch to the last airborne tick
+		bool  ps_crouch_auto = true;  // legacy (serialized, ignored since the
+		                              // crouch went pure-timing: its landing
+		                              // detection re-timed against the hull
+		                              // lift = a feedback loop, "solving")
 		int   ps_crouch_lead = 2;     // manual: ticks before the segment end to crouch
 		int   ps_crouch_cached = -1;  // auto: last-airborne tick from the last sim (runtime)
 	};
@@ -289,8 +377,22 @@ namespace {
 	StartState g_anchor;
 	std::vector<EditSegment> g_segs;
 	int g_sel = -1;                   // selected segment
+
+	// Test-play divergence tracking: during an editor test play, the REAL
+	// player origin is compared per tick against the sim's states - the
+	// direct measurement of the "line is engine-exact" promise.
+	bool   g_testplay = false;
+	int    g_play_count = 0;
+	float  g_play_max = 0.f;
+	int    g_play_max_tick = -1;
+	int    g_play_first_tick = -1;    // first tick deviating > 0.5 u
+	Vector g_play_div_pos = Vector(0.f, 0.f, 0.f);
 	int g_cursor = 0;                 // playhead tick
 	bool g_show_hull = true;          // ghost hull at the playhead
+	int  g_dur_max = 300;             // Duration slider range cap (persisted;
+	                                  // render tab). A segment already longer
+	                                  // keeps its value - the row's max floors
+	                                  // at it so nothing ever silently clamps.
 	std::string g_status = "No segments. Capture an anchor and add one.";
 
 	// Picking (Targets tab).
@@ -332,6 +434,17 @@ namespace {
 	std::vector<Prediction::SimState> g_states;
 	std::vector<float> g_speed, g_gain, g_maxgain, g_eff;
 
+	// COAST line: a gray "if you let go of everything now" trajectory off the
+	// run's END (= end of the last segment). It is simmed as extra no-input
+	// ticks in the SAME pass, then PEELED into this separate buffer before any
+	// analysis runs - so g_states stays exactly the run and nothing else is
+	// touched. Draw-only. g_coast_from is the sim tick the coast begins at,
+	// set per sim request and read by the provider (-1 = off).
+	bool g_coast_line = false;         // toggle (render tab + bindable)
+	int  g_coast_ticks = 132;          // length in ticks (~2 s at 66t)
+	int  g_coast_from = -1;            // sim tick coast begins (-1 = disabled)
+	std::vector<Vector> g_coast_path;  // peeled coast origins (draw only)
+
 	bool g_dirty = false;
 	unsigned long long g_dirty_ms = 0;
 	bool g_sim_requested = false;
@@ -342,7 +455,22 @@ namespace {
 	// into torn-down CRT state at game exit (crash.log 2026-07-24, offset
 	// resolved to the g_files ??__F thunk via the linker map). A reference
 	// to a heap object registers no destructor at all.
-	std::vector<std::string>& g_files = *new std::vector<std::string>();
+	// One entry per .tasproj on disk, with the v22 summary header parsed up
+	// front so the Project pane can show what each file IS without loading it.
+	struct ProjFileInfo {
+		std::string name;                 // filename (with extension)
+		unsigned long long size = 0;      // bytes
+		unsigned long long mtime_raw = 0; // last write FILETIME (sort key)
+		SYSTEMTIME mtime = {};            // last write, local time
+		bool     has_info = false;        // v22+ summary header present
+		uint32_t version = 0;
+		char     map[64] = {};            // level at save time ("" = unknown)
+		uint32_t total_ticks = 0;
+		std::vector<std::pair<uint8_t, int32_t>> segs;   // kind code, ticks
+		bool     anchor_valid = false;    // v23+: the anchor rides the summary
+		float    anchor[3] = {};
+	};
+	std::vector<ProjFileInfo>& g_files = *new std::vector<ProjFileInfo>();
 	int g_sel_file = -1;
 
 	// ------------------------------------------------------------------ plan --
@@ -370,13 +498,30 @@ namespace {
 	// Slot + layout discovery: every candidate virtual is sampled; a slot
 	// pins when its argument matches the engine view (angles + eye) at
 	// STABLE offsets over several samples. Per-slot state, first pin wins.
-	int      g_fc_slot = -1;              // pinned OverrideView slot
-	int      g_fc_org_off = -1, g_fc_ang_off = -1;   // pinned CViewSetup offsets
-	bool     g_fc_pinned = false, g_fc_dead = false;
-	int      g_fc_samples = 0;            // total in-game samples (give-up counter)
-	int      g_fc_s_org[32] = {}, g_fc_s_ang[32] = {};   // per-slot candidate offs
-	int      g_fc_s_streak[32] = {};
-	uint64_t g_fc_s_last_ms[32] = {};     // per-slot probe throttle
+	// The CViewSetup layout for THIS client.dll build, measured by the
+	// retired 12..20 discovery sweep (freecam_probe.log, four consistent
+	// sessions, 2026-08-05): OverrideView = slot 16, view origin at +0x40,
+	// view angles at +0x4C. NEVER trusted blind: every session re-verifies
+	// them against engine truth (below) before a single write, so a game
+	// update that moves anything turns freecam off loudly.
+	constexpr int kFcSlot = 16;
+	constexpr int kFcOrgOff = 0x40;
+	constexpr int kFcAngOff = 0x4C;
+	// TRUSTED, not re-derived: six independent sessions measured the SAME
+	// slot and offsets (freecam_probe.log). The background check below is a
+	// diagnostic that can only LOG - it never gates the camera. (It used to,
+	// and it locked freecam out: OverrideView fires several times per frame -
+	// main view, 3D SKYBOX camera, others - so single-sample-per-frame
+	// checking kept grabbing the sky setup, failing, and finally tripping a
+	// give-up counter that disabled the feature outright.)
+	bool     g_fc_confirmed = false;      // background sanity check passed
+	int      g_fc_checks = 0;             // sanity-check attempts
+	// Hook-context stash RING: the wrapper memcpys EVERY call of the frame
+	// into its own slot, so the pump sees the main view even when the sky
+	// camera is also flowing through.
+	constexpr int kFcRing = 4;
+	unsigned char g_fc_stash[kFcRing][0x140] = {};
+	volatile LONG g_fc_stash_idx = 0;
 	// High-resolution frame timing (GetTickCount64's ~15.6 ms resolution
 	// quantized flight into visible bursts at high fps) + optional visual
 	// position smoothing. g_fc_pos is the true integrator; g_fc_pos_vis is
@@ -391,6 +536,7 @@ namespace {
 	int     g_plan_ovr_count = 0;
 	Frame   g_plan_raw[Prediction::kMaxSimTicks];
 	float   g_plan_anchor_yaw = 0.f;
+	float   g_plan_anchor_pitch = 0.f;
 	float   g_plan_cap = 30.f;
 	float   g_plan_accel = 37.5f;     // airaccel * wishspeed * interval
 
@@ -400,11 +546,108 @@ namespace {
 	float g_pv_entry_yaw = 0.f;
 	float g_pv_entry_heading = 0.f;   // velocity heading at segment entry (opt modes)
 	bool  g_pv_prev_jump = false;
-	// Prestrafe distance tracking: segment-entry origin (the jump fires by
-	// TRAVELED DISTANCE, the map-intuitive control) and the tick the air
-	// phase actually started at (for the strafe alternation split).
+	float g_pv_pitch = 0.f;           // HUMAN pitch: eased value carried per tick
+	// Prestrafe walk state: segment-entry origin (the ray + jump distance are
+	// measured from here), the tick the air phase actually started at (strafe
+	// alternation split), the tick the ground CARVE began (-1 = still in the
+	// build phase), and the view at the jump (the air blend's start).
 	Vector g_pv_ps_org = Vector(0.f, 0.f, 0.f);
 	int    g_pv_ps_gt = 0;
+	int    g_pv_ps_carve = -1;
+	int    g_pv_ps_plateau = -1;      // tick ground speed stopped climbing
+	float  g_pv_ps_prev_spd = -1.f;   // previous tick's 2D speed (plateau detect)
+	float  g_pv_ps_jump_view = 0.f;
+
+	// --- UNDO / REDO ---------------------------------------------------------
+	// Snapshot-based: segments + anchor + selection. A "pre" snapshot is kept
+	// refreshed while idle; the first USER mutation of a burst (MarkDirty with
+	// >800 ms since the previous one) pushes that pre-burst state, so slider
+	// drags coalesce into one undo step. Machine edits (the auto loops inside
+	// SimLandedStage, undo/redo itself) never push.
+	struct UndoState {
+		std::vector<EditSegment> segs;
+		StartState anchor;
+		int sel = -1;
+	};
+	void MarkDirty();   // defined below (calls back into UndoOnUserEdit)
+
+	std::vector<UndoState> g_undo_stack, g_redo_stack;
+	UndoState g_undo_pre;
+	bool     g_undo_pre_valid = false;
+	bool     g_machine_edit = false;
+	uint64_t g_last_user_edit_ms = 0;
+	bool     g_autosave_pending = false;
+
+	void CaptureUndoPre() {
+		g_undo_pre.segs = g_segs;
+		g_undo_pre.anchor = g_anchor;
+		g_undo_pre.sel = g_sel;
+		g_undo_pre_valid = true;
+	}
+
+	void UndoOnUserEdit() {
+		g_autosave_pending = true;   // any mutation (machine too) re-arms autosave
+		if (g_machine_edit)
+			return;
+		const uint64_t now = GetTickCount64();
+		if (now - g_last_user_edit_ms > 800 && g_undo_pre_valid) {
+			g_undo_stack.push_back(g_undo_pre);
+			if (g_undo_stack.size() > 50)
+				g_undo_stack.erase(g_undo_stack.begin());
+			g_redo_stack.clear();
+		}
+		g_last_user_edit_ms = now;
+	}
+
+	// Refresh the pre-burst snapshot while idle (throttled - raw segments can
+	// carry thousands of frames).
+	void UndoIdleTick() {
+		static uint64_t s_last_cap = 0;
+		const uint64_t now = GetTickCount64();
+		if (now - g_last_user_edit_ms > 800 && now - s_last_cap > 500) {
+			s_last_cap = now;
+			CaptureUndoPre();
+		}
+	}
+
+	void ApplyUndoState(const UndoState& s) {
+		g_machine_edit = true;
+		g_segs = s.segs;
+		g_anchor = s.anchor;
+		g_sel = s.sel;
+		if (g_sel >= static_cast<int>(g_segs.size()))
+			g_sel = static_cast<int>(g_segs.size()) - 1;
+		MarkDirty();
+		g_machine_edit = false;
+		CaptureUndoPre();
+		g_last_user_edit_ms = 0;
+	}
+
+	void DoUndo() {
+		if (g_undo_stack.empty()) {
+			g_status = "Nothing to undo.";
+			return;
+		}
+		UndoState cur;
+		cur.segs = g_segs; cur.anchor = g_anchor; cur.sel = g_sel;
+		g_redo_stack.push_back(std::move(cur));
+		ApplyUndoState(g_undo_stack.back());
+		g_undo_stack.pop_back();
+		g_status = "Undo.";
+	}
+
+	void DoRedo() {
+		if (g_redo_stack.empty()) {
+			g_status = "Nothing to redo.";
+			return;
+		}
+		UndoState cur;
+		cur.segs = g_segs; cur.anchor = g_anchor; cur.sel = g_sel;
+		g_undo_stack.push_back(std::move(cur));
+		ApplyUndoState(g_redo_stack.back());
+		g_redo_stack.pop_back();
+		g_status = "Redo.";
+	}
 
 	void Layout() {
 		g_starts.clear();
@@ -421,7 +664,10 @@ namespace {
 			g_cursor = 0;
 	}
 
+	void UndoOnUserEdit();   // defined with the undo machinery below
+
 	void MarkDirty() {
+		UndoOnUserEdit();
 		Layout();
 		g_dirty = true;
 		g_dirty_ms = GetTickCount64();
@@ -531,6 +777,25 @@ namespace {
 			g_pv_last_yaw = g_plan_anchor_yaw;
 			g_pv_entry_yaw = g_plan_anchor_yaw;
 			g_pv_prev_jump = false;
+			g_pv_pitch = g_plan_anchor_pitch;   // HUMAN pitch eases from the anchor
+		}
+
+		// COAST tail: once past the run (and any solver overrun), emit a pure
+		// NO-INPUT frame - view frozen at the last emitted angles (no mouse),
+		// no movement keys, no buttons. The engine then sims friction/gravity
+		// naturally. These ticks are peeled off after the sim, so they never
+		// enter the run's states or analysis.
+		if (g_coast_from >= 0 && tick >= g_coast_from) {
+			out->viewangles[0] = g_pv_pitch;     // held (no view change)
+			out->viewangles[1] = g_pv_last_yaw;
+			out->forwardmove = 0.f;
+			out->sidemove = 0.f;
+			out->upmove = 0.f;
+			out->buttons = 0;
+			out->impulse = 0;
+			out->mousedx = 0;
+			out->mousedy = 0;
+			return;   // leaves g_pv_last_yaw / g_pv_pitch frozen for the next tick
 		}
 		while (g_pv_seg + 1 < g_plan_count && tick >= g_plan[g_pv_seg + 1].start)
 			g_pv_seg++;
@@ -543,6 +808,7 @@ namespace {
 			*out = g_plan_raw[ps.raw_off + tc];
 			g_pv_last_yaw = out->viewangles[1];
 			g_pv_prev_jump = (out->buttons & IN_JUMP) != 0;
+			g_pv_pitch = out->viewangles[0];   // HUMAN pitch continues seamlessly
 			return;
 		}
 
@@ -583,45 +849,67 @@ namespace {
 				yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
 			smove = (side > 0) ? -450.f : 450.f;   // +1 = A (left), -1 = D (right)
 		} else if (g.prestrafe) {
-			// PRESTRAFE, point-and-shoot: the user points a 2D RAY from the
-			// segment start (direction + magnitude = the LANDING goal) and the
-			// recipe emits the whole input set - wind-and-return ground carve
-			// aimed down the ray, jump (distance auto-solved so the landing
-			// hits the ray tip - see UpdatePrestrafeJumpDist), goal-homing
-			// optimal air strafes, crouch skim. Only inputs are emitted; the
-			// engine sims the real physics.
+			// PRESTRAFE v3 (user spec 2026-08-06): TWO RECIPES, sliders, NO
+			// solvers - "the final location is all that matters, the path is
+			// the mixture of recipes."
+			//   GROUND recipe: W+A speed-build until ground speed PLATEAUS
+			//   (max ground speed in the minimum distance) plus an optional
+			//   extra, then the carve sweeps the VELOCITY onto the segment
+			//   aim as hard as the server's ground accel allows, and the jump
+			//   fires the moment the heading ALIGNS with the aim. Getting max
+			//   speed then jumping is the whole job.
+			//   AIR recipe: N alternating optimal strafes (default two) with
+			//   a constant steering tilt - a convenient default shape. Its
+			//   duration is the air slider, or AUTO = one tick past landing
+			//   (the segment length snaps to it - see the duration snap).
+			//   Crouch: the tick before landing by default (adjustable).
+			// View per tick = whatever makes the WISH lead the velocity by
+			// the steer command (W+A's wish sits 45 deg to the A-side of the
+			// view): view = vel_heading + steer - dir*45.
 			if (t == 0) {
-				g_pv_ps_org = prev.origin;   // the ray starts here
 				g_pv_ps_gt = 0;
+				g_pv_ps_carve = -1;
+				g_pv_ps_plateau = -1;
+				g_pv_ps_prev_spd = -1.f;
+				g_pv_ps_jump_view = g_pv_entry_yaw;
 			}
-			// The ray: screen sign (+ = right of the aim), like every knob.
-			const float ray_yaw = NormYaw(g_pv_entry_yaw - g.ps_air_bias);
-			const float ray_rad = ray_yaw * (kPi / 180.f);
-			const float gx = g_pv_ps_org.X + cosf(ray_rad) * g.ps_goal_dist;
-			const float gy = g_pv_ps_org.Y + sinf(ray_rad) * g.ps_goal_dist;
-			const float pdx = prev.origin.X - g_pv_ps_org.X;
-			const float pdy = prev.origin.Y - g_pv_ps_org.Y;
-			const float traveled = sqrtf(pdx * pdx + pdy * pdy);
-			const float target = (g.ps_jump_dist < 10.f) ? 10.f : g.ps_jump_dist;
-			// Ground until the (auto-solved) jump distance is covered; a couple
-			// of ticks stay reserved so the air phase always exists.
-			const bool ground_phase = onground && traveled < target && t < ps.ticks - 2;
+			const float aim = g_pv_entry_yaw;   // straight-ahead by default
+			const float spd = Speed2D(prev.velocity);
+			// Plateau = the build stopped gaining: max ground speed reached
+			// in the minimum distance.
+			if (g_pv_ps_plateau < 0 && onground && t >= 4
+				&& spd > 100.f && spd - g_pv_ps_prev_spd < 0.25f)
+				g_pv_ps_plateau = t;
+			g_pv_ps_prev_spd = spd;
+			const int extra = (g.ps_ground_extra < 0) ? 0 : g.ps_ground_extra;
+			if (g_pv_ps_carve < 0 && g_pv_ps_plateau >= 0
+				&& t >= g_pv_ps_plateau + extra)
+				g_pv_ps_carve = t;
+			// The carve completes by ALIGNMENT, not by a clock: the jump fires
+			// the moment the velocity heading reaches the aim. The sweep runs
+			// at whatever rate the server's ground accel physically allows
+			// (the steer clamp saturates), so changing sv_accelerate reshapes
+			// the carve's length but can never break the recipe - the launch
+			// is ALWAYS down the aim. (The old timed sweep was tuned to one
+			// accel setting and launched off-aim on any other.)
+			const float vh = HeadingDeg(prev.velocity,
+				NormYaw(aim - static_cast<float>(g.ps_ground_dir) * g.ps_ground_turn));
+			const bool aligned = g_pv_ps_carve >= 0
+				&& fabsf(NormYaw(aim - vh)) < 2.f;
+			const bool ground_phase = onground && !aligned && t < ps.ticks - 2;
 			if (ground_phase) {
 				g_pv_ps_gt = t + 1;   // the air phase starts after this tick
-				// Wind-and-return carve (shape measured from human runs 4-6:
-				// swing out ~58% of the way, faster accelerating return), run
-				// on TRAVELED DISTANCE and aimed down the RAY: the view morphs
-				// from the entry aim onto the ray while the S-swing plays out,
-				// so yaw(jump) = the ray direction exactly.
-				float u = traveled / target;
-				if (u > 1.f) u = 1.f;
-				const float fp = 0.58f;   // out-swing fraction (measured)
-				const float s = (u < fp)
-					? 0.5f - 0.5f * cosf(kPi * (u / fp))
-					: 0.5f + 0.5f * cosf(kPi * ((u - fp) / (1.f - fp)));
-				const float base = g_pv_entry_yaw + NormYaw(ray_yaw - g_pv_entry_yaw) * u;
-				yaw = NormYaw(base
-					- static_cast<float>(g.ps_ground_dir) * g.ps_ground_turn * s);
+				// Build holds the velocity off-aim; the carve steers straight
+				// onto the aim (the clamped P gives a natural fast-then-ease
+				// sweep as the error shrinks).
+				const float off = (g_pv_ps_carve >= 0) ? 0.f : g.ps_ground_turn;
+				const float desired = NormYaw(aim
+					- static_cast<float>(g.ps_ground_dir) * off);
+				float steer = NormYaw(desired - vh) * 0.6f;
+				if (steer > 70.f) steer = 70.f;
+				if (steer < -70.f) steer = -70.f;
+				yaw = NormYaw(vh + steer - static_cast<float>(g.ps_ground_dir) * 45.f);
+				g_pv_ps_jump_view = yaw;   // the air blend starts from here
 				fmove = 450.f;   // W
 				smove = (g.ps_ground_dir > 0) ? -450.f : 450.f;   // A / D
 			} else {
@@ -632,25 +920,32 @@ namespace {
 				// ground phase went. Near the goal the steering freezes (the
 				// bearing would flip as it passes); the tilt cap keeps the
 				// cost tiny (cos^2 4 deg = 99.5% of max gain).
-				const int air_ticks = ps.ticks - g_pv_ps_gt;
+				// FIXED-LENGTH strafes: each lasts ps_strafe_ticks, alternation
+				// runs through N strafes, then the last side HOLDS. The layout
+				// depends only on ticks-since-jump - the segment's auto-sizing
+				// can never re-shuffle it (the old span-divided split moved the
+				// side boundaries every time the duration snapped, flip-
+				// flopping the path: the reported "solver behavior").
 				const int at = t - g_pv_ps_gt;
 				const int N = (g.ps_strafes < 1) ? 1 : g.ps_strafes;
-				int si = (air_ticks > 0) ? (at * N) / air_ticks : 0;
-				if (si < 0) si = 0;
+				const int per = (g.ps_strafe_ticks < 6) ? 6 : g.ps_strafe_ticks;
+				int si = (at < 0) ? 0 : at / per;
 				if (si >= N) si = N - 1;
 				const int side = (si % 2 == 0) ? g.ps_air_dir : -g.ps_air_dir;
 				const float h = HeadingDeg(prev.velocity, g_pv_last_yaw);
-				const float tgx = gx - prev.origin.X;
-				const float tgy = gy - prev.origin.Y;
-				const float tgd = sqrtf(tgx * tgx + tgy * tgy);
-				float tilt = 0.f;
-				if (tgd > 50.f) {
-					const float desired = Deg(atan2f(tgy, tgx));
-					tilt = NormYaw(desired - h) * 0.25f;
-					if (tilt > 4.f) tilt = 4.f;
-					if (tilt < -4.f) tilt = -4.f;
+				// Max-gain line + a constant steering tilt (+ = right): the
+				// path continues the launch direction, bent only by the slider.
+				float ay = NormYaw(h - g.ps_air_bias);
+				// Blend from the LAST GROUND VIEW onto the optimal air line
+				// over a few ticks so the jump has no visible snap (same
+				// straddle idea as boundary smoothing; the brief off-optimal
+				// wish costs ~nothing).
+				const int ab = 8;
+				if (at >= 0 && at < ab) {
+					const float w = static_cast<float>(at) / static_cast<float>(ab);
+					ay = NormYaw(ay + NormYaw(g_pv_ps_jump_view - ay) * (1.f - w));
 				}
-				yaw = NormYaw(h + tilt);
+				yaw = ay;
 				fmove = 0.f;
 				smove = (side > 0) ? -450.f : 450.f;
 			}
@@ -658,15 +953,16 @@ namespace {
 			// the ground key that same tick since smove already switched sides).
 			if (t == g_pv_ps_gt && onground)
 				ps_jump = true;
-			// Crouch at the last airborne tick (auto, from the last sim) or a
-			// manual lead before the end - lifts the hull ~18u to skim the floor.
+			// Crouch: PURE TIMING - this many ticks before the segment end,
+			// nothing else. The end sits one tick past the landing by default
+			// (the duration snap), so lead 2 = crouch the tick before landing
+			// with zero landing detection here. (The old auto-timer looked at
+			// the sim's ground flags, and the crouch's own ~18u hull lift then
+			// MOVED the landing it was timed against - a feedback loop the
+			// user rightly called solving behavior.)
 			if (g.ps_crouch_end) {
-				int ctick = g.ps_crouch_auto
-					? g.ps_crouch_cached
-					: (ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead));
-				if (g.ps_crouch_auto && ctick < 0)   // no sim yet: manual fallback
-					ctick = ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead);
-				if (ctick >= 0 && t >= ctick)
+				const int ctick = ps.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead);
+				if (t >= ctick)
 					ps_duck = true;
 			}
 		} else {
@@ -761,6 +1057,26 @@ namespace {
 				? -Deg(atan2f(prev.velocity.Z, v2)) * g.pitch_mult : 0.f;
 			if (pitch > 89.f) pitch = 89.f;
 			if (pitch < -89.f) pitch = -89.f;
+		} else if (g.pitch_mode == PM_Dynamic) {
+			// Dynamic recipe (measured; see GenParams): target = base
+			// + turn-coupling * |this tick's yaw rate|
+			// + descent-follow * downslope while falling,
+			// then ease toward it at most pitch_rate deg/tick. Source sign:
+			// + = down. Deterministic - same inputs, same stream.
+			float dyaw = fabsf(NormYaw(yaw - g_pv_last_yaw));
+			if (dyaw > 6.f) dyaw = 6.f;    // boundary snaps aren't "turning"
+			float target = g.pitch_val + g.pitch_turn * dyaw;
+			const float v2 = Speed2D(prev.velocity);
+			if (!onground && prev.velocity.Z < 0.f && (v2 > 1.f || -prev.velocity.Z > 1.f))
+				target += Deg(atan2f(-prev.velocity.Z, v2)) * g.pitch_desc;
+			if (target > 85.f) target = 85.f;
+			if (target < -30.f) target = -30.f;
+			float step = target - g_pv_pitch;
+			const float rate = (g.pitch_rate < 0.05f) ? 0.05f : g.pitch_rate;
+			if (step > rate) step = rate;
+			if (step < -rate) step = -rate;
+			g_pv_pitch += step;
+			pitch = g_pv_pitch;
 		}
 
 		int buttons = 0;
@@ -815,6 +1131,10 @@ namespace {
 
 		g_pv_last_yaw = yaw;
 		g_pv_prev_jump = (buttons & IN_JUMP) != 0;
+		// Track the EMITTED pitch in every mode, so a HUMAN segment following
+		// a const/follow/raw neighbor eases from where the view actually was
+		// instead of snapping from a stale value.
+		g_pv_pitch = pitch;
 	}
 
 	bool BuildPlan() {
@@ -852,11 +1172,65 @@ namespace {
 		}
 
 		g_plan_anchor_yaw = g_anchor.yaw;
+		g_plan_anchor_pitch = g_anchor.pitch;
 		float interval = Prediction::LastDiag().interval_per_tick;
 		if (interval <= 0.f) interval = 0.015f;
 		g_plan_cap = g_air_cap;
 		g_plan_accel = g_air_accel * g_wishspeed * interval;
 		return start > 0;
+	}
+
+	// RAMP (surf board) efficiency: AirAccelerate is IDENTICAL on a ramp -
+	// the wish add doesn't know the plane exists; the clip afterwards just
+	// removes whatever points into the surface, and gravity converts along
+	// the slope for free. So the score is the AIR COMPONENT of the tick:
+	// measured gain MINUS the slope's zero-input physics, against the same
+	// MaxAirGain optimum free flight uses. The plane is recovered from the
+	// sim data itself (consecutive slide velocities lie IN the ramp plane,
+	// so their cross product is its normal) and is used ONLY to compute that
+	// zero-input baseline. Free flight never reaches here (RecomputeDiag's
+	// gravity check runs first); every gate below leaves the tick
+	// UNSCOREABLE rather than guessing. Toggleable on the Rendering tab.
+	bool g_ramp_eff = true;   // persisted; also gates the gradient on boards
+	void RampScore(int i, float prev_speed) {
+		if (!g_ramp_eff)
+			return;
+		const Vector& v1 = g_states[i - 1].velocity;   // entering the tick
+		const Vector& v2 = g_states[i].velocity;       // leaving it (in-plane)
+		const float m1 = sqrtf(v1.X * v1.X + v1.Y * v1.Y + v1.Z * v1.Z);
+		const float m2 = sqrtf(v2.X * v2.X + v2.Y * v2.Y + v2.Z * v2.Z);
+		if (m1 < 50.f || m2 < 50.f)
+			return;                                    // too slow: normal too noisy
+		Vector nrm(v1.Y * v2.Z - v1.Z * v2.Y,
+		           v1.Z * v2.X - v1.X * v2.Z,
+		           v1.X * v2.Y - v1.Y * v2.X);
+		const float nm = sqrtf(nrm.X * nrm.X + nrm.Y * nrm.Y + nrm.Z * nrm.Z);
+		if (nm < m1 * m2 * 0.004f)
+			return;                                    // near-parallel: no stable plane
+		nrm.X /= nm; nrm.Y /= nm; nrm.Z /= nm;
+		if (nrm.Z < 0.f) { nrm.X = -nrm.X; nrm.Y = -nrm.Y; nrm.Z = -nrm.Z; }
+		if (nrm.Z < 0.02f || nrm.Z > 0.999f)
+			return;                                    // wall / floor: not a ride
+
+		float interval = Prediction::LastDiag().interval_per_tick;
+		if (interval <= 0.f) interval = 0.015f;
+		// Pre-clip velocity entering the tick (gravity applied, no input yet).
+		const Vector pre(v1.X, v1.Y, v1.Z - g_gravity * interval);
+		const float pen = pre.X * nrm.X + pre.Y * nrm.Y + pre.Z * nrm.Z;
+		if (pen > -1.f)
+			return;                                    // not moving INTO the plane: no slide
+		// BASELINE: the engine's clip (overbounce 1) with zero input - the
+		// slope physics the tick gives for free.
+		const Vector base(pre.X - pen * nrm.X, pre.Y - pen * nrm.Y, pre.Z - pen * nrm.Z);
+		const float base2d = sqrtf(base.X * base.X + base.Y * base.Y);
+
+		g_maxgain[i] = MaxAirGain(prev_speed);         // the SAME yardstick as flight
+		if (g_maxgain[i] > 0.001f) {
+			g_eff[i] = (g_gain[i] - (base2d - prev_speed)) / g_maxgain[i];
+			if (g_eff[i] > 1.f) g_eff[i] = 1.f;        // baseline-estimate guard
+		} else {
+			g_maxgain[i] = 0.f;
+		}
 	}
 
 	void RecomputeDiag() {
@@ -877,17 +1251,29 @@ namespace {
 		g_plan_accel = g_air_accel * g_wishspeed * interval;
 
 		float prev_speed = Speed2D(g_anchor.velocity);
+		float prev_vz = g_anchor.velocity.Z;
 		for (int i = 0; i < n; ++i) {
 			const float sp = Speed2D(g_states[i].velocity);
 			g_speed[i] = sp;
 			g_gain[i] = sp - prev_speed;
 			const bool air = (i > 0) && ((g_states[i - 1].flags & FL_ONGROUND) == 0);
+			// FREE FLIGHT (gravity alone explains the vertical change): score
+			// the raw gain against the air-accel optimum - nothing else
+			// touched the tick. Everything else airborne goes to RampScore,
+			// which separates slope physics from strafing and scores only the
+			// controllable part (raw scoring of slide ticks read >1000%).
 			if (air) {
-				g_maxgain[i] = MaxAirGain(prev_speed);
-				if (g_maxgain[i] > 0.001f)
-					g_eff[i] = g_gain[i] / g_maxgain[i];
+				const float expect_vz = prev_vz - g_gravity * interval;
+				if (fabsf(g_states[i].velocity.Z - expect_vz) < 1.5f) {
+					g_maxgain[i] = MaxAirGain(prev_speed);
+					if (g_maxgain[i] > 0.001f)
+						g_eff[i] = g_gain[i] / g_maxgain[i];
+				} else {
+					RampScore(i, prev_speed);
+				}
 			}
 			prev_speed = sp;
+			prev_vz = g_states[i].velocity.Z;
 		}
 	}
 
@@ -3074,47 +3460,20 @@ namespace {
 	void VerifyPump();        // fwd
 	void CorrectPump();       // fwd
 
-	// PRESTRAFE auto-crouch: after a sim, set each auto prestrafe segment's
-	// crouch tick to its LAST AIRBORNE tick (the max-speed moment, right
-	// before the floor). Crouching lifts the hull ~18u and delays landing,
-	// so the tick can shift a little on the re-sim - settle a few rounds then
-	// stop (the manual offset covers any last-tick preference).
-	void UpdatePrestrafeCrouch() {
-		static int settle = 0;
-		if (!g_valid || g_states.empty()) { settle = 0; return; }
-		bool changed = false;
-		for (size_t k = 0; k < g_segs.size(); ++k) {
-			EditSegment& s = g_segs[k];
-			if (s.raw || s.is_solver || !s.gen.prestrafe || !s.gen.ps_crouch_auto)
-				continue;
-			const int start = (k < g_starts.size()) ? g_starts[k] : 0;
-			int end = start + s.Ticks();
-			if (end > static_cast<int>(g_states.size())) end = static_cast<int>(g_states.size());
-			int last_air = -1;
-			for (int i = start; i < end; ++i)
-				if (!(g_states[i].flags & FL_ONGROUND))
-					last_air = i - start;
-			if (last_air >= 0 && last_air != s.gen.ps_crouch_cached) {
-				s.gen.ps_crouch_cached = last_air;
-				changed = true;
-			}
-		}
-		if (changed && settle < 6) { settle++; MarkDirty(); }
-		else settle = 0;
-	}
+	// (The old auto-crouch solver is GONE - 2026-08-06, user: "stop solving
+	// behavior for prestrafe". It timed the crouch off the sim's ground
+	// flags, and the crouch's own hull lift then moved the landing it was
+	// timed against - an oscillating feedback loop. Crouch is now a pure
+	// ticks-before-end lead applied in the provider.)
 
-	// PRESTRAFE goal solve. Two coupled fixed-point loops per sim:
-	//   1. DURATION is fully automatic (the tick slider is gone - the recipe
-	//      owns its length): while the sim never lands inside the segment the
-	//      duration GROWS, and once a landing exists it snaps to landing+3.
-	//      This is what un-deadlocks everything - without a landing the jump
-	//      distance could never correct, and the default duration was far too
-	//      short to ever produce one (the "2-tick air phase" bug).
-	//   2. JUMP DISTANCE walks by the landing's radial error to the goal ray
-	//      tip (damped 0.8; the air distance is nearly invariant to small
-	//      jump-distance changes, so it converges in a few rounds). Pinned at
-	//      its bounds when the goal is unreachable - the readout says so.
-	void UpdatePrestrafeJumpDist() {
+	// PRESTRAFE duration snap (v3: recipes, NOT solvers). The recipes are
+	// feed-forward; the only thing measured from the sim is WHERE things
+	// happened, to place the segment END:
+	//   air slider > 0 -> end = jump tick + slider ticks (timing-based, for
+	//                     non-flat startzones and edge cases);
+	//   auto (0)       -> end = ONE TICK PAST the landing (clearing the edge).
+	// No goal feedback loop exists anymore, so this converges in a sim or two.
+	void UpdatePrestrafeDuration() {
 		static int settle = 0;
 		if (!g_valid || g_states.empty()) { settle = 0; return; }
 		bool changed = false;
@@ -3127,8 +3486,6 @@ namespace {
 			if (end > static_cast<int>(g_states.size())) end = static_cast<int>(g_states.size());
 			if (end <= start + 2)
 				continue;
-			const Vector o0 = (start > 0 && start - 1 < static_cast<int>(g_states.size()))
-				? g_states[start - 1].origin : g_anchor.origin;
 			int jt = -1, lt = -1;
 			for (int i = start; i < end; ++i) {
 				const bool on = (g_states[i].flags & FL_ONGROUND) != 0;
@@ -3139,62 +3496,59 @@ namespace {
 					break;
 				}
 			}
-			if (lt < 0) {
-				// No landing inside the segment (ground still carving, or the
-				// flight outlives the duration): GROW, bounded.
-				if (s.gen.ticks < 1200) {
-					int nt = s.gen.ticks + s.gen.ticks / 2 + 30;
-					if (nt > 1200) nt = 1200;
-					s.gen.ticks = nt;
-					changed = true;
-				}
-				continue;
-			}
-			// Landing exists: the segment IS the recipe - snap the duration
-			// just past the landing...
-			const int want_ticks = (lt - start) + 3;
-			if (want_ticks >= 16 && want_ticks != s.gen.ticks) {
-				s.gen.ticks = want_ticks;
+			int want;
+			if (jt >= 0 && s.gen.ps_air_ticks > 0)
+				want = (jt - start) + s.gen.ps_air_ticks;   // manual air duration
+			else if (lt >= 0)
+				want = (lt - start) + 2;                    // one tick past landing
+			else if (jt >= 0)
+				want = (jt - start) + 220;                  // auto, still airborne:
+				                                            // generous flight window
+			else
+				want = s.gen.ticks + s.gen.ticks / 2 + 30;  // never even jumped: grow
+			if (want < 16) want = 16;
+			if (want > 1200) want = 1200;
+			const int dtk = want - s.gen.ticks;
+			if (dtk > 1 || dtk < -1) {
+				s.gen.ticks = want;
 				changed = true;
 			}
-			// ...and walk the jump distance by the landing's error to the goal.
-			const float dx = g_states[lt].origin.X - o0.X;
-			const float dy = g_states[lt].origin.Y - o0.Y;
-			const float land_dist = sqrtf(dx * dx + dy * dy);
-			const float err = s.gen.ps_goal_dist - land_dist;
-			if (fabsf(err) > 2.f) {
-				float nd = s.gen.ps_jump_dist + err * 0.8f;
-				if (nd < 10.f) nd = 10.f;
-				if (nd > s.gen.ps_goal_dist) nd = s.gen.ps_goal_dist;
-				if (fabsf(nd - s.gen.ps_jump_dist) > 0.5f) {
-					s.gen.ps_jump_dist = nd;
-					changed = true;
-				}
-			}
 		}
-		if (changed && settle < 14) { settle++; MarkDirty(); }
+		if (changed && settle < 10) { settle++; MarkDirty(); }
 		else settle = 0;
 	}
 
 	// Everything that runs when a sim lands, with a stage marker so a fault
 	// names its location. Lives behind SimLandedGuarded's POD-only SEH frame.
 	void SimLandedStage() {
+		// Everything in here is MACHINE refinement (auto duration, pumps,
+		// corrections) - none of it may open a new undo step.
+		g_machine_edit = true;
 		g_stage_name = "TakeSim";
 		const int n = Prediction::SimCount();
 		g_sim_fault = Prediction::SimFaulted();
 		g_frames.resize(n);
 		g_states.resize(n);
 		Prediction::TakeSim(g_frames.data(), g_states.data());
-		g_valid = n > 0;
+		// Peel the no-input COAST tail off BEFORE anything else looks at
+		// g_states, so the run's states/frames are exactly what they'd be
+		// without the coast - every analysis below is untouched.
+		g_coast_path.clear();
+		if (g_coast_from >= 0 && n > g_coast_from) {
+			g_coast_path.reserve(n - g_coast_from);
+			for (int i = g_coast_from; i < n; ++i)
+				g_coast_path.push_back(g_states[i].origin);
+			g_states.resize(g_coast_from);
+			g_frames.resize(g_coast_from);
+		}
+		g_valid = !g_states.empty();
 		g_sim_requested = false;
 		g_stage_name = "RecomputeDiag";
 		RecomputeDiag();
 		g_stage_name = "AnalyzeRealPass";
 		AnalyzeRealPass();
-		g_stage_name = "PrestrafeCrouch";
-		UpdatePrestrafeCrouch();
-		g_stage_name = "PrestrafeJumpDist";
-		UpdatePrestrafeJumpDist();
+		g_stage_name = "PrestrafeDuration";
+		UpdatePrestrafeDuration();
 		if (g_batch.active) {
 			g_stage_name = "BatchPump";
 			BatchPump();
@@ -3206,6 +3560,7 @@ namespace {
 			CorrectPump();
 		}
 		g_stage_name = "";
+		g_machine_edit = false;
 	}
 	bool SimLandedGuarded() {
 		__try {
@@ -3213,6 +3568,7 @@ namespace {
 			return true;
 		} __except (EXCEPTION_EXECUTE_HANDLER) {
 			g_guard_code = static_cast<int>(GetExceptionCode());
+			g_machine_edit = false;   // never leave the undo gate stuck shut
 			return false;
 		}
 	}
@@ -4733,6 +5089,10 @@ namespace {
 		X("trail3",        WorldDraw::corner_trails[3]) \
 		X("ghost_hull",    g_show_hull) \
 		X("replay_hud",    WorldDraw::show_replay_hud) \
+		X("coast_line",    g_coast_line) \
+		X("coast_ticks",   g_coast_ticks) \
+		X("ramp_eff",      g_ramp_eff) \
+		X("dur_max",       g_dur_max) \
 		X("min_eff",       g_min_eff) \
 		X("bsp_wire",      BspWorld::draw_wireframe) \
 		X("bsp_markers",   BspWorld::show_markers) \
@@ -4740,7 +5100,15 @@ namespace {
 		X("bsp_budget",    BspWorld::line_budget) \
 		X("bsp_solid",     BspWorld::show_solid) \
 		X("bsp_clip",      BspWorld::show_playerclip) \
-		X("bsp_ladder",    BspWorld::show_ladder)
+		X("bsp_ladder",    BspWorld::show_ladder) \
+		X("triggers_sim",  BspWorld::apply_triggers) \
+		X("triggers_show", BspWorld::show_triggers) \
+		X("trig_tp",       BspWorld::show_trig_tp) \
+		X("trig_push",     BspWorld::show_trig_push) \
+		X("trig_grav",     BspWorld::show_trig_grav) \
+		X("trig_links",    BspWorld::show_trig_links) \
+		X("trig_events",   WorldDraw::show_trig_events) \
+		X("autohop",       RecordPanel::AutohopEnabled())
 
 	void PrefPut(std::string& out, const char* key, bool v) {
 		out += key; out += v ? " 1\n" : " 0\n";
@@ -4843,6 +5211,8 @@ namespace {
 		return out.substr(first, last - first + 1);
 	}
 
+	bool ReadProjSummary(const std::string& path, ProjFileInfo& fi);   // below
+
 	void RefreshFiles() {
 		g_files.clear();
 		g_sel_file = -1;
@@ -4854,10 +5224,27 @@ namespace {
 		if (handle == INVALID_HANDLE_VALUE)
 			return;
 		do {
-			if (!(find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-				g_files.push_back(find.cFileName);
+			if (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+				continue;
+			ProjFileInfo fi;
+			fi.name = find.cFileName;
+			fi.size = (static_cast<unsigned long long>(find.nFileSizeHigh) << 32)
+				| find.nFileSizeLow;
+			fi.mtime_raw = (static_cast<unsigned long long>(find.ftLastWriteTime.dwHighDateTime) << 32)
+				| find.ftLastWriteTime.dwLowDateTime;
+			FILETIME local = {};
+			if (FileTimeToLocalFileTime(&find.ftLastWriteTime, &local))
+				FileTimeToSystemTime(&local, &fi.mtime);
+			ReadProjSummary(dir + "\\" + fi.name, fi);
+			g_files.push_back(std::move(fi));
 		} while (FindNextFileA(handle, &find));
 		FindClose(handle);
+		// Most recently saved first - the project being hunted for is almost
+		// always a recent one.
+		std::sort(g_files.begin(), g_files.end(),
+			[](const ProjFileInfo& a, const ProjFileInfo& b) {
+				return a.mtime_raw > b.mtime_raw;
+			});
 	}
 
 	constexpr char kProjMagic[4] = { 'S', 'T', 'P', 'J' };
@@ -4880,7 +5267,18 @@ namespace {
 	// v18: prestrafe gains ps_jump_dist (ground phase ends by DISTANCE).
 	// v19: prestrafe gains ps_goal_dist (point-and-shoot goal ray; ps_air_bias
 	//      is reinterpreted as the ray's direction off the aim).
-	constexpr uint32_t kProjVersion = 19;
+	// v20: prestrafe v3 recipes - gains ps_air_ticks + ps_ground_extra;
+	//      ps_air_bias returns to a steering tilt; jump/goal dists legacy.
+	// v21: prestrafe gains ps_strafe_ticks (fixed-length air strafes).
+	// v22: SUMMARY HEADER between the version and the anchor - map name,
+	//      total ticks, per-segment (kind, ticks) - so the Project pane can
+	//      browse files without walking the versioned body. Display-only;
+	//      the body stays the truth. Pre-v22 files load fine and just show
+	//      name + date in the browser.
+	// v23: gen gains the DYNAMIC pitch recipe fields (pitch_turn, pitch_rate,
+	//      pitch_desc) appended at the gen block's tail; the summary header
+	//      gains the anchor (valid flag + origin) after the segment list.
+	constexpr uint32_t kProjVersion = 23;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -4898,16 +5296,102 @@ namespace {
 			&& R(i, f.buttons) && R(i, f.impulse) && R(i, f.mousedx) && R(i, f.mousedy);
 	}
 
-	bool SaveProject() {
-		const std::string dir = ProjectDir();
-		std::string base = SanitizeName(g_name);
-		if (dir.empty() || base.empty()) { g_status = "Invalid project name."; return false; }
+	// Segment KIND codes for the v22 summary header, mirroring the segment
+	// list's labels (display-only - the loader never branches on these).
+	uint8_t SegKindCode(const EditSegment& s) {
+		if (s.raw) return 1;
+		if (s.is_solver) return s.solver.applied_ride ? 4 : (s.solver.solved ? 3 : 2);
+		if (s.gen.prestrafe) return 5;
+		if (s.gen.yaw_mode == 2) return s.gen.opt_dir > 0 ? 6 : 7;
+		if (s.gen.yaw_mode == 3) return 8;
+		if (s.gen.yaw_mode == 4) return 9;
+		return 0;
+	}
+	const char* SegKindName(uint8_t code) {
+		switch (code) {
+		case 1: return "RAW";
+		case 2: return "SOLVER (unsolved)";
+		case 3: return "SOLVER";
+		case 4: return "RIDE";
+		case 5: return "PRESTRAFE";
+		case 6: return "OPTIMAL left(A)";
+		case 7: return "OPTIMAL right(D)";
+		case 8: return "OPTIMAL straight";
+		case 9: return "OPTIMAL straight-skew";
+		default: return "MOVE";
+		}
+	}
 
-		std::ofstream out(dir + "\\" + base + ".tasproj", std::ios::binary | std::ios::trunc);
-		if (!out) { g_status = "Couldn't write project file."; return false; }
+	// Light header read for the Project pane's browser: magic + version +
+	// (v22+) the summary block. Never walks the versioned body, so it stays
+	// cheap enough to run for every file on a list refresh.
+	bool ReadProjSummary(const std::string& path, ProjFileInfo& fi) {
+		std::ifstream in(path, std::ios::binary);
+		if (!in)
+			return false;
+		char magic[4];
+		if (!in.read(magic, 4) || memcmp(magic, kProjMagic, 4) != 0 || !R(in, fi.version))
+			return false;
+		if (fi.version < 22)
+			return false;                     // pre-summary file: name/date only
+		if (!in.read(fi.map, sizeof(fi.map)))
+			return false;
+		fi.map[sizeof(fi.map) - 1] = 0;
+		uint32_t ns = 0;
+		if (!R(in, fi.total_ticks) || !R(in, ns) || ns > 4096)
+			return false;
+		fi.segs.clear();
+		fi.segs.reserve(ns);
+		for (uint32_t i = 0; i < ns; ++i) {
+			uint8_t kind = 0;
+			int32_t t = 0;
+			if (!R(in, kind) || !R(in, t))
+				return false;
+			fi.segs.push_back({ kind, t });
+		}
+		if (fi.version >= 23) {
+			uint8_t av = 0;
+			if (!R(in, av) || !in.read(reinterpret_cast<char*>(fi.anchor), sizeof(float) * 3))
+				return false;
+			fi.anchor_valid = av != 0;
+		}
+		fi.has_info = true;
+		return true;
+	}
+
+	bool WriteProjectFile(const std::string& path) {
+		std::ofstream out(path, std::ios::binary | std::ios::trunc);
+		if (!out)
+			return false;
 
 		out.write(kProjMagic, sizeof(kProjMagic));
 		W(out, kProjVersion);
+
+		// v22 summary header (see kProjVersion note): what the Project pane
+		// shows without loading the file. Map name comes from the live engine;
+		// saving outside a map stores "" and the browser shows "?".
+		{
+			char map[64] = {};
+			BspWorld::CurrentMapName(map, sizeof(map));
+			out.write(map, sizeof(map));
+			uint32_t total = 0;
+			for (const EditSegment& s : g_segs)
+				total += static_cast<uint32_t>(s.Ticks());
+			W(out, total);
+			const uint32_t ns = static_cast<uint32_t>(g_segs.size());
+			W(out, ns);
+			for (const EditSegment& s : g_segs) {
+				const uint8_t kind = SegKindCode(s);
+				const int32_t t = s.Ticks();
+				W(out, kind);
+				W(out, t);
+			}
+			// v23: anchor world position in the summary too, so the browser
+			// can say WHERE on the map a project starts.
+			const uint8_t sav = g_anchor.valid ? 1 : 0;
+			W(out, sav);
+			out.write(reinterpret_cast<const char*>(&g_anchor.origin), sizeof(float) * 3);
+		}
 
 		const uint8_t av = g_anchor.valid ? 1 : 0, ad = g_anchor.ducked ? 1 : 0;
 		W(out, av);
@@ -4955,6 +5439,12 @@ namespace {
 					W(out, g.ps_strafes);        // v16
 				W(out, g.ps_jump_dist);      // v18
 				W(out, g.ps_goal_dist);      // v19
+				W(out, g.ps_air_ticks);      // v20
+				W(out, g.ps_ground_extra);   // v20
+				W(out, g.ps_strafe_ticks);   // v21
+				W(out, g.pitch_turn);        // v23
+				W(out, g.pitch_rate);        // v23
+				W(out, g.pitch_desc);        // v23
 
 				const uint32_t novr = static_cast<uint32_t>(s.ovr.size());
 				W(out, novr);
@@ -4992,9 +5482,26 @@ namespace {
 			}
 		}
 
-		g_status = out ? ("Saved " + base + ".tasproj.") : "Write failed.";
-		RefreshFiles();
 		return static_cast<bool>(out);
+	}
+
+	bool SaveProject() {
+		const std::string dir = ProjectDir();
+		std::string base = SanitizeName(g_name);
+		if (dir.empty() || base.empty()) { g_status = "Invalid project name."; return false; }
+		const bool ok = WriteProjectFile(dir + "\\" + base + ".tasproj");
+		g_status = ok ? ("Saved " + base + ".tasproj.") : "Write failed.";
+		RefreshFiles();
+		return ok;
+	}
+
+	// Rolling crash backup: same format, fixed name, written quietly a couple
+	// of seconds after edits settle. Load it like any project to recover.
+	void SaveAutosave() {
+		const std::string dir = ProjectDir();
+		if (dir.empty())
+			return;
+		WriteProjectFile(dir + "\\_autosave.tasproj");
 	}
 
 	// Deserialized fields feed array indexing in the solver, the provider (on
@@ -5011,8 +5518,17 @@ namespace {
 		if (!(g.yaw_rate == g.yaw_rate)) g.yaw_rate = 0.f;       // NaN guard
 		if (g.yaw_rate < -180.f) g.yaw_rate = -180.f;
 		if (g.yaw_rate > 180.f) g.yaw_rate = 180.f;
-		if (g.pitch_mode < 0 || g.pitch_mode > 1) g.pitch_mode = PM_Const;
+		if (g.pitch_mode < 0 || g.pitch_mode > 2) g.pitch_mode = PM_Const;
 		if (g.jump_mode < 0 || g.jump_mode > 2) g.jump_mode = JM_None;
+		if (!(g.pitch_turn == g.pitch_turn)) g.pitch_turn = 8.f;     // NaN
+		if (g.pitch_turn < 0.f) g.pitch_turn = 0.f;
+		if (g.pitch_turn > 20.f) g.pitch_turn = 20.f;
+		if (!(g.pitch_rate == g.pitch_rate)) g.pitch_rate = 1.2f;    // NaN
+		if (g.pitch_rate < 0.05f) g.pitch_rate = 0.05f;
+		if (g.pitch_rate > 6.f) g.pitch_rate = 6.f;
+		if (!(g.pitch_desc == g.pitch_desc)) g.pitch_desc = 0.35f;   // NaN
+		if (g.pitch_desc < 0.f) g.pitch_desc = 0.f;
+		if (g.pitch_desc > 1.5f) g.pitch_desc = 1.5f;
 		if (g.smooth_ticks < 0) g.smooth_ticks = 0;
 		if (g.smooth_ticks > 64) g.smooth_ticks = 64;
 		if (g.ps_ground_ticks < 0) g.ps_ground_ticks = 0;
@@ -5021,7 +5537,10 @@ namespace {
 		// old projects' signed totals fold into the same range.
 		if (!(g.ps_ground_turn == g.ps_ground_turn)) g.ps_ground_turn = 75.f;   // NaN
 		g.ps_ground_turn = fabsf(g.ps_ground_turn);
-		if (g.ps_ground_turn > 170.f) g.ps_ground_turn = 170.f;
+		// v2 semantics: windup is the VELOCITY's offset from the goal heading
+		// during the build - past ~85 deg the build stops closing on the goal
+		// and the carve can never trigger.
+		if (g.ps_ground_turn > 85.f) g.ps_ground_turn = 85.f;
 		if (!(g.ps_jump_dist == g.ps_jump_dist)) g.ps_jump_dist = 500.f;   // NaN
 		if (g.ps_jump_dist < 10.f) g.ps_jump_dist = 10.f;
 		if (g.ps_jump_dist > 10000.f) g.ps_jump_dist = 10000.f;
@@ -5030,11 +5549,15 @@ namespace {
 		if (g.ps_strafes < 1) g.ps_strafes = 1;
 		if (g.ps_strafes > 8) g.ps_strafes = 8;
 		if (!(g.ps_air_bias == g.ps_air_bias)) g.ps_air_bias = 0.f;
-		if (g.ps_air_bias < -180.f) g.ps_air_bias = -180.f;   // ray direction
-		if (g.ps_air_bias > 180.f) g.ps_air_bias = 180.f;
-		if (!(g.ps_goal_dist == g.ps_goal_dist)) g.ps_goal_dist = 900.f;   // NaN
-		if (g.ps_goal_dist < 50.f) g.ps_goal_dist = 50.f;
-		if (g.ps_goal_dist > 20000.f) g.ps_goal_dist = 20000.f;
+		if (g.ps_air_bias < -20.f) g.ps_air_bias = -20.f;   // air steering tilt
+		if (g.ps_air_bias > 20.f) g.ps_air_bias = 20.f;
+		if (!(g.ps_goal_dist == g.ps_goal_dist)) g.ps_goal_dist = 900.f;   // legacy
+		if (g.ps_air_ticks < 0) g.ps_air_ticks = 0;
+		if (g.ps_air_ticks > 1000) g.ps_air_ticks = 1000;
+		if (g.ps_strafe_ticks < 6) g.ps_strafe_ticks = 6;
+		if (g.ps_strafe_ticks > 64) g.ps_strafe_ticks = 64;
+		if (g.ps_ground_extra < 0) g.ps_ground_extra = 0;
+		if (g.ps_ground_extra > 200) g.ps_ground_extra = 200;
 		if (g.ps_crouch_lead < 0) g.ps_crouch_lead = 0;
 		if (g.ps_crouch_lead > 200) g.ps_crouch_lead = 200;
 		g.ps_crouch_cached = -1;   // runtime-only
@@ -5158,7 +5681,19 @@ namespace {
 				return false;
 			if (version >= 19 && !R(in, g.ps_goal_dist))
 				return false;
+			if (version >= 20
+				&& (!R(in, g.ps_air_ticks) || !R(in, g.ps_ground_extra)))
+				return false;
+			if (version >= 21 && !R(in, g.ps_strafe_ticks))
+				return false;
+			// Pre-v20 files carried the RAY meaning in ps_air_bias (up to
+			// +-180); as a steering tilt that would slam the air path - reset.
+			if (version < 20 && fabsf(g.ps_air_bias) > 20.f)
+				g.ps_air_bias = 0.f;
 		}
+		if (version >= 23
+			&& (!R(in, g.pitch_turn) || !R(in, g.pitch_rate) || !R(in, g.pitch_desc)))
+			return false;
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
 		g.auto_key = autok != 0;
 		g.no_w_air = noW != 0;
@@ -5180,6 +5715,32 @@ namespace {
 			|| version < 1 || version > kProjVersion) {
 			g_status = "Not a valid project file.";
 			return false;
+		}
+
+		// v22+: skip the display-only summary header; the body is the truth.
+		if (version >= 22) {
+			char map[64];
+			uint32_t total = 0, ns = 0;
+			if (!in.read(map, sizeof(map)) || !R(in, total) || !R(in, ns) || ns > 4096) {
+				g_status = "Truncated project file.";
+				return false;
+			}
+			for (uint32_t i = 0; i < ns; ++i) {
+				uint8_t kind = 0;
+				int32_t t = 0;
+				if (!R(in, kind) || !R(in, t)) {
+					g_status = "Truncated project file.";
+					return false;
+				}
+			}
+			if (version >= 23) {
+				uint8_t sav = 0;
+				float so[3] = {};
+				if (!R(in, sav) || !in.read(reinterpret_cast<char*>(so), sizeof(so))) {
+					g_status = "Truncated project file.";
+					return false;
+				}
+			}
 		}
 
 		StartState anchor;
@@ -5346,7 +5907,7 @@ namespace {
 		const std::string dir = ProjectDir();
 		if (dir.empty())
 			return;
-		const std::string name = g_files[g_sel_file];
+		const std::string name = g_files[g_sel_file].name;
 		if (DeleteFileA((dir + "\\" + name).c_str()))
 			g_status = "Deleted " + name + ".";
 		else
@@ -5381,16 +5942,30 @@ namespace {
 			return;
 		}
 		char cmd[192];
-		// setpos_exact, full precision (see the Teleport button note).
-		Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
-			g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
-			g_anchor.pitch, g_anchor.yaw);
+		// setpos_exact, full precision (see the Teleport button note). With
+		// the freecam up, skip the setang half: playback replays each cmd's
+		// viewangles exactly regardless, and setang would snap the freecam's
+		// look (it reads the engine angles back every frame - third-party
+		// observer means the run never drives the camera).
+		if (g_freecam)
+			Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
+				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z);
+		else
+			Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
+				g_anchor.pitch, g_anchor.yaw);
 		if (engine)
 			engine->ClientCmd_Unrestricted(cmd);
-		if (g_tas.PlayEphemeral(std::move(run), 12))
+		if (g_tas.PlayEphemeral(std::move(run), 12)) {
+			g_testplay = true;
+			g_play_count = 0;
+			g_play_max = 0.f;
+			g_play_max_tick = -1;
+			g_play_first_tick = -1;
 			g_status = "Test playback from anchor (teleport needs sv_cheats 1). Emergency Stop aborts.";
-		else
+		} else {
 			g_status = "Can't test now - recorder busy.";
+		}
 	}
 
 	void ExportToLibrary() {
@@ -5458,85 +6033,76 @@ namespace {
 			f << line << "\n";
 	}
 
-	// One sample from candidate slot `slot` with its (unvalidated) second
-	// argument. Before a pin: throttled per-slot matching against engine
-	// truth. After a pin: only the winning slot applies the camera.
+
+	// Hook-context half: called by the single OverrideView wrapper with the
+	// frame's CViewSetup. May only do guarded MEMCPYS - verified: pinned
+	// writes the camera; unverified: stash a copy for Update's checker.
 	void FreecamSample(int slot, void* arg) {
-		if (g_fc_dead || slot < 0 || slot >= 32)
+		if (slot != kFcSlot || !arg)
 			return;
-		if (g_fc_pinned) {
-			if (slot != g_fc_slot || !g_freecam || !arg)
-				return;
+		// Camera write (guarded memcpys, the only thing this must do).
+		if (g_freecam) {
 			float org[3] = { g_fc_pos_vis.X, g_fc_pos_vis.Y, g_fc_pos_vis.Z };
 			float ang[3] = { g_fc_pitch, g_fc_yaw, 0.f };
 			unsigned char* base = static_cast<unsigned char*>(arg);
-			FcSafeCopy(base + g_fc_org_off, org, sizeof(org));
-			FcSafeCopy(base + g_fc_ang_off, ang, sizeof(ang));
-			return;
+			FcSafeCopy(base + kFcOrgOff, org, sizeof(org));
+			FcSafeCopy(base + kFcAngOff, ang, sizeof(ang));
 		}
-		if (!arg)
-			return;
-		// Throttle: some candidate virtuals fire hundreds of times per frame
-		// (per-entity queries); one look every 50 ms per slot is plenty.
-		const uint64_t now = GetTickCount64();
-		if (now - g_fc_s_last_ms[slot] < 50)
-			return;
-		g_fc_s_last_ms[slot] = now;
+		// Diagnostic stash (until the sanity check confirms once).
+		if (!g_fc_confirmed) {
+			const LONG i = InterlockedIncrement(&g_fc_stash_idx) - 1;
+			FcSafeCopy(g_fc_stash[((i % kFcRing) + kFcRing) % kFcRing], arg,
+				sizeof(g_fc_stash[0]));
+		}
+	}
 
-		unsigned char buf[0x140];
-		if (!FcSafeCopy(buf, arg, sizeof(buf)))
-			return;   // unreadable arg just means "not this slot right now"
+	// Background SANITY CHECK on the editor's frame path: does ANY of this
+	// frame's stashed CViewSetups show the engine's own view at the measured
+	// offsets? Purely informational - it flips a status line and stops
+	// sampling once satisfied. It can never disable the camera (that gating
+	// is exactly what locked freecam out).
+	void FreecamVerifyPump() {
+		if (g_fc_confirmed || g_freecam)
+			return;   // while flying, the stash holds OUR values, not the engine's
+		if (!engine || !engine->IsInGame())
+			return;
 		StartState st;
 		if (!Prediction::CaptureStartState(st))
-			return;   // needs a live player for the eye anchor - out-of-game
-			          // samples must not burn the give-up budget
-		g_fc_samples++;
+			return;
+		g_fc_checks++;
 		QAngle va(0.f, 0.f, 0.f);
-		if (engine)
-			engine->GetViewAngles(va);
-		const float* f = reinterpret_cast<const float*>(buf);
-		const int nf = static_cast<int>(sizeof(buf) / 4) - 3;
-		int aoff = -1, ooff = -1;
-		for (int i = 0; i <= nf; ++i) {
-			if (aoff < 0
-				&& fabsf(f[i] - va.X) < 0.01f
-				&& fabsf(NormYaw(f[i + 1] - va.Y)) < 0.01f
-				&& fabsf(f[i + 2]) < 0.01f)   // roll = 0
-				aoff = i * 4;
-			if (ooff < 0) {
-				const float dx = f[i] - st.origin.X;
-				const float dy = f[i + 1] - st.origin.Y;
-				const float dz = f[i + 2] - st.origin.Z;
-				if (fabsf(dx) < 4.f && fabsf(dy) < 4.f && dz > 20.f && dz < 96.f)
-					ooff = i * 4;   // eye = origin + view offset
-			}
-		}
-		if (aoff >= 0 && ooff >= 0 && aoff != ooff) {
-			if (aoff == g_fc_s_ang[slot] && ooff == g_fc_s_org[slot])
-				g_fc_s_streak[slot]++;
-			else {
-				g_fc_s_ang[slot] = aoff;
-				g_fc_s_org[slot] = ooff;
-				g_fc_s_streak[slot] = 1;
-			}
-			if (g_fc_s_streak[slot] >= 5) {
-				// Offsets first, THEN the pin flag: the apply path reads them
-				// only after seeing pinned == true.
-				g_fc_slot = slot;
-				g_fc_org_off = g_fc_s_org[slot];
-				g_fc_ang_off = g_fc_s_ang[slot];
-				g_fc_pinned = true;
+		engine->GetViewAngles(va);
+		for (int i = 0; i < kFcRing; ++i) {
+			const float* fo = reinterpret_cast<const float*>(g_fc_stash[i] + kFcOrgOff);
+			const float* fa = reinterpret_cast<const float*>(g_fc_stash[i] + kFcAngOff);
+			const float dz = fo[2] - st.origin.Z;
+			// Cross-frame tolerances: the stash is up to a frame older than
+			// these engine reads, so allow a few degrees / units of drift.
+			if (fabsf(fo[0] - st.origin.X) < 8.f
+				&& fabsf(fo[1] - st.origin.Y) < 8.f
+				&& dz > 16.f && dz < 100.f
+				&& fabsf(NormYaw(fa[0] - va.X)) < 3.f
+				&& fabsf(NormYaw(fa[1] - va.Y)) < 3.f
+				&& fabsf(fa[2]) < 0.5f) {   // roll ~ 0
+				g_fc_confirmed = true;
 				char line[192];
-				Sfmt(line, "freecam: OverrideView pinned - SLOT %d, origin+0x%X angles+0x%X "
-					"(%d in-game samples across candidates)",
-					slot, g_fc_org_off, g_fc_ang_off, g_fc_samples);
+				Sfmt(line, "freecam: layout confirmed (slot %d, origin+0x%X angles+0x%X, %d checks)",
+					kFcSlot, kFcOrgOff, kFcAngOff, g_fc_checks);
 				FcLog(line);
+				return;
 			}
 		}
-		if (!g_fc_pinned && g_fc_samples > 5000) {
-			g_fc_dead = true;
-			FcLog("freecam: no candidate slot 12..20 ever matched the engine view "
-				"after 5000 in-game samples - freecam disabled");
+		if (g_fc_checks == 300) {
+			const float* fo = reinterpret_cast<const float*>(g_fc_stash[0] + kFcOrgOff);
+			const float* fa = reinterpret_cast<const float*>(g_fc_stash[0] + kFcAngOff);
+			char line[256];
+			Sfmt(line, "freecam: sanity check unconfirmed after %d checks (camera still "
+				"active) - ring[0] org (%.1f %.1f %.1f) vs eye (%.1f %.1f %.1f+z), "
+				"ang (%.1f %.1f %.1f) vs view (%.1f %.1f)",
+				g_fc_checks, fo[0], fo[1], fo[2],
+				st.origin.X, st.origin.Y, st.origin.Z,
+				fa[0], fa[1], fa[2], va.X, va.Y);
+			FcLog(line);
 		}
 	}
 
@@ -5693,9 +6259,14 @@ namespace {
 			// engine's unstick (1u forward); a +0.25z guess flipped it to 1u
 			// BEHIND. No more guessing - the deferred check below MEASURES the
 			// landing delta and prints it, so the next report is data.
-			Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
-				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
-				g_anchor.pitch, g_anchor.yaw);
+			// Freecam up: position only - setang would snap the observer's look.
+			if (g_freecam)
+				Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
+					g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z);
+			else
+				Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+					g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
+					g_anchor.pitch, g_anchor.yaw);
 			engine->ClientCmd_Unrestricted(cmd);
 			g_tp_check = true;
 			g_tp_ms = GetTickCount64();
@@ -5898,7 +6469,10 @@ namespace {
 					g_cursor = g_starts[k];
 			}
 		}
+		const float seg_sy = ImGui::GetScrollY(), seg_sm = ImGui::GetScrollMaxY();
 		ImGui::EndChild();
+		static float s_segs_pw = 0.f;
+		PassWheelAtEdge(&s_segs_pw, seg_sy, seg_sm);
 		// Stats for the selected segment, in the free space to the right.
 		ImGui::SameLine();
 		ImGui::BeginChild("segstats", ImVec2(0, 172), true,
@@ -5942,12 +6516,65 @@ namespace {
 		if (ImGui::Button("Split at playhead"))
 			SplitAtCursor();
 		ImGui::SameLine();
+		if (ImGui::Button("Duplicate") && g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) {
+			EditSegment copy = g_segs[g_sel];
+			g_segs.insert(g_segs.begin() + g_sel + 1, std::move(copy));
+			g_sel++;
+			MarkDirty();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Bake to raw") && g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())
+			&& g_valid && !g_dirty && g_sel < static_cast<int>(g_starts.size())) {
+			// Freeze the selected segment's SIMMED frames as a raw (per-tick
+			// editable) segment. Solver segments only once solved - unsolved
+			// ones are just the hold-pattern placeholder.
+			EditSegment& s = g_segs[g_sel];
+			if (!s.raw && (!s.is_solver || s.solver.solved)) {
+				const int b = g_starts[g_sel];
+				int e = (g_sel + 1 < static_cast<int>(g_starts.size())) ? g_starts[g_sel + 1] : g_total;
+				if (e > static_cast<int>(g_frames.size()))
+					e = static_cast<int>(g_frames.size());
+				if (e > b) {
+					s.raw = true;
+					s.is_solver = false;
+					s.frames.assign(g_frames.begin() + b, g_frames.begin() + e);
+					s.ovr.clear();   // baked frames already contain them
+					g_status = "Baked segment to raw frames (per-tick editable).";
+					MarkDirty();
+				}
+			}
+		}
+		Theme::Help("Freezes the selected segment's simmed ticks into RAW frames "
+			"(per-tick editable). Needs a current sim; solver segments bake "
+			"once solved.");
+		ImGui::SameLine();
 		if (Theme::Danger("Remove selected") && g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) {
 			g_segs.erase(g_segs.begin() + g_sel);
 			if (g_sel >= static_cast<int>(g_segs.size()))
 				g_sel = static_cast<int>(g_segs.size()) - 1;
 			MarkDirty();
 		}
+		if (ImGui::Button("Move up") && g_sel > 0
+			&& g_sel < static_cast<int>(g_segs.size())) {
+			std::swap(g_segs[g_sel - 1], g_segs[g_sel]);
+			g_sel--;
+			MarkDirty();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Move down") && g_sel >= 0
+			&& g_sel + 1 < static_cast<int>(g_segs.size())) {
+			std::swap(g_segs[g_sel], g_segs[g_sel + 1]);
+			g_sel++;
+			MarkDirty();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Undo"))
+			DoUndo();
+		ImGui::SameLine();
+		if (ImGui::Button("Redo"))
+			DoRedo();
+		ImGui::SameLine();
+		ImGui::TextDisabled("Ctrl+Z / Ctrl+Y");
 
 		// --- selected segment parameters ----------------------------------
 		if (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) {
@@ -6061,7 +6688,10 @@ namespace {
 						"runs with a solved solver segment");
 				}
 				ImGui::PopTextWrapPos();
+				const float sg_sy = ImGui::GetScrollY(), sg_sm = ImGui::GetScrollMaxY();
 				ImGui::EndChild();
+				static float s_gates_pw = 0.f;
+				PassWheelAtEdge(&s_gates_pw, sg_sy, sg_sm);
 
 				ImGui::Separator();
 				if (Theme::Accent("Search solutions"))
@@ -6309,33 +6939,30 @@ namespace {
 					}
 				}
 
-				// Pitch still applies (static or trajectory-follow, as usual).
+				// Pitch still applies (static, trajectory-follow, or the human
+				// recipe, exactly as in normal segments).
 				bool ch = false;
-				ImGui::PushItemWidth(180);
-				ch |= ImGui::Combo("Pitch", &s.gen.pitch_mode, "Constant\0Follow trajectory\0");
-				ImGui::PopItemWidth();
-				if (s.gen.pitch_mode == PM_Const)
+				static const char* kPitchModesSv[] = { "Constant", "Follow trajectory", "Dynamic" };
+				if (ChoiceRow("Pitch", &s.gen.pitch_mode, kPitchModesSv, 3)) {
+					if (s.gen.pitch_mode == PM_Dynamic && s.gen.pitch_val == 0.f)
+						s.gen.pitch_val = 20.f;   // measured straight-flight base
+					ch = true;
+				}
+				if (s.gen.pitch_mode == PM_Const) {
 					ch |= FloatRow("Pitch value", &s.gen.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
-				else
+				} else if (s.gen.pitch_mode == PM_Follow) {
 					ch |= FloatRow("Pitch multiplier", &s.gen.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
+				} else {
+					ch |= FloatRow("Base pitch", &s.gen.pitch_val, -30.f, 85.f, "%.1f deg", 0.1f, 5.f, 1);
+					ch |= FloatRow("Turn coupling", &s.gen.pitch_turn, 0.f, 20.f, "%.1f deg", 0.1f, 1.f, 1);
+					ch |= FloatRow("Descent follow", &s.gen.pitch_desc, 0.f, 1.5f, "%.2f", 0.01f, 0.1f);
+					ch |= FloatRow("Response", &s.gen.pitch_rate, 0.05f, 4.f, "%.2f deg/tick", 0.05f, 0.2f);
+					Theme::Help("The dynamic pitch recipe, measured from your recorded "
+						"runs - see the tooltips on a normal segment's pitch rows.");
+				}
 				if (ch)
 					MarkDirty();
 
-				if (s.solver.solved && ImGui::Button("Bake to raw frames") && g_valid && !g_dirty
-					&& g_sel < static_cast<int>(g_starts.size())) {
-					const int b = g_starts[g_sel];
-					int e = (g_sel + 1 < static_cast<int>(g_starts.size())) ? g_starts[g_sel + 1] : g_total;
-					if (e > static_cast<int>(g_frames.size()))
-						e = static_cast<int>(g_frames.size());
-					if (e > b) {
-						s.raw = true;
-						s.is_solver = false;
-						s.frames.assign(g_frames.begin() + b, g_frames.begin() + e);
-						s.ovr.clear();
-						g_status = "Baked solver segment to raw frames.";
-						MarkDirty();
-					}
-				}
 			} else if (!g_segs[g_sel].raw) {
 				const GenParams before = g_segs[g_sel].gen;
 				GenParams g = before;
@@ -6350,43 +6977,66 @@ namespace {
 					"crouch skim. The engine sims the real physics; only inputs "
 					"are emitted.");
 				if (g.prestrafe) {
-					// No duration slider: the recipe owns its own length (it
-					// grows/snaps to landing+3 every sim - see the goal solve).
-					ImGui::TextDisabled("Goal ray");
-					Theme::Help("The landing goal: a ray on the 2D yaw plane from "
-						"the segment start. The recipe self-solves the jump point "
-						"every sim so the run LANDS at the ray tip - telemetry "
-						"below shows the achieved landing and error.");
-					ch |= FloatRow("  direction", &g.ps_air_bias, -180.f, 180.f, "%+.1f deg", 0.1f, 1.f, 1);
-					Theme::Help("0 = straight along the segment's aim; + points "
-						"right, - left. The ground carve and the flight both follow "
-						"the ray.");
-					ch |= FloatRow("  distance", &g.ps_goal_dist, 100.f, 4000.f, "%.0f u", 5.f, 50.f, 0);
-					Theme::Help("The ray's magnitude - horizontal distance from the "
-						"segment start to the landing point.");
+					// Direction anchor: the recipes follow the segment AIM,
+					// world-anchored by default so neighbor edits can't rotate
+					// a tuned prestrafe.
+					ch |= ImGui::Checkbox("  anchor aim to absolute yaw", &g.yaw_abs);
+					Theme::Help("OFF (default): the recipe aims straight ahead from "
+						"wherever the segment starts - the normal map/stage-start "
+						"case. ON: pin a fixed world yaw instead, for prestrafes "
+						"mid-run where upstream edits could swing the entry aim.");
+					if (g.yaw_abs) {
+						ImGui::SameLine();
+						ImGui::PushItemWidth(kInputW);
+						ch |= ImGui::InputFloat("##psyawabs", &g.yaw_start, 0.1f, 5.f, 1);
+						ImGui::PopItemWidth();
+					}
 
-					ImGui::TextDisabled("Ground");
-					ImGui::PushItemWidth(150);
+					ImGui::TextDisabled("Ground recipe");
+					Theme::Help("W + strafe key builds to MAX ground speed in the "
+						"minimum distance (the build ends the moment speed stops "
+						"climbing), then the carve sweeps the velocity onto the aim "
+						"as hard as the server's ground accel allows, and the jump "
+						"fires the moment the heading reaches the aim - so changing "
+						"sv_accelerate reshapes the carve, never the launch "
+						"direction. Recipe, not a solver.");
+					static const char* kSides[] = { "A (left)", "D (right)" };
 					int gdir = (g.ps_ground_dir > 0) ? 0 : 1;
-					if (ImGui::Combo("  ground strafe side", &gdir, "A (left)\0D (right)\0")) {
+					if (ChoiceRow("  ground strafe side", &gdir, kSides, 2)) {
 						g.ps_ground_dir = (gdir == 0) ? 1 : -1; ch = true;
 					}
-					ImGui::PopItemWidth();
 					ch |= FloatRow("  windup swing",
-						&g.ps_ground_turn, 0.f, 170.f, "%.0f deg", 1.f, 10.f, 0);
-					Theme::Help("How far the view swings OUT (opposite the carve side) "
-						"before sweeping back onto the ray. Bigger swing = more carve "
-						"speed; real human prestrafes measured 60-90 degrees. The jump "
-						"always leaves aimed down the ray, whatever the swing.");
+						&g.ps_ground_turn, 0.f, 85.f, "%.0f deg", 1.f, 10.f, 0);
+					Theme::Help("How far the velocity runs off the aim during the "
+						"build before the carve sweeps it back on. Bigger swing = "
+						"longer, harder carve = more jump speed; measured human runs "
+						"used 60-90. The carve always ends exactly on the aim.");
+					ch |= IntRow("  extra build ticks", &g.ps_ground_extra, 0, 100);
+					Theme::Help("Extends the speed-build past the max-speed point "
+						"(0 = the minimum-distance default). Use it to place the "
+						"jump deeper into a long startzone.");
 
-					ImGui::TextDisabled("Air");
+					ImGui::TextDisabled("Air recipe");
 					ch |= IntRow("  alternating strafes", &g.ps_strafes, 1, 8);
-					ImGui::PushItemWidth(150);
+					ch |= IntRow("  ticks per strafe", &g.ps_strafe_ticks, 6, 64);
+					Theme::Help("Fixed length of each air strafe (human first strafes "
+						"measured 22-25 ticks). Fixed-length alternation means the "
+						"segment's auto-duration can never re-shuffle the strafes; "
+						"after the last one, the final side holds.");
 					int adir = (g.ps_air_dir > 0) ? 0 : 1;
-					if (ImGui::Combo("  first strafe side", &adir, "A (left)\0D (right)\0")) {
+					if (ChoiceRow("  first strafe side", &adir, kSides, 2)) {
 						g.ps_air_dir = (adir == 0) ? 1 : -1; ch = true;
 					}
-					ImGui::PopItemWidth();
+					ch |= FloatRow("  steer bias",
+						&g.ps_air_bias, -20.f, 20.f, "%+.2f deg", 0.05f, 0.5f);
+					Theme::Help("Constant tilt off the optimal line: + bends the air "
+						"path right, - left, 0 = straight. Same feel as the straight "
+						"modes' steering.");
+					ch |= IntRow("  air duration", &g.ps_air_ticks, 0, 400);
+					Theme::Help("Ticks of flight after the jump. 0 = AUTO: the segment "
+						"ends ONE TICK PAST the landing (clearing the startzone edge). "
+						"Set it manually for non-flat startzones and other edge cases - "
+						"purely timing-based.");
 
 					ImGui::TextDisabled("Crouch");
 					ch |= ImGui::Checkbox("Hold crouch for the whole segment", &g.duck);
@@ -6394,12 +7044,11 @@ namespace {
 					Theme::Help("Crouch right before the floor to skim past it at maximum "
 						"speed (the last-moment startzone exit).");
 					if (g.ps_crouch_end) {
-						ch |= ImGui::Checkbox("Auto-time to the last airborne tick", &g.ps_crouch_auto);
-						if (!g.ps_crouch_auto)
-							ch |= IntRow("Crouch this many ticks before the end", &g.ps_crouch_lead, 0, 60);
-						else if (g.ps_crouch_cached >= 0)
-							ImGui::TextDisabled("auto crouch tick: local %d (last airborne of the last sim)",
-								g.ps_crouch_cached);
+						ch |= IntRow("  crouch lead", &g.ps_crouch_lead, 0, 60);
+						Theme::Help("Ticks before the segment END to crouch - pure "
+							"timing, no landing detection. The end sits one tick past "
+							"the landing by default, so lead 2 = crouch the tick "
+							"before landing. Adjust for edge cases.");
 					}
 					// ---- recipe telemetry: the "am I at max" numbers ----------
 					// Ground and air speed limits with tick timing, plus the
@@ -6446,15 +7095,17 @@ namespace {
 									const float ldy = g_states[lt].origin.Y - ro.Y;
 									const float ld = sqrtf(ldx * ldx + ldy * ldy);
 									ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.f, 1.f),
-										"landing tick %d   %.0f u out   goal err %+.1f u",
-										lt - start, ld, g.ps_goal_dist - ld);
-									ImGui::TextDisabled("auto: duration %d ticks   jump dist %.0f u",
-										g.ticks, g.ps_jump_dist);
+										"lands tick %d   %.0f u out   ends %s",
+										lt - start, ld,
+										g.ps_air_ticks > 0 ? "at the air-duration slider"
+										                   : "one tick past the landing");
 								} else {
-									ImGui::TextDisabled("sizing the segment to the recipe (auto-growing)...");
+									ImGui::TextDisabled(g.ps_air_ticks > 0
+										? "airborne at segment end (manual air duration)"
+										: "sizing the segment to the recipe (auto)...");
 								}
 							} else {
-								ImGui::TextDisabled("solving the ground run (auto-growing the segment)...");
+								ImGui::TextDisabled("building ground speed (segment auto-sizing)...");
 							}
 						}
 					}
@@ -6462,8 +7113,7 @@ namespace {
 					// the real simmed velocity magnitude including the downward vz.
 					if (g_valid && !g_dirty && g_sel < static_cast<int>(g_starts.size())) {
 						const int start = g_starts[g_sel];
-						int ct = g.ps_crouch_auto ? g.ps_crouch_cached
-							: (g.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead));
+						int ct = g.ticks - (g.ps_crouch_lead < 0 ? 0 : g.ps_crouch_lead);
 						if (ct < 0) ct = g.ticks - 1;
 						const int gi = start + ct;
 						if (gi >= 0 && gi < static_cast<int>(g_states.size())) {
@@ -6477,12 +7127,35 @@ namespace {
 					}
 				} else {
 
+				SubHeading("Keys & duration");
 				ImGui::Text("Held keys:");
 				ImGui::SameLine(); ch |= ImGui::Checkbox("W", &g.key_w);
 				ImGui::SameLine(); ch |= ImGui::Checkbox("A", &g.key_a);
 				ImGui::SameLine(); ch |= ImGui::Checkbox("S", &g.key_s);
 				ImGui::SameLine(); ch |= ImGui::Checkbox("D", &g.key_d);
 				ImGui::SameLine(); ch |= ImGui::Checkbox("Crouch", &g.duck);
+				// Jump is a held key too: checked = hold jump (JM_Hold). The
+				// Auto-bhop box beside it upgrades that to press-on-landing
+				// (JM_AutoBhop) - unchecking Jump clears both.
+				{
+					bool jump_held = g.jump_mode != JM_None;
+					ImGui::SameLine();
+					if (ImGui::Checkbox("Jump", &jump_held)) {
+						g.jump_mode = jump_held ? JM_Hold : JM_None;
+						ch = true;
+					}
+					if (jump_held) {
+						bool autobhop = g.jump_mode == JM_AutoBhop;
+						ImGui::SameLine();
+						if (ImGui::Checkbox("Auto-bhop", &autobhop)) {
+							g.jump_mode = autobhop ? JM_AutoBhop : JM_Hold;
+							ch = true;
+						}
+						Theme::Help("Jump held = jump is pressed every tick. Auto-bhop = "
+							"press only on ticks that start grounded, so it re-hops on "
+							"each landing instead of holding.");
+					}
+				}
 				ImGui::SameLine();
 				ch |= ImGui::Checkbox("Auto A/D from turn direction", &g.auto_key);
 				Theme::Help("Airborne + turning: the strafe key is picked from the turn "
@@ -6490,7 +7163,10 @@ namespace {
 				ImGui::SameLine();
 				ch |= ImGui::Checkbox("Release W in air", &g.no_w_air);
 
-				ch |= IntRow("Duration (ticks)", &g.ticks, 1, 1000);
+				ch |= IntRow("Duration (ticks)", &g.ticks, 1,
+					(g.ticks > g_dur_max) ? g.ticks : g_dur_max);
+
+				SubHeading("Steering");
 				// Two view modes now: TURN RATE (mode 1) and OPTIMAL (max gain).
 				// Optimal covers strafing LEFT, RIGHT, or STRAIGHT (alternating
 				// max-gain strafes whose net path holds its heading, mode 3) -
@@ -6499,28 +7175,25 @@ namespace {
 				if (g.yaw_mode < 1 || g.yaw_mode > 4)
 					g.yaw_mode = 2;
 				int vmode = (g.yaw_mode == 1) ? 0 : 1;
-				ImGui::PushItemWidth(260);
-				if (ImGui::Combo("View mode", &vmode,
-					"Turn rate\0Optimal strafe (max gain)\0")) {
+				static const char* kViewModes[] = { "Turn rate", "Optimal strafe" };
+				if (ChoiceRow("View mode", &vmode, kViewModes, 2)) {
 					g.yaw_mode = (vmode == 0) ? 1 : ((g.yaw_mode == 3 || g.yaw_mode == 4) ? g.yaw_mode : 2);
 					ch = true;
 				}
-				ImGui::PopItemWidth();
 				if (vmode == 0) {
 					ch |= FloatRow("View turn", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
 					Theme::Help("- turns left, + turns right, 0 holds the view still.");
 				} else {
 					// Optimal: Left / Right / Straight (view-tilt) / Straight (skew).
 					int dir_idx = (g.yaw_mode == 4) ? 3 : (g.yaw_mode == 3) ? 2 : ((g.opt_dir > 0) ? 0 : 1);
-					ImGui::PushItemWidth(240);
-					if (ImGui::Combo("Direction", &dir_idx,
-						"Left (A)\0Right (D)\0Straight - steer by view\0Straight - steer by dwell\0")) {
+					static const char* kDirs[] =
+						{ "Left (A)", "Right (D)", "Straight (view)", "Straight (dwell)" };
+					if (ChoiceRow("Direction", &dir_idx, kDirs, 4)) {
 						if (dir_idx == 3) g.yaw_mode = 4;
 						else if (dir_idx == 2) g.yaw_mode = 3;
 						else { g.yaw_mode = 2; g.opt_dir = (dir_idx == 0) ? 1 : -1; }
 						ch = true;
 					}
-					ImGui::PopItemWidth();
 					// One tooltip, text matching the selected direction mode.
 					Theme::Help(
 						g.yaw_mode == 3
@@ -6549,8 +7222,8 @@ namespace {
 						// DEFAULT (Steering) first without changing the stored codes.
 						int bk_disp = (g.bias_kind == 2) ? 0 : (g.bias_kind == 0) ? 1 : 2;
 						ImGui::PushItemWidth(210);
-						if (ImGui::Combo("Bias kind", &bk_disp,
-							"Steering L/R\0Total heading (deg over segment)\0Per-tick (legacy)\0")) {
+						if (ImGui::Combo("Steering type", &bk_disp,
+							"Rate L/R\0Total heading (deg over segment)\0Per-tick (legacy)\0")) {
 							g.bias_kind = (bk_disp == 0) ? 2 : (bk_disp == 1) ? 0 : 1;
 							ch = true;
 						}
@@ -6590,17 +7263,7 @@ namespace {
 					ImGui::PopItemWidth();
 				}
 
-				ImGui::PushItemWidth(180);
-				ch |= ImGui::Combo("Pitch", &g.pitch_mode, "Constant\0Follow trajectory\0");
-				ImGui::PopItemWidth();
-				if (g.pitch_mode == PM_Const)
-					ch |= FloatRow("Pitch value", &g.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
-				else
-					ch |= FloatRow("Pitch multiplier", &g.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
-				ImGui::PushItemWidth(220);
-				ch |= ImGui::Combo("Jump", &g.jump_mode, "None (walk)\0Hold\0Auto-bhop on landing\0");
-				ImGui::PopItemWidth();
-
+				SubHeading("Smoothing");
 				// Boundary smoothing: blend the view across THIS segment's start
 				// so the per-tick rate is continuous with the previous segment
 				// (half the window in each). In optimal modes the wish stays
@@ -6612,6 +7275,48 @@ namespace {
 					"modes the wish stays max-gain, so it costs almost no speed.");
 
 				}   // end else (normal generated-segment controls)
+
+				// --- PITCH, its own section below smoothing - shared by the
+				// normal AND prestrafe branches (the recipe covers a prestrafe's
+				// ground+air arc too). DYNAMIC is the default: the human recipe
+				// measured from the recorded runs.
+				SubHeading("Pitch");
+				static const char* kPitchModes[] = { "Constant", "Follow trajectory", "Dynamic" };
+				if (ChoiceRow("##pitchmode", &g.pitch_mode, kPitchModes, 3)) {
+					// Old segments switched onto DYNAMIC with an untouched 0
+					// base: seed the measured straight-flight base (visible +
+					// editable; new segments already default to it).
+					if (g.pitch_mode == PM_Dynamic && g.pitch_val == 0.f)
+						g.pitch_val = 20.f;
+					ch = true;
+				}
+				Theme::Help("Dynamic is a recipe measured from your recorded runs: "
+					"pitch rides at a base, dips further with the turn rate (the "
+					"dominant human pattern - carving = looking down the ramp), sinks "
+					"toward the fall line while descending, and never moves faster "
+					"than the response limit. All sliders, no solving.");
+				if (g.pitch_mode == PM_Const) {
+					ch |= FloatRow("Pitch value", &g.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
+				} else if (g.pitch_mode == PM_Follow) {
+					ch |= FloatRow("Pitch multiplier", &g.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
+				} else {
+					ch |= FloatRow("Base pitch", &g.pitch_val, -30.f, 85.f, "%.1f deg", 0.1f, 5.f, 1);
+					Theme::Help("Pitch while flying straight, + = down. Your runs sat "
+						"around +8..+27 when not turning.");
+					ch |= FloatRow("Turn coupling", &g.pitch_turn, 0.f, 20.f, "%.1f deg", 0.1f, 1.f, 1);
+					Theme::Help("Extra down-pitch per deg/tick of yaw rate. Your runs "
+						"looked +20..+48 deeper while carving than while straight; "
+						"typical strafe rates ~2-4 deg/tick make 8 a good middle.");
+					ch |= FloatRow("Descent follow", &g.pitch_desc, 0.f, 1.5f, "%.2f", 0.01f, 0.1f);
+					Theme::Help("How much of the falling trajectory's slope is added "
+						"while descending (watching the landing). 0 = ignore the "
+						"fall, 1 = look straight down the fall line. Rising never "
+						"pitches up - the runs never did.");
+					ch |= FloatRow("Response", &g.pitch_rate, 0.05f, 4.f, "%.2f deg/tick", 0.05f, 0.2f);
+					Theme::Help("Rate limit toward the target. Your runs moved the "
+						"pitch under ~1 deg/tick 90% of the time, ~1.7 at the 99th "
+						"percentile.");
+				}
 
 				if (ch) {
 					// Segment edits overwrite the per-tick input overrides (the
@@ -6628,22 +7333,6 @@ namespace {
 					else
 						g_segs[g_sel].gen = g;
 					MarkDirty();
-				}
-
-				if (ImGui::Button("Bake to raw frames") && g_valid && !g_dirty
-					&& g_sel < static_cast<int>(g_starts.size())) {
-					const int b = g_starts[g_sel];
-					int e = (g_sel + 1 < static_cast<int>(g_starts.size())) ? g_starts[g_sel + 1] : g_total;
-					if (e > static_cast<int>(g_frames.size()))
-						e = static_cast<int>(g_frames.size());
-					if (e > b) {
-						EditSegment& s = g_segs[g_sel];
-						s.raw = true;
-						s.frames.assign(g_frames.begin() + b, g_frames.begin() + e);
-						s.ovr.clear();   // baked frames already contain them
-						g_status = "Baked segment to raw frames (per-tick editable).";
-						MarkDirty();
-					}
 				}
 			} else {
 				EditSegment& s = g_segs[g_sel];
@@ -6673,53 +7362,6 @@ namespace {
 				}
 			}
 
-		}
-
-		ImGui::Separator();
-
-		if (ImGui::CollapsingHeader("Strafe model")) {
-			bool ch = false;
-			ImGui::PushItemWidth(120);
-			ch |= ImGui::InputFloat("Air speed cap", &g_air_cap, 1.f, 10.f, 1);
-			ch |= ImGui::InputFloat("sv_airaccelerate", &g_air_accel, 1.f, 10.f, 1);
-			ch |= ImGui::InputFloat("Wish speed", &g_wishspeed, 10.f, 50.f, 0);
-			ch |= ImGui::InputFloat("sv_gravity", &g_gravity, 10.f, 50.f, 0);
-			// Model jump velocity, part of the model - not a search gate (it
-			// used to hide in the solver's gates section, which read as one).
-			ImGui::InputFloat("Jump vz (0 = engine formula)", &g_jump_vz, 1.f, 10.f, 1);
-			Theme::Help("Vertical velocity the model gives a jump. 0 uses the engine "
-				"formula sqrt(2*g*57). The engine probe below measures the real value "
-				"from sim data; Refresh adopts it.");
-			ImGui::PopItemWidth();
-			if (ch)
-				MarkDirty();
-
-			if (ImGui::Button("Refresh")) {
-				float aa = 0.f, gr = 0.f;
-				const bool ok_a = Cvars::GetFloat("sv_airaccelerate", &aa);
-				const bool ok_g = Cvars::GetFloat("sv_gravity", &gr);
-				if (ok_a || ok_g) {
-					if (ok_a) g_air_accel = aa;
-					if (ok_g) g_gravity = gr;
-					MarkDirty();
-					g_status = FmtStr("Read live server cvars: sv_airaccelerate %.1f, sv_gravity %.1f.",
-						aa, gr);
-				} else {
-					// No validated live reads on this build - fall back to the
-					// engine probe's MEASURED values (never guesses).
-					AdoptProbe();
-				}
-			}
-			Theme::Help("Reads the LIVE replicated server cvars (sv_airaccelerate, "
-				"sv_gravity) straight out of client.dll - the values the server "
-				"enforces right now, no solver run needed. The ConVar layout is "
-				"discovered and validated from data at runtime and logged to "
-				"cvar_probe.log; if validation fails, Refresh falls back to the "
-				"engine probe's sim-measured values.");
-			ImGui::TextDisabled("%s", Cvars::Status());
-			if (g_meas_max_add > 0.f || g_meas_grav_n > 0)
-				ImGui::TextDisabled("probe: add/tick <= %.1f | gravity %.0f [%d samples] | jump vz %.1f",
-					g_meas_max_add, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
 		}
 
 		const float sim_ms = Prediction::LastDiag().sim_ms;
@@ -6940,6 +7582,34 @@ namespace {
 		FloatRow("Min efficiency", &g_min_eff, 0.90f, 1.f, "%.2f", 0.005f, 0.02f);
 		Theme::Help("Line coloring only: ticks below this efficiency color the "
 			"run line toward red.");
+		IntRow("Duration slider max", &g_dur_max, 50, 1000);
+		Theme::Help("Range cap of the segment Duration slider - most segments "
+			"live well under 300 ticks, so the default keeps the slider's "
+			"resolution useful. Segments already longer than the cap keep "
+			"their length (the slider just tops out at it).");
+		if (ImGui::Checkbox("Score ramp ticks", &g_ramp_eff))
+			RecomputeDiag();   // pure math over the existing sim - instant
+		Theme::Help("ON: board/slide ticks score like flight - the slope's free "
+			"physics is subtracted and your strafing's air component is measured "
+			"against the SAME air-accel optimum (AirAccelerate is identical on a "
+			"ramp; the clip just eats whatever points into the surface). Feeds "
+			"the efficiency coloring and the segment %. OFF: ramp ticks are "
+			"unscoreable - neutral color, excluded from the %.");
+
+		if (ImGui::Checkbox("Coast line (release-all off the run end)", &g_coast_line))
+			MarkDirty();   // resim so the tail appears/clears now
+		Theme::Help("Gray trajectory off the END of the last segment showing where "
+			"you'd travel if you let go of everything - no yaw change, no keys, no "
+			"crouch/jump - so it's easy to line up the next segment's start. "
+			"Visual only; never part of the run. Bindable as 'Toggle Coast Line'.");
+		if (g_coast_line) {
+			if (IntRow("Coast length (ticks)", &g_coast_ticks, 8, 600))
+				MarkDirty();
+			ImGui::SameLine();
+			float itick = Prediction::LastDiag().interval_per_tick;
+			if (itick <= 0.f) itick = 0.015f;
+			ImGui::TextDisabled("(%.1f s)", g_coast_ticks * itick);
+		}
 
 		Theme::Heading("World geometry",
 			"Brush geometry parsed straight from the map's BSP file.");
@@ -6956,12 +7626,12 @@ namespace {
 		ImGui::SameLine();
 		if (ImGui::Button("Reload##bsp"))
 			BspWorld::LoadCurrentMap();
-
 		const BspWorld::Status bs = BspWorld::GetStatus();
 		if (bs.loaded) {
 			ImGui::Text("%s (v%d): %d brushes, %d faces, %d edges (%.0f ms parse)",
 				bs.map, bs.bsp_version, bs.brush_count, bs.face_count, bs.edge_count, bs.parse_ms);
-			ImGui::Text("drawing %d brushes / %d lines", bs.drawn_brushes, bs.drawn_lines);
+			ImGui::Text("drawing %d brushes / %d lines",
+				bs.drawn_brushes, bs.drawn_lines);
 		} else if (bs.error[0]) {
 			ImGui::PushTextWrapPos(0.f);
 			ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f), "BSP: %s", bs.error);
@@ -6969,6 +7639,46 @@ namespace {
 		} else {
 			ImGui::TextDisabled("BSP: not loaded (enable wireframes while in a map)");
 		}
+
+		Theme::Heading("Triggers",
+			"Parsed from the map's entity lump - the same keyvalues the server "
+			"spawns from. The sim fires them with the SDK's exact Touch "
+			"semantics; the volume wires draw independently of the brush "
+			"wireframe.");
+		ImGui::Checkbox("Apply triggers in sim", &BspWorld::apply_triggers);
+		Theme::Help("trigger_teleport, trigger_gravity and trigger_push fire "
+			"inside the editor sim with the SDK's exact Touch semantics, so the "
+			"line matches the real run through them - the client's own "
+			"prediction never runs server triggers.");
+		ImGui::SameLine();
+		ImGui::Checkbox("Show trigger volumes", &BspWorld::show_triggers);
+		Theme::Help("Master switch for the color-coded volume wires. They draw "
+			"even with brush wireframes OFF - within the wire radius, on the "
+			"shared line budget - so a route's triggers stay visible without "
+			"paying for the whole map.");
+		if (BspWorld::show_triggers) {
+			ImGui::Checkbox("Teleport##trig", &BspWorld::show_trig_tp);
+			ImGui::SameLine();
+			ImGui::TextColored(ImVec4(1.f, 0.67f, 0.16f, 1.f), "gold");
+			ImGui::SameLine();
+			ImGui::Checkbox("Push##trig", &BspWorld::show_trig_push);
+			ImGui::SameLine();
+			ImGui::TextColored(ImVec4(0.35f, 1.f, 0.51f, 1.f), "green");
+			ImGui::SameLine();
+			ImGui::Checkbox("Gravity##trig", &BspWorld::show_trig_grav);
+			ImGui::SameLine();
+			ImGui::TextColored(ImVec4(0.31f, 0.67f, 1.f, 1.f), "blue");
+			ImGui::SameLine();
+			ImGui::Checkbox("Links##trig", &BspWorld::show_trig_links);
+			Theme::Help("Teleport destination arrows (volume to landing box) and "
+				"booster direction rays. A hidden type hides its links too.");
+		}
+		ImGui::Checkbox("Sim event markers", &WorldDraw::show_trig_events);
+		Theme::Help("Small boxes on the run line where the last sim teleported "
+			"(gold), boosted (green) or entered a gravity zone (blue).");
+		ImGui::Text("volumes: %d teleport, %d push, %d gravity",
+			BspWorld::TriggerTeleportCount(), BspWorld::TriggerPushCount(),
+			BspWorld::TriggerGravityCount());
 
 		Theme::Heading("Freecam");
 		{
@@ -6987,15 +7697,9 @@ namespace {
 			Theme::Help("Eases the rendered camera position (~55 ms) for buttery "
 				"flight. Look stays raw so the crosshair and picks never lag. "
 				"Off = the camera renders the integrator directly.");
-			if (g_fc_pinned)
-				ImGui::TextDisabled("view slot: pinned (slot %d, origin+0x%X, angles+0x%X)",
-					g_fc_slot, g_fc_org_off, g_fc_ang_off);
-			else if (g_fc_dead)
-				ImGui::TextColored(Theme::Error,
-					"view slot: none validated - freecam unavailable (freecam_probe.log)");
-			else
-				ImGui::TextDisabled("view slot: identifying from engine data (be in game; %d samples)...",
-					g_fc_samples);
+			ImGui::TextDisabled("view write: slot %d, origin+0x%X, angles+0x%X%s",
+				kFcSlot, kFcOrgOff, kFcAngOff,
+				g_fc_confirmed ? " (confirmed)" : " (sanity check pending)");
 		}
 
 		Theme::Heading("Defaults");
@@ -7005,6 +7709,78 @@ namespace {
 		}
 		Theme::Help("Restores every option on this tab (including menu opacity) "
 			"to its built-in default and saves.");
+	}
+
+	// Server-side setup + the strafe model's assumed values, on their own tab
+	// (they are per-server configuration, not per-run editing).
+	void DrawServerTab() {
+		Theme::Heading("Server setup",
+			"Listen-server cvars the physics depend on. Surf setup applies the "
+			"standard surf server config in one click; Refresh reads the LIVE "
+			"replicated values back into the model.");
+		if (ImGui::Button("Surf setup")) {
+			if (engine) {
+				engine->ClientCmd_Unrestricted(
+					"sv_cheats 1; sv_accelerate 10; sv_airaccelerate 150; "
+					"sv_enablebunnyhopping 1");
+				g_air_accel = 150.f;   // the model follows what was just set
+				MarkDirty();
+				g_status = "Sent sv_cheats 1, sv_accelerate 10, sv_airaccelerate 150, "
+					"sv_enablebunnyhopping 1 - model updated.";
+			}
+		}
+		Theme::Help("One click for a listen-server surf setup: sv_cheats 1, "
+			"sv_accelerate 10, sv_airaccelerate 150, and sv_enablebunnyhopping 1 "
+			"(the server cvar that removes the jump speed cap - PreventBunnyJumping "
+			"- so hops keep speed). The strafe model's sv_airaccelerate follows "
+			"immediately.");
+		ImGui::SameLine();
+		if (ImGui::Button("Refresh")) {
+			float aa = 0.f, gr = 0.f;
+			const bool ok_a = Cvars::GetFloat("sv_airaccelerate", &aa);
+			const bool ok_g = Cvars::GetFloat("sv_gravity", &gr);
+			if (ok_a || ok_g) {
+				if (ok_a) g_air_accel = aa;
+				if (ok_g) g_gravity = gr;
+				MarkDirty();
+				g_status = FmtStr("Read live server cvars: sv_airaccelerate %.1f, sv_gravity %.1f.",
+					aa, gr);
+			} else {
+				// No validated live reads on this build - fall back to the
+				// engine probe's MEASURED values (never guesses).
+				AdoptProbe();
+			}
+		}
+		Theme::Help("Reads the LIVE replicated server cvars (sv_airaccelerate, "
+			"sv_gravity) straight out of client.dll - the values the server "
+			"enforces right now, no solver run needed. The ConVar layout is "
+			"discovered and validated from data at runtime and logged to "
+			"cvar_probe.log; if validation fails, Refresh falls back to the "
+			"engine probe's sim-measured values.");
+		ImGui::TextDisabled("%s", Cvars::Status());
+
+		Theme::Heading("Strafe model",
+			"The values the editor's optimal-strafe math and the solver assume. "
+			"Refresh above adopts the live server values; the engine probe "
+			"measures them from real sim data.");
+		bool ch = false;
+		ImGui::PushItemWidth(120);
+		ch |= ImGui::InputFloat("Air speed cap", &g_air_cap, 1.f, 10.f, 1);
+		ch |= ImGui::InputFloat("sv_airaccelerate", &g_air_accel, 1.f, 10.f, 1);
+		ch |= ImGui::InputFloat("Wish speed", &g_wishspeed, 10.f, 50.f, 0);
+		ch |= ImGui::InputFloat("sv_gravity", &g_gravity, 10.f, 50.f, 0);
+		// Model jump velocity, part of the model - not a search gate (it
+		// used to hide in the solver's gates section, which read as one).
+		ImGui::InputFloat("Jump vz (0 = engine formula)", &g_jump_vz, 1.f, 10.f, 1);
+		Theme::Help("Vertical velocity the model gives a jump. 0 uses the engine "
+			"formula sqrt(2*g*57). The engine probe measures the real value "
+			"from sim data; Refresh adopts it.");
+		ImGui::PopItemWidth();
+		if (ch)
+			MarkDirty();
+		if (g_meas_max_add > 0.f || g_meas_grav_n > 0)
+			ImGui::TextDisabled("probe: add/tick <= %.1f | gravity %.0f [%d samples] | jump vz %.1f",
+				g_meas_max_add, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
 	}
 
 	void DrawProjectTab() {
@@ -7018,17 +7794,39 @@ namespace {
 		if (ImGui::Button("Refresh list"))
 			RefreshFiles();
 
-		ImGui::BeginChild("projfiles", ImVec2(0, 90), true);
+		const float itick = Prediction::LastDiag().interval_per_tick > 0.f
+			? Prediction::LastDiag().interval_per_tick : 0.015f;
+
+		// The browser: newest first, each row carrying enough to know WHICH
+		// project it is without loading it (map, size of the run, saved when).
+		ImGui::BeginChild("projfiles", ImVec2(0, 200), true);
 		for (int i = 0; i < static_cast<int>(g_files.size()); ++i) {
-			if (ImGui::Selectable((g_files[i] + "##proj").c_str(), g_sel_file == i))
+			const ProjFileInfo& fi = g_files[i];
+			char row[320];
+			if (fi.has_info)
+				Sfmt(row, "%s    [%s]    %d seg   %u ticks (%.1f s)    %04d-%02d-%02d %02d:%02d##proj%d",
+					fi.name.c_str(), fi.map[0] ? fi.map : "?",
+					static_cast<int>(fi.segs.size()), fi.total_ticks,
+					fi.total_ticks * itick,
+					fi.mtime.wYear, fi.mtime.wMonth, fi.mtime.wDay,
+					fi.mtime.wHour, fi.mtime.wMinute, i);
+			else
+				Sfmt(row, "%s    (pre-update save)    %04d-%02d-%02d %02d:%02d##proj%d",
+					fi.name.c_str(),
+					fi.mtime.wYear, fi.mtime.wMonth, fi.mtime.wDay,
+					fi.mtime.wHour, fi.mtime.wMinute, i);
+			if (ImGui::Selectable(row, g_sel_file == i))
 				g_sel_file = i;
 		}
 		if (g_files.empty())
 			ImGui::TextDisabled("(no saved projects)");
+		const float pf_sy = ImGui::GetScrollY(), pf_sm = ImGui::GetScrollMaxY();
 		ImGui::EndChild();
+		static float s_pfiles_pw = 0.f;
+		PassWheelAtEdge(&s_pfiles_pw, pf_sy, pf_sm);
 
 		if (ImGui::Button("Load selected project") && g_sel_file >= 0 && g_sel_file < static_cast<int>(g_files.size()))
-			LoadProject(g_files[g_sel_file]);
+			LoadProject(g_files[g_sel_file].name);
 		ImGui::SameLine();
 		if (ImGui::Button("Delete selected project"))
 			DeleteProjectFile();
@@ -7038,6 +7836,47 @@ namespace {
 		ImGui::SameLine();
 		if (ImGui::Button("Import selected recording"))
 			ImportFromLibrary();
+
+		// Details for the highlighted file - the expanded stats plus a
+		// read-only picture of its segments, so the right project is known
+		// BEFORE it replaces the one being edited.
+		Theme::Heading("Selected project");
+		if (g_sel_file >= 0 && g_sel_file < static_cast<int>(g_files.size())) {
+			const ProjFileInfo& fi = g_files[g_sel_file];
+			ImGui::Text("%s   (%.1f KB, saved %04d-%02d-%02d %02d:%02d)",
+				fi.name.c_str(), fi.size / 1024.0,
+				fi.mtime.wYear, fi.mtime.wMonth, fi.mtime.wDay,
+				fi.mtime.wHour, fi.mtime.wMinute);
+			if (fi.has_info) {
+				ImGui::Text("map: %s", fi.map[0] ? fi.map : "? (saved outside a map)");
+				if (fi.version >= 23) {
+					if (fi.anchor_valid)
+						ImGui::Text("anchor: %.0f  %.0f  %.0f  (saved with the project)",
+							fi.anchor[0], fi.anchor[1], fi.anchor[2]);
+					else
+						ImGui::TextDisabled("no anchor stored - capture one after loading");
+				}
+				ImGui::Text("%d segment(s), %u ticks total (%.2f s)",
+					static_cast<int>(fi.segs.size()), fi.total_ticks,
+					fi.total_ticks * itick);
+				ImGui::BeginChild("projsegs", ImVec2(0, 190), true);
+				for (int k = 0; k < static_cast<int>(fi.segs.size()); ++k)
+					ImGui::Text("#%d   %s   %d ticks  (%.2f s)", k,
+						SegKindName(fi.segs[k].first),
+						fi.segs[k].second, fi.segs[k].second * itick);
+				if (fi.segs.empty())
+					ImGui::TextDisabled("(no segments in this file)");
+				const float ps_sy = ImGui::GetScrollY(), ps_sm = ImGui::GetScrollMaxY();
+				ImGui::EndChild();
+				static float s_psegs_pw = 0.f;
+				PassWheelAtEdge(&s_psegs_pw, ps_sy, ps_sm);
+			} else {
+				ImGui::TextDisabled("no summary in pre-update saves - load it and "
+					"Save once to index it.");
+			}
+		} else {
+			ImGui::TextDisabled("select a project above to inspect it before loading");
+		}
 	}
 }
 
@@ -7059,12 +7898,20 @@ void TasEditor::Update() {
 		LoadUiSettings();
 	}
 
+	// Stage breadcrumbs through the WHOLE of Update: the 2026-08-05 freeze's
+	// last record was "endscene: editor update" with nothing finer - the hang
+	// is somewhere in here, and the next one must name its exact stage.
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: search");
 	// Pump the solver search (time-sliced; no-op when idle).
 	StepSearch();
 
-	// Freecam flight (no-op unless active).
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: freecam");
+	// Freecam flight + layout verification (no-ops once irrelevant; the
+	// verification runs HERE, never inside the view hook).
 	FreecamMove();
+	FreecamVerifyPump();
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: teleport");
 	// Teleport landing check: report the measured delta from the anchor, and
 	// persist it (a later crash or status overwrite must not eat the number).
 	if (g_tp_check && GetTickCount64() - g_tp_ms >= 400) {
@@ -7092,6 +7939,7 @@ void TasEditor::Update() {
 		}
 	}
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: correct");
 	// Slider settled? Start the deferred auto-correction (one, not per notch).
 	if (g_pick_correct_pending && GetTickCount64() - g_pick_settle_ms >= 350
 		&& !g_verify.active && !g_batch.active && !g_search.active) {
@@ -7106,14 +7954,48 @@ void TasEditor::Update() {
 	// would stick true forever (which also kept SearchBusy true, so the
 	// draw-pause blanked the world until a menu interaction forced a resim).
 	// Kick a stalled correction once the current line is landed and clean.
+	UndoIdleTick();
+
+	// Test-play verdict: when the playback ends, report how faithfully the
+	// real run followed the sim (the engine-exact promise, measured).
+	{
+		static bool s_was_playing = false;
+		const bool playing = g_tas.IsPlaying();
+		if (s_was_playing && !playing && g_testplay) {
+			g_testplay = false;
+			if (g_play_count > 0) {
+				char line[224];
+				if (g_play_max <= 0.5f)
+					Sfmt(line, "Test play FOLLOWED the sim: max deviation %.3f u over %d ticks.",
+						g_play_max, g_play_count);
+				else
+					Sfmt(line, "Test play DIVERGED: max %.1f u at tick %d (first past 0.5 u at "
+						"tick %d) - check cvars, stamina, unmodeled triggers.",
+						g_play_max, g_play_max_tick, g_play_first_tick);
+				g_status = line;
+			}
+		}
+		s_was_playing = playing;
+	}
+
+	// Autosave: a rolling crash backup, 2 s after the last mutation settles.
+	if (g_autosave_pending && GetTickCount64() - g_last_user_edit_ms > 2000
+		&& !g_dirty && !g_segs.empty()) {
+		g_autosave_pending = false;
+		SaveAutosave();
+	}
+
 	if (g_correct.active && g_correct.skip == 0 && g_valid && !g_dirty
 		&& !g_sim_requested && !Prediction::SimBusy()
 		&& !g_verify.active && !g_batch.active) {
 		g_stage_name = "CorrectPump(kick)";
+		g_machine_edit = true;
 		CorrectPump();
+		g_machine_edit = false;
 		g_stage_name = "";
 	}
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: simland");
 	// Land a finished sim, measure the REAL pass, feed the correction loop.
 	// The whole chain runs under the same fault guard as the search jobs: a
 	// crash anywhere in it becomes a NAMED stage in solver_fault.log and the
@@ -7138,6 +8020,7 @@ void TasEditor::Update() {
 		}
 	}
 
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: simreq");
 	// Live preview: resim as fast as the sim itself allows (measured, not
 	// guessed); only long runs get a short debounce to protect the framerate.
 	const float sim_ms = Prediction::LastDiag().sim_ms;
@@ -7156,12 +8039,66 @@ void TasEditor::Update() {
 				sim_ticks += kSolverOverrun;
 			if (sim_ticks > Prediction::kMaxSimTicks)
 				sim_ticks = Prediction::kMaxSimTicks;
+			// COAST: append no-input ticks past the run end. g_coast_from tells
+			// the provider where to start emitting nothing, and SimLandedStage
+			// where to peel the tail off. -1 = off (nothing appended).
+			g_coast_from = -1;
+			if (g_coast_line && sim_ticks > 0 && sim_ticks < Prediction::kMaxSimTicks) {
+				g_coast_from = sim_ticks;
+				sim_ticks += g_coast_ticks;
+				if (sim_ticks > Prediction::kMaxSimTicks)
+					sim_ticks = Prediction::kMaxSimTicks;
+			}
 			if (Prediction::RequestSim(g_anchor, sim_ticks, &Provider)) {
 				g_sim_requested = true;
 				g_dirty = false;
 			}
 		}
 	}
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: end");
+}
+
+void TasEditor::Undo() { DoUndo(); }
+void TasEditor::Redo() { DoRedo(); }
+
+void TasEditor::NotePlaybackTick(int index) {
+	// Called by the CreateMove hook (game thread - the same thread that runs
+	// the sims, so g_states can't be resized under this read) with the index
+	// of the frame ABOUT to replay: the player's current origin must equal
+	// the sim's state after tick index-1.
+	if (!g_testplay || !g_valid || index <= 0
+		|| index - 1 >= static_cast<int>(g_states.size()))
+		return;
+	StartState st;
+	if (!Prediction::CaptureStartState(st))
+		return;
+	const Vector& want = g_states[index - 1].origin;
+	const float dx = st.origin.X - want.X;
+	const float dy = st.origin.Y - want.Y;
+	const float dz = st.origin.Z - want.Z;
+	const float dev = sqrtf(dx * dx + dy * dy + dz * dz);
+	if (dev > g_play_max) {
+		g_play_max = dev;
+		g_play_max_tick = index - 1;
+		g_play_div_pos = st.origin;
+	}
+	if (g_play_first_tick < 0 && dev > 0.5f)
+		g_play_first_tick = index - 1;
+	g_play_count++;
+}
+
+bool TasEditor::DivergencePoint(Vector* p) {
+	if (g_play_max <= 0.5f || g_play_max_tick < 0)
+		return false;
+	if (p)
+		*p = g_play_div_pos;
+	return true;
+}
+
+void TasEditor::ToggleCoastLine() {
+	g_coast_line = !g_coast_line;
+	MarkDirty();   // resim so the coast tail appears/clears immediately
+	g_status = g_coast_line ? "Coast line on." : "Coast line off.";
 }
 
 bool TasEditor::IsOpen() { return g_open; }
@@ -7252,14 +8189,6 @@ void TasEditor::PickAtCrosshair() {
 }
 
 void TasEditor::ToggleFreecam() {
-	// NEVER engage (and never block player input) before the view slot is
-	// pinned - a freecam that can't show its camera must not eat controls.
-	if (!g_freecam && !g_fc_pinned) {
-		g_status = g_fc_dead
-			? "Freecam unavailable: no view slot validated on this build (freecam_probe.log)."
-			: "Freecam: still identifying the engine's view slot - be in game a few seconds, then retry.";
-		return;
-	}
 	g_freecam = !g_freecam;
 	if (g_freecam) {
 		// Seed the camera from the CURRENT view (engine truth).
@@ -7342,6 +8271,8 @@ bool TasEditor::GetDrawData(DrawData& out) {
 	out.have_pass = g_realpass.computed && g_realpass.crossed;
 	out.pass_tick = g_realpass.tick;
 	out.pass_point = g_realpass.pass;
+	out.coast = g_coast_path.empty() ? nullptr : g_coast_path.data();
+	out.coast_count = static_cast<int>(g_coast_path.size());
 	// Tag data: % of optimal gain over the selected segment + elapsed time.
 	float interval = Prediction::LastDiag().interval_per_tick;
 	if (interval <= 0.f) interval = 0.015f;
@@ -7351,16 +8282,23 @@ bool TasEditor::GetDrawData(DrawData& out) {
 	if (out.sel_start >= 0 && out.sel_end > out.sel_start && !g_gain.empty()) {
 		float gs = 0.f, ms = 0.f;
 		const int hi = (std::min)(out.sel_end,
-			(std::min)(static_cast<int>(g_gain.size()),
+			(std::min)(static_cast<int>(g_eff.size()),
 			           static_cast<int>(g_maxgain.size())));
 		for (int i = out.sel_start; i < hi; ++i) {
 			if (g_maxgain[i] <= 0.f)
-				continue;   // unscoreable ticks (sliding/grounded) stay out
-			gs += g_gain[i];
+				continue;   // unscoreable ticks (grounded/degenerate) stay out
+			// eff*maxgain = the tick's SCORED gain: the raw gain in free
+			// flight, the strafe-controllable part on a ramp slide - so the
+			// segment % stays out of 100 across both.
+			gs += g_eff[i] * g_maxgain[i];
 			ms += g_maxgain[i];
 		}
 		if (ms > 1.f)
 			out.seg_gain_pct = 100.f * gs / ms;
+		// Out of 100 means OUT OF 100: free-flight gating above keeps physics
+		// gains out, this keeps float residue from reading 100.3%.
+		if (out.seg_gain_pct > 100.f)
+			out.seg_gain_pct = 100.f;
 	}
 	return true;
 }
@@ -7442,7 +8380,7 @@ void DrawWindowImpl() {
 	Theme::ApplyOpacity(Theme::MenuOpacity());
 	// Single panel now (record/run is a tab) - F8 controls visibility, so no
 	// per-window close button.
-	if (!ImGui::Begin("sourceTAS", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
+	if (!ImGui::Begin("sourceTAS v1.1###sourceTAS", nullptr, ImGuiWindowFlags_NoSavedSettings)) {
 		ImGui::End();
 		Theme::ApplyOpacity(1.f);
 		return;
@@ -7463,11 +8401,11 @@ void DrawWindowImpl() {
 	ImGui::Spacing();
 
 	// Tab row (selected = pink accent).
-	const char* tabs[] = { "Project", "Record", "Run", "Targets", "Rendering" };
-	for (int i = 0; i < 5; ++i) {
+	const char* tabs[] = { "Project", "Record", "Run", "Targets", "Server", "Rendering" };
+	for (int i = 0; i < 6; ++i) {
 		if (Theme::Tab(tabs[i], g_tab == i, ImVec2(104, 0)))
 			g_tab = i;
-		if (i < 4)
+		if (i < 5)
 			ImGui::SameLine();
 	}
 	ImGui::Spacing();
@@ -7482,6 +8420,7 @@ void DrawWindowImpl() {
 	case 1: RecordPanel::Draw(); break;
 	case 2: DrawRunTab(); break;
 	case 3: DrawTargetsTab(); break;
+	case 4: DrawServerTab(); break;
 	default: DrawRenderingTab(); break;
 	}
 	ImGui::EndChild();

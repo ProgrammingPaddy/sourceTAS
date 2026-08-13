@@ -38,6 +38,8 @@ namespace WorldDraw {
 	bool tag_seg_end_eff   = true;
 	bool tag_seg_end_time  = true;
 	bool tag_cursor_time   = true;
+
+	bool show_trig_events  = true;
 }
 
 namespace {
@@ -70,9 +72,14 @@ namespace {
 	const unsigned char kSevenSeg[10] = {
 		0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
 
+	// Shared overlay budget (reset each Render frame; see WorldDraw.h).
+	int g_ovl_left = 0;
+
 	void DrawSegDigit(int digit, const Vector& org, const Vector& right,
 	                  float h, int r, int g, int b, float dur) {
 		if (digit < 0 || digit > 9)
+			return;
+		if (!WorldDraw::OverlayTake(7))
 			return;
 		const float w = h * 0.55f;
 		auto P = [&](float x, float y) {
@@ -252,14 +259,39 @@ namespace {
 	}
 }
 
+bool WorldDraw::OverlayTake(int count) {
+	if (g_ovl_left < count)
+		return false;
+	g_ovl_left -= count;
+	return true;
+}
+
 void WorldDraw::Render() {
 	Diagnostics d;
+	g_ovl_left = 2000;   // this frame's shared overlay budget
 
 	d.interfaces_ready = (engine && debugoverlay && entitylist && clientdll);
 	if (!d.interfaces_ready) { g_diag = d; return; }
 
 	d.in_game = engine->IsInGame();
 	if (!d.in_game) { g_diag = d; return; }
+
+	// PAUSED GAME (ESC on a listen server) freezes curtime - and debug
+	// overlays EXPIRE against curtime, so a frozen clock means nothing ever
+	// expires while we submit thousands per frame. The engine's overlay list
+	// then grows until its hard overflow terminates the process (2026-08-06:
+	// death inside the worlddraw section ~10 s after ESC; the earlier
+	// on-screen overflow warning + hitch were the same mechanism during
+	// brief pauses). Submit ONLY when curtime advances: exactly one
+	// submission per expiry cycle - what is already drawn stays visible
+	// between ticks precisely because nothing expires, and high-fps overlay
+	// churn drops several-fold for free.
+	{
+		static float s_last_ct = -1e9f;
+		const float ct = Prediction::CurTime();
+		if (ct == s_last_ct) { g_diag = d; return; }
+		s_last_ct = ct;
+	}
 
 	// Crash isolation: while the solver's HEAVY phases churn (search /
 	// verify / batch), submit NOTHING. The engine expires its overlay list
@@ -330,10 +362,12 @@ void WorldDraw::Render() {
 			for (const Vector& p : path) {
 				if (!FiniteWorldPoint(p))
 					break;   // prediction diverged; stop before feeding garbage to the overlay
+				if (!OverlayTake(2))
+					break;   // shared frame budget spent
 				debugoverlay->AddLineOverlay(prev, p, 40, 220, 90, false, g_dur_live);
 				debugoverlay->AddBoxOverlay(p, dmin, dmax, kNoRotation, 40, 255, 90, 255, g_dur_live);
 				for (int c = 0; c < 4; ++c)
-					if (corner_trails[c])
+					if (corner_trails[c] && OverlayTake(1))
 						debugoverlay->AddLineOverlay(prev + kCornerOff[c], p + kCornerOff[c],
 						                             120, 170, 200, false, g_dur_live);
 				prev = p;
@@ -370,6 +404,8 @@ void WorldDraw::Render() {
 			const Vector p = ed.states[i].origin;
 			if (!FiniteWorldPoint(p))
 				break;
+			if (!OverlayTake(2))
+				break;   // shared frame budget spent - the line ends here
 
 			// Splice the measured pass point in as a vertex (and never decimate
 			// its tick): the drawn line visibly runs through the exact point
@@ -395,8 +431,18 @@ void WorldDraw::Render() {
 				r = 120; g = 120; b = 120;
 			} else {
 				if (ed.eff && ed.maxgain && ed.maxgain[i] > 0.001f) {
-					if (ed.eff[i] >= ed.min_eff) { r = 60; g = 255; b = 120; }   // optimal enough
-					else                          { r = 255; g = 140; b = 30; }  // below threshold
+					// Efficiency GRADIENT: everything at/above the min-eff cap
+					// draws the same bright green; below it the color slides
+					// through orange down to red across a 15%-wide band, so
+					// the line itself says HOW far off optimal a stretch is.
+					const float hi = ed.min_eff;
+					const float lo = hi - 0.15f;
+					float t = (hi > lo) ? (ed.eff[i] - lo) / (hi - lo) : 1.f;
+					if (t < 0.f) t = 0.f;
+					if (t > 1.f) t = 1.f;
+					r = static_cast<int>(255.f + (60.f - 255.f) * t);
+					g = static_cast<int>(60.f + (255.f - 60.f) * t);
+					b = static_cast<int>(40.f + (120.f - 40.f) * t);
 				} else {
 					r = 50; g = 190; b = 110;                    // not scoreable (ground/landing)
 				}
@@ -406,7 +452,7 @@ void WorldDraw::Render() {
 			if (prev_ok) {
 				debugoverlay->AddLineOverlay(prev, p, r, g, b, false, duration);
 				for (int c = 0; c < 4; ++c)
-					if (corner_trails[c])
+					if (corner_trails[c] && OverlayTake(1))
 						debugoverlay->AddLineOverlay(prev + kCornerOff[c], p + kCornerOff[c],
 						                             120, 170, 200, false, duration);
 			}
@@ -416,6 +462,33 @@ void WorldDraw::Render() {
 			if (boundary)
 				debugoverlay->AddBoxOverlay(p, Vector(-1.5f, -1.5f, -1.5f), Vector(1.5f, 1.5f, 1.5f),
 				                            kNoRotation, 255, 255, 255, 255, duration);
+		}
+
+		// COAST line: gray "if you let go of everything at the run's end"
+		// trajectory. Continues from the last run state through the peeled
+		// no-input origins. Draw-only, decimated like the main line, on the
+		// shared budget - purely a visual aid for placing the next segment.
+		if (ed.coast_count > 0 && ed.count > 0 && FiniteWorldPoint(ed.states[ed.count - 1].origin)) {
+			Vector cprev = ed.states[ed.count - 1].origin;
+			bool cprev_ok = true;
+			const int cstride = ed.coast_count > 200 ? ed.coast_count / 200 : 1;
+			// A small tick at the seam so the release point is legible.
+			if (OverlayTake(1))
+				debugoverlay->AddBoxOverlay(cprev, Vector(-1.2f, -1.2f, -1.2f),
+				                            Vector(1.2f, 1.2f, 1.2f), kNoRotation, 170, 170, 170, 200, duration);
+			for (int i = 0; i < ed.coast_count; ++i) {
+				if (i != ed.coast_count - 1 && (i % cstride) != 0)
+					continue;
+				const Vector cp = ed.coast[i];
+				if (!FiniteWorldPoint(cp))
+					break;
+				if (!OverlayTake(1))
+					break;
+				if (cprev_ok)
+					debugoverlay->AddLineOverlay(cprev, cp, 150, 150, 150, false, duration);
+				cprev = cp;
+				cprev_ok = true;
+			}
 		}
 
 		if (ed.cursor >= 0 && ed.cursor < ed.count) {
@@ -468,6 +541,33 @@ void WorldDraw::Render() {
 		// tick, the same state a solution row's `speed` claims (never the
 		// post-pass slide/overrun). Playhead: speed (cyan, +96), time (white,
 		// +110).
+		// Worst divergence of the last test play (> 0.5 u): a red marker at
+		// the spot where reality left the sim.
+		{
+			Vector dp;
+			if (TasEditor::DivergencePoint(&dp) && FiniteWorldPoint(dp) && OverlayTake(1))
+				debugoverlay->AddBoxOverlay(dp, Vector(-2.5f, -2.5f, -2.5f),
+					Vector(2.5f, 2.5f, 2.5f), kNoRotation, 255, 50, 50, 220, duration);
+		}
+
+		// Trigger events from the last sim: gold markers where the line
+		// teleported / entered a gravity zone.
+		if (show_trig_events)
+		for (int ti = 0; ti < Prediction::TriggerEventCount(); ++ti) {
+			const Prediction::TriggerEvent* ev = Prediction::TriggerEventAt(ti);
+			if (!ev || !FiniteWorldPoint(ev->to) || !OverlayTake(1))
+				break;
+			if (ev->type == 1)
+				debugoverlay->AddBoxOverlay(ev->to, Vector(-3.f, -3.f, 0.f),
+					Vector(3.f, 3.f, 6.f), kNoRotation, 255, 170, 40, 180, duration);
+			else if (ev->type == 3)
+				debugoverlay->AddBoxOverlay(ev->to, Vector(-2.f, -2.f, -2.f),
+					Vector(2.f, 2.f, 2.f), kNoRotation, 90, 255, 130, 180, duration);
+			else
+				debugoverlay->AddBoxOverlay(ev->to, Vector(-2.f, -2.f, -2.f),
+					Vector(2.f, 2.f, 2.f), kNoRotation, 80, 170, 255, 180, duration);
+		}
+
 		Vector eye(d.origin.X, d.origin.Y, d.origin.Z + 64.f);
 		TasEditor::FreecamEye(&eye);   // freecam engaged: tags face the camera
 		if (ed.sel_end > 0 && ed.sel_end <= ed.count) {
