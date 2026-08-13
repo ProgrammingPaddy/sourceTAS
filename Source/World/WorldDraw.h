@@ -46,6 +46,10 @@ namespace WorldDraw {
 	extern bool tag_seg_end_time;    // elapsed seconds at the segment's end
 	extern bool tag_cursor_time;     // elapsed seconds at the playhead
 
+	// Markers on the run line where the last sim fired a trigger (gold =
+	// teleport landing, green = booster, blue = gravity zone).
+	extern bool show_trig_events;
+
 	// Prediction input (held for the whole predicted window).
 	extern int   pred_ticks;         // number of ticks to predict
 	extern bool  pred_live_input;    // use the live command's input (else the overrides below)

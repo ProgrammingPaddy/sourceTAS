@@ -50,6 +50,16 @@ namespace Prediction {
 	// from the render thread). Returns false when not in game.
 	bool CaptureStartState(StartState& out);
 
+	// The live local player's m_fFlags (FL_ONGROUND etc.), same access path as
+	// CaptureStartState. False when not in game / offsets unresolved - callers
+	// must then leave the input untouched (autohop's fail-passive rule).
+	bool LiveFlags(int* out);
+
+	// m_fFlags captured INSIDE the FinishMove hook after the newest
+	// first-time-predicted command - the tick-exact grounded signal (the
+	// netvar read above can lag prediction by a tick at CreateMove time).
+	bool PredictedFlags(int* out);
+
 	// Origin of the newest real command's movedata. Compared against the netvar
 	// origin in the menu to verify both draw paths share one basis (read it
 	// standing still - in motion they differ by one tick of movement).
@@ -60,6 +70,17 @@ namespace Prediction {
 	// debug overlays expire against curtime and a frozen clock means nothing
 	// ever expires. Returns a constant sentinel when unavailable.
 	float CurTime();
+
+	// Trigger events the last editor sim fired (teleports/gravity zones the
+	// client's prediction would otherwise ignore - see BspWorld::CheckTriggers).
+	struct TriggerEvent {
+		int    tick;
+		int    type;       // 1 = teleport, 2 = gravity
+		Vector to;         // teleport destination (type 1)
+		float  gravity;    // player gravity scale (type 2)
+	};
+	int TriggerEventCount();
+	const TriggerEvent* TriggerEventAt(int i);
 
 	// Live diagnostics for the menu.
 	struct Diag {

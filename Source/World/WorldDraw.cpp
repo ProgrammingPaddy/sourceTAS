@@ -38,6 +38,8 @@ namespace WorldDraw {
 	bool tag_seg_end_eff   = true;
 	bool tag_seg_end_time  = true;
 	bool tag_cursor_time   = true;
+
+	bool show_trig_events  = true;
 }
 
 namespace {
@@ -462,6 +464,33 @@ void WorldDraw::Render() {
 				                            kNoRotation, 255, 255, 255, 255, duration);
 		}
 
+		// COAST line: gray "if you let go of everything at the run's end"
+		// trajectory. Continues from the last run state through the peeled
+		// no-input origins. Draw-only, decimated like the main line, on the
+		// shared budget - purely a visual aid for placing the next segment.
+		if (ed.coast_count > 0 && ed.count > 0 && FiniteWorldPoint(ed.states[ed.count - 1].origin)) {
+			Vector cprev = ed.states[ed.count - 1].origin;
+			bool cprev_ok = true;
+			const int cstride = ed.coast_count > 200 ? ed.coast_count / 200 : 1;
+			// A small tick at the seam so the release point is legible.
+			if (OverlayTake(1))
+				debugoverlay->AddBoxOverlay(cprev, Vector(-1.2f, -1.2f, -1.2f),
+				                            Vector(1.2f, 1.2f, 1.2f), kNoRotation, 170, 170, 170, 200, duration);
+			for (int i = 0; i < ed.coast_count; ++i) {
+				if (i != ed.coast_count - 1 && (i % cstride) != 0)
+					continue;
+				const Vector cp = ed.coast[i];
+				if (!FiniteWorldPoint(cp))
+					break;
+				if (!OverlayTake(1))
+					break;
+				if (cprev_ok)
+					debugoverlay->AddLineOverlay(cprev, cp, 150, 150, 150, false, duration);
+				cprev = cp;
+				cprev_ok = true;
+			}
+		}
+
 		if (ed.cursor >= 0 && ed.cursor < ed.count) {
 			// The hull for tick t is the state ENTERING t: states[t-1], and the
 			// ANCHOR for t=0. Drawing states[t] put the "start hitbox" one tick
@@ -512,6 +541,33 @@ void WorldDraw::Render() {
 		// tick, the same state a solution row's `speed` claims (never the
 		// post-pass slide/overrun). Playhead: speed (cyan, +96), time (white,
 		// +110).
+		// Worst divergence of the last test play (> 0.5 u): a red marker at
+		// the spot where reality left the sim.
+		{
+			Vector dp;
+			if (TasEditor::DivergencePoint(&dp) && FiniteWorldPoint(dp) && OverlayTake(1))
+				debugoverlay->AddBoxOverlay(dp, Vector(-2.5f, -2.5f, -2.5f),
+					Vector(2.5f, 2.5f, 2.5f), kNoRotation, 255, 50, 50, 220, duration);
+		}
+
+		// Trigger events from the last sim: gold markers where the line
+		// teleported / entered a gravity zone.
+		if (show_trig_events)
+		for (int ti = 0; ti < Prediction::TriggerEventCount(); ++ti) {
+			const Prediction::TriggerEvent* ev = Prediction::TriggerEventAt(ti);
+			if (!ev || !FiniteWorldPoint(ev->to) || !OverlayTake(1))
+				break;
+			if (ev->type == 1)
+				debugoverlay->AddBoxOverlay(ev->to, Vector(-3.f, -3.f, 0.f),
+					Vector(3.f, 3.f, 6.f), kNoRotation, 255, 170, 40, 180, duration);
+			else if (ev->type == 3)
+				debugoverlay->AddBoxOverlay(ev->to, Vector(-2.f, -2.f, -2.f),
+					Vector(2.f, 2.f, 2.f), kNoRotation, 90, 255, 130, 180, duration);
+			else
+				debugoverlay->AddBoxOverlay(ev->to, Vector(-2.f, -2.f, -2.f),
+					Vector(2.f, 2.f, 2.f), kNoRotation, 80, 170, 255, 180, duration);
+		}
+
 		Vector eye(d.origin.X, d.origin.Y, d.origin.Z + 64.f);
 		TasEditor::FreecamEye(&eye);   // freecam engaged: tags face the camera
 		if (ed.sel_end > 0 && ed.sel_end <= ed.count) {

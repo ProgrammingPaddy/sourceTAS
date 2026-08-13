@@ -12,7 +12,8 @@
 namespace {
 	constexpr char kMagic[4] = { 'S', 'T', 'A', 'S' };
 	// v1: segments only. v2: adds the StartState anchor block after the version.
-	constexpr uint32_t kVersion = 2;
+	// v3: adds a length-prefixed map name after the anchor block.
+	constexpr uint32_t kVersion = 3;
 
 	// Documents\sourceTAS\recordings (created if missing); "" on failure.
 	std::string Directory() {
@@ -93,6 +94,12 @@ namespace {
 		out.write(reinterpret_cast<const char*>(&start_ducked), sizeof(start_ducked));
 		out.write(reinterpret_cast<const char*>(&run.start.stamina), sizeof(run.start.stamina));
 
+		// v3 map name (length-prefixed).
+		const uint32_t map_len = static_cast<uint32_t>(run.map.size());
+		out.write(reinterpret_cast<const char*>(&map_len), sizeof(map_len));
+		if (map_len)
+			out.write(run.map.data(), map_len);
+
 		const uint32_t segment_count = static_cast<uint32_t>(run.segments.size());
 		out.write(reinterpret_cast<const char*>(&segment_count), sizeof(segment_count));
 
@@ -112,7 +119,14 @@ namespace {
 			}
 		}
 
-		return static_cast<bool>(out);
+		const bool ok = static_cast<bool>(out);
+		out.close();
+		// Stamp the on-disk write time for the record list's date column.
+		WIN32_FILE_ATTRIBUTE_DATA fad = {};
+		if (ok && GetFileAttributesExA(run.filepath.c_str(), GetFileExInfoStandard, &fad))
+			run.mtime = (static_cast<unsigned long long>(fad.ftLastWriteTime.dwHighDateTime) << 32)
+				| fad.ftLastWriteTime.dwLowDateTime;
+		return ok;
 	}
 
 	bool ReadRun(const std::string& path, Run& out) {
@@ -143,6 +157,17 @@ namespace {
 				return false;
 			run.start.valid = start_valid != 0;
 			run.start.ducked = start_ducked != 0;
+		}
+
+		if (version >= 3) {
+			uint32_t map_len = 0;
+			if (!in.read(reinterpret_cast<char*>(&map_len), sizeof(map_len)) || map_len > 256)
+				return false;
+			if (map_len) {
+				run.map.resize(map_len);
+				if (!in.read(&run.map[0], map_len))
+					return false;
+			}
 		}
 
 		uint32_t segment_count = 0;
@@ -192,8 +217,11 @@ void TasEngine::LoadFromDisk() {
 				if (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
 					continue;
 				Run run;
-				if (ReadRun(directory + "\\" + find.cFileName, run))
+				if (ReadRun(directory + "\\" + find.cFileName, run)) {
+					run.mtime = (static_cast<unsigned long long>(find.ftLastWriteTime.dwHighDateTime) << 32)
+						| find.ftLastWriteTime.dwLowDateTime;
 					library.push_back(std::move(run));
+				}
 			} while (FindNextFileA(handle, &find));
 			FindClose(handle);
 		}
@@ -245,6 +273,12 @@ void TasEngine::DeleteSelected() {
 	Run& run = library[selected];
 	if (!run.filepath.empty())
 		DeleteFileA(run.filepath.c_str());
+
+	// Stash for UndeleteLast (session-scoped, small): the run keeps its
+	// filepath, so restoring rewrites the exact same file.
+	deleted_stack.push_back(run);
+	if (deleted_stack.size() > 10)
+		deleted_stack.erase(deleted_stack.begin());
 
 	const std::string name = run.name;
 	library.erase(library.begin() + selected);

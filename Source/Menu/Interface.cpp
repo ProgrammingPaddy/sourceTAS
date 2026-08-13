@@ -35,6 +35,10 @@ namespace {
 	// the toggle command itself bypasses the gate (see dispatch).
 	bool g_hotkeys_armed = true;
 
+	// Autohop for human play (declared before the command table too). Applied
+	// in the CreateMove hook; see RecordPanel::AutohopEnabled.
+	bool g_autohop = false;
+
 	TasCommand g_commands[] = {
 		{ "Start Recording", 0, [] { return Idle(); }, [] { g_tas.StartRecording(); } },
 		{ "Save Segment", 0, [] { return Recording(); }, [] { g_tas.SaveSegment(); } },
@@ -50,6 +54,8 @@ namespace {
 		{ "Editor: Next Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(1); } },
 		{ "Editor: Pick At Crosshair", 0, [] { return true; }, [] { TasEditor::PickAtCrosshair(); } },
 		{ "Freecam Toggle", 0, [] { return true; }, [] { TasEditor::ToggleFreecam(); } },
+		{ "Toggle Autohop", 0, [] { return true; }, [] { g_autohop = !g_autohop; } },
+		{ "Toggle Coast Line", 0, [] { return true; }, [] { TasEditor::ToggleCoastLine(); } },
 		// Default-bound to TILDE: the key that opens the console also flips
 		// the arm state, so opening the console disarms every other bind and
 		// closing it (tilde again) re-arms - no detection, purely key-driven.
@@ -184,6 +190,10 @@ bool& RecordPanel::HotkeysArmed() {
 	return g_hotkeys_armed;
 }
 
+bool& RecordPanel::AutohopEnabled() {
+	return g_autohop;
+}
+
 // The recording / run controls, drawn as a tab inside the editor window.
 void RecordPanel::Draw() {
 	// --- state + status --------------------------------------------------
@@ -201,17 +211,35 @@ void RecordPanel::Draw() {
 			static_cast<int>(g_tas.PlaybackPosition()), static_cast<int>(g_tas.PlaybackTotal()));
 
 	Theme::Heading("Recordings");
-	ImGui::BeginChild("runs", ImVec2(0, 120), true);
+	ImGui::BeginChild("runs", ImVec2(0, 168), true);
 	const std::vector<Run>& library = g_tas.Library();
+	float itick = Prediction::LastDiag().interval_per_tick;
+	if (itick <= 0.f) itick = 0.015f;
 	if (library.empty()) {
 		ImGui::TextDisabled("(none yet - Start Recording to make one)");
 	} else {
 		for (int i = 0; i < static_cast<int>(library.size()); ++i) {
-			char label[160];
-			sprintf_s(label, "%s   (%d seg, %d frames)##run%d",
-				library[i].name.c_str(),
-				static_cast<int>(library[i].segments.size()),
-				static_cast<int>(library[i].FrameCount()), i);
+			const Run& r = library[i];
+			// Same at-a-glance stats as the project browser: map, run time,
+			// date. Map/date come from the .tas v3 header + file time; older
+			// recordings show "?"/no date.
+			char when[32] = {};
+			if (r.mtime) {
+				FILETIME ft;
+				ft.dwLowDateTime = static_cast<DWORD>(r.mtime & 0xFFFFFFFF);
+				ft.dwHighDateTime = static_cast<DWORD>(r.mtime >> 32);
+				FILETIME local = {};
+				SYSTEMTIME st = {};
+				if (FileTimeToLocalFileTime(&ft, &local) && FileTimeToSystemTime(&local, &st))
+					sprintf_s(when, "%04d-%02d-%02d %02d:%02d",
+						st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+			}
+			const int frames = static_cast<int>(r.FrameCount());
+			char label[224];
+			sprintf_s(label, "%s   [%s]   %d seg   %d ticks (%.1f s)   %s##run%d",
+				r.name.c_str(), r.map.empty() ? "?" : r.map.c_str(),
+				static_cast<int>(r.segments.size()), frames, frames * itick,
+				when[0] ? when : "-", i);
 			if (ImGui::Selectable(label, g_tas.Selected() == i))
 				g_tas.Select(i);
 		}
@@ -244,6 +272,15 @@ void RecordPanel::Draw() {
 			synced = -1;
 		}
 	}
+	// Own undo for record-tab deletes - outside the selected-run row so it
+	// stays reachable when the delete emptied the library. Session-scoped.
+	if (g_tas.CanUndelete()) {
+		if (ImGui::Button("Undo delete")) {
+			g_tas.UndeleteLast();
+		}
+		Theme::Help("Restores the most recently deleted recording (this session) "
+			"and rewrites its file on disk.");
+	}
 
 	Theme::Heading("Actions & hotkeys");
 	ImGui::Checkbox("Arm hotkeys", &g_hotkeys_armed);
@@ -254,8 +291,53 @@ void RecordPanel::Draw() {
 		ImGui::SameLine();
 		ImGui::TextColored(Theme::Warning, "DISARMED");
 	}
+	ImGui::Checkbox("Autohop", &g_autohop);
+	Theme::Help("Server-style autobhop for YOUR play: hold jump and the hook "
+		"strips the button while airborne, so every landing reads as a fresh "
+		"press and hops. Applies to free play and recording (recordings keep "
+		"the hops); replayed runs are never touched. Note: jump is also held "
+		"off on ladders/in water while this is on. Bindable as 'Toggle "
+		"Autohop'.");
+	if (g_autohop) {
+		ImGui::SameLine();
+		ImGui::TextColored(Theme::Pink, "AUTOHOP");
+	}
+
+	// A muted section divider (grey label + thin underline), the same visual
+	// language as the editor's sub-headings.
+	auto GroupLine = [](const char* label) {
+		ImGui::Spacing();
+		ImGui::TextDisabled("%s", label);
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		const float w = ImGui::GetContentRegionAvailWidth();
+		ImGui::GetWindowDrawList()->AddLine(
+			ImVec2(p.x, p.y + 1.f), ImVec2(p.x + w, p.y + 1.f),
+			ImGui::ColorConvertFloat4ToU32(ImVec4(0.55f, 0.55f, 0.62f, 0.30f)), 1.0f);
+		ImGui::Dummy(ImVec2(0.f, 3.f));
+	};
+	// Command index -> section (mirrors the g_commands order): the loop prints
+	// a heading when the section changes and starts a fresh 2-up row.
+	auto GroupOf = [](int i) -> const char* {
+		if (i <= 4)  return "Recording";
+		if (i <= 7)  return "Playback & control";
+		if (i <= 12) return "Editor navigation";
+		return "Toggles";
+	};
+
+	// Two command+bind pairs per row - single file was a full screen tall.
+	const char* cur_group = nullptr;
+	int col = 0;
 	for (int i = 0; i < kCommandCount; ++i) {
 		TasCommand& command = g_commands[i];
+		const char* grp = GroupOf(i);
+		if (grp != cur_group) {
+			cur_group = grp;
+			GroupLine(grp);
+			col = 0;
+		}
+		if (col % 2 == 1)
+			ImGui::SameLine(392.f);
+		col++;
 		const bool available = command.available();
 		// Accent (pink) for the two headline actions; neutral otherwise.
 		const bool primary = available
@@ -270,14 +352,14 @@ void RecordPanel::Draw() {
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
-			clicked = ImGui::Button(command.name, ImVec2(250, 0));
+			clicked = ImGui::Button(command.name, ImVec2(230, 0));
 			ImGui::PopStyleColor(4);
 		} else if (primary) {
-			clicked = Theme::Accent(command.name, ImVec2(250, 0));
+			clicked = Theme::Accent(command.name, ImVec2(230, 0));
 		} else if (danger) {
-			clicked = Theme::Danger(command.name, ImVec2(250, 0));
+			clicked = Theme::Danger(command.name, ImVec2(230, 0));
 		} else {
-			clicked = ImGui::Button(command.name, ImVec2(250, 0));
+			clicked = ImGui::Button(command.name, ImVec2(230, 0));
 		}
 		if (clicked && available)
 			command.execute();
@@ -285,51 +367,16 @@ void RecordPanel::Draw() {
 		ImGui::SameLine();
 		ImGui::PushID(i);
 		const char* label = (g_binding == i) ? "press a key..." : KeyName(command.key);
-		if (ImGui::Button(label, ImVec2(150, 0)))
+		if (ImGui::Button(label, ImVec2(130, 0)))
 			g_binding = (g_binding == i) ? -1 : i;
 		ImGui::PopID();
 	}
 	ImGui::TextDisabled("binds: click the key button, press a key (Esc clears)");
 	Theme::Help("Hotkeys work with the menu closed; F8 toggles the menu. Binds save "
 		"to binds.cfg the moment you set them and load again on every restart.");
-
-	// --- dev diagnostics -------------------------------------------------
-	if (ImGui::CollapsingHeader("Diagnostics")) {
-		ImGui::PushItemWidth(120);
-		ImGui::InputInt("Box overlay index", &g_overlay_box_index);
-		ImGui::InputInt("Line overlay index", &g_overlay_line_index);
-		ImGui::PopItemWidth();
-		ImGui::Checkbox("Line uses alpha form (8-arg)", &g_overlay_line_alpha);
-		if (g_overlay_box_index < 0)   g_overlay_box_index = 0;
-		if (g_overlay_box_index > 19)  g_overlay_box_index = 19;
-		if (g_overlay_line_index < 0)  g_overlay_line_index = 0;
-		if (g_overlay_line_index > 19) g_overlay_line_index = 19;
-
-		ImGui::Separator();
-		const WorldDraw::Diagnostics d = WorldDraw::LastDiagnostics();
-		ImGui::Text("interfaces: %s   in game: %s   player idx: %d",
-			d.interfaces_ready ? "ready" : "MISSING", d.in_game ? "yes" : "no", d.local_index);
-		if (d.have_player) {
-			ImGui::Text("origin: %.1f  %.1f  %.1f   flags 0x%08X %s",
-				d.origin.X, d.origin.Y, d.origin.Z, d.flags, d.ducking ? "(ducking)" : "(standing)");
-			Vector move_origin;
-			if (Prediction::LastRealMoveOrigin(move_origin))
-				ImGui::Text("basis delta (net - movedata): %.2f  %.2f  %.2f",
-					d.origin.X - move_origin.X, d.origin.Y - move_origin.Y,
-					d.origin.Z - move_origin.Z);
-		} else {
-			ImGui::TextDisabled("no local player entity");
-		}
-		const Prediction::Diag pd = Prediction::LastDiag();
-		const char* pred_state =
-			pd.ran ? "running" : pd.installed ? "installed (idle)" : "not installed";
-		ImGui::Text("prediction: %s   interval %.4f   window %d ticks (%.2f s)",
-			pred_state, pd.interval_per_tick, pd.ticks, pd.ticks * pd.interval_per_tick);
-		if (pd.fault_count > 0)
-			ImGui::TextColored(Theme::Warning,
-				"recovered faults: %d   last: client.dll+0x%llX  access 0x%llX",
-				pd.fault_count, pd.last_fault_rva, pd.last_fault_access);
-	}
+	// (The old dev-diagnostics section lived here - retired 2026-08-12: the
+	// overlay indices have been pinned since Phase 1a and the readouts were
+	// duplicated by the crash journal + solver gates probe.)
 }
 
 void BasehookInterface::OnEndScene() {
@@ -449,6 +496,12 @@ bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param
 	const bool typing = is_menu_visible && ImGui::GetIO().WantTextInput;
 
 	if (first_press && !typing) {
+		// Ctrl+Z / Ctrl+Y: editor undo/redo (works with the menu open or
+		// closed; skipped while a text field has focus via !typing above).
+		if (GetKeyState(VK_CONTROL) & 0x8000) {
+			if (w_param == 'Z') { TasEditor::Undo(); return false; }
+			if (w_param == 'Y') { TasEditor::Redo(); return false; }
+		}
 		if (g_binding >= 0) {
 			// Assign the pressed key (Escape clears it), then stop capturing.
 			g_commands[g_binding].key = (w_param == VK_ESCAPE) ? 0 : static_cast<int>(w_param);
@@ -488,12 +541,23 @@ bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param
 	// Fighting that pipeline with our own cursor recentering was the v1 bug:
 	// two recenter loops feeding each other constant fake deltas.
 	if (!is_menu_visible && TasEditor::FreecamActive()) {
-		const bool keyboard = type == WM_KEYDOWN || type == WM_KEYUP
-			|| type == WM_SYSKEYDOWN || type == WM_SYSKEYUP || type == WM_CHAR;
+		// Block key DOWNS only - key UPS must reach the engine, or a key held
+		// when freecam engaged stays stuck down in the engine's key state
+		// forever (its release was swallowed). A stuck +forward then WALKED
+		// the player during the test-play grace window, aimed by the freecam
+		// look yaw - the "deviation follows the freecam" report. Ups for keys
+		// the engine never saw pressed are no-ops, so passing them is free.
+		const bool keyboard = type == WM_KEYDOWN
+			|| type == WM_SYSKEYDOWN || type == WM_CHAR;
 		// Mouse BUTTONS and wheel are blocked too (no shooting/weapon-switch
 		// from the flying camera); 0x0201..0x020E spans L/R/M/X down/up/dblclk
 		// + both wheels. WM_MOUSEMOVE (0x0200) stays live for CInput's look.
-		const bool mouse_btn = type >= WM_LBUTTONDOWN && type <= 0x020E;
+		// Button UPS pass for the same stuck-state reason as key ups.
+		const bool mouse_btn = type == WM_LBUTTONDOWN || type == WM_LBUTTONDBLCLK
+			|| type == WM_RBUTTONDOWN || type == WM_RBUTTONDBLCLK
+			|| type == WM_MBUTTONDOWN || type == WM_MBUTTONDBLCLK
+			|| type == 0x020B /*XBUTTONDOWN*/ || type == 0x020D /*XBUTTONDBLCLK*/
+			|| type == 0x020A /*MOUSEWHEEL*/ || type == 0x020E /*MOUSEHWHEEL*/;
 		return !(keyboard || mouse_btn);
 	}
 	return !is_menu_visible;
