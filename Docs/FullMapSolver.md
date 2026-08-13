@@ -1015,11 +1015,51 @@ with the engine — the settle event and solved7's failure become exact per-trac
 deltas instead of inferred rules. Fix TraceHull until the battery is clean, then
 regression-replay everything.
 
+### CORNER RULE ORACLE-PINNED (2026-08-13) — collision now answers like the engine
+
+**Oracle run 1 (2,072 real-route traces):** 2,030 bit-exact, 41 within 1.3e-4
+(per-trace expansion rounding, ~0.0004 u, benign), **ONE hard mismatch**: solved7
+t512 (spine climb) — engine HITS ramp 4's west face at frac 0 where our
+true-interval rule skipped the brush. Combined with the 604 t284 engine-MISS, no
+single interval variant explained both → **oracle sweep battery** (1,483 synthetic
+queries around both cases: face-d0 through the epsilon region, trace length,
+corner slides; run-1 files backed up as *_run1.csv).
+
+**Sweeps split cleanly:** A-family (leave through a REAL side) behaves
+true-interval; B-family (leave through a BEVEL side) behaves plain-padded. Two
+independent flips pinned the boundary to one 0.005 u step. **THE RULE (H′): a
+brush is skipped iff the TRUE (un-padded) entry time ≥ the earliest REAL-SIDE
+leave extended by one DIST_EPSILON ((d0−ε)/(d0−d1)); BEVEL sides never release**
+(they exist to smooth corners — releasing through them would punch holes at every
+corner). Padded interval still sets the fraction. H′ = **0 disagreements on all
+3,555 engine answers** (both batteries), and explains both original cases.
+
+**Implemented in TraceHull** (bevel flag = pid<0, already tagged) + `traceself`
+command (run our TraceHull over a stored query file → results format) so any
+future TraceHull change re-verifies against stored engine answers offline.
+C++ port vs engine: 0 hit/miss disagreements, worst frac delta 3e-4.
+
+**Regression + the payoff:** all prior parity EXACT (seeded 0.000 / solved2 0.024
+/ unseeded 0.137 / finishes unchanged) — and **solved7 vs its REAL failing
+capture: 0.000 u over the ENTIRE tape.** The failure is fully explained: the old
+model missed the t512 clip, the solver planned through it, reality clipped. The
+model now sees what the engine sees.
+
+**Settle event EXONERATED as a trace bug:** all 272 settle-window traces (604
+t500-604) match the engine <1e-3 — the 3.5u settle residual lives in the MOVEMENT
+layer's query pattern (which traces a tick issues), not in trace answers. Only
+known residual; confined to a dead route class; own hunt later.
+
+**New pre-ship gate:** every candidate tape's full trace log gets oracle-verified
+(one in-game click) BEFORE the tape is handed over for play.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
   halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
-- AWAITING: trace oracle click → tracediff → fix TraceHull on engine truth
-  (replaces the capture-fitting loop for collision).
+- Settle event (604 t544-548, ~5 u/s once): movement-layer query-pattern
+  divergence (trace answers engine-exact). Hunt via a tick-level query-log diff
+  when a live route class exercises it.
+- solved8 candidate: oracle pre-ship gate, then in-game test.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

@@ -403,16 +403,17 @@ namespace Solver {
 					continue;
 				const std::vector<float>& pd = ducked ? bc.d_duck : bc.d_stand;
 				float tmin = -1.f, tmax = 1.f;   // engine: enterfrac -1, leavefrac 1
-				// TRUE (un-padded) crossing interval. Measured 2026-08-13 via
-				// the 604-tape capture: sliding off a brush END mid-surf, the
-				// real engine reported NO HIT even though the epsilon-padded
-				// interval was non-empty (face enterfrac ~0 < cap leavefrac
-				// 0.0032). The un-padded times explain it exactly: true face
-				// entry 0.0684 comes AFTER true cap exit 0.0063 - the box
-				// leaves the brush extent before it would actually re-touch
-				// the face. DIST_EPSILON pads the reported POSITION only,
-				// never the hit topology.
-				float tmin_t = -1.f, tmax_t = 1.f;
+				// CORNER RELEASE - ORACLE-PINNED (2026-08-13, 3,555 engine
+				// answers, zero disagreements): the brush is skipped iff the
+				// TRUE (un-padded) entry time is >= the earliest REAL-SIDE
+				// leave extended by one DIST_EPSILON ((d0 - eps)/(d0 - d1)).
+				// BEVEL sides never release (they exist to smooth corners;
+				// releasing through them would punch holes at every corner -
+				// and the engine measurably does not: solved7 t512, the spine
+				// climb, hits where a bevel-leave would release). The padded
+				// interval still decides the fraction. Empirical boundary
+				// pinned by two independent sweeps to one 0.005u step.
+				float tmin_t = -1.f, tmax_t = 1e9f;
 				int enter = -1;
 				bool outside = false, miss = false;
 				const int np = static_cast<int>(bc.n.size());
@@ -432,14 +433,16 @@ namespace Solver {
 						float tt = (d0 + kDistEpsilon) / (d0 - d1);
 						if (tt > 1.f) tt = 1.f;
 						if (tt < tmax) tmax = tt;
-						const float tn = d0 / (d0 - d1);
-						if (tn < tmax_t) tmax_t = tn;
+						if (bc.pid[pi] >= 0) {   // real sides only
+							const float tn = (d0 - kDistEpsilon) / (d0 - d1);
+							if (tn < tmax_t) tmax_t = tn;
+						}
 					}
 				}
 				if (miss || !outside || enter < 0 || tmin >= tmax)
 					continue;
 				if (true_interval_corner && tmin_t >= tmax_t)
-					continue;   // corner release: true interval is empty
+					continue;   // corner release (engine-measured rule)
 				if (tmin < best) {
 					best = (tmin > 0.f) ? tmin : 0.f;
 					best_brush = bi;

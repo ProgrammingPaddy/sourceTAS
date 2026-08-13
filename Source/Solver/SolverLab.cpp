@@ -1014,6 +1014,55 @@ namespace {
 		return 0;
 	}
 
+	// Run OUR TraceHull over a query file directly (results-format output) -
+	// verifies a TraceHull change against stored engine answers without
+	// depending on replay trajectories.
+	int CmdTraceSelf(const std::string& map_path, const std::string& q_path,
+	                 const std::string& out_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		FILE* q = nullptr;
+		if (fopen_s(&q, q_path.c_str(), "r") != 0 || !q) {
+			printf("traceself: cannot open %s\n", q_path.c_str());
+			return 1;
+		}
+		FILE* r = nullptr;
+		if (fopen_s(&r, out_path.c_str(), "w") != 0 || !r) {
+			fclose(q);
+			printf("traceself: cannot write %s\n", out_path.c_str());
+			return 1;
+		}
+		fprintf(r, "id,frac,ex,ey,ez,nx,ny,nz,pdist,startsolid,allsolid\n");
+		char line[512];
+		int n = 0;
+		while (fgets(line, sizeof(line), q)) {
+			int id = 0, tick = 0, ducked = 0;
+			float ax, ay, az, bx, by, bz;
+			if (sscanf_s(line, "%d,%d,%f,%f,%f,%f,%f,%f,%d", &id, &tick,
+				&ax, &ay, &az, &bx, &by, &bz, &ducked) != 9)
+				continue;
+			TraceResult tr;
+			const Vec3 a(ax, ay, az), b(bx, by, bz);
+			const float f = w.TraceHull(a, b, ducked != 0, &tr);
+			const Vec3 e = a + Scale(b - a, f);
+			fprintf(r, "%d,%.9g,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,0,0,0\n",
+				id, f, e.X, e.Y, e.Z,
+				tr.brush >= 0 ? tr.normal.X : 0.f,
+				tr.brush >= 0 ? tr.normal.Y : 0.f,
+				tr.brush >= 0 ? tr.normal.Z : 0.f);
+			n++;
+		}
+		fclose(q);
+		fclose(r);
+		printf("traceself: %d answers -> %s\n", n, out_path.c_str());
+		return 0;
+	}
+
 	// Compare OUR TraceHull answers against the engine oracle's, trace by
 	// trace. queries.csv = replay --trace-log output (has our answers);
 	// results.csv = the Map Solve tab's engine answers for the same ids.
@@ -1136,6 +1185,12 @@ int main(int argc, char** argv) {
 	}
 	if (cmd == "tracediff" && argc >= 4)
 		return CmdTraceDiff(argv[2], argv[3]);
+	if (cmd == "traceself" && argc >= 5) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 5, o))
+			return 1;
+		return CmdTraceSelf(argv[2], argv[3], argv[4], o);
+	}
 	PrintUsage();
 	return 1;
 }
