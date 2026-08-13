@@ -1,0 +1,829 @@
+# Full Map Solver — Lab Log
+
+**Read this file FIRST before any solver-era work.** This is the source of truth for the
+full-map-solver effort: mission rules, candidate designs, decisions, benchmarks, experiments,
+and dead ends. Append entries (dated); never rewrite history. Dead ends stay recorded so they
+are never retried without new evidence. Keeping this current is cheaper than re-deriving
+anything after a context compaction.
+
+---
+
+## Mission (kickoff 2026-08-12)
+
+Solve a surf map hands-off: from the start platform to the end platform/zone, minimizing
+**total ticks**. Feasibility first: *"If we can find tons of routes, culling bad ones is easy.
+If we can't find any routes, getting a good one is impossible."*
+
+Hard rules (user-set):
+1. **Results define conditions.** No prescriptive value rules; slow or non-finishing behavior
+   is culled by selection, not by hand-coded penalties. Prescriptive bans only for
+   truly-universal cases (startzone speed-farming is the canonical example).
+2. **Strafe direction changes ≤ 5/sec** (no ugly 1-tick strafing). At 66.67 tps that is ≥ 14
+   ticks between L/R flips. Enforce STRUCTURALLY in the control encoding, never by
+   post-filtering. Revisit only with evidence it blocks real routes.
+3. **Wall clock ≤ 10 min per map** — sooner is better. Compute budget is a first-class design
+   input, not an afterthought.
+4. **Adaptable to every map.** Zero per-map hand configuration beyond declaring start/end.
+5. **Engine-verified output only.** A route "exists" when it compiles through
+   Prediction::RequestSim and passes the divergence check — solver-model claims don't count.
+6. Never break existing features; the solver is additive on top of v1.1 (tag `v1.1`, commit
+   `ba9461c`).
+
+---
+
+## Assets already in the tree (reuse, don't rebuild)
+
+Names below are from the segment-solver era (see memory `solver-roadmap-1-1`); verify exact
+signatures in code before building on them.
+
+- **Engine-exact sim**: `Prediction::RequestSim` — closed-loop provider through the real
+  movement pipeline. Main-thread, frame-hitching → ground truth + final compile, NOT search
+  volume. Test-play divergence machinery already exists.
+- **Fast offline model (the crown jewel)**: `EngineMoveTick` + `TraceHullWorld` — AirMove /
+  friction / jump / gravity plus brush collision replicating the engine's exact behaviors
+  (CategorizePosition 2u ground probe + origin snap, unclamped-enterfrac started-touching
+  tie-break, exact axial bevels from the brushside lump, Minkowski hull expansion from live
+  `CCollisionProperty` mins/maxs). Validated to dpos = 0.000 across months of segment-solver
+  traces. Known residual: knife-edge apex cases are decided by real-replay arbitration, never
+  by geometric gates (v5.6 lesson — do not re-attempt fragility gates).
+- **BSP world**: full .bsp file parse; worldspawn-only collision (model-0 tree walk; entity
+  brushes flagged non-collision); triggers parsed (teleport / push / gravity) with SDK-exact
+  Touch semantics already wired into both sim loops; face polygons/planes; surf-face tags;
+  board targets; per-map `.geo` persistence.
+- **Threaded worker pool**: `hardware_concurrency − 2` (cap 12), thread_local per-worker
+  state, SEH per job, results under one mutex. Proven on segment searches.
+- **Control primitives (provider vocabulary)**: optimal strafe (max-gain), steering L/R rate,
+  prestrafe, ride, coast, jump/duck, boundary smoothing, `MaxAirGain` closed form.
+- **7 human recordings** (.tas v3 with map names) — validation corpus + search seeds.
+- **Known gaps**: colliders were corridor-scoped (cap 256) → need a whole-map spatial index;
+  displacements NOT collided (dispinfo skipped at parse); func_-entity solids not collided;
+  disconnected stage starts unsupported.
+
+---
+
+## Compute reality (hypotheses — MEASURE in Phase 0, record under Benchmarks)
+
+- 66.67 tps (0.015 s interval — confirm from gpGlobals). A 2-minute route ≈ 8000 ticks.
+- Engine sim is main-thread only → verify/compile budget, roughly "a handful of full routes
+  per minute". All search volume must live on the fast model.
+- Fast model with a whole-map spatial index: target ≥ 0.5–2 M ticks/s/thread. 10 workers ×
+  5 min ≈ 1.5–6 B ticks ≈ 200k–750k full-route equivalents — and archive-style search mostly
+  simulates SHORT continuations from snapshots, so effective coverage is higher still.
+
+---
+
+## Candidate approaches (written 2026-08-12, BEFORE seeing the user's offline findings)
+
+### A. Knot control parameterization (foundation for everything below)
+Controls are not per-tick inputs. A route is an ordered list of **knots**:
+`{duration ≥ 14 ticks, steer: L / R / straight, mode: optimal-strafe toward a drifting
+heading OR fixed steering rate, buttons (jump; duck deferred)}`. Within a knot, yaw comes
+from the existing closed-loop provider math (optimal strafe / steering) — smooth by
+construction, so 1-tick jitter is impossible and the ≤5 flips/sec rule is structural (flips
+only at knot boundaries). Collapses the search space from 8000 continuous yaw decisions to
+~100–400 mostly-inert genes, and the output maps 1:1 onto existing editor segment kinds
+(the solved route lands as an editable .tasproj).
+
+### B. Archive-driven exploration — RECOMMENDED route finder (Go-Explore family)
+- **Cell** = quantized position (start 64–128 u) × coarse speed bucket (± maybe velocity
+  octant). Archive keeps the best entry per cell (earliest tick; speed tiebreak) + a full
+  fast-model **state snapshot** + the input tape that reached it.
+- **Loop**: sample a cell (weight = frontier-ness: low visit count × progress potential),
+  restore its snapshot (O(1) struct copy — deterministic model; THE reason search can't run
+  in-engine), roll 1–4 randomized knots (headings biased toward the distance field's
+  downhill and toward keeping speed), commit new/improved cells. Fully parallel across
+  workers.
+- **Automatic progress metric, zero per-map config**: voxelize free space from the BSP, BFS
+  a **distance field from the end volume**, flowing through teleport triggers (source →
+  destination edges). Used ONLY to bias sampling — never to cull. Any reached cell is kept:
+  results define conditions.
+- **Finish** = a cell inside the end volume → extract the tape. Keep exploring for MANY
+  finishes; distinctness = edit distance over coarse cell/face sequences ("tons of routes").
+- **Seeding**: replay the human recordings through the fast model to pre-populate the
+  archive along known routes (instant finisher-to-beat on mapped maps). Works from scratch
+  without them.
+- Startzone farming: if the clock runs from anchor tick 0, zone looping costs ticks and
+  self-culls — no rule needed. Only a timer-style "clock starts at zone exit" convention
+  needs an explicit prespeed rule. (Open question 1.)
+
+### C. Evolutionary refinement on knots — RECOMMENDED optimizer
+Population = diverse finishers from B. **Objective = finish tick, nothing else.** Mutations:
+knot heading/duration jitter, split/merge, boundary nudges; crossover = splice two routes at
+a shared archive cell; greedy time-trim passes (shorten each knot, keep iff it still
+finishes). Optionally CMA-ES over a fixed skeleton's continuous genes between structural
+rounds. A mutant that doesn't finish is dead — no shaped fitness, no style scoring.
+Re-boarding a ramp survives only if it is actually faster (user's philosophy, self-culling).
+
+### D. Geometric ramp-graph macro planner — optional bias/seed layer, NOT primary
+Extract surfable faces (slope band + area + existing tags), edges = reachability validated
+by sampled fast-model rollouts (with speed windows), K-shortest-paths → macro routes.
+Interpretable and fast on linear maps, but risks prescribing away unmodeled routes (skips,
+booster tricks, teleport abuse) and mostly duplicates what B + the distance field achieve
+with fewer assumptions. Build only if B demonstrably needs the help.
+
+### E. Kinodynamic RRT / SST — fallback alternative to B
+Tree in (pos, vel) with sampled knot controls. Needs a dynamics-aware distance metric
+(position-only misleads badly at 800+ u/s). The archive method dominates it in this setting
+(deterministic restore, cross-iteration reuse, cell dominance ≈ SST witness sets). Keep as
+fallback if B stalls.
+
+### F. Reinforcement learning — rejected for v1
+Per-map training busts the 10-minute budget; a general cross-map policy is a GPU research
+project with opaque failures; reward shaping fights results-define-conditions. Revisit only
+as a learned sampling prior distilled from archive data.
+
+### G. Formal optimal control (collocation / DDP) — rejected
+Contact sequence is discrete and the dynamics non-smooth (ClipVelocity, ground snaps) →
+mixed-integer intractability. C is the derivative-free practical cousin. Keep only the
+phase-sequencing insight.
+
+### Recommended pipeline (per map, inside 10 min)
+- **Phase 0** (≤ ~30 s): whole-map collision index (grid/BVH over worldspawn brushes),
+  free-space voxel distance field from the end volume (through teleports), throughput +
+  fidelity benchmarks, audit of map features we don't collide (displacements etc.).
+- **Phase 1** (~3–5 min): archive exploration (B) on the fast model, all workers.
+- **Phase 2** (~2–4 min): evolutionary tick-minimization (C) on the top-K diverse finishers.
+- **Phase 3** (~30 s): compile top routes through the engine (RequestSim), divergence check,
+  LOCAL re-solve around any divergence (the segment-solver's correction pattern), emit
+  .tasproj knots→segments so the result is hand-editable in the v1.1 editor.
+
+---
+
+## Risks (log findings against these IDs)
+
+- **R1** Fast-model fidelity compounding over 8k-tick horizons. Mitigation: Phase 3 verify +
+  local correction; the ROUTE (which ramps, what order) is robust even when exact ticks
+  shift; Phase 0 benchmarks divergence against the human recordings.
+- **R2** Collision gaps: displacements, func_-entity solids. Phase 0 must REPORT what a map
+  contains that we don't simulate, per map, before any search is trusted.
+- **R3** Archive cell resolution: too coarse misses tight lines, too fine wastes memory and
+  stalls convergence. Measure before making it adaptive.
+- **R4** Maps needing duck tunnels or precise jump chains — scope call for v1.
+- **R5** Solver home: in-DLL background workers vs offline harness exe (decision pending).
+
+---
+
+## Open questions (2026-08-12 — ANSWERED 2026-08-13, see "Final contract" below)
+
+1. **Timing + start legality**: does the clock run from the anchor (tick 0) or timer-style
+   from start-zone exit? Former ⇒ startzone farming self-culls, no rule needed. Latter ⇒
+   need the explicit rule (prespeed cap? no re-entry?). And what is the legal start state —
+   the existing anchor captured standing on the platform? Is platform prestrafe/jump
+   allowed?
+2. **End condition**: user-picked end volume (crosshair-picked box, persisted in .geo), a
+   named map trigger, or coordinates?
+3. **Testbed maps**: 1–3 maps easy→hard, ideally ≥1 with existing recordings (validation +
+   seeding).
+4. **Solver home**: default proposal = engine-agnostic solver core compiled BOTH into the
+   DLL (background workers, real workflow) AND a console harness exe (tune/batch offline
+   without injecting — the torture.cpp pattern scaled up). Veto if DLL-only preferred.
+5. **v1 input scope**: jump as a knot gene from day 1 (platform links, bhop sections); duck
+   deferred unless a testbed map needs it?
+
+---
+
+## 2026-08-13 — Final contract + prior-attempt handoff review
+
+### Final contract (user answers)
+
+- **Timing / objective**: fitness = **ticks from anchor tick 0** to finish (user's stated
+  ideal; makes startzone farming self-culling). Real-surf semantics — timer starts on the
+  first tick the start platform is no longer beneath the player (platform footprint extended
+  upward; in-zone prestrafe is free) — is a LATER refinement, possibly with an in-TAS
+  startzone/endzone creator. v1 uses the player ORIGIN for all zone tests (user's
+  simplification).
+- **Startzone rule (the one universal ban)**: at most **ONE jump while the origin is over
+  the start platform footprint**. Belt-and-braces under tick-0 timing.
+- **Finish v1**: **grounded on the end platform's top face** (standing on red). Nearness,
+  flyover, or airborne closest-approach is NOT success. (Real-surf endzone = plane above
+  the platform crossed ⇒ timer stop; later, with the zone creator.)
+- **Testbed**: `surf_glade\surf_basictest.bsp` (facts verified below). User will supply a
+  manual recording on it (parity corpus + seed). **Generalization is a requirement** — no
+  map-specific logic; diagnostic route families are probes, never solver logic. ML is
+  acceptable only if it learns a new map quickly (no slow per-map training).
+- **Solver home**: standalone-first, per user ("DLL only would be a problem"). Solver core =
+  engine-independent C++ lib built from OUR BspWorld parse + OUR validated fast model,
+  driven by a console harness (SolverLab.exe) for search speed and iteration; the DLL gets
+  run control + full in-game visualization of solver artifacts + final engine verify.
+- **Duck**: deferred (limited use cases; user delegated judgement).
+- **Direction-change rate**: a PARAMETER, default 5/s to start (the prior attempt's 4/s was
+  explicitly only an example). Min knot duration = ceil(66.67/5) = **14 ticks** ⇒ any
+  rolling window satisfies the cap by construction, including across prefix/suffix
+  boundaries (the prior attempt's "prefix boundary ignored" debt cannot occur).
+
+### Handoff review (C# lab, Aug 5–12 — "take with a grain of salt", verified selectively)
+
+Credibility frame: every number in the handoff is exact-to-its-own C# oracle, never
+validated against the native predictor (its #1 admitted debt — a debt WE structurally don't
+have, since our fast model is the one already validated against the engine). Its failure to
+find a legal route is evidence about **search organization**, not map feasibility: the
+user's manual 1-3-4 run finishes this map legally, and every impressive terminal number in
+the handoff was achieved with ILLEGAL per-tick A/D switching (their ControlGrammar validator
+existed but was disconnected from every active sampler). **The legal knot space was never
+actually searched end-to-end.** Their only finish (15.810 s) farmed 16 start-platform hops
+and is rejected + slower than the user's manual run.
+
+**ACCEPT** (their controlled evidence + consistent with our segment-solver experience):
+1. Event/contact-boundary organization beats monolithic per-tick beams at equal budget
+   (their strongest ablation: hybrid macro portfolio hit all 4 ramps in ~2M transitions;
+   monolithic beams hit ZERO ramps).
+2. Arrival DIVERSITY at contact boundaries is load-bearing; greedy/narrow handoffs poison
+   everything downstream. (This is the archive/Go-Explore thesis restated.)
+3. Max-work A/D arcs as the default proposal family; loss-taking controls only event-local
+   (loss-everywhere = ~15× transition blowup AND worse results).
+4. Finite-face target enumeration + small segment BVP solves was their most productive
+   local generator — and it is essentially OUR existing LM/RouteSolution machinery. Reuse
+   ours.
+5. Targets must carry full state (position + velocity + contact mode); point-only targets
+   produce false optimism.
+6. Funnel visualization is where diagnosis power comes from; they added it too late. Build
+   it first-class here.
+7. Legality must be structural in the genome, never a side validator samplers can bypass.
+
+**REJECT / DEMOTE**:
+1. Energy as a frontier score or hard prune (two documented false-prune postmortems; high
+   energy with wrong direction/contact is worthless). Demote to diagnostics (board loss in
+   u²/s² in the funnel viz); optimistic energy route-graph shelved.
+2. Sparse intermediate reverse-reachability joins (cost ≫ benefit in their runs; forward
+   result got WORSE in one config). Shelve ALL backward machinery unless the explorer shows
+   their terminal-stall signature (reaches last surface repeatedly, never finishes).
+3. Their C# oracle and its archives/traces as any form of ground truth — not transferable.
+   Map facts + organization lessons only.
+4. Stage-wise diagnostic route restrictions (1-3-4 etc.) as solver logic — probes only.
+
+**RE-VERIFY with OUR model before reliance**:
+- Ramp-4 terminal envelope (~875 u/s uphill tangent at low board, ~500 u/s near lip) —
+  C#-derived, re-measure if it starts driving decisions.
+- Their C# throughput 4,817,961 ticks/s single-thread = the FLOOR our C++ core should beat.
+- Board-loss magnitudes (u²/s²) — recompute with our clip math.
+
+Key compute datum: their ENTIRE largest failed campaign was ~95M transitions / 172 s. At
+our worker-pool scale that is seconds. **The bottleneck is search organization, not
+throughput** — but throughput discipline still matters for generalizing to real maps.
+
+### Verified map facts (surf_basictest.bsp, parsed independently 2026-08-13)
+
+Handoff Section 3.3 CONFIRMED in full; extras noted. Parser: scratchpad `parse_basictest.py`.
+
+- VBSP v20, 108 planes, 12 brushes, 76 sides, **models=1 ⇒ ALL brushes are world collision**;
+  2 entities (worldspawn + info_player_terrorist) ⇒ **no triggers at all** (no teleports/
+  boosters/zones on this map).
+- Spawn: (-1578.3, -431.025, 449), angles 0 0 0 (on green, facing +x).
+- Enclosure: floor z=-1088..-1056, ceiling z=1248..1280, 4 walls — the map bottom is a
+  landable fail surface the search will discover; that's fine (dead-end cells).
+- **Green start = brush 6**: x=-2176..-1280, y=-2048..1216, top **z=448** (CABLE/GREEN).
+- **Red finish = brush 10**: x=1216..2112, y=-2336..928, top **z=256** (CABLE/RED).
+- Ramps (all 51.3° — nz=0.624695; one non-axial side each + 1 bevel side):
+  - Ramp 1 = brush 7: x=-1152..-704, y=-448..-192, n=(0,-0.780869,0.624695) d=349.829
+    (face rises from z≈0 at y=-448 to z≈320 at y=-192).
+  - Ramp 2 = brush 8: x=-576..-128, same n, d=309.849 (z≈-64..256).
+  - Ramp 3 = brush 9: x=-128..320, y=-768..-512, n=(0,+0.780869,0.624695) d=-439.785
+    (opposite-facing, z≈-64 at y=-512 up to z≈256 at y=-768).
+  - Ramp 4 = brush 11: x=640..896, y=-832..64, n=(-0.780869,0,0.624695) d=-539.737
+    (rises toward +x; lip z≈256 at x=896).
+- Terminal geometry: ramp-4 lip (z≈256 @ x=896) is EXACTLY level with the red top (z=256,
+  x≥1216) ⇒ a 320 u horizontal gap to clear without net height loss. Explains the prior
+  attempt's terminal wall.
+- User's known legal manual route: 1-3-4 (skips ramp 2), no prehop.
+
+### Revised design v2 (deltas from candidates A–C above)
+
+1. **Cells gain CONTACT MODE**: key = (quantized position, speed bucket, contact: air |
+   surface-brush | ground-brush). Continuation unit = roll knots until the contact event
+   changes OR a horizon expires; boundary states archived with full state + tape +
+   snapshot. (Marries their event-boundary win to the archive.)
+2. **Proposal mix per continuation**: max-gain arc L/R (dominant), straight hold,
+   face-target BVP proposals (enumerate points on plausible next faces, solve a legal
+   3-phase knot schedule with our LM machinery), rare event-local loss arcs. Proposals only
+   bias — results decide survival.
+3. Energy = diagnostics only. Distance field stays the exploration bias (bias ≠ cull).
+4. Backward reachability shelved (revive only on terminal-stall signature).
+5. Startzone 1-jump rule + tick-0 timing; finish = grounded-on-end-platform predicate.
+6. All physics inputs in an explicit `MoveParams` (gravity/accel/airaccel/maxspeed/
+   tickinterval/hull) — fed from live cvars in-game, from config offline. Testbed server
+   settings: sv_airaccelerate 150, sv_accelerate 10 (+ surf setup's sv_enablebunnyhopping 1).
+
+### Visualization (first-class; prior attempts failed here per user)
+
+In-game is the PRIMARY viewer — we have the real world, the overlay budget system, freecam,
+and the whole editor:
+- **Solver tab**: run control (params incl. changes/sec, budget), live counters (cells,
+  boundary states, finishes, best ticks, ticks/s), sortable route list (ticks, max speed,
+  route signature) → selecting a route draws it + "Load as segments" lands it as a
+  .tasproj-style run in the editor (cursor scrub, test play, divergence — all existing
+  tooling applies).
+- **World draws** (budgeted/decimated like the BSP wireframe): explored-cell cloud colored
+  by earliest-tick/speed; top-K route polylines; **board funnels** — board points rendered
+  ON the ramp face in situ, colored by post-board speed / board loss (their 2D scatter, in
+  3D); optional distance-field arrows near the cursor.
+- **Harness emits artifact files** (routes, archive snapshot, funnels); the DLL loads and
+  renders them identically ⇒ offline runs are fully inspectable in-game. This satisfies
+  "control and visualize in-game" with a standalone-speed search.
+
+### Phase 0 build list (next implementation work)
+
+1. Extract solver core (`Source/Solver/`, engine-independent): BSP parse + fast model
+   behind `MoveParams`; audit and remove live-engine reads; console harness `SolverLab.exe`.
+2. Whole-map collision index (uniform grid over brush AABBs) replacing corridor scoping;
+   regression: identical traces vs the corridor path on segment-solver cases.
+3. Parity benchmark: replay the user's surf_basictest recording through the core; compare
+   against in-game engine states; record drift here. Throughput benchmark (target ≥ 5M
+   ticks/s/thread — beat the C# floor).
+4. Zone semantics + finish predicate + 1-jump rule + knot grammar (min-duration constant
+   from the changes/sec parameter).
+5. Then Phase 1 explorer per revised design v2.
+
+---
+
+## Phase 1 build log (2026-08-13, same session as the divergence hunt)
+
+### Server-settings adaptation (user directive: nothing hardcoded)
+- DLL `ExportServerParams()` (TasEditor.cpp): every Map Solve states export now also
+  writes `Documents\sourceTAS\solver\server_params.cfg` from LIVE values — Cvars::GetFloat
+  for sv_gravity / sv_airaccelerate / sv_accelerate / sv_friction / sv_stopspeed /
+  sv_maxvelocity / sv_enablebunnyhopping, measured tick interval (LastDiag), live hull
+  (PlayerHull), strafe-model wishspeed as maxspeed. Every line labeled `live` vs
+  `default (not readable)`.
+- Harness `SolverParams.{h,cpp}`: all commands auto-load the canonical file (or
+  `--params <file>`), precedence defaults < file < CLI flags, applied keys printed loudly.
+  Engine-behavior constants (duck shift, stamina, air cap...) are overridable file keys
+  too — one visible place, zero recompiles. The max-gain controller derives its optimal
+  wish angle from the live params EVERY tick (acos(max(cap−a,0)/speed)), so a cvar change
+  changes the strafing itself, not just the sim.
+
+### Explorer (Source/Solver/SolverExplore.{h,cpp} + `solve` command)
+As designed in v2: knot genomes {dur ≥ min-knot, side L/R/coast, jump, duck, ground turn}
+with flip legality carried ACROSS archive splice points (ticks-since-flip in every entry);
+cell archive (pos × speed × contact kind/brush × ducked) with POD snapshot restore and
+shared-prefix genome chains; 1-jump startzone rule enforced in rollouts (abort, never
+scored); finish = grounded on the end brush (expanded footprint); `.tas` writer so solver
+output loads in-game like any recording (WriteTas, STAS v3). Fixed rng seed 1337 =
+reproducible runs; `--rng` varies.
+
+### Iteration findings (each fix data-driven from the run logs)
+1. Uniform tournament + per-tick recording: 2M entry cap hit at 10 s, 1.2M of the entries
+   were tick-level replacement churn, ZERO finishes in 240M ticks. → Event-aligned
+   recording (contacts/ground/duck/jump ticks, knot ends, every 4th tick), +4-tick
+   replacement hysteresis, POD inline knots (no per-entry heap).
+2. Straight-line distance-band pull alone: min-dist stalled at 1097, zero finishes — the
+   pull drags restarts to SLOW junk cells near the finish (floor/walls) while the route
+   needs speed built far away. → **Round-robin selection** (the prior attempt's validated
+   lesson, now ours too): rotate dist-band pull / speed-band pull / uniform. Free-air
+   cells get 2× coarser quantization (void bloat).
+3. **SEEDED solve (basictest.tas as archive seed): 113 finishes in 9.0 s; best 430 ticks
+   vs the seed's 432 — the solver beat the human run on its first working session.**
+   Best route verified two ways: BuildFrames determinism check (re-rolled state matches
+   archived snapshots) + independent `replay` of the written tape (finish tick 429 by
+   replay's 0-indexed convention — counter conventions need unifying, cosmetic). The
+   solver's landing is its OWN variant: duck 417 → UNDUCK 421 → lands (1203.4, 58.0) vs
+   the human's (1213.7, 63.3). Written to recordings as `basictest_solved.tas` (in-game
+   playable; engine verify = test play, expected near-exact after Phase 0 parity).
+   Solve-loop throughput ~5.3M ticks/s single-thread (record/copy overhead vs the 15.26M
+   raw bench).
+
+### Phase 1.1 — UNSEEDED DISCOVERY ACHIEVED (2026-08-13, five data-driven iterations)
+
+Each iteration was diagnosed from the previous run's printout (min-dist / max-spd /
+closest-entry / per-brush census diagnostics added along the way — the census names which
+pipeline stage is starved and was the decisive instrument):
+
+1. Energy-band selection axis added to the round-robin (dist/speed/ENERGY/uniform).
+   Energy = 0.5|v|²+gz separates live pipeline cells (high+fast) from fallen junk —
+   allowed as ONE axis (the prior attempt only proved it fails as a sole score).
+   Cap-freeze instead of cap-stop (budget no longer wasted).
+2. Air-cell sub-cap (1.5M) + 3× coarser air cells + 2× coarser air speed buckets:
+   junk falls were filling the archive before the contact pipeline matured (frontier
+   froze at 20 s with min-dist still advancing). Contact cells keep full resolution —
+   the event-boundary lesson again.
+3. Finish-distance band walk restricted to CONTACT cells only: the measured closest
+   entry was a dead vertical fall beside the platform soaking the pull.
+4. Startzone z-fix: the zone is the platform footprint extended UP per the user's
+   definition; floor bounces under it wrongly burned the jump budget.
+5. **Near-miss breeding** (the dam-breaker): census showed the whole pipeline populated
+   (ramps at 912–945 u/s, 23k ramp-4 touches, 50 touches on RED's west wall just below
+   the lip — arrivals cresting with too much vertical, too little forward). New selection
+   mode: back up 1–2 knot links from the closest approaches and resample the release.
+
+**Result: pure discovery finishes surf_basictest with ZERO human input.**
+- rng 1337: 404 finishes in 120 s (first at ~60 s), best 1264 ticks; verified by
+  independent replay — legal, grounded on red, and **0 startzone jumps** (the solver
+  invented a different opening than the human route entirely).
+- rng 7: 1 finish in 120 s (~113 s) — works but HIGH VARIANCE across seeds. Headroom
+  levers: worker-pool parallelism (many seeds racing/sharing an archive), and the Phase 2
+  optimizer both compressing routes (1264 → competitive) and stabilizing discovery.
+- Feasibility bar met: seeded = beats the human; unseeded = finds routes from nothing.
+
+### Phase 1.2 — THE FRAGILE-SOLVE INCIDENT (2026-08-13, user-caught, fixed)
+
+**User report:** the shipped unseeded tape (`surf_basictest_solved.tas`, the rng-7
+1510-tick route auto-written by the default --out) diverges IN-GAME at ramp 1's spine,
+falls to the enclosure floor, and appears to "finish" below the endzone. Suspected
+false-positive finish.
+
+**Findings (instrumented, not guessed):**
+- Finish heights audited across the default seed's finishers: ALL at z 256.88–257.50,
+  genuinely ON TOP of red IN THE CORE. Structurally, IsFinish can only fire on red's top
+  plane (the only nz≥0.7 plane of brush 10). So NOT a below-map false positive —
+  **core-legal but ENGINE-DIVERGENT**: the in-game playback separated from the core sim
+  before the first ramp contact and everything after was garbage.
+- New NEAR-EDGE detector (TryPlayerMove impact within 2u of a second plane of the same
+  brush = geometry where the engine consults edge bevels the validated model omits):
+  human run = 0 edge ticks; EVERY fragile finisher's chain contained edge ticks, first at
+  ~tick 99 = the hull grazing the START PLATFORM's corner while walking off the lip (the
+  whole fragile family launches by walk-off; the human jumps). The graze seeds the
+  engine-vs-core split; the spine hit the user watched is downstream fallout.
+- Taint-as-ABORT failed (0 finishes in 150 s): wall-kisses below the lip — the near-miss
+  breeding stock — are edge-adjacent by nature; aborting sterilized them.
+- Taint-as-INHERITED-FLAG + clean-only shipping still gave 1272/1272 fragile: the
+  archive's best-per-cell rule was TAINT-BLIND — tainted first-arrivals permanently
+  blocked clean lineage from recording (clean arrival 5+ ticks later = rejected).
+- **Fix: class-aware cell replacement** — clean beats tainted regardless of tick;
+  tainted never displaces clean; ±4-tick hysteresis within a class. Result: **9 CLEAN
+  finishes (edge-ticks 0 audited over the whole chain), best 1887 ticks**, finish z
+  256.88, 0 zone jumps, and a novel ending (three legal bhops building 274→344→403 into
+  the gap jump onto red). Shipped as the replacement `surf_basictest_solved.tas`.
+
+**Residual risk, stated:** "clean" = no TryPlayerMove edge contacts. The clean route
+still LAUNCHES by walking off the lip (grounding simply ceases; the ground PROBE near
+the expanded corner is exempt from tainting because apex-top grounding is engine-real
+per v5.4). If the user's in-game test of the clean tape diverges at the launch, the next
+lever is edge-checking CategorizePosition probes too (or the probe-region subset of
+them). IN-GAME TEST PENDING = the actual acceptance gate.
+
+**Rules earned:** (1) a solver claim is only as good as the model's coverage of the
+geometry it exercised — audit edge exposure on everything shipped; (2) archive
+acceptance rules must respect trust classes or fragile lineage monopolizes the frontier;
+(3) auto-writing solver output into the user's recordings needs the same skepticism as
+any shipped artifact (the bad tape reached the user because --out defaulted there).
+
+### Phase 1.3 — THE AGREEMENT PROTOCOL (2026-08-13, after the user's second test)
+
+**User's second in-game test:** still deviation; tick-0 ambiguity called out (they tried
+the project start AND map spawn for the 1887 tape - neither matched its actual anchor,
+which was the map spawn but reached only ramp 3 with the "end" on the floor). Verdict:
+need (a) a tick-0 state both sides sign, (b) REAL engine tick capture in-game, (c) no
+edge-contact theory accepted without engine data. All built this round:
+
+**Map Solve tab v2 (QOL instruments — removable once proven):**
+- **Capture solve anchor**: writes the current player state to
+  `solver\solve_anchor.cfg` (+ live server params) — the agreed tick-0.
+- **Teleport to anchor** (solve anchor) and **Teleport to '<selected run>' anchor**
+  (any recording's own tick-0, for aligned playback of a specific tape).
+- **Surf setup** button (same cvars as the Server tab).
+- **Arm capture for next playback**: records every replayed tick's ACTUAL engine state
+  (netvar basis, same as the divergence verdict; inputs stashed from each replayed cmd so
+  rows carry buttons+yaw), auto-exports `solver\playback_states.csv` on playback end.
+  Row −1 = the settled pre-frame-0 state → the diff's anchor check DIRECTLY verifies
+  tick-0 agreement. The last frame's outcome row is deliberately omitted (post-playback
+  physics would pollute it).
+- Harness: `solve` anchor resolution = `--anchor file` > `--anchor-tas tape` > captured
+  solve_anchor.cfg > seed anchor > map spawn (source always printed); seeding refuses a
+  seed whose anchor differs from the solve anchor (>0.5 u) — foreign-anchor seeds are
+  garbage.
+
+**Shipped test tape**: clean unseeded route from the USER'S RECORDING ANCHOR (the anchor
+already proven in-game by the working seeded tape): rng 11, **1312 ticks, 45 clean
+finishes, finish z 256.03 landing at x 1224–1271 (platform interior, not the expanded
+corner), 0 zone jumps, 0 edge ticks** → `recordings\surf_basictest_solved.tas`.
+(rng 1337/3 from this anchor: 0 clean in 90–180 s — clean-lineage discovery is
+rng-sensitive; parallelism remains the structural fix.)
+
+**THE PROTOCOL (user's next session — settles everything with data):**
+1. Map Solve → Surf setup.
+2. INSTRUMENT VALIDATION (known-good tape): Record tab → select `basictest_solved`
+   (seeded 430, works in-game) → Map Solve → Teleport to its anchor → Arm capture →
+   play it. Then offline:
+   `SolverLab diff <bsp> <basictest_solved.tas> solver\playback_states.csv`
+   EXPECTED: agreement (first |dpos|>1 late/never). This proves the capture instrument.
+3. THE QUESTION (new clean tape): same steps with `surf_basictest_solved` (1312).
+   The diff then names the first divergent tick + everyone can see what geometry lives
+   there. Either it tracks (Phase 1 ONLINE) or the divergence tick is the undeniable
+   evidence the user asked for — and the fix target.
+
+### Phase 1.4 — THE PROTOCOL RAN: two real bugs found, edge theory dead (2026-08-13)
+
+The user ran the protocol and delivered captures (seeded playback + both tapes' engine
+sims). Results, in order:
+
+1. **INSTRUMENT + CORE PROVEN vs REAL PLAYBACK: max |dpos| 0.000 across all 429 ticks**
+   of the seeded tape. The capture pipeline, anchor protocol, and core physics are exact
+   against actual in-game playback, not just prediction.
+2. **Poisoned-params incident**: the auto-loaded server_params.cfg held ALL-DEFAULT
+   values (airaccelerate 10, bhop 0, stopspeed 100) — snapshotted while the server
+   wasn't surf-configured (and/or unvalidated cvar reads). It silently corrupted the
+   first diff pass (fake tick-17 divergence = the stopspeed-100 signature). Quarantined
+   as `server_params_SUSPECT.cfg`. FIXES: params are now (re)written at every playback
+   capture (the moment that matters), and `hull_stand 62` from that file is flagged as
+   an untrusted single read (72 remains the parity-proven default). RULE: never filter
+   the harness's `params:` lines out of a diff read-out.
+3. **Real divergence #1 — tick 204, flat ground, mid-platform:** the DUCKED SPEED CAP
+   applies the moment duck is PRESSED (engine showed pure friction −19.1 = 318·0.06 from
+   the press tick), not when the 400 ms transition completes. Fixed: effmax uses
+   (ducked || ducking). Verified: divergence moved 204 → 514, max drift 1481 → 130.
+4. **Real divergence #2 — tick 514, post-landing:** the −775 u/s jump-free floor landing
+   showed stamina scale = 1.00000 EXACTLY → **the stamina model was reframed: the JUMP
+   arms the timer (fitted 1317.5 ms ≈ classic 25/19 s), it drains 15 ms/tick everywhere,
+   and the RESIDUE at landing drags walk ticks.** Reconciles everything: jump t432 +
+   705 ms flight = 611 ms at the t479 landing (the old "landing constant" 612.5), full
+   bhop height at stamina 0, and zero slowdown after jump-free falls. A hot-stamina jump
+   scales its impulse by the same factor (classic formula, not yet capture-exercised).
+   Verified: divergence moved 514 → 917.
+5. **Residual regime — tick 917: CS:S GROUND-DUCK LIFECYCLE** (transition/spam
+   mechanics; engine walks duck-capped at wishspeed 85 while FL_DUCKING=0). Not modeled
+   yet; instead the SOLVER emits duck presses/releases AIRBORNE ONLY (state-dependent
+   input rule) — every duck regime in shipped tapes is a proven-parity class (air-duck
+   ±8.5, ducked landing, ducked jump, air-unduck: all 0.000-verified). Ground-duck
+   modeling = future capture study if crouch-walking ever matters on a surf route.
+6. **EDGE-CONTACT THEORY: NOT CONFIRMED — gate removed** (user's skepticism vindicated
+   twice). Both measured divergences were duck physics on flat ground, nowhere near
+   edges. `taint_edges` now defaults OFF (`--edge-taint` re-enables if capture data ever
+   convicts edges); the near-edge detector stays as an AUDIT COLUMN only. The earlier
+   "spine hit" observation is explained as downstream fallout of tapes already
+   out-of-sync from the duck bug + start ambiguity.
+7. **Export discipline (user directive)**: every export now writes a unique
+   self-describing name (`sim_<project> (N).csv`, `playback_<runname> (N).csv`) and one
+   manifest line in `solver\exports.log` (timestamp | kind | map | source | ticks |
+   path). Identification is a lookup, never a guess. Playback captures also rewrite the
+   live params alongside.
+8. **QOL**: "God (toggle)" button on the tab (fall-damage death breaks playback sync —
+   the user's floor-landing report; god is a console toggle so it stays out of Surf
+   setup to avoid silent double-click disarm).
+9. **Shipped**: new unseeded route from the proven recording anchor under all fixes —
+   **1125 ticks (16.86 s)**, finish z 256.03 ducked-landing at 466.9 u/s, all duck
+   transitions airborne, 1 legal zone jump, 0 edge contacts →
+   `recordings\surf_basictest_solved.tas`. IN-GAME TEST = the gate (god on;
+   teleport-to-tape-anchor button; if it deviates, arm capture → manifest-named CSV →
+   one diff command names the tick).
+
+### Phase 1.4b — one-click capture flow (2026-08-13, user: "just make the process clean")
+The Map Solve tab now owns the whole capture workflow: a **Recording picker** (library
+combo with map + tick count), an **Export name field** (auto-fills from the picked run,
+user-editable, governs BOTH the playback capture and the sim export — nothing lands as
+"untitled" again), and one **"Teleport, play & capture"** button that teleports to the
+recording's own anchor (setpos_exact + setang, freecam-aware), plays it via the ephemeral
+player with the standard 12-tick settle grace, captures every real tick, and exports
+`playback_<name>.csv` + live params + a manifest line on finish. Abort button while
+capturing. No tab-hopping, no manual arming, no name guessing.
+
+### Phase 1.5 — SECOND CAPTURE ROUND: jump tax fitted exactly, cruft stripped (2026-08-13)
+
+User captured both tapes via the one-click flow (`playback_seeded_solve` /
+`playback_unseeded_solve` — the manifest identified everything; the unseeded route
+"failed the last jump" in-game and plummeted).
+
+- Seeded regression vs REAL playback: **0.000 again.**
+- **Retraction:** the earlier "engine does NOT tax hot-stamina jumps" conclusion was a
+  WRONG-PAIRING artifact — that diff compared against a stale sim export of the OLD
+  1312 tape after the tape FILE had been rewritten with the 1125 route under the same
+  name. Lesson enforced: shipped tapes now get UNIQUE names (`*_solved2.tas`, ...);
+  never rewrite a tape file that captures may still reference.
+- **Real-playback jump audit (4 jumps in one capture): the impulse tax EXISTS,** with
+  its own scale: `impulse *= 1 − stamina_ms · 0.000186` (walk-drag keeps its
+  independently fitted 0.00019833; same 1317.5 ms arm + 15 ms/tick drain). The fit
+  predicts all three taxed jumps (gaps 49/44/43 ticks) within 0.05 u/s and the
+  zero-floor at gap 900. Constants are per-regime fits — do not unify without data.
+- **Result: the failing 1125 tape now matches REAL playback at max |dpos| 0.137 u over
+  all 1124 ticks, all flags exact** — the core reproduces even the route's real-world
+  failure. The route itself was simply planned under the older, slightly-off tax.
+- **Poisoned params, root-caused:** the generic ConVar reads RETURN DEFAULTS on this
+  build (server demonstrably ran surf settings) — every capture was re-writing the bad
+  file. `ExportServerParams` now writes ONLY trustworthy sources: measured tick
+  interval + the editor's strafe model (gravity/airaccelerate/maxspeed/air cap);
+  everything else defers to SolverLab's parity-proven defaults. hull_stand=62 read
+  discarded with the rest.
+- **Edge apparatus fully removed** (user directive): detector, TickEvents fields,
+  taint inheritance, class-aware cell replacement, fragile finisher splitting, CLI
+  flags, audit columns — all gone. If capture data ever implicates edge geometry, it
+  gets rebuilt from evidence, not resurrected.
+- **Shipped `surf_basictest_solved2.tas`**: unseeded, corrected-physics plan, 1208
+  ticks (18.1 s), finish z 256.03 at 455 u/s, 1 zone jump (300 s run, rng 5; rng
+  11/1337/42/7 at 120–150 s found nothing — discovery variance under the tighter
+  physics reaffirms worker-pool parallelism as the next structural lever).
+
+### PHASE 1 SIGNED OFF (2026-08-13): the user played `surf_basictest_solved2.tas`
+in-game and **it lands on the platform**. Full loop proven end to end: unseeded
+discovery from nothing → offline plan on the capture-proven core → real-engine playback
+→ legal finish. Era gates cleared: consistent anchor, real-tick capture, physics parity
+(0.000 / 0.137u), export discipline, one-click workflow.
+
+## Phase 2 — the optimizer (opened 2026-08-13)
+
+Contract: fitness = finish tick, NOTHING else; legality structural (flip spacing,
+airborne-only duck transitions, startzone jump budget enforced in every eval); every
+evaluation runs through the capture-proven core; improvements accepted only when the
+re-rolled route finishes strictly earlier. Design: finisher chains flatten to genomes
+{seed-prefix length, knot list}; operators = knot trims, knot deletion, suffix
+resampling, parameter jitter, and seed-prefix erosion (branching earlier into the human
+prefix); abort-at-best evaluation keeps evals cheap (~5.8k/s at 7M ticks/s).
+
+### Phase 2 v1 — built + first results (2026-08-13)
+
+**Built:** `SolverKnots.{h,cpp}` (Knot/KnotTick/MaxGainYaw/SampleKnot/FlipsLegal extracted
+— one shared control vocabulary for explorer + optimizer, stream-identical to the old
+inline code) and `SolverOptimize.{h,cpp}` (FlatGenome hill-climb: knot trims, deletion,
+suffix resampling with the explorer's own distribution, parameter jitter, knot growth,
+seed-prefix erosion with flip-state recompute; strict tick-improvement acceptance;
+abort-at-incumbent evaluation → ~23k evals/s; genomes re-verified by full re-roll and
+tapes truncated AT the finish tick). Wired as `solve --optimize-s N` (default 60; top-3
+distinct-tick subjects split the budget). Default `--out` names now UNIQUIFY (never
+overwrite a shipped tape — the capture-pairing lesson, enforced).
+
+**First results (honest):**
+- Seeded subjects: 432 → 430 in a handful of improvements (~930k evals each). The 430
+  floor holds: the human seed prefix is a monolith knot operators can't restructure, and
+  prefix erosion without a reconnect-repair operator almost never survives.
+- Unseeded 1208: → 1207 in 1.18M evals. The route's slack is STRUCTURAL (long floor
+  meanders), and single-mutation strict hill-climbing cannot restructure - as the
+  original design notes predicted (splice/crossover is the structural operator).
+- **Tightening-loop concept validated as machinery** (zero new code): exploring with
+  `--max-ticks <incumbent-1>` makes every rollout that exceeds the best route abort -
+  all discovery pressure goes to strictly-faster routes by construction. One 180 s
+  trial round (rng 6, cap 1206) found nothing - single-threaded rounds are too
+  expensive for the variance.
+
+**Verdict: PARALLELISM IS NOW THE GATING WORK.** Discovery variance, tightening rounds,
+and archive-splice operators all reduce to "make exploration rounds cheap." Next:
+worker-pool exploration (shared or racing archives), then an automated tighten loop
+{explore(cap=best-1) → optimize} and archive-shortcut splicing (graft archive-best
+prefixes onto finisher suffixes at shared cells).
+
+Shipped for optional in-game testing: `basictest_opt.tas` (seeded, 430) and
+`surf_basictest_opt.tas` (unseeded, 1207).
+
+### Open items
+- Worker-pool parallelism (gates everything above).
+- Tighten-loop automation + archive-splice operator (Phase 2 v2).
+- Ground-duck lifecycle / duck-flag timing / hull-height data (dormant, non-blocking).
+- Ground-duck lifecycle capture study (only if a route ever needs crouch-walking).
+- Duck-flag completion timing (mismatch at 230 — flag-only today, no position error).
+- Hot-stamina jump impulse tax not yet capture-exercised.
+- hull_stand=62 read vs parity-proven 72 (needs a ceiling map or a better netvar read).
+- Phase 2 optimizer: trim/splice/mutate CLEAN finishers (1887 and the seeded 430 both
+  have obvious fat; optimizer must preserve cleanliness — mutations audited).
+- Parallelism (worker pool) for discovery variance + real-map budgets.
+- Edge-bevel modeling (load non-axial bevels as a SEPARATE validated trace mode?) would
+  convert "avoid edges" into "predict edges" — needs its own engine ground-truth study
+  (the v5.4 warning stands: naive inclusion broke proven lines).
+- Cell-space audit, finish-tick display conventions, duck hull height / stamina
+  fall-speed data, in-game archive viz in the Map Solve tab.
+
+## Decisions log
+- 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
+- 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
+  (C:\Users\Connor\Documents\Player Controler\solver-feasibility\Source_TAS_Solver_Search_Handoff.md)
+  and the testbed map. Final contract + handoff review + revised design v2 recorded above.
+  Architecture: standalone-first solver core + in-game control/visualization/verify.
+  Map facts independently verified (parse matches handoff Section 3.3 exactly).
+
+## Phase 0 build log (2026-08-13)
+
+**Built and verified this session** (all NEW files; Basehook untouched — zero regression risk):
+
+- `Source/Solver/SolverMath.h` — engine-free Vec3 (X/Y/Z field names match the DLL's Vector).
+- `Source/Solver/SolverWorld.{h,cpp}` — BSP collision loader + whole-map uniform grid +
+  swept-hull trace. Mirrors the validated model: all non-bevel sides + EXACT axial lump
+  bevels (non-axial bevels excluded), worldspawn-only via model-0 walk (v0=56/v1=32 leaf
+  strides, divides-check), Minkowski hull expansion, CM_ClipBoxToBrush trace semantics
+  (enterfrac from −1, unclamped tie-break, DIST_EPSILON 1/32). NEW vs DLL: **two expanded
+  plane sets per brush (standing + ducked hull)** so the mover can crouch mid-flight;
+  brush AABBs from the compiler's axial planes (exact, not winding-derived); spawn parsed
+  from the entities lump.
+- `Source/Solver/SolverMove.{h,cpp}` — full FullWalkMove tick: Duck() → StartGravity →
+  CheckJumpButton → Friction → Walk/AirMove → CategorizePosition → FinishGravity.
+  TryPlayerMove/CategorizePosition/ClipVelocity are verbatim ports of the DLL-validated
+  code (**rule: validated DLL behavior wins over SDK recollection**). NEW (SDK-shaped,
+  parity-arbitrated): ground friction/accelerate, WalkMove + StayOnGround, CheckJumpButton
+  (vz = √(2g·57)≈302, `jump_finishgravity` toggle for the SDK's in-jump FinishGravity
+  half-step, PreventBunnyJumping clamp gated on enablebunnyhopping), CS duck state machine
+  (instant air duck, +18u FinishDuck lift = 72−54 hull delta, ground 400 ms transition,
+  unduck fit-validated via static hull-overlap test, duck maxspeed ×0.34).
+- `Source/Solver/SolverTape.{h,cpp}` — read-only .tas (STAS v1–3) reader, byte-for-byte
+  mirror of RecordingStore (which stays the format owner).
+- `Source/Solver/SolverLab.cpp` + `SolverLab.vcxproj` — console harness (v145, MaxSpeed,
+  default FP — same flags as Basehook so float behavior matches when the DLL embeds the
+  core). Commands: `mapinfo`, `replay` (events timeline + CSV dump + param overrides),
+  `bench`. Output: `Output\SolverLab\SolverLab.exe`.
+
+**Verification results:**
+- `mapinfo surf_basictest.bsp` matches the independent python parse EXACTLY (12 world
+  brushes, 108 planes, spawn, all AABBs incl. derived ramp tops 320/256/256/256; ramps
+  carry 6 sides + 1 axial bevel).
+- **Replay of the user's `basictest.tas` (629 frames): qualitative parity is STRONG.**
+  The sim reproduces the whole run shape open-loop: prestrafe to 282 u/s → single jump
+  tick 71 → startzone exit tick 109 @ 320.8 → boards ramp 1 tick 146 (leaves 817 u/s) →
+  skips ramp 2 → ramp 3 tick 241 (841) → ramp 4 tick 316 (849) → **the user's landing
+  crouch appears at tick 417 exactly where they crouched** → but leaves ramp 4 at only
+  258 u/s and drops short of the red platform (crosses x=1216 at z≈113 vs top 256).
+  Max speed 909.7. FINISH NOT reached.
+- **Sensitivity sweep** (no-jump-fg / stopspeed 75 / maxspeed 260 / maxspeed 240): same
+  route shape in all variants, none finish; ramp-4 entry point moves by tens of units
+  across variants and the 56-tick terminal carve amplifies whatever drift exists at
+  entry. stopspeed is irrelevant at prestrafe speeds (as predicted). Conclusion: an
+  open-loop 372-tick replay through three boards cannot localize drift — DO NOT blind-fit
+  parameters; get per-tick engine ground truth instead.
+
+**Known gaps (core), logged not hidden:** StepMove step-up/down comparison deferred
+(WalkMove slides only — flat platforms unaffected); CS:S stamina carried but its jump
+factor not modeled (single-jump runs start at 0 where the factor is 1); triggers not yet
+in the core (basictest has none); displacements still uncollided (basictest has none);
+`old_buttons` starts 0 (a run that begins with jump already held would differ).
+
+**Ground-truth loop built (same day):**
+- **Map Solve tab** added to the editor (7th tab, between Server and Rendering; case 5 in
+  the tab switch) — the designated home for EVERYTHING solver-related from here on.
+  Phase 0 contents: sim status line, "Export sim states CSV" button (unlocks only when
+  the sim is READY and not dirty), last-export path display, harness command crib.
+- `ExportSimStates()` (TasEditor.cpp, next to DrawMapSolveTab): writes the ENGINE-exact
+  per-tick states of the compiled run to `Documents\sourceTAS\solver\<project>_states.csv`.
+  Columns `tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw` (ground/duck from
+  SimState.flags FL_ONGROUND/FL_DUCKING; buttons+yaw from the compiled frames for input
+  alignment); row 0 is the anchor as tick −1 (ground −1 = unknown). `SolverDir()` helper
+  creates the folder. New prefs/persistence: none (session-only display).
+- **`SolverLab diff <map.bsp> <run.tas> <states.csv>`**: replays the tape through the
+  core and reports the FIRST divergence (thresholds 0.1/1/10 u), first ground/duck flag
+  mismatches, max + final |dpos|, and a ±3-tick context dump (engine | core | delta,
+  per axis) around the earliest interesting tick. Verifies input alignment first
+  (buttons+yaw) and refuses to interpret state deltas past an input mismatch — a project
+  whose frames differ from the .tas would otherwise masquerade as physics drift. Takes
+  the same param overrides as replay (--maxspeed etc.) → parameter sweeps can be scored
+  against ground truth offline. Replay's --csv now emits the identical 12-column format.
+- **Identity self-test PASSED**: core replay CSV diffed against the core itself = 629
+  ticks, every threshold "never", max |dpos| 0.000. The diff plumbing is sound.
+
+**Next-session workflow (user in-game, one click + one command):**
+1. Load the basictest project → Map Solve tab → "Export sim states CSV".
+2. `SolverLab.exe diff <surf_basictest.bsp> <basictest.tas> Documents\sourceTAS\solver\basictest_states.csv`
+3. Fix the core at the first divergent tick the data names; re-diff until the full run
+   tracks. Prime suspects by phase: ticks 0–70 = ground friction/accelerate/maxspeed,
+   tick 71 = jump impulse (+ the jump_finishgravity quirk), 72+ = air/board fidelity
+   (expected near-exact — DLL-validated math), tick ~417 = duck constants.
+
+## 2026-08-13 (later) — THE DIVERGENCE HUNT: full tick-exact parity achieved
+
+The user exported engine states (545 rows) from the Map Solve tab; `SolverLab diff`
+localized each divergence in turn. Every fix below is ENGINE-MEASURED from that ground
+truth, applied one at a time, each verified by re-diff. Final result: **545/545 ticks
+exact, max |dpos| 0.001 u (CSV rounding), zero flag mismatches** — prestrafe, jump,
+boards 1-3-4, air-crouch, landing on red (FINISH tick 431, 6.465 s, 352.9 u/s), bhop off
+red, second flight + landing, stamina walk-out to standstill. **The offline core is now
+tick-exact against the engine on the whole reference run.**
+
+Fixes, in discovery order (all in Source/Solver/SolverMove.{h,cpp}):
+1. **sv_stopspeed = 75, maxspeed = 250 confirmed.** Fitted drop curve matches
+   control=max(speed,75)·4·dt at every tick; fitted accel gain is 37.50 flat =
+   10·0.015·250. (First guess 100 caused a −1.5/tick deficit; a maxspeed-260 trial
+   "fixed" two ticks by two errors cancelling — the per-tick k/a decomposition fit
+   exposed it. Sweep-fitting without decomposition is a trap; the fit script is
+   scratchpad `fit_ground.py`.)
+2. **Jump impulse: ADD onto post-StartGravity vz when standing, SET when ducked/ducking.**
+   Jump tick ends at vz 284.0 = (−6+302)−6−6 (standing, t71); ducked bhop ends at 290.0 =
+   302−6−6 (t432). Both confirm the SDK's in-CheckJumpButton FinishGravity quirk
+   (jump_finishgravity stays true). No PreventBunnyJumping clamp active
+   (sv_enablebunnyhopping 1).
+3. **In-air duck/unduck origin shift = ±8.500 EXACTLY** (duck t417, unduck t443) — NOT
+   the SDK hull delta 18. Kept as measured constant `duck_air_shift`; duck hull height
+   for collision left 54 (only a ceiling map can test it — flagged).
+4. **CategorizePosition does NOT snap the origin.** t479 lands with ground SET and the
+   origin still 1.575 u above the surface; StayOnGround reaches the surface on the next
+   WALK tick. The DLL model's in-probe snap was an end-of-flight conflation — removed
+   from the core, DO NOT restore. (t431's landing hit the plane inside TryPlayerMove, so
+   both stories agreed there.)
+5. **Landing stamina (this build's variant).** Landing arms a timer (`stamina_land_ms
+   612.5`); every WALK tick scales v.xy by (1 − stam·0.00019833) AFTER friction; the
+   timer drains 15 ms/tick including airborne. Fit is exact across the whole 19-tick
+   decay (order alternative "scale before friction" ruled out — blows up at low speed).
+   Data also shows: **no jump-impulse stamina tax** (t432 bhop full height), and bhop
+   ticks bypass the scale entirely (CheckJumpButton leaves the ground branch before
+   WalkMove) — which is why chained hops keep speed on this build.
+6. Finish predicate uses the hull-EXPANDED footprint (engine grounds on red at origin
+   x 1213.69 vs the box's 1216).
+
+**Undetermined (needs targeted data, logged not guessed):**
+- Stamina initial value's fall-speed dependence — one landing observed (constant fits;
+  CSGO-style landcost·vz also roughly fits). A second landing at a different fall speed
+  discriminates.
+- Duck hull height (ceiling clearance) — untestable on this map.
+- Ground duck transition timing (400 ms path) — this run only air-ducks.
+
+**Dead ends (do NOT resurrect without new evidence):** SDK-classic stamina constants
+(1052.6 ms / 0.00019); SDK 18u air-duck shift; in-CategorizePosition origin snap;
+blind parameter sweeps as a fitting method.
+
+## Benchmarks (measured only — never assumed)
+| date | machine/map | metric | value | notes |
+|------|-------------|--------|-------|-------|
+| 2026-08-12 | (their machine, C# lab) | C# oracle throughput, 1 thread | 4,817,961 ticks/s | EXTERNAL reference from handoff — our C++ floor to beat |
+| 2026-08-13 | user machine, surf_basictest | solver core throughput, 1 thread | **15,258,605–15,260,745 ticks/s** | SolverLab bench, 2M and 10M ticks, full collision + grid; 3.2× the C# floor; ~150M/s at 10 workers |
+| 2026-08-13 | user machine, surf_basictest | full-run replay (629 ticks) | instant (<1 ms scale) | replay wall time dominated by process start |
+| — | — | engine RequestSim throughput (ticks/s) | TBD | |
+| 2026-08-13 | surf_basictest, basictest.tas | **fast-vs-engine divergence, 545 ticks** | **max 0.001 u, all flags exact** | after the divergence-hunt fixes; 0.001 = CSV %.4f/%.3f rounding floor |
+
+## Experiments log
+Template: `date | hypothesis | setup | result | verdict (+risk ID)`
+
+## Dead ends (do NOT retry without new evidence)
+(none yet — segment-solver era dead ends live in memory `solver-roadmap-1-1`: geometric
+fragility gates, SDK-adjacency vtable guesses, board-coupling gen-1.)
+
+## Findings
+(none yet)

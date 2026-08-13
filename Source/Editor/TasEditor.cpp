@@ -5044,6 +5044,19 @@ namespace {
 		return dir;
 	}
 
+	// Documents\sourceTAS\solver: ground-truth exports and solver artifacts.
+	// The offline SolverLab harness reads from here (Map Solve tab workflow).
+	std::string SolverDir() {
+		char documents[MAX_PATH];
+		if (FAILED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, documents)))
+			return {};
+		std::string base = std::string(documents) + "\\sourceTAS";
+		CreateDirectoryA(base.c_str(), nullptr);
+		std::string dir = base + "\\solver";
+		CreateDirectoryA(dir.c_str(), nullptr);
+		return dir;
+	}
+
 	// Global UI preferences (not per-project), one "key value" line each in
 	// Documents\sourceTAS\ui.cfg: the menu opacity plus every Rendering-tab
 	// option. Unknown keys are ignored so old and new builds can share the
@@ -7783,6 +7796,481 @@ namespace {
 				g_meas_max_add, g_meas_grav, g_meas_grav_n, g_meas_jump_vz);
 	}
 
+	// ------------------------------------------------------------- map solve --
+	// The full-map solver era's home (design log: Docs\FullMapSolver.md).
+	// Phase 0 wires the ground-truth loop: export the ENGINE-exact per-tick
+	// states of the compiled run so the offline core (SolverLab.exe) can be
+	// diffed against them tick by tick - fixes land where the data says, not
+	// where theory guesses.
+	std::string g_solver_export;   // last written path (session display only)
+	// The tab's export-name field: governs BOTH the playback capture and the
+	// sim export, so nothing ever lands as "untitled" again.
+	char g_solver_export_name[64] = "";
+
+	// Exports never overwrite and never leave identification to guesswork:
+	// unique self-describing names + one manifest line per export in
+	// solver\exports.log (timestamp, kind, map, source, ticks, path).
+	std::string UniqueSolverCsv(const std::string& base) {
+		const std::string dir = SolverDir();
+		if (dir.empty())
+			return {};
+		std::string path = dir + "\\" + base + ".csv";
+		for (int n = 2; GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES; ++n)
+			path = dir + "\\" + base + " (" + std::to_string(n) + ").csv";
+		return path;
+	}
+
+	void AppendExportLog(const char* kind, const std::string& path,
+	                     const char* source, int ticks) {
+		const std::string dir = SolverDir();
+		if (dir.empty())
+			return;
+		std::ofstream log(dir + "\\exports.log", std::ios::app);
+		if (!log)
+			return;
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+		char map[64] = "?";
+		BspWorld::CurrentMapName(map, sizeof(map));
+		char line[512];
+		Sfmt(line, "%04d-%02d-%02d %02d:%02d:%02d | %-8s | map %-24s | %-28s | %5d ticks | %s\n",
+			st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+			kind, map, source, ticks, path.c_str());
+		log << line;
+	}
+
+	// Physics context for the offline solver. TRUST DISCIPLINE (learned the
+	// hard way 2026-08-13): the generic ConVar reads returned DEFAULTS while
+	// the live server demonstrably ran surf settings, and the hull netvar
+	// read said 62 on a parity-proven-72 build - so this file carries ONLY
+	// values with a trustworthy source: the measured tick interval and the
+	// EDITOR'S STRAFE MODEL (user-visible on the Server tab; Surf setup /
+	// Refresh / the engine probe update them). Everything else is left to
+	// SolverLab's built-in defaults, which are engine-parity-proven.
+	bool ExportServerParams() {
+		const std::string dir = SolverDir();
+		if (dir.empty())
+			return false;
+		const std::string path = dir + "\\server_params.cfg";
+		std::ofstream out(path, std::ios::trunc);
+		if (!out)
+			return false;
+		out << "# sourceTAS solver params - written by the Map Solve tab.\n";
+		out << "# Only trustworthy sources: measured interval + the editor's\n";
+		out << "# strafe model. Unlisted physics = SolverLab parity-proven\n";
+		out << "# defaults. CLI flags override everything.\n";
+		char line[160];
+		const float itick = Prediction::LastDiag().interval_per_tick;
+		Sfmt(line, "tickinterval %g  # %s\n", itick > 0.f ? itick : 0.015f,
+			itick > 0.f ? "measured" : "default (no sim yet)");
+		out << line;
+		Sfmt(line, "gravity %g  # editor strafe model\n", g_gravity);
+		out << line;
+		Sfmt(line, "airaccelerate %g  # editor strafe model\n", g_air_accel);
+		out << line;
+		Sfmt(line, "maxspeed %g  # editor strafe model wishspeed\n", g_wishspeed);
+		out << line;
+		Sfmt(line, "air_speed_cap %g  # editor strafe model\n", g_air_cap);
+		out << line;
+		return static_cast<bool>(out);
+	}
+
+	bool ExportSimStates() {
+		if (!g_valid || g_states.empty() || g_frames.empty()) {
+			g_status = "Map Solve: no compiled sim to export - load a project first.";
+			return false;
+		}
+		const std::string dir = SolverDir();
+		if (dir.empty()) {
+			g_status = "Map Solve: couldn't resolve Documents\\sourceTAS\\solver.";
+			return false;
+		}
+		std::string base = SanitizeName(g_solver_export_name[0]
+			? g_solver_export_name : g_name);
+		if (base.empty())
+			base = "project";
+		const std::string path = UniqueSolverCsv("sim_" + base);
+		std::ofstream out(path, std::ios::trunc);
+		if (!out) {
+			g_status = "Map Solve: couldn't write " + path;
+			return false;
+		}
+		// Column layout shared with SolverLab's replay CSV, plus yaw so the
+		// differ can verify input alignment before trusting a state delta.
+		// Row 0 = the anchor as tick -1 (ground unknown there: -1).
+		out << "tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw\n";
+		char line[320];
+		Sfmt(line, "-1,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,-1,%d,0,%.4f\n",
+			g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
+			g_anchor.velocity.X, g_anchor.velocity.Y, g_anchor.velocity.Z,
+			sqrtf(g_anchor.velocity.X * g_anchor.velocity.X
+				+ g_anchor.velocity.Y * g_anchor.velocity.Y),
+			g_anchor.ducked ? 1 : 0, g_anchor.yaw);
+		out << line;
+		const int n = static_cast<int>(g_states.size() < g_frames.size()
+			? g_states.size() : g_frames.size());
+		for (int i = 0; i < n; ++i) {
+			const Prediction::SimState& st = g_states[i];
+			const Frame& fr = g_frames[i];
+			Sfmt(line, "%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%d,%d,%d,%.4f\n",
+				i, st.origin.X, st.origin.Y, st.origin.Z,
+				st.velocity.X, st.velocity.Y, st.velocity.Z,
+				sqrtf(st.velocity.X * st.velocity.X
+					+ st.velocity.Y * st.velocity.Y),
+				(st.flags & FL_ONGROUND) ? 1 : 0,
+				(st.flags & FL_DUCKING) ? 1 : 0,
+				fr.buttons, fr.viewangles[1]);
+			out << line;
+		}
+		const bool ok = static_cast<bool>(out);
+		const bool params_ok = ExportServerParams();
+		g_solver_export = path;
+		if (ok)
+			AppendExportLog("sim", path, g_name, n);
+		g_status = ok
+			? FmtStr("Map Solve: exported %d engine ticks + anchor -> %s%s",
+				n, path.c_str(),
+				params_ok ? " (+ server_params.cfg)" : " (params write FAILED)")
+			: "Map Solve: write failed mid-file.";
+		return ok;
+	}
+
+	// ---------------- map solve: quick-iteration instruments (QOL) ----------
+	// SOLVE ANCHOR: the tick-0 state the solver and the game AGREE on.
+	// Capture writes it (plus the live server params) for the harness;
+	// Teleport puts the player back on it before playback, so both worlds
+	// start from the identical state - the start-position ambiguity that
+	// muddied the first unseeded tests dies here.
+	StartState g_solve_anchor;
+	bool g_solve_anchor_valid = false;
+
+	std::string SolveAnchorPath() {
+		const std::string dir = SolverDir();
+		return dir.empty() ? std::string() : dir + "\\solve_anchor.cfg";
+	}
+
+	bool WriteSolveAnchor() {
+		StartState st;
+		if (!Prediction::CaptureStartState(st)) {
+			g_status = "Map Solve: can't capture the player - not in game?";
+			return false;
+		}
+		const std::string path = SolveAnchorPath();
+		if (path.empty())
+			return false;
+		std::ofstream out(path, std::ios::trunc);
+		if (!out) {
+			g_status = "Map Solve: couldn't write solve_anchor.cfg";
+			return false;
+		}
+		char line[256];
+		out << "# sourceTAS solve anchor - the agreed tick-0 state.\n";
+		Sfmt(line, "origin %.6f %.6f %.6f\n",
+			st.origin.X, st.origin.Y, st.origin.Z);
+		out << line;
+		Sfmt(line, "velocity %.6f %.6f %.6f\n",
+			st.velocity.X, st.velocity.Y, st.velocity.Z);
+		out << line;
+		Sfmt(line, "pitch %.4f\nyaw %.4f\nducked %d\nstamina %.2f\n",
+			st.pitch, st.yaw, st.ducked ? 1 : 0, st.stamina);
+		out << line;
+		g_solve_anchor = st;
+		g_solve_anchor_valid = true;
+		ExportServerParams();
+		g_status = FmtStr("Map Solve: solve anchor (%.1f, %.1f, %.1f) + live "
+			"server params written to solver\\.", st.origin.X, st.origin.Y,
+			st.origin.Z);
+		return true;
+	}
+
+	bool LoadSolveAnchorFile() {
+		std::ifstream in(SolveAnchorPath());
+		if (!in)
+			return false;
+		StartState st;
+		bool have_origin = false;
+		std::string line;
+		while (std::getline(in, line)) {
+			int d = 0;
+			if (sscanf_s(line.c_str(), "origin %f %f %f",
+				&st.origin.X, &st.origin.Y, &st.origin.Z) == 3)
+				have_origin = true;
+			else if (sscanf_s(line.c_str(), "velocity %f %f %f",
+				&st.velocity.X, &st.velocity.Y, &st.velocity.Z) == 3) {}
+			else if (sscanf_s(line.c_str(), "pitch %f", &st.pitch) == 1) {}
+			else if (sscanf_s(line.c_str(), "yaw %f", &st.yaw) == 1) {}
+			else if (sscanf_s(line.c_str(), "ducked %d", &d) == 1)
+				st.ducked = d != 0;
+			else if (sscanf_s(line.c_str(), "stamina %f", &st.stamina) == 1) {}
+		}
+		if (!have_origin)
+			return false;
+		st.valid = true;
+		g_solve_anchor = st;
+		g_solve_anchor_valid = true;
+		return true;
+	}
+
+	void TeleportToSolveAnchor() {
+		if (!g_solve_anchor_valid && !LoadSolveAnchorFile()) {
+			g_status = "Map Solve: no solve anchor - capture one first.";
+			return;
+		}
+		if (!engine)
+			return;
+		char cmd[192];
+		Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+			g_solve_anchor.origin.X, g_solve_anchor.origin.Y,
+			g_solve_anchor.origin.Z, g_solve_anchor.pitch, g_solve_anchor.yaw);
+		engine->ClientCmd_Unrestricted(cmd);
+		g_status = "Map Solve: teleported to the solve anchor (needs sv_cheats 1).";
+	}
+
+	// REAL PLAYBACK CAPTURE: while armed, every playback tick's ACTUAL player
+	// state (netvar basis, same as the divergence verdict) is recorded; on
+	// playback end the rows export as the solver diff's ground-truth CSV.
+	// This is the instrument that settles core-vs-engine claims with data.
+	struct PlayCapRow {
+		int tick;
+		Vector pos, vel;
+		int ground, ducked, buttons;
+		float yaw;
+	};
+	std::vector<PlayCapRow> g_playcap;
+	bool g_playcap_armed = false;
+	bool g_playcap_active = false;
+	int g_playcap_buttons = 0;
+	float g_playcap_yaw = 0.f;
+	std::string g_playcap_run;    // name of the run being captured
+	std::string g_playcap_name_override;   // tab-chosen export name (wins)
+	std::string g_playcap_last;
+
+	// Combo getter over the recording library (Map Solve capture picker).
+	bool RunItemGetter(void*, int idx, const char** out) {
+		static char buf[160];
+		const std::vector<Run>& lib = g_tas.Library();
+		if (idx < 0 || idx >= static_cast<int>(lib.size()))
+			return false;
+		Sfmt(buf, "%s   [%s]   %d ticks", lib[idx].name.c_str(),
+			lib[idx].map.empty() ? "?" : lib[idx].map.c_str(),
+			static_cast<int>(lib[idx].FrameCount()));
+		*out = buf;
+		return true;
+	}
+
+	void FinalizePlaybackCapture() {
+		g_playcap_active = false;
+		if (g_playcap.empty())
+			return;
+		const std::string dir = SolverDir();
+		if (dir.empty())
+			return;
+		std::string base = SanitizeName(g_playcap_run);
+		if (base.empty())
+			base = "run";
+		const std::string path = UniqueSolverCsv("playback_" + base);
+		std::ofstream out(path, std::ios::trunc);
+		if (!out) {
+			g_status = "Map Solve: couldn't write playback_states.csv";
+			g_playcap.clear();
+			return;
+		}
+		out << "tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw\n";
+		char line[320];
+		for (const PlayCapRow& r : g_playcap) {
+			Sfmt(line, "%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%d,%d,%d,%.4f\n",
+				r.tick, r.pos.X, r.pos.Y, r.pos.Z, r.vel.X, r.vel.Y, r.vel.Z,
+				sqrtf(r.vel.X * r.vel.X + r.vel.Y * r.vel.Y),
+				r.ground, r.ducked, r.buttons, r.yaw);
+			out << line;
+		}
+		const int n = static_cast<int>(g_playcap.size());
+		g_playcap.clear();
+		g_playcap_last = path;
+		AppendExportLog("playback", path, g_playcap_run.c_str(), n);
+		ExportServerParams();   // the params that were LIVE for this capture
+		g_status = FmtStr("Map Solve: captured %d REAL playback ticks of '%s' -> %s",
+			n, g_playcap_run.c_str(), path.c_str());
+		g_playcap_name_override.clear();
+	}
+
+	void DrawMapSolveTab() {
+		Theme::Heading("Map Solve",
+			"Home of the full-map solver (design log: Docs\\FullMapSolver.md). "
+			"The ground-truth loop between the ENGINE and the offline core - "
+			"everything the solver grows lands in this tab.");
+
+		SubHeading("Consistent start (solve anchor)");
+		if (g_solve_anchor_valid || LoadSolveAnchorFile())
+			ImGui::Text("Solve anchor: (%.1f, %.1f, %.1f) yaw %.1f%s",
+				g_solve_anchor.origin.X, g_solve_anchor.origin.Y,
+				g_solve_anchor.origin.Z, g_solve_anchor.yaw,
+				g_solve_anchor.ducked ? " (ducked)" : "");
+		else
+			ImGui::TextDisabled("No solve anchor captured yet.");
+		if (ImGui::Button("Capture solve anchor", ImVec2(170, 0)))
+			WriteSolveAnchor();
+		ImGui::SameLine();
+		if (ImGui::Button("Teleport to anchor", ImVec2(150, 0)))
+			TeleportToSolveAnchor();
+		ImGui::SameLine();
+		if (ImGui::Button("Surf setup", ImVec2(100, 0))) {
+			if (engine) {
+				engine->ClientCmd_Unrestricted(
+					"sv_cheats 1; sv_accelerate 10; sv_airaccelerate 150; "
+					"sv_enablebunnyhopping 1");
+				g_air_accel = 150.f;
+				MarkDirty();
+				g_status = "Map Solve: surf server cvars sent - model updated.";
+			}
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("God (toggle)", ImVec2(110, 0))) {
+			if (engine) {
+				engine->ClientCmd_Unrestricted("god");
+				g_status = "Map Solve: sent 'god' (TOGGLES each click; needs "
+					"sv_cheats 1). Fall damage off = playback can't die.";
+			}
+		}
+		Theme::Help("God is a console TOGGLE, so it stays a separate button "
+			"instead of hiding inside Surf setup (double-clicking setup would "
+			"silently turn it back off). Fall-damage death breaks playback "
+			"sync - keep god on while testing solver tapes.");
+		Theme::Help("The agreed tick-0 state. Capture writes solver\\"
+			"solve_anchor.cfg + the LIVE server params; offline solves auto-"
+			"start from it, and Teleport puts the player back on it before "
+			"playback - solver and game share one origin of truth.");
+		// Playback alignment for ANY tape: its own anchor, one click.
+		{
+			const std::vector<Run>& lib = g_tas.Library();
+			const int sel = g_tas.Selected();
+			const bool have = sel >= 0 && sel < static_cast<int>(lib.size())
+				&& lib[sel].start.valid;
+			if (have) {
+				char lbl[128];
+				Sfmt(lbl, "Teleport to '%s' anchor", lib[sel].name.c_str());
+				if (ImGui::Button(lbl, ImVec2(0, 0)) && engine) {
+					const StartState& a = lib[sel].start;
+					char cmd[192];
+					Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+						a.origin.X, a.origin.Y, a.origin.Z, a.pitch, a.yaw);
+					engine->ClientCmd_Unrestricted(cmd);
+					g_status = FmtStr("Map Solve: teleported to '%s' anchor.",
+						lib[sel].name.c_str());
+				}
+				Theme::Help("Puts the player exactly on the SELECTED "
+					"recording's tick-0 state (Record tab selection) so its "
+					"playback starts from the state the tape assumes.");
+			} else {
+				ImGui::TextDisabled("(select a recording in the Record tab to "
+					"teleport to its anchor)");
+			}
+		}
+
+		SubHeading("Capture & export");
+		{
+			const std::vector<Run>& lib = g_tas.Library();
+			static int s_cap_run = -1;
+			if (s_cap_run >= static_cast<int>(lib.size()))
+				s_cap_run = static_cast<int>(lib.size()) - 1;
+			if (s_cap_run < 0 && !lib.empty()) {
+				s_cap_run = (g_tas.Selected() >= 0) ? g_tas.Selected() : 0;
+				Sfmt(g_solver_export_name, "%s", lib[s_cap_run].name.c_str());
+			}
+			ImGui::PushItemWidth(340);
+			if (ImGui::Combo("Recording", &s_cap_run, RunItemGetter, nullptr,
+				static_cast<int>(lib.size()))
+				&& s_cap_run >= 0 && s_cap_run < static_cast<int>(lib.size()))
+				Sfmt(g_solver_export_name, "%s", lib[s_cap_run].name.c_str());
+			ImGui::InputText("Export name", g_solver_export_name,
+				sizeof(g_solver_export_name));
+			ImGui::PopItemWidth();
+			if (g_playcap_active) {
+				ImGui::TextColored(Theme::Warning,
+					"CAPTURING '%s' (%d ticks)...", g_playcap_run.c_str(),
+					static_cast<int>(g_playcap.size()));
+				if (ImGui::Button("Abort capture", ImVec2(240, 0))) {
+					g_playcap_armed = false;
+					g_playcap_active = false;
+					g_playcap.clear();
+					g_playcap_name_override.clear();
+					g_tas.EmergencyStop();
+				}
+			} else if (s_cap_run >= 0 && s_cap_run < static_cast<int>(lib.size())
+				&& !lib[s_cap_run].Empty()) {
+				if (ImGui::Button("Teleport, play & capture", ImVec2(240, 0))) {
+					const Run& r = lib[s_cap_run];
+					if (r.start.valid && engine) {
+						char cmd[192];
+						if (g_freecam)
+							Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
+								r.start.origin.X, r.start.origin.Y,
+								r.start.origin.Z);
+						else
+							Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+								r.start.origin.X, r.start.origin.Y,
+								r.start.origin.Z, r.start.pitch, r.start.yaw);
+						engine->ClientCmd_Unrestricted(cmd);
+					}
+					Run copy = lib[s_cap_run];
+					g_playcap_name_override = g_solver_export_name[0]
+						? g_solver_export_name : lib[s_cap_run].name;
+					g_playcap_armed = true;
+					if (!g_tas.PlayEphemeral(std::move(copy), 12)) {
+						g_playcap_armed = false;
+						g_playcap_name_override.clear();
+						g_status = "Map Solve: can't play now - recorder busy.";
+					} else {
+						g_status = FmtStr("Map Solve: playing '%s', exporting "
+							"as '%s' on finish.", lib[s_cap_run].name.c_str(),
+							g_playcap_name_override.c_str());
+					}
+				}
+			} else {
+				ImGui::TextDisabled(lib.empty()
+					? "(no recordings in the library)" : "(pick a recording)");
+			}
+			Theme::Help("One click: teleports to the recording's own anchor "
+				"(sv_cheats 1), plays it, records the ACTUAL engine state of "
+				"every tick, and exports solver\\playback_<export name>.csv + "
+				"the live params + a manifest line in exports.log when it "
+				"ends. The export name also governs 'Export sim states CSV' "
+				"below.");
+			if (!g_playcap_last.empty())
+				ImGui::TextDisabled("last capture: %s", g_playcap_last.c_str());
+		}
+
+		SubHeading("Ground truth export");
+		if (g_valid && !g_states.empty())
+			ImGui::Text("Compiled run: %d ticks, anchor (%.1f, %.1f, %.1f)%s",
+				static_cast<int>(g_states.size()),
+				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
+				g_dirty ? "  [SIM UPDATING - wait]" : "");
+		else
+			ImGui::TextDisabled("No compiled sim - load the project first (e.g. basictest).");
+		const bool can_export = g_valid && !g_dirty && !g_states.empty();
+		if (can_export) {
+			if (ImGui::Button("Export sim states CSV", ImVec2(220, 0)))
+				ExportSimStates();
+		} else {
+			ImGui::TextDisabled("(export unlocks once the sim is READY)");
+		}
+		Theme::Help("Writes the ENGINE-exact per-tick states (origin, velocity, "
+			"ground/duck flags) of the compiled run to Documents\\sourceTAS\\"
+			"solver\\<project>_states.csv, anchor included as tick -1. The "
+			"offline core diffs itself against this file tick by tick to "
+			"localize its first divergence.");
+		if (!g_solver_export.empty())
+			ImGui::TextDisabled("last export: %s", g_solver_export.c_str());
+
+		SubHeading("Offline harness");
+		ImGui::TextDisabled("SolverLab.exe (repo Output\\SolverLab\\):");
+		ImGui::TextDisabled("  solve  <map.bsp> --end-brush N            route search (auto-uses solve anchor)");
+		ImGui::TextDisabled("  diff   <map.bsp> <run.tas> <states.csv>   first-divergence report");
+		ImGui::TextDisabled("  replay <map.bsp> <run.tas> --end-brush N  event timeline");
+		ImGui::TextDisabled("Playback capture + sim export + params all land in Documents\\sourceTAS\\solver\\.");
+	}
+
 	void DrawProjectTab() {
 		ImGui::PushItemWidth(180);
 		ImGui::InputText("##projname", g_name, sizeof(g_name));
@@ -8055,6 +8543,12 @@ void TasEditor::Update() {
 			}
 		}
 	}
+	// Map Solve playback capture: playback ended -> write the CSV. (The last
+	// frame's outcome row is intentionally omitted; post-playback physics
+	// would pollute it - the diff loses exactly one tick.)
+	if (g_playcap_active && !g_tas.IsPlaying())
+		FinalizePlaybackCapture();
+
 	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: end");
 }
 
@@ -8062,6 +8556,49 @@ void TasEditor::Undo() { DoUndo(); }
 void TasEditor::Redo() { DoRedo(); }
 
 void TasEditor::NotePlaybackTick(int index) {
+	// REAL playback capture (Map Solve): each row is the actual engine
+	// outcome of frame index-1, on the same netvar basis as the divergence
+	// verdict below. Grace-period repeats overwrite the tick -1 row, so the
+	// anchor row is the settled post-teleport state - the direct check that
+	// game and solver agree on tick 0.
+	if (g_playcap_armed && index == 0) {
+		g_playcap_armed = false;
+		g_playcap_active = true;
+		g_playcap.clear();
+		// Name the capture: the tab's chosen export name wins; otherwise the
+		// run being played. Identification is a manifest lookup, never a
+		// guess.
+		if (!g_playcap_name_override.empty()) {
+			g_playcap_run = g_playcap_name_override;
+		} else if (g_tas.IsTestPlayback()) {
+			g_playcap_run = "testplay";
+		} else {
+			const int sel = g_tas.Selected();
+			const std::vector<Run>& lib = g_tas.Library();
+			g_playcap_run = (sel >= 0 && sel < static_cast<int>(lib.size()))
+				? lib[sel].name : "run";
+		}
+	}
+	if (g_playcap_active) {
+		StartState pst;
+		if (Prediction::CaptureStartState(pst) && g_playcap.size() < 20000) {
+			PlayCapRow r;
+			r.tick = index - 1;
+			r.pos = pst.origin;
+			r.vel = pst.velocity;
+			int fl = 0;
+			r.ground = Prediction::LiveFlags(&fl)
+				? ((fl & FL_ONGROUND) ? 1 : 0) : -1;
+			r.ducked = pst.ducked ? 1 : 0;
+			r.buttons = (index == 0) ? 0 : g_playcap_buttons;
+			r.yaw = (index == 0) ? pst.yaw : g_playcap_yaw;
+			if (!g_playcap.empty() && g_playcap.back().tick == r.tick)
+				g_playcap.back() = r;
+			else
+				g_playcap.push_back(r);
+		}
+	}
+
 	// Called by the CreateMove hook (game thread - the same thread that runs
 	// the sims, so g_states can't be resized under this read) with the index
 	// of the frame ABOUT to replay: the player's current origin must equal
@@ -8085,6 +8622,11 @@ void TasEditor::NotePlaybackTick(int index) {
 	if (g_play_first_tick < 0 && dev > 0.5f)
 		g_play_first_tick = index - 1;
 	g_play_count++;
+}
+
+void TasEditor::NotePlaybackInputs(int buttons, float yaw) {
+	g_playcap_buttons = buttons;
+	g_playcap_yaw = yaw;
 }
 
 bool TasEditor::DivergencePoint(Vector* p) {
@@ -8401,11 +8943,12 @@ void DrawWindowImpl() {
 	ImGui::Spacing();
 
 	// Tab row (selected = pink accent).
-	const char* tabs[] = { "Project", "Record", "Run", "Targets", "Server", "Rendering" };
-	for (int i = 0; i < 6; ++i) {
+	const char* tabs[] = { "Project", "Record", "Run", "Targets", "Server",
+	                       "Map Solve", "Rendering" };
+	for (int i = 0; i < 7; ++i) {
 		if (Theme::Tab(tabs[i], g_tab == i, ImVec2(104, 0)))
 			g_tab = i;
-		if (i < 5)
+		if (i < 6)
 			ImGui::SameLine();
 	}
 	ImGui::Spacing();
@@ -8421,6 +8964,7 @@ void DrawWindowImpl() {
 	case 2: DrawRunTab(); break;
 	case 3: DrawTargetsTab(); break;
 	case 4: DrawServerTab(); break;
+	case 5: DrawMapSolveTab(); break;
 	default: DrawRenderingTab(); break;
 	}
 	ImGui::EndChild();

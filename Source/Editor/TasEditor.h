@@ -61,6 +61,11 @@ namespace TasEditor {
 	void NotePlaybackTick(int index);
 	bool DivergencePoint(Vector* p);
 
+	// Map Solve: real-playback capture. The hook stashes each replayed cmd's
+	// inputs so the NEXT tick's captured row (the state that cmd produced)
+	// carries them; rows export as the solver diff's ground-truth CSV.
+	void NotePlaybackInputs(int buttons, float yaw);
+
 	// Snapshot of everything WorldDraw needs to render the run line.
 	struct DrawData {
 		const Prediction::SimState* states;   // per-tick world states

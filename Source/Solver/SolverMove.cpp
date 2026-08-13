@@ -1,0 +1,396 @@
+#include "SolverMove.h"
+
+namespace Solver {
+
+	namespace {
+
+		// CGameMovement::ClipVelocity with overbounce 1: out = in - n*dot(in,n),
+		// then the engine's one adjust iteration so the result never still
+		// points into the plane. (Verbatim from the validated DLL model.)
+		void EngineClipVelocity(const Vec3& in, const Vec3& n, Vec3& out) {
+			const float backoff = Dot(in, n);
+			out = in - Scale(n, backoff);
+			const float adjust = Dot(out, n);
+			if (adjust < 0.f)
+				out = out - Scale(n, adjust);
+		}
+
+		void CheckVelocity(PlayerState& s, const MoveParams& p) {
+			auto clampc = [&](float& c) {
+				if (c > p.maxvelocity) c = p.maxvelocity;
+				else if (c < -p.maxvelocity) c = -p.maxvelocity;
+			};
+			clampc(s.vel.X);
+			clampc(s.vel.Y);
+			clampc(s.vel.Z);
+		}
+
+		// Move directions from the view yaw with z zeroed and normalized -
+		// AirMove and WalkMove both flatten the basis, which is why pitch never
+		// enters surf movement. forward = (cos yaw, sin yaw), right = (sin yaw,
+		// -cos yaw): facing +x puts right at -y (Source angle convention).
+		void WishFromInput(float yaw, float fmove, float smove,
+		                   float* wx, float* wy) {
+			const float r = Deg2Rad(yaw);
+			const float cy = cosf(r), sy = sinf(r);
+			*wx = cy * fmove + sy * smove;
+			*wy = sy * fmove - cy * smove;
+		}
+
+		// TryPlayerMove: up to 4 bumps; partial moves re-base the clip set;
+		// first impact = plain clip; multi-plane crease resolution; stop-dead
+		// guards. Verbatim mirror of the validated DLL model (which itself
+		// mirrors the engine's measured behavior - do NOT "fix" it toward SDK
+		// recollection without parity evidence).
+		void TryPlayerMove(PlayerState& s, const World& w, const MoveParams& p,
+		                   TickEvents* ev) {
+			float time_left = p.dt;
+			Vec3 planes[5];
+			int numplanes = 0;
+			Vec3 original_v = s.vel;
+			const Vec3 primal_v = s.vel;
+			for (int bump = 0; bump < 4; ++bump) {
+				if (Len2(s.vel) == 0.f)
+					break;
+				const Vec3 end = s.pos + Scale(s.vel, time_left);
+				TraceResult tr;
+				const float frac = w.TraceHull(s.pos, end, s.ducked, &tr);
+				if (frac > 0.f) {
+					s.pos = s.pos + Scale(end - s.pos, frac);
+					original_v = s.vel;   // engine re-bases the clip set
+					numplanes = 0;
+				}
+				if (frac >= 1.f || tr.brush < 0)
+					break;
+				time_left -= time_left * frac;
+				const Vec3 n = tr.normal;
+				if (ev && ev->ncontacts < 4) {
+					ev->contact_brush[ev->ncontacts] = tr.brush;
+					ev->contact_plane[ev->ncontacts] = tr.plane;
+					ev->contact_loss[ev->ncontacts] = 0.f;
+					ev->ncontacts++;
+				}
+				if (numplanes >= 5) {
+					s.vel = Vec3();
+					break;
+				}
+				planes[numplanes++] = n;
+				const float sp_before = Len(s.vel);
+				if (numplanes == 1) {
+					EngineClipVelocity(original_v, planes[0], s.vel);
+					original_v = s.vel;
+				} else {
+					int i = 0;
+					for (; i < numplanes; ++i) {
+						EngineClipVelocity(original_v, planes[i], s.vel);
+						int j = 0;
+						for (; j < numplanes; ++j)
+							if (j != i && Dot(s.vel, planes[j]) < 0.f)
+								break;
+						if (j == numplanes)
+							break;
+					}
+					if (i == numplanes) {
+						if (numplanes != 2) {
+							s.vel = Vec3();
+							break;
+						}
+						// Slide along the crease of the two planes.
+						Vec3 dir(planes[0].Y * planes[1].Z - planes[0].Z * planes[1].Y,
+						         planes[0].Z * planes[1].X - planes[0].X * planes[1].Z,
+						         planes[0].X * planes[1].Y - planes[0].Y * planes[1].X);
+						const float dl = Len(dir);
+						if (dl > 1e-6f) dir = Scale(dir, 1.f / dl);
+						s.vel = Scale(dir, Dot(dir, s.vel));
+					}
+					if (Dot(s.vel, primal_v) <= 0.f) {
+						s.vel = Vec3();
+						break;
+					}
+				}
+				if (ev && ev->ncontacts > 0)
+					ev->contact_loss[ev->ncontacts - 1] = sp_before - Len(s.vel);
+			}
+		}
+
+		// CategorizePosition: the engine's ONLY grounding rule. Falling no
+		// faster up than NON_JUMP_VELOCITY, a 2-unit down-trace onto a walkable
+		// plane (nz >= 0.7) sets ground AND SNAPS the origin to the trace end.
+		void CategorizePosition(PlayerState& s, const World& w, const MoveParams& p,
+		                        TickEvents* ev) {
+			const bool was_ground = s.on_ground;
+			s.on_ground = false;
+			s.ground_brush = -1;
+			if (s.vel.Z <= p.non_jump_velocity) {
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
+				                             s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0 && tr.normal.Z >= p.walkable_z) {
+					// NO origin snap: engine ground truth (2026-08-13, t479)
+					// sets ground with the origin still 1.575u above the
+					// surface; StayOnGround reaches it on the next WALK tick.
+					// (The DLL model's in-probe snap conflated end-of-flight
+					// analysis with continuing simulation - do not restore it.)
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			if (ev) {
+				if (!was_ground && s.on_ground) ev->landed = true;
+				if (was_ground && !s.on_ground) ev->left_ground = true;
+			}
+			// Landings arm NOTHING (measured: the jump-free -775 u/s floor
+			// landing walked at scale 1.00000) - stamina is the JUMP's tax.
+		}
+
+		void Friction(PlayerState& s, const MoveParams& p) {
+			const float speed = Len(s.vel);
+			if (speed < 0.1f)
+				return;
+			const float control = (speed < p.stopspeed) ? p.stopspeed : speed;
+			const float drop = control * p.friction * p.dt;   // surface friction 1
+			float newspeed = speed - drop;
+			if (newspeed < 0.f) newspeed = 0.f;
+			if (newspeed != speed)
+				s.vel = Scale(s.vel, newspeed / speed);
+		}
+
+		void CheckJumpButton(PlayerState& s, const World& /*w*/, const MoveParams& p,
+		                     TickEvents* ev) {
+			if (!s.on_ground) {
+				s.old_buttons |= IN_JUMP;
+				return;
+			}
+			if (s.old_buttons & IN_JUMP)
+				return;   // must release jump before jumping again
+			// PreventBunnyJumping (server, binary-scanned): clamp velocity to
+			// 1.1*maxspeed before the impulse - OFF under sv_enablebunnyhopping.
+			if (!p.enablebunnyhopping) {
+				const float maxscaled = p.maxspeed * 1.1f;
+				const float spd = Len(s.vel);
+				if (spd > maxscaled && spd > 0.f)
+					s.vel = Scale(s.vel, maxscaled / spd);
+			}
+			s.on_ground = false;
+			s.ground_brush = -1;
+			// Engine-measured 2026-08-13 (basictest ground truth): standing
+			// jumps ADD sqrt(2g*57)=302 onto the post-StartGravity vz (-6),
+			// ducked/ducking jumps SET it - tick-end vz 284 vs 290, both exact.
+			// Hot-stamina jumps are taxed (REAL-playback fit, 4 jumps - see
+			// MoveParams). The earlier "no tax" conclusion came from pairing
+			// the wrong sim export with a rewritten tape file - retracted.
+			float impulse = sqrtf(2.f * p.gravity * p.jump_height);
+			if (s.stamina > 0.f)
+				impulse *= 1.f - s.stamina * p.stamina_jump_scale_per_ms;
+			if (s.ducked || s.ducking)
+				s.vel.Z = impulse;
+			else
+				s.vel.Z += impulse;
+			if (p.jump_finishgravity)
+				s.vel.Z -= p.gravity * 0.5f * p.dt;   // SDK's in-jump FinishGravity
+				                                      // (confirmed by the -6 -6 tail)
+			// The jump ARMS the stamina timer (see MoveParams: jump tax,
+			// drained in flight, residue drags the landing walk).
+			s.stamina = p.stamina_jump_ms;
+			s.old_buttons |= IN_JUMP;
+			if (ev) {
+				ev->jumped = true;
+				ev->left_ground = true;
+			}
+		}
+
+		void StayOnGround(PlayerState& s, const World& w, const MoveParams& p) {
+			Vec3 start = s.pos;
+			start.Z += 2.f;
+			Vec3 end = s.pos;
+			end.Z -= p.stepsize;
+			TraceResult up;
+			const float fu = w.TraceHull(s.pos, start, s.ducked, &up);
+			start = s.pos;
+			start.Z += 2.f * fu;
+			TraceResult dn;
+			const float fd = w.TraceHull(start, end, s.ducked, &dn);
+			if (fd > 0.f && fd < 1.f && dn.brush >= 0
+				&& dn.normal.Z >= p.walkable_z) {
+				const Vec3 land = start + Scale(end - start, fd);
+				if (fabsf(s.pos.Z - land.Z) > 0.015625f)   // half COORD_RESOLUTION
+					s.pos = land;
+			}
+		}
+
+		void WalkMove(PlayerState& s, const World& w, const MoveParams& p,
+		              float yaw, float fmove, float smove, TickEvents* ev) {
+			// Landing stamina drags WALK ticks only (a bhop tick jumps before
+			// reaching here - measured: t432 kept full speed, t480+ decayed).
+			// Applied after Friction, before Accelerate (fit order A).
+			if (s.stamina > 0.f) {
+				const float ratio = 1.f - s.stamina * p.stamina_scale_per_ms;
+				s.vel.X *= ratio;
+				s.vel.Y *= ratio;
+			}
+			float wx, wy;
+			WishFromInput(yaw, fmove, smove, &wx, &wy);
+			float wishspeed = sqrtf(wx * wx + wy * wy);
+			Vec3 wishdir(0.f, 0.f, 0.f);
+			if (wishspeed > 1e-6f)
+				wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
+			// ENGINE-MEASURED 2026-08-13 (unseeded-tape ground truth, tick
+			// 204): the ducked speed cap applies the moment duck is PRESSED
+			// (m_bDucking), not when the transition finishes - the engine
+			// showed pure friction decay (-19.1 = 318*0.06) from the press
+			// tick while the old ducked-only model kept accelerating.
+			const float effmax = (s.ducked || s.ducking)
+				? p.maxspeed * p.duck_speed_frac : p.maxspeed;
+			if (wishspeed > effmax)
+				wishspeed = effmax;
+			// Accelerate.
+			const float cur = Dot(s.vel, wishdir);
+			const float add = wishspeed - cur;
+			if (add > 0.f) {
+				float accelspeed = p.accelerate * p.dt * wishspeed;   // friction 1
+				if (accelspeed > add) accelspeed = add;
+				s.vel = s.vel + Scale(wishdir, accelspeed);
+			}
+			s.vel.Z = 0.f;
+			if (Len(s.vel) < 1.f) {
+				s.vel = Vec3();
+				return;
+			}
+			// Straight attempt first; on a hit, slide via TryPlayerMove.
+			// (Full StepMove step-up/step-down comparison is deferred - flat
+			// start platforms never need it; logged as a known gap.)
+			const Vec3 dest(s.pos.X + s.vel.X * p.dt,
+			                s.pos.Y + s.vel.Y * p.dt, s.pos.Z);
+			TraceResult tr;
+			const float frac = w.TraceHull(s.pos, dest, s.ducked, &tr);
+			if (frac >= 1.f) {
+				s.pos = dest;
+			} else {
+				TryPlayerMove(s, w, p, ev);
+			}
+			StayOnGround(s, w, p);
+			s.vel.Z = 0.f;
+		}
+
+		void AirMove(PlayerState& s, const World& w, const MoveParams& p,
+		             float yaw, float fmove, float smove, TickEvents* ev) {
+			float wx, wy;
+			WishFromInput(yaw, fmove, smove, &wx, &wy);
+			float wishspeed = sqrtf(wx * wx + wy * wy);
+			Vec3 wishdir(0.f, 0.f, 0.f);
+			if (wishspeed > 1e-6f)
+				wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
+			const float effmax = (s.ducked || s.ducking)
+				? p.maxspeed * p.duck_speed_frac : p.maxspeed;
+			if (wishspeed > effmax)
+				wishspeed = effmax;
+			// AirAccelerate: the add is capped at 30 (air speed cap) but the
+			// accel budget scales with the FULL wishspeed - the asymmetry that
+			// makes airaccelerate 150 behave the way surf servers expect.
+			const float wishspd = (wishspeed > p.air_speed_cap)
+				? p.air_speed_cap : wishspeed;
+			const float cur = Dot(s.vel, wishdir);
+			const float add = wishspd - cur;
+			if (add > 0.f) {
+				float accelspeed = p.airaccelerate * wishspeed * p.dt;   // friction 1
+				if (accelspeed > add) accelspeed = add;
+				s.vel = s.vel + Scale(wishdir, accelspeed);
+			}
+			TryPlayerMove(s, w, p, ev);
+		}
+
+		// Duck state machine (CGameMovement::Duck, CS hulls). In the air a duck
+		// finishes INSTANTLY with the origin pulled up by (standing - ducked)
+		// hull height (the measured ~18u FinishDuck lift); on the ground the
+		// hull swaps after TIME_TO_DUCK. Unduck reverses the shift and must fit.
+		void HandleDuck(PlayerState& s, const World& w, const MoveParams& p,
+		                int buttons, TickEvents* ev) {
+			const bool want = (buttons & IN_DUCK) != 0;
+			// Engine-measured shift (see MoveParams), NOT the hull delta.
+			const float lift = p.duck_air_shift;
+			if (want) {
+				if (s.ducked)
+					return;
+				if (!s.ducking) {
+					s.ducking = true;
+					s.duck_elapsed_ms = 0.f;
+				}
+				s.duck_elapsed_ms += p.dt * 1000.f;
+				if (!s.on_ground || s.duck_elapsed_ms >= p.time_to_duck_ms) {
+					// FinishDuck.
+					s.ducked = true;
+					s.ducking = false;
+					if (ev) ev->duck_changed = true;
+					if (!s.on_ground) {
+						s.pos.Z += lift;
+						// FixPlayerCrouchStuck: nudge up until the ducked hull
+						// fits (rare in open air; bounded).
+						for (int i = 0; i < 18 && w.OriginInSolid(s.pos, true); ++i)
+							s.pos.Z += 1.f;
+					}
+				}
+			} else {
+				if (s.ducking) {
+					s.ducking = false;
+					s.duck_elapsed_ms = 0.f;
+				}
+				if (s.ducked) {
+					if (!s.on_ground) {
+						const Vec3 cand(s.pos.X, s.pos.Y, s.pos.Z - lift);
+						if (!w.OriginInSolid(cand, false)) {
+							s.pos = cand;
+							s.ducked = false;
+							if (ev) ev->duck_changed = true;
+						}
+						// No room: stay ducked (engine behavior).
+					} else {
+						if (!w.OriginInSolid(s.pos, false)) {
+							s.ducked = false;
+							if (ev) ev->duck_changed = true;
+						}
+					}
+				}
+			}
+		}
+
+	} // namespace
+
+	void MoveTick(PlayerState& s, const World& w, const MoveParams& p,
+	              float /*pitch*/, float yaw, float fmove, float smove,
+	              float /*umove*/, int buttons, TickEvents* ev) {
+		if (ev)
+			*ev = TickEvents();
+
+		// ReduceTimers: the stamina clock drains every tick, airborne too.
+		if (s.stamina > 0.f) {
+			s.stamina -= p.dt * 1000.f;
+			if (s.stamina < 0.f)
+				s.stamina = 0.f;
+		}
+
+		// PlayerMove: Duck() runs before the move itself.
+		HandleDuck(s, w, p, buttons, ev);
+
+		// FullWalkMove.
+		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // StartGravity
+		if (buttons & IN_JUMP)
+			CheckJumpButton(s, w, p, ev);
+		else
+			s.old_buttons &= ~IN_JUMP;
+		if (s.on_ground) {
+			s.vel.Z = 0.f;
+			Friction(s, p);
+		}
+		CheckVelocity(s, p);
+		if (s.on_ground)
+			WalkMove(s, w, p, yaw, fmove, smove, ev);
+		else
+			AirMove(s, w, p, yaw, fmove, smove, ev);
+		CategorizePosition(s, w, p, ev);
+		CheckVelocity(s, p);
+		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // FinishGravity
+		if (s.on_ground)
+			s.vel.Z = 0.f;
+	}
+
+} // namespace Solver

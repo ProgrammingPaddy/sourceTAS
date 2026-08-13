@@ -78,6 +78,10 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 		// the freecam reads back as its look every frame - so skip it and the
 		// freecam stays a third-party observer while the run plays underneath.
 		if (g_tas.ReplayFrame(command)) {
+			// Stash the replayed inputs: the NEXT NotePlaybackTick's captured
+			// state is this cmd's outcome (Map Solve playback capture).
+			TasEditor::NotePlaybackInputs(command->buttons,
+			                              command->viewangles.Y);
 			if (!TasEditor::FreecamActive())
 				engine->SetViewAngles(command->viewangles);
 		} else if (g_tas.IsPlaying()) {
