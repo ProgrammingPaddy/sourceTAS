@@ -109,6 +109,21 @@ namespace Solver {
 		// epsilon-padded hit test (pre-fix control arm).
 		bool true_interval_corner = true;
 
+		// TRACE ORACLE hook: when set, every TraceHull call appends its query
+		// + OUR answer here (single-threaded replay only). The rows double as
+		// the engine oracle's query file - the in-game Map Solve tab answers
+		// them with IEngineTrace and `tracediff` compares us trace by trace.
+		struct TraceProbeRow {
+			int tick = 0;
+			Vec3 a, b;
+			bool ducked = false;
+			float frac = 1.f;
+			Vec3 n;
+			int brush_id = -1;
+		};
+		std::vector<TraceProbeRow>* trace_log = nullptr;
+		int trace_tick = 0;
+
 	private:
 		Hulls hulls_;
 		// Uniform grid over the STANDING expanded AABBs (a superset of the

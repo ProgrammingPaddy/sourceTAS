@@ -20,6 +20,7 @@
 #include <shlobj.h>
 
 #include <cstrike/sdk.h>
+#include <cstrike/Interfaces/IEngineTrace.h>
 #include <imgui/imgui.h>
 #include <imgui/imgui_internal.h>   // window-stack rebalance after a UI fault
 
@@ -8094,6 +8095,180 @@ namespace {
 		g_playcap_name_override.clear();
 	}
 
+	// ---- TRACE ORACLE (engine-truth collision, user-directed 2026-08-13) ----
+	// "We have the actual physics engine right here, why not take from that
+	// instead of guessing?" - batch-answer the solver's trace queries with the
+	// ENGINE's own collision code. SolverLab writes solver\trace_queries.csv
+	// (replay --trace-log), this processes it through IEngineTrace::TraceRay
+	// (world-only) into trace_results.csv, and `SolverLab tracediff` compares
+	// our TraceHull against the engine answer for every single trace.
+
+	IEngineTrace* g_engine_trace = nullptr;
+}
+
+// Adjustable ABI pins declared extern in IEngineTrace.h (the overlay-index
+// pattern: probe-then-pin, one-click adjustable instead of a rebuild).
+int  g_trace_ray_index = 5;      // 2013 IEngineTrace layout
+bool g_ray_has_transform = true; // 2013 Ray_t (carries m_pWorldAxisTransform)
+
+namespace {
+
+	// SEH-guarded raw call: a mispinned vtable index REPORTS instead of
+	// crashing the game (no C++ objects in scope - SEH rule).
+	static bool SafeTraceCall(IEngineTrace* tr, int index, const void* ray,
+	                          unsigned mask, void* filter, void* out) {
+		__try {
+			tr->TraceRayAt(index, ray, mask, filter, out);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	bool AcquireEngineTrace() {
+		if (g_engine_trace)
+			return true;
+		g_engine_trace = GetInterface<IEngineTrace>("engine.dll",
+			"EngineTraceClient004");
+		if (!g_engine_trace)
+			g_engine_trace = GetInterface<IEngineTrace>("engine.dll",
+				"EngineTraceClient003");
+		return g_engine_trace != nullptr;
+	}
+
+	// One engine trace with the ACTIVE (index, layout) pin. False on fault.
+	bool OracleTrace(const Vector& a, const Vector& b, bool ducked,
+	                 float* frac, Vector* end, Vector* nrm, float* pdist,
+	                 bool* startsolid, bool* allsolid) {
+		using namespace EngineTraceABI;
+		static WorldOnlyFilter s_filter;
+		const Vector mins(-16.f, -16.f, 0.f);
+		const Vector maxs(16.f, 16.f, ducked ? 54.f : 72.f);
+		RayBuf ray;
+		BuildRay(ray, a, b, mins, maxs);
+		TraceOut out;
+		memset(out.raw, 0, sizeof(out.raw));
+		if (!SafeTraceCall(g_engine_trace, g_trace_ray_index, &ray,
+			kMaskPlayerSolid, &s_filter, out.raw))
+			return false;
+		if (frac) *frac = out.Frac();
+		if (end) *end = out.End();
+		if (nrm) *nrm = out.Normal();
+		if (pdist) *pdist = out.PlaneDist();
+		if (startsolid) *startsolid = out.StartSolid();
+		if (allsolid) *allsolid = out.AllSolid();
+		return true;
+	}
+
+	// Known-answer validation battery from the solve anchor (on the start
+	// platform): pins (vtable index, Ray_t layout) by RESULT, the
+	// IVDebugOverlay probe-then-pin discipline. Never processes a batch
+	// until a config passes.
+	bool ValidateOraclePin(char* why, size_t why_n) {
+		if (!(g_solve_anchor_valid || LoadSolveAnchorFile())) {
+			_snprintf_s(why, why_n, _TRUNCATE, "no solve anchor (capture one first)");
+			return false;
+		}
+		const Vector az(g_solve_anchor.origin.X, g_solve_anchor.origin.Y,
+		                g_solve_anchor.origin.Z);
+		const int idx_try[2] = { g_trace_ray_index, g_trace_ray_index == 5 ? 4 : 5 };
+		const bool lay_try[2] = { g_ray_has_transform, !g_ray_has_transform };
+		for (int li = 0; li < 2; ++li) {
+			for (int ii = 0; ii < 2; ++ii) {
+				g_trace_ray_index = idx_try[ii];
+				g_ray_has_transform = lay_try[li];
+				float f1 = -1.f, f2 = -1.f, f3 = -1.f;
+				Vector n1;
+				bool ss1 = true;
+				// V1: straight down onto the platform: expect ~0.5, n=(0,0,1)
+				if (!OracleTrace(az + Vector(0.f, 0.f, 100.f),
+					az + Vector(0.f, 0.f, -100.f), false, &f1, nullptr, &n1,
+					nullptr, &ss1, nullptr))
+					continue;
+				// V2: clear air well above: expect fraction 1
+				if (!OracleTrace(az + Vector(0.f, 0.f, 200.f),
+					az + Vector(0.f, 0.f, 150.f), false, &f2, nullptr,
+					nullptr, nullptr, nullptr, nullptr))
+					continue;
+				// V3: ducked hull, same down-trace: same feet-based fraction
+				if (!OracleTrace(az + Vector(0.f, 0.f, 100.f),
+					az + Vector(0.f, 0.f, -100.f), true, &f3, nullptr,
+					nullptr, nullptr, nullptr, nullptr))
+					continue;
+				if (fabsf(f1 - 0.5f) < 0.05f && n1.Z > 0.9f && !ss1
+					&& f2 > 0.999f && fabsf(f3 - f1) < 0.01f) {
+					_snprintf_s(why, why_n, _TRUNCATE, "pinned index %d, %s Ray_t (v1 %.4f)",
+						g_trace_ray_index,
+						g_ray_has_transform ? "2013" : "2007", f1);
+					return true;
+				}
+			}
+		}
+		_snprintf_s(why, why_n, _TRUNCATE, "no (index, layout) config passed the battery");
+		return false;
+	}
+
+	// Batch: solver\trace_queries.csv -> solver\trace_results.csv.
+	// Query row: id,tick,ax,ay,az,bx,by,bz,ducked[,...ours - ignored here]
+	int ProcessTraceOracle(char* status, size_t status_n) {
+		if (!AcquireEngineTrace()) {
+			_snprintf_s(status, status_n, _TRUNCATE, "Trace oracle: EngineTraceClient interface "
+				"NOT found.");
+			return -1;
+		}
+		char pin[128];
+		if (!ValidateOraclePin(pin, sizeof(pin))) {
+			_snprintf_s(status, status_n, _TRUNCATE, "Trace oracle: validation FAILED (%s) - "
+				"no batch run, game untouched.", pin);
+			return -1;
+		}
+		const std::string dir = SolverDir();
+		const std::string qpath = dir + "\\trace_queries.csv";
+		const std::string rpath = dir + "\\trace_results.csv";
+		FILE* q = nullptr;
+		fopen_s(&q, qpath.c_str(), "r");
+		if (!q) {
+			_snprintf_s(status, status_n, _TRUNCATE, "Trace oracle: %s not found (generate it "
+				"with SolverLab replay --trace-log).", qpath.c_str());
+			return -1;
+		}
+		FILE* r = nullptr;
+		fopen_s(&r, rpath.c_str(), "w");
+		if (!r) {
+			fclose(q);
+			_snprintf_s(status, status_n, _TRUNCATE, "Trace oracle: cannot write %s", rpath.c_str());
+			return -1;
+		}
+		fprintf(r, "id,frac,ex,ey,ez,nx,ny,nz,pdist,startsolid,allsolid\n");
+		char line[512];
+		int n = 0, faults = 0;
+		while (fgets(line, sizeof(line), q)) {
+			int id = 0, tick = 0, ducked = 0;
+			float ax, ay, az2, bx, by, bz;
+			if (sscanf_s(line, "%d,%d,%f,%f,%f,%f,%f,%f,%d", &id, &tick,
+				&ax, &ay, &az2, &bx, &by, &bz, &ducked) != 9)
+				continue;   // header / malformed
+			float frac = 1.f, pdist = 0.f;
+			Vector end, nrm;
+			bool ss = false, as = false;
+			if (!OracleTrace(Vector(ax, ay, az2), Vector(bx, by, bz),
+				ducked != 0, &frac, &end, &nrm, &pdist, &ss, &as)) {
+				faults++;
+				continue;
+			}
+			fprintf(r, "%d,%.9g,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d\n",
+				id, frac, end.X, end.Y, end.Z, nrm.X, nrm.Y, nrm.Z, pdist,
+				ss ? 1 : 0, as ? 1 : 0);
+			n++;
+		}
+		fclose(q);
+		fclose(r);
+		AppendExportLog("oracle", rpath, "trace_results", n);
+		_snprintf_s(status, status_n, _TRUNCATE, "Trace oracle: %d engine answers written "
+			"(%s; %d faults) -> trace_results.csv", n, pin, faults);
+		return n;
+	}
+
 	void DrawMapSolveTab() {
 		Theme::Heading("Map Solve",
 			"Home of the full-map solver (design log: Docs\\FullMapSolver.md). "
@@ -8165,6 +8340,25 @@ namespace {
 				ImGui::TextDisabled("(select a recording in the Record tab to "
 					"teleport to its anchor)");
 			}
+		}
+
+		SubHeading("Trace oracle (engine truth)");
+		{
+			static char s_oracle_status[256] = "";
+			if (ImGui::Button("Run trace oracle", ImVec2(150, 0)))
+				ProcessTraceOracle(s_oracle_status, sizeof(s_oracle_status));
+			ImGui::SameLine();
+			ImGui::Text("idx %d, %s Ray_t", g_trace_ray_index,
+				g_ray_has_transform ? "2013" : "2007");
+			if (s_oracle_status[0])
+				ImGui::TextWrapped("%s", s_oracle_status);
+			Theme::Help("Answers solver\\trace_queries.csv with the ENGINE'S "
+				"own collision traces (IEngineTrace, world-only) into "
+				"trace_results.csv. A known-answer battery from the solve "
+				"anchor pins the vtable index + Ray_t layout before any batch "
+				"runs (SEH-guarded probe - a wrong pin reports, never "
+				"crashes). Generate queries with: SolverLab replay <map> "
+				"<tape> --trace-log; compare with: SolverLab tracediff.");
 		}
 
 		SubHeading("Capture & export");

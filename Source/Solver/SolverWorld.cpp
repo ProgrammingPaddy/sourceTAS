@@ -453,6 +453,18 @@ namespace Solver {
 			out->plane = best_plane;
 			out->normal = brushes[best_brush].n[best_plane];
 		}
+		if (trace_log) {
+			TraceProbeRow row;
+			row.tick = trace_tick;
+			row.a = a;
+			row.b = b;
+			row.ducked = ducked;
+			row.frac = best;
+			if (best_brush >= 0)
+				row.n = brushes[best_brush].n[best_plane];
+			row.brush_id = best_brush >= 0 ? brushes[best_brush].id : -1;
+			trace_log->push_back(row);
+		}
 		return best;
 	}
 

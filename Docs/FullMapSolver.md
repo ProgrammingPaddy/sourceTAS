@@ -984,11 +984,42 @@ NEXT DATA NEEDED: a fresh capture of a failing endgame tape (solved6 playback
 export) for a second instance to fit the rule against — one event is not enough to
 fix without guessing.
 
+### TRACE ORACLE — ENGINE-TRUTH COLLISION (2026-08-13, user-directed)
+
+solved7 ALSO failed in-game. User: "We have the actual physics engine right here,
+why not take from that instead of guessing?" — correct. Two knife-edge rules fitted
+from captures, two new knife-edges found in reality. New methodology: the injected
+engine ANSWERS OUR TRACES DIRECTLY.
+
+**Built:**
+- DLL (`Include/cstrike/Interfaces/IEngineTrace.h` + Map Solve tab): "Run trace
+  oracle" reads `solver\trace_queries.csv`, answers every row with
+  IEngineTrace::TraceRay (EngineTraceClient004/003, MASK_PLAYERSOLID,
+  TRACE_WORLD_ONLY filter — the same CM path player movement uses vs worldspawn),
+  writes `trace_results.csv` + a manifest line. ABI pins (TraceRay vtable index,
+  default 5 = 2013 layout; Ray_t with/without m_pWorldAxisTransform) are probed by
+  a KNOWN-ANSWER battery from the solve anchor before any batch, and the probe
+  call is SEH-guarded — a wrong pin reports instead of crashing the game (the
+  IVDebugOverlay probe-then-pin discipline). trace_t read at fixed CBaseTrace
+  offsets into an oversized buffer.
+- Lab: `replay --trace-log <csv> [--trace-window a b]` logs EVERY TraceHull call
+  (query + our answer; the file doubles as the oracle input);
+  `tracediff <queries> <results>` compares us vs the engine per trace (exact /
+  <1e-4 / <1e-3 / mismatch buckets, worst-12 with tick context).
+
+**Staged: 2,072 queries** (`solver\trace_queries.csv`) = every trace of the full
+solved7 tape (1,800) + the 604 settle window ticks 500-604 (272). ONE user click
+in-game (Map Solve → Run trace oracle, with surf_basictest loaded) produces the
+engine's answers; tracediff then names every trace where our TraceHull disagrees
+with the engine — the settle event and solved7's failure become exact per-trace
+deltas instead of inferred rules. Fix TraceHull until the battery is clean, then
+regression-replay everything.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
   halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
-- 544-548 settle event (ducked plane-settle clip resolution, ~5 u/s once) — BLOCKING
-  for knife-edge endgames; needs the solved6 capture as a second data point.
+- AWAITING: trace oracle click → tracediff → fix TraceHull on engine truth
+  (replaces the capture-fitting loop for collision).
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

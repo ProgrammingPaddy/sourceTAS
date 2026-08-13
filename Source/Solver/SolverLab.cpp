@@ -49,6 +49,10 @@ namespace {
 		printf("          [--aim] [--clock zone|anchor] [--seed-ticks N]\n");
 		printf("          [--out-eloss path] [physics options]\n");
 		printf("          archive route search; best route written as a playable .tas\n");
+			printf("  tracediff <queries.csv> <results.csv>\n");
+		printf("          our TraceHull vs the in-game engine oracle, per trace\n");
+		printf("          (replay --trace-log [--trace-window a b] writes queries;\n");
+		printf("          the Map Solve tab's 'Run trace oracle' answers them)\n");
 		printf("  bench   <map.bsp> [ticks]\n");
 		printf("All commands auto-load Documents\\sourceTAS\\solver\\server_params.cfg\n");
 		printf("(written by the Map Solve tab from LIVE server values); --params <file>\n");
@@ -98,6 +102,9 @@ namespace {
 		std::string anchor_tas;
 		std::string out_tas;
 		std::string out_eloss;      // also write the min-dissipation finisher
+		std::string trace_log;      // replay: dump every TraceHull query+answer
+		int trace_a = 0;            // trace-log tick window (inclusive)
+		int trace_b = 1 << 28;
 		int seed_ticks = 0;         // seed only the first N tape ticks (0=all)
 		double budget_s = 30.0;
 		double optimize_s = 60.0;   // Phase 2 budget after exploration (0 = off)
@@ -173,6 +180,11 @@ namespace {
 			else if (a == "--seed-tas") { if (i + 1 < argc) o.seed_tas = argv[++i]; else ok = false; }
 			else if (a == "--seed-ticks") ok = next_i(&o.seed_ticks);
 			else if (a == "--out-eloss") { if (i + 1 < argc) o.out_eloss = argv[++i]; else ok = false; }
+			else if (a == "--trace-log") { if (i + 1 < argc) o.trace_log = argv[++i]; else ok = false; }
+			else if (a == "--trace-window") {
+				if (i + 2 < argc) { o.trace_a = atoi(argv[++i]); o.trace_b = atoi(argv[++i]); }
+				else ok = false;
+			}
 			else if (a == "--anchor") { if (i + 1 < argc) o.anchor_file = argv[++i]; else ok = false; }
 			else if (a == "--anchor-tas") { if (i + 1 < argc) o.anchor_tas = argv[++i]; else ok = false; }
 			else if (a == "--out") { if (i + 1 < argc) o.out_tas = argv[++i]; else ok = false; }
@@ -288,7 +300,16 @@ namespace {
 		int first_finish = -1;
 		float max_speed = 0.f;
 
+		// Trace-oracle query capture: every TraceHull call in the window is
+		// logged (query + OUR answer) for the in-game engine oracle to
+		// re-answer with ITS collision code.
+		std::vector<World::TraceProbeRow> probes;
 		for (int t = 0; t < static_cast<int>(tape.frames.size()); ++t) {
+			if (!o.trace_log.empty()) {
+				w.trace_tick = t;
+				w.trace_log = (t >= o.trace_a && t <= o.trace_b)
+					? &probes : nullptr;
+			}
 			const TapeFrame& f = tape.frames[t];
 			TickEvents ev;
 			MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove, f.umove,
@@ -367,6 +388,27 @@ namespace {
 			printf("zone clock: exit tick %d -> %d SCORED ticks (%.3f s)\n",
 				zone_exit_tick, first_finish - zone_exit_tick,
 				(first_finish - zone_exit_tick) * o.params.dt);
+		if (!o.trace_log.empty()) {
+			w.trace_log = nullptr;
+			FILE* tl = nullptr;
+			if (fopen_s(&tl, o.trace_log.c_str(), "w") == 0 && tl) {
+				fprintf(tl, "id,tick,ax,ay,az,bx,by,bz,ducked,frac,nx,ny,nz,brush\n");
+				for (size_t i = 0; i < probes.size(); ++i) {
+					const World::TraceProbeRow& p = probes[i];
+					fprintf(tl, "%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,"
+						"%.9g,%.6f,%.6f,%.6f,%d\n",
+						static_cast<int>(i), p.tick,
+						p.a.X, p.a.Y, p.a.Z, p.b.X, p.b.Y, p.b.Z,
+						p.ducked ? 1 : 0, p.frac, p.n.X, p.n.Y, p.n.Z,
+						p.brush_id);
+				}
+				fclose(tl);
+				printf("trace log: %d queries -> %s\n",
+					static_cast<int>(probes.size()), o.trace_log.c_str());
+			} else {
+				printf("trace log: cannot open %s\n", o.trace_log.c_str());
+			}
+		}
 		fflush(stdout);
 		return 0;
 	}
@@ -972,6 +1014,94 @@ namespace {
 		return 0;
 	}
 
+	// Compare OUR TraceHull answers against the engine oracle's, trace by
+	// trace. queries.csv = replay --trace-log output (has our answers);
+	// results.csv = the Map Solve tab's engine answers for the same ids.
+	int CmdTraceDiff(const std::string& q_path, const std::string& r_path) {
+		struct Q { int tick; float ax, ay, az, bx, by, bz, frac, nx, ny, nz; int ducked, brush; };
+		struct R { float frac, nx, ny, nz; int startsolid, allsolid; };
+		std::vector<Q> qs;
+		std::vector<R> rs;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, q_path.c_str(), "r") != 0 || !f) {
+				printf("tracediff: cannot open %s\n", q_path.c_str());
+				return 1;
+			}
+			char line[512];
+			while (fgets(line, sizeof(line), f)) {
+				Q q;
+				int id;
+				if (sscanf_s(line, "%d,%d,%f,%f,%f,%f,%f,%f,%d,%f,%f,%f,%f,%d",
+					&id, &q.tick, &q.ax, &q.ay, &q.az, &q.bx, &q.by, &q.bz,
+					&q.ducked, &q.frac, &q.nx, &q.ny, &q.nz, &q.brush) == 14)
+					qs.push_back(q);
+			}
+			fclose(f);
+		}
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, r_path.c_str(), "r") != 0 || !f) {
+				printf("tracediff: cannot open %s\n", r_path.c_str());
+				return 1;
+			}
+			char line[512];
+			while (fgets(line, sizeof(line), f)) {
+				R r;
+				int id;
+				float ex, ey, ez, pd;
+				if (sscanf_s(line, "%d,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d",
+					&id, &r.frac, &ex, &ey, &ez, &r.nx, &r.ny, &r.nz, &pd,
+					&r.startsolid, &r.allsolid) == 11)
+					rs.push_back(r);
+			}
+			fclose(f);
+		}
+		const size_t n = qs.size() < rs.size() ? qs.size() : rs.size();
+		if (n == 0) {
+			printf("tracediff: no comparable rows (%zu queries, %zu results)\n",
+				qs.size(), rs.size());
+			return 1;
+		}
+		if (qs.size() != rs.size())
+			printf("tracediff: WARNING row count mismatch (%zu vs %zu) - "
+				"comparing the first %zu\n", qs.size(), rs.size(), n);
+		int exact = 0, close = 0, loose = 0, bad = 0, ss = 0;
+		struct Worst { float d; size_t i; };
+		std::vector<Worst> worst;
+		for (size_t i = 0; i < n; ++i) {
+			const float d = fabsf(qs[i].frac - rs[i].frac);
+			if (rs[i].startsolid) ss++;
+			if (d < 1e-6f) exact++;
+			else if (d < 1e-4f) close++;
+			else if (d < 1e-3f) loose++;
+			else {
+				bad++;
+				worst.push_back({ d, i });
+			}
+		}
+		std::sort(worst.begin(), worst.end(),
+			[](const Worst& a, const Worst& b) { return a.d > b.d; });
+		printf("tracediff: %zu traces | exact(<1e-6) %d  close(<1e-4) %d  "
+			"loose(<1e-3) %d  MISMATCH %d  (engine startsolid on %d)\n",
+			n, exact, close, loose, bad, ss);
+		const int show = static_cast<int>(worst.size()) < 12
+			? static_cast<int>(worst.size()) : 12;
+		for (int i = 0; i < show; ++i) {
+			const size_t k = worst[i].i;
+			printf("  tick %4d  dfrac %.6f  ours %.6f eng %.6f%s  "
+				"a(%.2f,%.2f,%.2f) b(%.2f,%.2f,%.2f) d%d  our-brush %d  "
+				"our-n(%.2f,%.2f,%.2f) eng-n(%.2f,%.2f,%.2f)\n",
+				qs[k].tick, worst[i].d, qs[k].frac, rs[k].frac,
+				rs[k].startsolid ? " [eng STARTSOLID]" : "",
+				qs[k].ax, qs[k].ay, qs[k].az, qs[k].bx, qs[k].by, qs[k].bz,
+				qs[k].ducked, qs[k].brush,
+				qs[k].nx, qs[k].ny, qs[k].nz, rs[k].nx, rs[k].ny, rs[k].nz);
+		}
+		fflush(stdout);
+		return bad > 0 ? 2 : 0;
+	}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1004,6 +1134,8 @@ int main(int argc, char** argv) {
 		const long long ticks = (argc >= 4) ? atoll(argv[3]) : 2000000LL;
 		return CmdBench(argv[2], ticks);
 	}
+	if (cmd == "tracediff" && argc >= 4)
+		return CmdTraceDiff(argv[2], argv[3]);
 	PrintUsage();
 	return 1;
 }
