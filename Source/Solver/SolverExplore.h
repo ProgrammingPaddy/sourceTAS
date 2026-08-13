@@ -19,15 +19,33 @@
 //     only, never a cull). BFS distance field deferred until a winding map
 //     needs it - logged in the lab notes.
 //   - Finish = grounded on the end platform (hull-expanded footprint).
+//
+// Phase 2 v2b: the explorer is a WORKER POOL over one shared archive.
+// Entries are immutable once published (the finished flag is set at
+// creation, never after), the storage is preallocated so indices stay
+// stable, the cell map is sharded by key hash, and selection frontiers take
+// short per-band locks. Workers cross-pollinate through the shared archive -
+// one worker's near-miss is every worker's breeding stock, which is the
+// point of sharing rather than running isolated islands. Determinism: with
+// --threads 1 a run reproduces the single-thread explorer exactly (same rng
+// stream, same archive); with N workers the interleaving makes runs
+// non-reproducible even at a fixed seed - by design, variance is the enemy.
 
 #include "SolverKnots.h"
 #include "SolverMove.h"
 #include "SolverTape.h"
 
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace Solver {
+
+	// 0 = auto (hardware threads minus one, min 1).
+	int ResolveThreadCount(int requested);
 
 	struct ExploreConfig {
 		MoveParams params;
@@ -41,14 +59,16 @@ namespace Solver {
 		unsigned rng_seed = 1337;    // fixed default = reproducible runs
 		float cell_size = 64.f;      // position quantum
 		float speed_bucket = 100.f;  // 2D-speed quantum
+		int threads = 0;             // worker count; 0 = auto
 		// GOAL: false = grounded ON the end platform (full-map contract);
 		// true = any contact with the end brush (segment experiments -
 		// "fastest to ramp N" as a theory test lab).
 		bool goal_touch = false;
 		// Smooth-frontier selection axis: prefer low cumulative energy
-		// dissipation near the finish. Measured 2026-08-13: fast runs
-		// dissipate ~260k with 3 big-loss events; the slow unseeded route
-		// 538k with 8 - dissipation-at-progress is the human-routing signal.
+		// dissipation near the finish. Measured 2026-08-13 on basictest: fast
+		// runs dissipated ~260k with 3 big-loss events; the slow unseeded
+		// route 538k with 8 - dissipation-at-progress is the human-routing
+		// signal ON THIS MAP (one measurement, not a law - keep testing).
 		// Bias only (fitness stays ticks); off = control arm for A/B.
 		bool eloss_bias = true;
 	};
@@ -66,6 +86,7 @@ namespace Solver {
 		long long ticks_simulated = 0;
 		int entries = 0;
 		int cells = 0;
+		int threads = 1;
 		std::vector<Finisher> finishers;   // sorted by tick ascending
 		double seconds = 0.0;
 	};
@@ -73,6 +94,7 @@ namespace Solver {
 	class Explorer {
 	public:
 		Explorer(const World& w, const ExploreConfig& cfg);
+		~Explorer();
 
 		// Root the archive at the run anchor (required, before Run/Seed).
 		void SetAnchor(const TapeAnchor& a);
@@ -121,61 +143,91 @@ namespace Solver {
 			short cbrush = -1;          // cell contact brush (census/diagnostics)
 			signed char ckind = 0;      // 0 air, 1 ground, 2 touch
 			float eloss = 0.f;          // cumulative dissipation along the path
-			bool finished = false;
+			bool finished = false;      // set at CREATION only (immutability
+			                            // is what makes lock-free reads safe)
 			// Knots since the parent, INLINE (rollouts append <= 3): POD
 			// entries, no per-entry heap churn at millions of records.
 			Knot knots[3];
 			unsigned char nknots = 0;
 		};
 
+		// Archive limits. Entries live in one preallocated buffer so worker
+		// threads publish by index with no reallocation ever moving them.
+		static const int kMaxEntries = 4000000;   // frontier freeze point
+		static const int kBufSlack = 4096;        // finisher force-adds + races
+		static const long long kAirCap = 1500000; // free-air sub-cap
+
 		const World& w_;
 		ExploreConfig cfg_;
+
+		// ---- shared archive (workers read lock-free, publish under the
+		// owning shard/band lock) ----
+		std::vector<Entry> entries_;              // preallocated, index-stable
+		std::unique_ptr<std::atomic<unsigned char>[]> ready_;  // publish flags
+		std::atomic<int> nentries_{ 0 };
+		std::atomic<long long> air_entries_{ 0 };
+		std::atomic<bool> cap_msg_{ false };
+
 		// Frontier indices for round-robin selection (the prior attempt's
 		// validated lesson: multi-criteria diversity preserves the useful
 		// extremes a single score collapses). Distance bands pull toward the
 		// finish; speed bands pull along the speed pipeline; uniform keeps
 		// everything reachable. Bias only - nothing is ever culled.
-		std::vector<int> bands_[32];    // dist-to-end / 256
+		std::vector<int> bands_[32];    // dist-to-end / 256 (contact only)
 		std::vector<int> sbands_[16];   // 2D speed / 100
-		float min_dist_seen_ = 1e9f;
-		float max_speed_seen_ = 0.f;
-		int min_dist_entry_ = -1;
+		std::mutex band_mx_[32];
+		std::mutex sband_mx_[16];
+		std::atomic<int> band_n_[32];   // lock-free empty checks
+		std::atomic<int> sband_n_[16];
 		// Near-miss ring: entries that got close to the finish. A selection
-		// mode backtracks 1-2 knots up their parent chains and resamples -
-		// breeding the release-timing variations that convert a wall-kiss
-		// below the lip into a landing.
-		std::vector<int> near_ring_;
-		// Free-air records get their own sub-cap: junk falls were filling the
-		// whole archive before the contact pipeline matured (frontier froze at
-		// 20s with min-dist still advancing). Contact/event cells keep the
-		// full budget.
-		long long air_entries_ = 0;
+		// mode backtracks 1-2 knot-chain links and resamples - breeding the
+		// release-timing variations that convert a wall-kiss below the lip
+		// into a landing. Fixed slots + atomic indices = benign races.
+		std::atomic<int> ring_[512];
+		std::atomic<int> ring_n_{ 0 };
+
+		std::atomic<float> min_dist_seen_{ 1e9f };
+		std::atomic<float> max_speed_seen_{ 0.f };
+		int min_dist_entry_ = -1;       // guarded by stats_mx_
+		std::mutex stats_mx_;
+
+		std::vector<Finisher> fins_;    // guarded by fin_mx_
+		std::mutex fin_mx_;
+		std::atomic<int> fin_count_{ 0 };
+		std::atomic<int> best_fin_tick_{ -1 };
+
+		std::atomic<long long> rollouts_{ 0 };
+		std::atomic<long long> ticks_sim_{ 0 };
+		std::atomic<int> done_workers_{ 0 };
+
 		int min_knot_ = 14;
 		int start_idx_ = -1, end_idx_ = -1;
 		int seed_finish_tick_ = -1;
 		Vec3 end_center_;
 		const Tape* seed_tape_ = nullptr;
-		std::vector<Entry> entries_;
-		// cell key -> entries_ index of the best (earliest-tick) entry
-		struct CellMap;
-		std::vector<std::pair<unsigned long long, int>> cells_flat_;   // unused; see cpp
-		void* cellmap_ = nullptr;   // unordered_map behind a pimpl to keep the
-		                            // header light; owned, freed in dtor
-	public:
-		~Explorer();
-	private:
+		void* cellmap_ = nullptr;   // sharded hash maps behind a pimpl to
+		                            // keep the header light; owned, freed in
+		                            // the dtor
+
+		int Count() const {
+			const int n = nentries_.load(std::memory_order_relaxed);
+			const int cap = kMaxEntries + kBufSlack;
+			return n < cap ? n : cap;
+		}
 		unsigned long long CellKey(const PlayerState& s, int contact_kind,
 		                           int contact_brush) const;
 		bool InsideZoneXY(const Vec3& p, int brush_idx) const;
 		bool InsideStartZone(const Vec3& p) const;
 		bool IsFinish(const PlayerState& s) const;
+		int AllocEntry(bool force);
 		int RecordCell(const PlayerState& s, float yaw, int tick,
 		               int parent, int seed_ticks,
 		               const std::vector<Knot>& knots, int cur_knot,
 		               int ticks_into_knot, signed char last_side,
 		               short since_flip, short zone_jumps, float eloss,
-		               const TickEvents& ev);
+		               const TickEvents& ev, bool finished_flag);
 		bool GoalReached(const PlayerState& s, const TickEvents& ev) const;
+		void WorkerLoop(int wid, std::chrono::steady_clock::time_point t0);
 	};
 
 } // namespace Solver

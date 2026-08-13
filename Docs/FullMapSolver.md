@@ -680,10 +680,111 @@ Full-map rng 11 at 150 s remains dry with the bias: it accelerates, it does not 
 single-thread discovery variance. Parallelism stays the gating work — and now
 multiplies a 1.9×-richer finisher stream when it lands.
 
+**User calibration (2026-08-13):** the human run was "far from clean — just decent";
+smoother boards would beat it. And **do not lock in energy multiples** (the 0.73×E0
+figure is ONE map's measurement, not a law) — stay flexible as new data lands. Both
+points proved out immediately in v2b: see the 604-tick eloss inversion below.
+
+### Phase 2 v2b — WORKER-POOL PARALLEL EXPLORER (2026-08-13)
+
+v2a committed first as `59601d6`. The explorer is now a worker pool over ONE shared
+archive (20 logical cores on this box; `--threads N`, default auto = cores−1 = 19).
+
+**Design (SolverExplore.{h,cpp} rewrite):**
+- Entries preallocated (4M cap + 4096 slack ≈ 0.5 GB buffer, pages commit on touch);
+  allocation = atomic counter; **entries immutable once published** (finished flag set
+  at creation — the goal check moved BEFORE recording so finisher entries are born
+  finished; no post-publish mutation anywhere). Per-entry publish flags (release/acquire)
+  make uniform selection safe against half-written slots.
+- Cell map sharded 64 ways by mixed key hash — lookup+publish under one short shard
+  lock, different map regions land on different shards. Hysteresis/replacement decisions
+  inside the shard lock; entry snapshot reads lock-free (immutability).
+- Dist/speed bands keep per-band mutexes + atomic size counters for lock-free empty
+  checks; near-miss ring became 512 atomic slots (benign races by design). min-dist /
+  max-speed = CAS loops; finishers under one mutex.
+- Per-worker mt19937 (worker 0 seeds at exactly cfg.rng_seed); round-robin mode from the
+  shared rollout counter. Frontier-freeze / air sub-cap semantics preserved (force-adds
+  spill into the slack region so finishers are never dropped at cap).
+- Monitor thread prints the 1 s heartbeat; census/closest reports unchanged post-join.
+- CmdSolve: `--threads`; optimize stage now runs up to `threads` distinct-tick subjects
+  CONCURRENTLY, each with the FULL --optimize-s budget (parallelism buys subject breadth,
+  not budget splitting).
+- Basehook untouched (it never compiled the explorer) — zero risk to in-game features.
+
+**Determinism gate PASSED:** old v2a binary vs new at `--threads 1 --rollouts 200000
+--rng 1` (touch-9): 16,076,635 ticks, 432,817 entries, 385,801 cells, 9,376 finishes —
+every number identical, census identical, output tapes hash-identical. The refactor is
+provably behavior-preserving single-threaded; multi-thread runs are non-reproducible by
+design (interleaving), worker streams still seeded deterministically.
+
+**Scaling (touch ramp 3, 30 s, rng 1):**
+| threads | ticks/s | rollouts | finishes | best |
+|---|---|---|---|---|
+| 1 | 7.7M | 2.93M | 182k | 226 |
+| 4 | 30.7M | 11.75M | 697k | 202 |
+| 10 | 63.1M | 23.6M | 1.31M | 216 |
+| 19 | 79.2M | 31.7M | 1.81M | 207 |
+~4.0× at 4 workers, 10.3× at 19 (the box is 20 logical; past physical cores the
+per-thread gain flattens, as expected). Lock design holds: throughput scales with
+finisher throughput, so contention is not eating the archive traffic.
+
+**Full-map dam BROKEN:** rng 11, the seed that was STONE DRY at 150 s single-threaded,
+now: first finishes at ~90 s, 2,244 finishes by 150 s (best 2499, a meander — but it
+finishes, so the optimizer can eat it). rng 1337 same budget: **4,619 finishes, best
+604 ticks — the unseeded record HALVED (was 1207/1208)**, 73.3M ticks/s, 12 distinct-
+tick subjects optimized in parallel (~6.2M evals/60 s aggregate vs ~1.4M sequential).
+Shipped `surf_basictest_solved3.tas` (604, replay-verified: grounded on brush 10,
+finish z 256.03, ZERO startzone jumps — it walks off the platform, saving the jump
+budget entirely; finishes ducked at 491 u/s).
+
+**eloss inversion (flexibility point proven):** the 604 winner dissipates MORE (440k)
+than the 612 (392k) and 637 (381k) runners-up. Lowest-dissipation ≠ fastest at the
+margin — exactly the user's tradeoff warning. Dissipation stays a SELECTION BIAS and
+diagnostic; it must never become fitness or a gate.
+
+**Tighten probe (rng 1337, --max-ticks 603, 150 s + optimize):** NO sub-603 finish.
+Brush 10 touched 385×, min-dist 465, but never grounded under the cap; the capped
+archive is leaner (1.37M entries) because long lines die at 603. Tighten rounds are now
+CHEAP (one round ≈ 44 core-minutes) but this seed's next improvement wants better
+OPERATORS, not just more capped exploration — see the themes data for where.
+
+**Human-run themes (data-only pass, scratchpad/themes.py over core replay CSVs; tick
+classification from raw deltas: ballistic air = dvz exactly −12, ramp/clip air = any
+other airborne dvz):**
+| run | timeline (phase ticks) | ramp episodes | board entries | mid-run big losses |
+|---|---|---|---|---|
+| human 431 | g70 j1 b72 r47 b47 r35 b34 r58 b66 g1 | 3 | 9.1°/13.7°/11.1° costing 11k/20k/10k | NONE (only the finish landing, 84k) |
+| seeded-opt 429 | identical prefix; optimizer DROPPED the human's landing duck | 3 | same | none |
+| unseeded-opt 1206 | 11 episodes; ~700 ticks stuck at x 800-880 | 11 | two SLAMS: 36.5° −166k, 37.2° −78k | 3 slams + 2 ground |
+| unseeded 604 | walks off start (0 zone jumps); ends in a 3-hop chain onto red | 7 | 4 hard boards 25-33° costing 47-80k (~257k total vs human ~40k) | 4 board slams |
+Other measurements: human strafes at max-gain (median yaw-vs-heading offset 2.3°,
+p90 5.6° — validates MaxGainYaw as the control vocabulary); human flip cadence 1.54/s
+with MIN gap 20 ticks (never near the 14-tick structural floor → the 5/s budget is not
+binding for human-quality lines); human touches each ramp exactly once, zero mid-run
+ground contacts, phase durations near-metronomic; duck usage is rare and situational
+(human: one pre-landing duck the optimizer proved unnecessary; 604: short tactical
+air-ducks).
+
+**The data names the remaining gap:** 604's waste is almost entirely BOARD-ENTRY
+harshness (25-33° vs the human's 9-14°). Neither uniform knot-jitter (optimizer ops
+pick random knots) nor capped re-exploration targets contact-adjacent timing.
+Candidate v3 operators, in order: (1) **contact-anchored mutation** — aim trims/jitter
+at the knots around recorded board events; (2) archive-splice (graft archive-best
+prefixes onto finisher suffixes at shared cells); (3) board-entry deflection as an
+AUDIT column first (eloss may already price it — deflection is the cause, eloss the
+effect; segment-lab A/B decides if it earns selection weight). Open intuition
+questions for the user: is a hard board ever deliberately correct (speed-kill before a
+transfer), and is the 604's end-stretch bhop chain a real technique here or an
+artifact the tighten rounds should erase?
+
 ### Open items
-- Worker-pool parallelism (gates full-map variance + tighten rounds; multiplies the
-  dissipation-bias throughput gain).
-- Tighten-loop automation + archive-splice operator.
+- ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
+  halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
+- Phase 2 v3 operators (themes-motivated): contact-anchored mutation (target board-
+  entry knots), archive-splice, tighten-loop automation ({explore capped at best−1 →
+  optimize} rounds — machinery proven, single capped round on rng 1337 found nothing).
+- Board-entry deflection as audit column; segment-lab A/B before any selection weight
+  (eloss may already price it).
 - Segment-lab studies queued for the lab: per-stage fastest times (ramp2/3/4) as
   reference conditions for operator tests.
 - Ground-duck lifecycle / duck-flag timing / hull-height data (dormant, non-blocking).

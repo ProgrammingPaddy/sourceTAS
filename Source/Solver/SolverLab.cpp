@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Solver;
@@ -44,7 +45,7 @@ namespace {
 		printf("          first-divergence report vs the Map Solve tab's export\n");
 		printf("  solve   <map.bsp> --end-brush N [--seed-tas run.tas] [--budget-s S]\n");
 		printf("          [--flips F] [--rng N] [--out path.tas] [--cell U]\n");
-		printf("          [--rollouts N] [--max-ticks N] [physics options]\n");
+		printf("          [--rollouts N] [--max-ticks N] [--threads N] [physics options]\n");
 		printf("          archive route search; best route written as a playable .tas\n");
 		printf("  bench   <map.bsp> [ticks]\n");
 		printf("All commands auto-load Documents\\sourceTAS\\solver\\server_params.cfg\n");
@@ -101,6 +102,7 @@ namespace {
 		unsigned rng = 1337;
 		float cell = 64.f;
 		int max_ticks = 4000;
+		int threads = 0;            // explorer/optimizer workers; 0 = auto
 		bool goal_touch = false;
 		bool eloss_bias = true;
 	};
@@ -168,6 +170,7 @@ namespace {
 			else if (a == "--rng") { if (i + 1 < argc) o.rng = static_cast<unsigned>(atoll(argv[++i])); else ok = false; }
 			else if (a == "--cell") ok = next_f(&o.cell);
 			else if (a == "--max-ticks") ok = next_i(&o.max_ticks);
+			else if (a == "--threads") ok = next_i(&o.threads);
 			else if (a == "--goal") {
 				if (i + 1 < argc) {
 					const std::string gv = argv[++i];
@@ -577,8 +580,10 @@ namespace {
 		cfg.rng_seed = o.rng;
 		cfg.cell_size = o.cell;
 		cfg.max_path_ticks = o.max_ticks;
+		cfg.threads = o.threads;
 		cfg.goal_touch = o.goal_touch;
 		cfg.eloss_bias = o.eloss_bias;
+		const int nthreads = ResolveThreadCount(o.threads);
 		if (o.goal_touch)
 			printf("solve: GOAL = TOUCH brush %d (segment experiment mode)\n",
 				o.end_brush);
@@ -589,9 +594,10 @@ namespace {
 			"end brush %d\n", anchor.origin.X, anchor.origin.Y, anchor.origin.Z,
 			anchor.yaw, cfg.start_brush_id, cfg.end_brush_id);
 		printf("solve: flips/sec %.1f (min knot %d ticks) | budget %.0fs | "
-			"rng %u | cell %.0f\n", cfg.flips_per_sec,
+			"rng %u | cell %.0f | threads %d%s\n", cfg.flips_per_sec,
 			static_cast<int>(1.f / (cfg.params.dt * cfg.flips_per_sec)) + 1,
-			cfg.budget_seconds, cfg.rng_seed, cfg.cell_size);
+			cfg.budget_seconds, cfg.rng_seed, cfg.cell_size,
+			nthreads, o.threads > 0 ? "" : " (auto)");
 		fflush(stdout);
 
 		Explorer ex(w, cfg);
@@ -651,10 +657,11 @@ namespace {
 			PlayerState root;
 			float root_yaw = 0.f;
 			ex.RootState(&root, &root_yaw);
-			Optimizer opt(w, ocfg, root, root_yaw,
-				have_seed ? &seed : nullptr);
 
-			// Up to 3 distinct-tick subjects, budget split between them.
+			// Distinct-tick subjects, one hill-climb THREAD each, every one
+			// with the full budget (they run concurrently - the wall time is
+			// o.optimize_s either way, so parallelism buys subject breadth
+			// instead of splitting one budget three ways).
 			std::vector<int> subjects;
 			for (const Finisher& f : res.finishers) {
 				bool dup = false;
@@ -664,35 +671,53 @@ namespace {
 				if (!dup)
 					subjects.push_back(
 						static_cast<int>(&f - res.finishers.data()));
-				if (subjects.size() >= 3)
+				if (static_cast<int>(subjects.size()) >= nthreads)
 					break;
+			}
+			std::vector<Explorer::FlatGenome> gs(subjects.size());
+			std::vector<OptimizeResult> ors(subjects.size());
+			std::vector<char> valid(subjects.size(), 0);
+			for (size_t si = 0; si < subjects.size(); ++si)
+				valid[si] = ex.ExtractGenome(
+					res.finishers[subjects[si]].entry, gs[si]) ? 1 : 0;
+			printf("solve: OPTIMIZING %d subject(s) in parallel, %.0fs each:\n",
+				static_cast<int>(subjects.size()), o.optimize_s);
+			fflush(stdout);
+			ocfg.budget_seconds = o.optimize_s;
+			{
+				std::vector<std::thread> othreads;
+				for (size_t si = 0; si < subjects.size(); ++si) {
+					if (!valid[si])
+						continue;
+					OptimizeConfig scfg = ocfg;
+					scfg.rng_seed = o.rng + static_cast<unsigned>(si) + 1;
+					othreads.emplace_back([&, si, scfg]() {
+						Optimizer opt2(w, scfg, root, root_yaw,
+							have_seed ? &seed : nullptr);
+						ors[si] = opt2.Improve(gs[si]);
+					});
+				}
+				for (auto& th : othreads)
+					th.join();
 			}
 			Explorer::FlatGenome best_g;
 			int best_tick = -1;
-			printf("solve: OPTIMIZING %d subject(s), %.0fs total budget:\n",
-				static_cast<int>(subjects.size()), o.optimize_s);
-			fflush(stdout);
 			for (size_t si = 0; si < subjects.size(); ++si) {
-				Explorer::FlatGenome g;
-				if (!ex.ExtractGenome(res.finishers[subjects[si]].entry, g))
+				if (!valid[si])
 					continue;
-				ocfg.budget_seconds = o.optimize_s / subjects.size();
-				ocfg.rng_seed = o.rng + static_cast<unsigned>(si) + 1;
-				Optimizer opt2(w, ocfg, root, root_yaw,
-					have_seed ? &seed : nullptr);
-				OptimizeResult orr = opt2.Improve(g);
+				const OptimizeResult& orr = ors[si];
 				printf("  subject #%d: %d -> %d ticks (%d improvements, "
 					"%lld evals, %.1fM ticks/s)\n",
 					static_cast<int>(si) + 1, orr.initial_tick, orr.best_tick,
 					orr.improvements, orr.evals,
 					orr.ticks_simulated / (orr.seconds > 0 ? orr.seconds : 1)
 						/ 1e6);
-				fflush(stdout);
 				if (orr.ok && (best_tick < 0 || orr.best_tick < best_tick)) {
 					best_tick = orr.best_tick;
-					best_g = g;
+					best_g = gs[si];
 				}
 			}
+			fflush(stdout);
 			if (best_tick > 0) {
 				Optimizer optb(w, ocfg, root, root_yaw,
 					have_seed ? &seed : nullptr);

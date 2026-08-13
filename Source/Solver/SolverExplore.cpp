@@ -4,19 +4,46 @@
 #include <chrono>
 #include <cstdio>
 #include <random>
+#include <thread>
 #include <unordered_map>
 
 namespace Solver {
 
 	namespace {
-		using CellHash = std::unordered_map<unsigned long long, int>;
+		// The cell map is sharded by a mixed key hash: workers recording in
+		// different regions of the map land on different shards, so the
+		// hot path (cell lookup + publish) almost never contends.
+		struct CellShard {
+			std::mutex m;
+			std::unordered_map<unsigned long long, int> map;
+		};
+		struct CellShards {
+			CellShard s[64];
+		};
+		inline int ShardOf(unsigned long long key) {
+			return static_cast<int>((key * 0x9E3779B97F4A7C15ull) >> 58);
+		}
 	}
 
-	#define CMAP() (*static_cast<CellHash*>(cellmap_))
+	#define CSHARDS() (*static_cast<CellShards*>(cellmap_))
+
+	int ResolveThreadCount(int requested) {
+		if (requested > 0)
+			return requested;
+		const int hc = static_cast<int>(std::thread::hardware_concurrency());
+		return hc > 1 ? hc - 1 : 1;   // leave one for the OS
+	}
 
 	Explorer::Explorer(const World& w, const ExploreConfig& cfg)
 		: w_(w), cfg_(cfg) {
-		cellmap_ = new CellHash();
+		cellmap_ = new CellShards();
+		// Atomic arrays have no default value - zero them explicitly.
+		for (int b = 0; b < 32; ++b)
+			band_n_[b].store(0, std::memory_order_relaxed);
+		for (int b = 0; b < 16; ++b)
+			sband_n_[b].store(0, std::memory_order_relaxed);
+		for (int i = 0; i < 512; ++i)
+			ring_[i].store(0, std::memory_order_relaxed);
 		// flips/sec -> minimum ticks between L/R flips, enforced structurally.
 		const float tps = 1.f / cfg_.params.dt;
 		min_knot_ = static_cast<int>(tps / cfg_.flips_per_sec) + 1;
@@ -33,21 +60,46 @@ namespace Solver {
 	}
 
 	Explorer::~Explorer() {
-		delete static_cast<CellHash*>(cellmap_);
+		delete static_cast<CellShards*>(cellmap_);
 	}
 
 	void Explorer::SetAnchor(const TapeAnchor& a) {
-		entries_.clear();
-		CMAP().clear();
-		for (int b = 0; b < 32; ++b)
+		const int kBufN = kMaxEntries + kBufSlack;
+		// Preallocate once: workers publish entries by index into a buffer
+		// that never reallocates (index stability is the whole concurrency
+		// story). ~0.5 GB at the 4M cap; the OS commits pages on first touch.
+		if (static_cast<int>(entries_.size()) != kBufN)
+			entries_.assign(kBufN, Entry());
+		if (!ready_)
+			ready_.reset(new std::atomic<unsigned char>[kBufN]);
+		for (int i = 0; i < kBufN; ++i)
+			ready_[i].store(0, std::memory_order_relaxed);
+		for (auto& sh : CSHARDS().s)
+			sh.map.clear();
+		for (int b = 0; b < 32; ++b) {
 			bands_[b].clear();
-		for (int b = 0; b < 16; ++b)
+			band_n_[b].store(0, std::memory_order_relaxed);
+		}
+		for (int b = 0; b < 16; ++b) {
 			sbands_[b].clear();
-		min_dist_seen_ = 1e9f;
-		max_speed_seen_ = 0.f;
+			sband_n_[b].store(0, std::memory_order_relaxed);
+		}
+		for (int i = 0; i < 512; ++i)
+			ring_[i].store(0, std::memory_order_relaxed);
+		ring_n_.store(0, std::memory_order_relaxed);
+		min_dist_seen_.store(1e9f, std::memory_order_relaxed);
+		max_speed_seen_.store(0.f, std::memory_order_relaxed);
 		min_dist_entry_ = -1;
-		air_entries_ = 0;
-		near_ring_.clear();
+		air_entries_.store(0, std::memory_order_relaxed);
+		nentries_.store(0, std::memory_order_relaxed);
+		cap_msg_.store(false, std::memory_order_relaxed);
+		fins_.clear();
+		fin_count_.store(0, std::memory_order_relaxed);
+		best_fin_tick_.store(-1, std::memory_order_relaxed);
+		rollouts_.store(0, std::memory_order_relaxed);
+		ticks_sim_.store(0, std::memory_order_relaxed);
+		done_workers_.store(0, std::memory_order_relaxed);
+
 		Entry e;
 		e.st.pos = a.origin;
 		e.st.vel = a.velocity;
@@ -66,15 +118,18 @@ namespace Solver {
 		e.parent = -1;
 		e.seed_ticks = -1;
 		e.ticks_since_flip = 999;
-		entries_.push_back(e);
+		entries_[0] = e;
+		ready_[0].store(1, std::memory_order_release);
+		nentries_.store(1, std::memory_order_relaxed);
 		int band = static_cast<int>(Len(e.st.pos - end_center_) / 256.f);
 		if (band > 31) band = 31;
 		if (band < 0) band = 0;
 		bands_[band].push_back(0);
+		band_n_[band].store(1, std::memory_order_relaxed);
 	}
 
 	void Explorer::RootState(PlayerState* s, float* yaw) const {
-		if (entries_.empty())
+		if (nentries_.load(std::memory_order_relaxed) == 0)
 			return;
 		if (s) *s = entries_[0].st;
 		if (yaw) *yaw = entries_[0].yaw;
@@ -82,7 +137,7 @@ namespace Solver {
 
 	bool Explorer::ExtractGenome(int entry_index, FlatGenome& out) const {
 		out = FlatGenome();
-		if (entry_index < 0 || entry_index >= static_cast<int>(entries_.size()))
+		if (entry_index < 0 || entry_index >= Count())
 			return false;
 		std::vector<int> chain;
 		for (int i = entry_index; i >= 0; i = entries_[i].parent)
@@ -168,12 +223,33 @@ namespace Solver {
 			| (kk << 37) | (kb << 39);
 	}
 
+	int Explorer::AllocEntry(bool force) {
+		const int kBufN = kMaxEntries + kBufSlack;
+		if (!force && nentries_.load(std::memory_order_relaxed) >= kMaxEntries) {
+			// FREEZE the frontier, don't stop the run: rollouts keep
+			// exploring from the existing archive (finisher entries still
+			// force-allocate into the slack region).
+			if (!cap_msg_.exchange(true)) {
+				printf("  entry cap (4M): frontier frozen, exploration "
+					"continues\n");
+				fflush(stdout);
+			}
+			return -1;
+		}
+		const int idx = nentries_.fetch_add(1, std::memory_order_relaxed);
+		if (idx >= kBufN)
+			return -1;   // slack exhausted (finisher storm past the cap)
+		if (!force && idx >= kMaxEntries)
+			return -1;   // lost the freeze race; the slot stays unpublished
+		return idx;
+	}
+
 	int Explorer::RecordCell(const PlayerState& s, float yaw, int tick,
 	                         int parent, int seed_ticks,
 	                         const std::vector<Knot>& knots, int cur_knot,
 	                         int ticks_into_knot, signed char last_side,
 	                         short since_flip, short zone_jumps, float eloss,
-	                         const TickEvents& ev) {
+	                         const TickEvents& ev, bool finished_flag) {
 		int kind = 0, brush = -1;
 		if (s.on_ground) {
 			kind = 1;
@@ -182,50 +258,70 @@ namespace Solver {
 			kind = 2;
 			brush = ev.contact_brush[0];
 		}
-		if (kind == 0 && air_entries_ >= 1500000)
+		if (kind == 0
+			&& air_entries_.load(std::memory_order_relaxed) >= kAirCap)
 			return -1;   // air sub-cap: keep room for the contact pipeline
 		const unsigned long long key = CellKey(s, kind, brush);
-		CellHash& m = CMAP();
-		auto it = m.find(key);
-		// Hysteresis: replace only a meaningfully earlier arrival (tick-level
-		// churn was flooding the archive in the first unseeded runs).
-		if (it != m.end() && entries_[it->second].tick <= tick + 4)
-			return -1;
-		if (entries_.size() >= 4000000)
-			return -1;   // global cap; Run() freezes the frontier when hit
+		CellShard& sh = CSHARDS().s[ShardOf(key)];
+		int idx = -1;
+		{
+			std::lock_guard<std::mutex> g(sh.m);
+			auto it = sh.map.find(key);
+			// Hysteresis: replace only a meaningfully earlier arrival (tick-
+			// level churn was flooding the archive in the first unseeded
+			// runs).
+			if (it != sh.map.end() && entries_[it->second].tick <= tick + 4)
+				return -1;
+			idx = AllocEntry(finished_flag);
+			if (idx < 0)
+				return -1;
+			Entry& e = entries_[idx];
+			e.st = s;
+			e.yaw = yaw;
+			e.tick = tick;
+			e.parent = parent;
+			e.seed_ticks = seed_ticks;
+			e.last_side = last_side;
+			e.ticks_since_flip = since_flip;
+			e.zone_jumps = zone_jumps;
+			e.eloss = eloss;
+			e.cbrush = static_cast<short>(brush);
+			e.ckind = static_cast<signed char>(kind);
+			e.finished = finished_flag;
+			if (cur_knot >= 0) {
+				e.nknots = static_cast<unsigned char>(cur_knot + 1);
+				for (int i = 0; i <= cur_knot && i < 3; ++i)
+					e.knots[i] = knots[i];
+				e.knots[cur_knot].dur = static_cast<short>(ticks_into_knot);
+			}
+			ready_[idx].store(1, std::memory_order_release);
+			if (it != sh.map.end()) it->second = idx; else sh.map.emplace(key, idx);
+		}
 		if (kind == 0)
-			air_entries_++;
-		Entry e;
-		e.st = s;
-		e.yaw = yaw;
-		e.tick = tick;
-		e.parent = parent;
-		e.seed_ticks = seed_ticks;
-		e.last_side = last_side;
-		e.ticks_since_flip = since_flip;
-		e.zone_jumps = zone_jumps;
-		e.eloss = eloss;
-		e.cbrush = static_cast<short>(brush);
-		e.ckind = static_cast<signed char>(kind);
-		if (cur_knot >= 0) {
-			e.nknots = static_cast<unsigned char>(cur_knot + 1);
-			for (int i = 0; i <= cur_knot && i < 3; ++i)
-				e.knots[i] = knots[i];
-			e.knots[cur_knot].dur = static_cast<short>(ticks_into_knot);
-		}
-		const int idx = static_cast<int>(entries_.size());
-		entries_.push_back(e);
-		if (it != m.end()) it->second = idx; else m[key] = idx;
+			air_entries_.fetch_add(1, std::memory_order_relaxed);
+
+		// ---- frontier structures (outside the shard lock) ----
 		const float dist = Len(s.pos - end_center_);
-		if (dist < min_dist_seen_) {
-			min_dist_seen_ = dist;
-			min_dist_entry_ = idx;
+		if (dist < min_dist_seen_.load(std::memory_order_relaxed)) {
+			std::lock_guard<std::mutex> g(stats_mx_);
+			if (dist < min_dist_seen_.load(std::memory_order_relaxed)) {
+				min_dist_seen_.store(dist, std::memory_order_relaxed);
+				min_dist_entry_ = idx;
+			}
 		}
-		if (dist < min_dist_seen_ + 350.f) {
-			if (near_ring_.size() < 512)
-				near_ring_.push_back(idx);
-			else
-				near_ring_[idx % 512] = idx;
+		if (dist < min_dist_seen_.load(std::memory_order_relaxed) + 350.f) {
+			int rn = ring_n_.load(std::memory_order_relaxed);
+			if (rn < 512) {
+				rn = ring_n_.fetch_add(1, std::memory_order_relaxed);
+				if (rn < 512) {
+					ring_[rn].store(idx, std::memory_order_relaxed);
+				} else {
+					ring_n_.store(512, std::memory_order_relaxed);
+					ring_[idx % 512].store(idx, std::memory_order_relaxed);
+				}
+			} else {
+				ring_[idx % 512].store(idx, std::memory_order_relaxed);
+			}
 		}
 		int band = static_cast<int>(dist / 256.f);
 		if (band > 31) band = 31;
@@ -233,18 +329,32 @@ namespace Solver {
 		// drift near the finish were soaking the band walk (measured: closest
 		// entry was a dead vertical fall beside the platform). Air cells stay
 		// reachable via the speed/energy/uniform axes.
-		if (kind != 0)
+		if (kind != 0) {
+			std::lock_guard<std::mutex> g(band_mx_[band]);
 			bands_[band].push_back(idx);
+			band_n_[band].store(static_cast<int>(bands_[band].size()),
+				std::memory_order_relaxed);
+		}
 		const float sp2 = Len2D(s.vel);
-		if (sp2 > max_speed_seen_) max_speed_seen_ = sp2;
+		{
+			float cur = max_speed_seen_.load(std::memory_order_relaxed);
+			while (sp2 > cur
+				&& !max_speed_seen_.compare_exchange_weak(cur, sp2)) {}
+		}
 		int sband = static_cast<int>(sp2 / 100.f);
 		if (sband > 15) sband = 15;
-		sbands_[sband].push_back(idx);
+		{
+			std::lock_guard<std::mutex> g(sband_mx_[sband]);
+			sbands_[sband].push_back(idx);
+			sband_n_[sband].store(static_cast<int>(sbands_[sband].size()),
+				std::memory_order_relaxed);
+		}
 		return idx;
 	}
 
 	int Explorer::SeedFromTape(const Tape& tape) {
-		if (entries_.empty() || !tape.start.valid)
+		if (nentries_.load(std::memory_order_relaxed) == 0
+			|| !tape.start.valid)
 			return 0;
 		seed_tape_ = &tape;
 		PlayerState s = entries_[0].st;
@@ -275,7 +385,7 @@ namespace Solver {
 			if (ev.jumped && InsideStartZone(s.pos))
 				zone_jumps++;
 			RecordCell(s, f.yaw, t + 1, -1, t + 1, none, -1, 0,
-			           last_side, since_flip, zone_jumps, eloss, ev);
+			           last_side, since_flip, zone_jumps, eloss, ev, false);
 			seeded++;
 			if (GoalReached(s, ev)) {
 				seed_finish_tick_ = t + 1;
@@ -285,46 +395,54 @@ namespace Solver {
 		return seeded;
 	}
 
-	ExploreResult Explorer::Run() {
-		ExploreResult res;
-		if (entries_.empty() || end_idx_ < 0)
-			return res;
-		std::mt19937 rng(cfg_.rng_seed);
-		const auto t0 = std::chrono::steady_clock::now();
+	// One worker of the pool. Selection and recording go through the shared
+	// archive (short shard/band locks); the simulation itself - the bulk of
+	// every rollout - runs lock-free on private state. Worker 0 with
+	// --threads 1 draws the exact rng stream the single-thread explorer did.
+	void Explorer::WorkerLoop(int wid,
+	                          std::chrono::steady_clock::time_point t0) {
+		std::mt19937 rng(cfg_.rng_seed
+			+ 0x9E3779B9u * static_cast<unsigned>(wid));
 		auto elapsed = [&]() {
 			return std::chrono::duration<double>(
 				std::chrono::steady_clock::now() - t0).count();
 		};
-		double next_print = 1.0;
 		std::vector<Knot> knots;
-		std::vector<Finisher> finishers;
-		bool cap_hit = false;
 
 		while (elapsed() < cfg_.budget_seconds
-			&& (cfg_.max_rollouts == 0 || res.rollouts < cfg_.max_rollouts)) {
+			&& (cfg_.max_rollouts == 0
+				|| rollouts_.load(std::memory_order_relaxed)
+					< cfg_.max_rollouts)) {
 			// Round-robin selection (validated prior-attempt lesson): rotate
-			// four pulls - toward the finish, along the speed pipeline, up
-			// the energy ladder, and uniform - so no single score collapses
-			// the frontier.
+			// the pulls - toward the finish, along the speed pipeline, down
+			// the dissipation ladder, uniform, and near-miss breeding - so no
+			// single score collapses the frontier.
 			int base = -1;
-			const int mode = static_cast<int>(res.rollouts % 5);
-			if (mode == 4 && !near_ring_.empty()) {
+			const int mode = static_cast<int>(
+				rollouts_.load(std::memory_order_relaxed) % 5);
+			if (mode == 4) {
 				// Breed near-misses: back up 1-2 knot-chain links from a
 				// close approach and resample the ending.
-				int i = near_ring_[rng() % near_ring_.size()];
-				const int back = 1 + static_cast<int>(rng() % 2);
-				for (int bsteps = 0; bsteps < back; ++bsteps)
-					if (entries_[i].parent >= 0)
-						i = entries_[i].parent;
-				if (!entries_[i].finished)
-					base = i;
+				int rn = ring_n_.load(std::memory_order_relaxed);
+				if (rn > 512) rn = 512;
+				if (rn > 0) {
+					int i = ring_[static_cast<int>(rng() % rn)]
+						.load(std::memory_order_relaxed);
+					const int back = 1 + static_cast<int>(rng() % 2);
+					for (int bsteps = 0; bsteps < back; ++bsteps)
+						if (entries_[i].parent >= 0)
+							i = entries_[i].parent;
+					if (!entries_[i].finished)
+						base = i;
+				}
 			}
 			if (base < 0 && mode == 0) {
 				for (int pass = 0; pass < 2 && base < 0; ++pass)
 					for (int b = 0; b < 32 && base < 0; ++b) {
-						if (bands_[b].empty())
+						if (band_n_[b].load(std::memory_order_relaxed) == 0)
 							continue;
 						if (rng() % 100 < 55) {
+							std::lock_guard<std::mutex> g(band_mx_[b]);
 							const std::vector<int>& v = bands_[b];
 							const int i = v[rng() % v.size()];
 							if (!entries_[i].finished)
@@ -334,9 +452,10 @@ namespace Solver {
 			} else if (mode == 1) {
 				for (int pass = 0; pass < 2 && base < 0; ++pass)
 					for (int b = 15; b >= 0 && base < 0; --b) {
-						if (sbands_[b].empty())
+						if (sband_n_[b].load(std::memory_order_relaxed) == 0)
 							continue;
 						if (rng() % 100 < 55) {
+							std::lock_guard<std::mutex> g(sband_mx_[b]);
 							const std::vector<int>& v = sbands_[b];
 							const int i = v[rng() % v.size()];
 							if (!entries_[i].finished)
@@ -344,16 +463,18 @@ namespace Solver {
 						}
 					}
 			} else if (mode == 2 && cfg_.eloss_bias) {
-				// SMOOTH FRONTIER (user's routing intuition, measured: fast
-				// runs dissipate ~260k vs 538k for the meandering route):
-				// among the few contact bands nearest the finish, restart
-				// from the LOWEST cumulative-dissipation entry sampled.
+				// SMOOTH FRONTIER (user's routing intuition, measured on
+				// basictest: fast runs dissipated ~260k vs 538k for the
+				// meandering route): among the few contact bands nearest the
+				// finish, restart from the LOWEST cumulative-dissipation
+				// entry sampled.
 				float best_l = 1e30f;
 				int nonempty = 0;
 				for (int b = 0; b < 32 && nonempty < 3; ++b) {
-					if (bands_[b].empty())
+					if (band_n_[b].load(std::memory_order_relaxed) == 0)
 						continue;
 					nonempty++;
+					std::lock_guard<std::mutex> g(band_mx_[b]);
 					const std::vector<int>& v = bands_[b];
 					for (int c = 0; c < 4; ++c) {
 						const int i = v[rng() % v.size()];
@@ -367,8 +488,10 @@ namespace Solver {
 			}
 			if (base < 0) {
 				for (int t = 0; t < 8 && base < 0; ++t) {
-					const int i = static_cast<int>(rng() % entries_.size());
-					if (!entries_[i].finished)
+					const int n = Count();
+					const int i = static_cast<int>(rng() % n);
+					if (ready_[i].load(std::memory_order_acquire)
+						&& !entries_[i].finished)
 						base = i;
 				}
 			}
@@ -383,7 +506,8 @@ namespace Solver {
 			short zone_jumps = entries_[base].zone_jumps;
 			float eloss = entries_[base].eloss;
 			float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
-			res.rollouts++;
+			rollouts_.fetch_add(1, std::memory_order_relaxed);
+			long long tloc = 0;
 
 			knots.clear();
 			const int K = 1 + static_cast<int>(rng() % 3);
@@ -400,7 +524,7 @@ namespace Solver {
 					TickEvents ev;
 					KnotTick(s, yaw, kn, t, w_, cfg_.params, &ev, nullptr);
 					tick++;
-					res.ticks_simulated++;
+					tloc++;
 					const float e_now = 0.5f * Len2(s.vel)
 						+ cfg_.params.gravity * s.pos.Z;
 					if (e_now < e_prev)
@@ -420,75 +544,113 @@ namespace Solver {
 					}
 					// Event-aligned recording (contact/ground/duck/jump ticks,
 					// knot ends, every 4th tick otherwise) - tick-level
-					// recording was pure churn.
+					// recording was pure churn. The goal check runs first so
+					// finisher entries are born finished (entries are
+					// immutable once published).
+					const bool goal = GoalReached(s, ev);
 					const bool eventful = ev.ncontacts > 0 || ev.landed
 						|| ev.left_ground || ev.duck_changed || ev.jumped;
 					int idx = -1;
 					if (eventful || t == kn.dur - 1 || (tick & 3) == 0)
 						idx = RecordCell(s, yaw, tick, base, -1, knots,
 							k, t + 1, last_side, since_flip, zone_jumps,
-							eloss, ev);
-					if (!cap_hit && entries_.size() >= 4000000) {
-						// FREEZE the frontier, don't stop the run: rollouts
-						// keep exploring from the existing archive (finisher
-						// entries are still force-added).
-						cap_hit = true;
-						printf("  entry cap (4M): frontier frozen, exploration "
-							"continues\n");
-						fflush(stdout);
-					}
-					if (GoalReached(s, ev)) {
+							eloss, ev, goal);
+					if (goal) {
 						int fi = idx;
 						if (fi < 0) {
 							// Cell already better - still keep the finisher
 							// entry so its genome is reconstructable.
-							Entry e;
-							e.st = s;
-							e.yaw = yaw;
-							e.tick = tick;
-							e.parent = base;
-							e.seed_ticks = -1;
-							e.last_side = last_side;
-							e.ticks_since_flip = since_flip;
-							e.zone_jumps = zone_jumps;
-							e.eloss = eloss;
-							e.nknots = static_cast<unsigned char>(k + 1);
-							for (int i = 0; i <= k; ++i)
-								e.knots[i] = knots[i];
-							e.knots[k].dur = static_cast<short>(t + 1);
-							fi = static_cast<int>(entries_.size());
-							entries_.push_back(e);
+							fi = AllocEntry(true);
+							if (fi >= 0) {
+								Entry& e = entries_[fi];
+								e.st = s;
+								e.yaw = yaw;
+								e.tick = tick;
+								e.parent = base;
+								e.seed_ticks = -1;
+								e.last_side = last_side;
+								e.ticks_since_flip = since_flip;
+								e.zone_jumps = zone_jumps;
+								e.eloss = eloss;
+								e.finished = true;
+								e.nknots = static_cast<unsigned char>(k + 1);
+								for (int i2 = 0; i2 <= k; ++i2)
+									e.knots[i2] = knots[i2];
+								e.knots[k].dur = static_cast<short>(t + 1);
+								ready_[fi].store(1, std::memory_order_release);
+							}
 						}
-						entries_[fi].finished = true;
-						Finisher fin;
-						fin.tick = tick;
-						fin.speed = Len2D(s.vel);
-						fin.eloss = eloss;
-						fin.pos = s.pos;
-						fin.entry = fi;
-						finishers.push_back(fin);
+						if (fi >= 0) {
+							Finisher fin;
+							fin.tick = tick;
+							fin.speed = Len2D(s.vel);
+							fin.eloss = eloss;
+							fin.pos = s.pos;
+							fin.entry = fi;
+							{
+								std::lock_guard<std::mutex> g(fin_mx_);
+								fins_.push_back(fin);
+							}
+							fin_count_.fetch_add(1, std::memory_order_relaxed);
+							int cur = best_fin_tick_.load(
+								std::memory_order_relaxed);
+							while ((cur < 0 || tick < cur)
+								&& !best_fin_tick_.compare_exchange_weak(
+									cur, tick)) {}
+						}
 						aborted = true;
 						break;
 					}
 				}
 			}
+			ticks_sim_.fetch_add(tloc, std::memory_order_relaxed);
+		}
+		done_workers_.fetch_add(1, std::memory_order_relaxed);
+	}
 
+	ExploreResult Explorer::Run() {
+		ExploreResult res;
+		if (nentries_.load(std::memory_order_relaxed) == 0 || end_idx_ < 0)
+			return res;
+		const int T = ResolveThreadCount(cfg_.threads);
+		res.threads = T;
+		const auto t0 = std::chrono::steady_clock::now();
+		auto elapsed = [&]() {
+			return std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - t0).count();
+		};
+		done_workers_.store(0, std::memory_order_relaxed);
+		std::vector<std::thread> pool;
+		pool.reserve(T);
+		for (int i = 0; i < T; ++i)
+			pool.emplace_back(&Explorer::WorkerLoop, this, i, t0);
+
+		// Progress heartbeat (the single-thread loop used to print inline).
+		double next_print = 1.0;
+		while (done_workers_.load(std::memory_order_relaxed) < T) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
 			if (elapsed() >= next_print) {
 				next_print += 1.0;
-				int best = -1;
-				for (const Finisher& f : finishers)
-					if (best < 0 || f.tick < best)
-						best = f.tick;
+				long long cells = 0;
+				for (auto& sh : CSHARDS().s) {
+					std::lock_guard<std::mutex> g(sh.m);
+					cells += static_cast<long long>(sh.map.size());
+				}
+				const int best = best_fin_tick_.load(std::memory_order_relaxed);
 				printf("  %5.1fs  rollouts %lld  entries %d  cells %d  "
 					"finishes %d  best %s  min-dist %.0f  max-spd %.0f\n",
-					elapsed(), res.rollouts, static_cast<int>(entries_.size()),
-					static_cast<int>(CMAP().size()),
-					static_cast<int>(finishers.size()),
+					elapsed(), rollouts_.load(std::memory_order_relaxed),
+					Count(), static_cast<int>(cells),
+					fin_count_.load(std::memory_order_relaxed),
 					best < 0 ? "-" : std::to_string(best).c_str(),
-					min_dist_seen_, max_speed_seen_);
+					min_dist_seen_.load(std::memory_order_relaxed),
+					max_speed_seen_.load(std::memory_order_relaxed));
 				fflush(stdout);
 			}
 		}
+		for (auto& th : pool)
+			th.join();
+
 		if (min_dist_entry_ >= 0) {
 			const Entry& me = entries_[min_dist_entry_];
 			printf("  closest entry: tick %d  pos (%.0f, %.0f, %.0f)  "
@@ -506,7 +668,9 @@ namespace Solver {
 				float maxsp1 = 0.f, maxsp2 = 0.f, mind = 1e9f;
 			};
 			std::vector<BStat> bs(w_.brushes.size());
-			for (const Entry& e : entries_) {
+			const int n = Count();
+			for (int i = 0; i < n; ++i) {
+				const Entry& e = entries_[i];
 				if (e.ckind == 0 || e.cbrush < 0
 					|| e.cbrush >= static_cast<short>(bs.size()))
 					continue;
@@ -530,11 +694,19 @@ namespace Solver {
 						bs[i].maxsp1, bs[i].maxsp2, bs[i].mind);
 			fflush(stdout);
 		}
+		std::vector<Finisher> finishers = fins_;
 		std::sort(finishers.begin(), finishers.end(),
 			[](const Finisher& a, const Finisher& b) { return a.tick < b.tick; });
 		res.finishers = std::move(finishers);
-		res.entries = static_cast<int>(entries_.size());
-		res.cells = static_cast<int>(CMAP().size());
+		res.rollouts = rollouts_.load(std::memory_order_relaxed);
+		res.ticks_simulated = ticks_sim_.load(std::memory_order_relaxed);
+		res.entries = Count();
+		{
+			long long cells = 0;
+			for (auto& sh : CSHARDS().s)
+				cells += static_cast<long long>(sh.map.size());
+			res.cells = static_cast<int>(cells);
+		}
 		res.seconds = elapsed();
 		return res;
 	}
@@ -542,7 +714,7 @@ namespace Solver {
 	bool Explorer::BuildFrames(int entry_index, std::vector<TapeFrame>& out,
 	                           int* finish_tick) {
 		out.clear();
-		if (entry_index < 0 || entry_index >= static_cast<int>(entries_.size()))
+		if (entry_index < 0 || entry_index >= Count())
 			return false;
 		std::vector<int> chain;
 		for (int i = entry_index; i >= 0; i = entries_[i].parent)
