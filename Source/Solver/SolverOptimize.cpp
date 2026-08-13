@@ -63,7 +63,16 @@ namespace Solver {
 				if (++zone_jumps > cfg_.max_zone_jumps)
 					return -1;
 			}
-			if (cfg_.end_brush_idx >= 0 && s.on_ground && s.ground_brush >= 0
+			if (cfg_.goal_touch) {
+				if (s.on_ground && s.ground_brush >= 0
+					&& w_.brushes[s.ground_brush].id == cfg_.end_brush_id)
+					return 1;
+				for (int c = 0; c < ev.ncontacts; ++c)
+					if (w_.brushes[ev.contact_brush[c]].id
+						== cfg_.end_brush_id)
+						return 1;
+			} else if (cfg_.end_brush_idx >= 0 && s.on_ground
+				&& s.ground_brush >= 0
 				&& w_.brushes[s.ground_brush].id == cfg_.end_brush_id) {
 				const WorldBrush& b = w_.brushes[cfg_.end_brush_idx];
 				if (s.pos.X >= b.gmin_stand.X && s.pos.X <= b.gmax_stand.X

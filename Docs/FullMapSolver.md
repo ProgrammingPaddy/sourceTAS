@@ -650,9 +650,42 @@ prefixes onto finisher suffixes at shared cells).
 Shipped for optional in-game testing: `basictest_opt.tas` (seeded, 430) and
 `surf_basictest_opt.tas` (unseeded, 1207).
 
+### Phase 2 v2a — DISSIPATION BIAS + SEGMENT LAB (2026-08-13, user-directed)
+
+Committed the era first: `ac781e7` (21 files, +4948).
+
+**The user's energy intuition, measured** (core traces of the three verified runs,
+E = 0.5|v|²+gz):
+| run | ticks | dissipated | pumped | big-loss ticks | worst tick |
+|---|---|---|---|---|---|
+| human | 432 | 260k | 168k | 3 | 84k |
+| seeded | 430 | 260k | 167k | 3 | 77k |
+| unseeded | 1207 | 538k | 491k | 8 | 167k |
+Fast runs dissipate ~0.73× E0 total (the user's "slight-to-moderate multiple above
+closed") with only the intentional landings as big events; the slow route wastes 2.07×
+as much and pumps 3× the strafe work to re-earn it. The actionable signal is
+**cumulative dissipation at equal progress** (absolute E already failed the prior
+attempt as a sole score — and our own ebands were the weaker form of this).
+
+**Implemented (bias, never fitness):** per-path `eloss` on every archive entry
+(inherited; += max(0, E drop) per tick); the round-robin's energy axis replaced by
+**SMOOTH FRONTIER** — lowest-eloss entry among the 3 contact bands nearest the finish;
+`--no-eloss-bias` control arm; finisher tables report eloss; **`--goal touch`** turns
+any brush into a segment goal (the user's "fastest to ramp N" theory lab — segment
+experiments are now one-liners with fast rounds and low variance).
+
+**A/B (touch ramp 3, 30 s × rng {1,2,3}):** bias ON = 160k/164k/135k finishes; OFF =
+88k/80k/85k — **~1.9× finisher throughput**, best-tick neutral (204-227 vs 205-206).
+Full-map rng 11 at 150 s remains dry with the bias: it accelerates, it does not fix
+single-thread discovery variance. Parallelism stays the gating work — and now
+multiplies a 1.9×-richer finisher stream when it lands.
+
 ### Open items
-- Worker-pool parallelism (gates everything above).
-- Tighten-loop automation + archive-splice operator (Phase 2 v2).
+- Worker-pool parallelism (gates full-map variance + tighten rounds; multiplies the
+  dissipation-bias throughput gain).
+- Tighten-loop automation + archive-splice operator.
+- Segment-lab studies queued for the lab: per-stage fastest times (ramp2/3/4) as
+  reference conditions for operator tests.
 - Ground-duck lifecycle / duck-flag timing / hull-height data (dormant, non-blocking).
 - Ground-duck lifecycle capture study (only if a route ever needs crouch-walking).
 - Duck-flag completion timing (mismatch at 230 — flag-only today, no position error).

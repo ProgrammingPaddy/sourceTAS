@@ -101,6 +101,8 @@ namespace {
 		unsigned rng = 1337;
 		float cell = 64.f;
 		int max_ticks = 4000;
+		bool goal_touch = false;
+		bool eloss_bias = true;
 	};
 
 	bool ParseCommon(int argc, char** argv, int first, ReplayOpts& o) {
@@ -166,6 +168,15 @@ namespace {
 			else if (a == "--rng") { if (i + 1 < argc) o.rng = static_cast<unsigned>(atoll(argv[++i])); else ok = false; }
 			else if (a == "--cell") ok = next_f(&o.cell);
 			else if (a == "--max-ticks") ok = next_i(&o.max_ticks);
+			else if (a == "--goal") {
+				if (i + 1 < argc) {
+					const std::string gv = argv[++i];
+					if (gv == "touch") o.goal_touch = true;
+					else if (gv == "ground") o.goal_touch = false;
+					else { printf("--goal must be touch|ground\n"); return false; }
+				} else ok = false;
+			}
+			else if (a == "--no-eloss-bias") o.eloss_bias = false;
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
 		}
@@ -566,6 +577,13 @@ namespace {
 		cfg.rng_seed = o.rng;
 		cfg.cell_size = o.cell;
 		cfg.max_path_ticks = o.max_ticks;
+		cfg.goal_touch = o.goal_touch;
+		cfg.eloss_bias = o.eloss_bias;
+		if (o.goal_touch)
+			printf("solve: GOAL = TOUCH brush %d (segment experiment mode)\n",
+				o.end_brush);
+		if (!o.eloss_bias)
+			printf("solve: dissipation bias OFF (control arm)\n");
 
 		printf("solve: anchor (%.1f, %.1f, %.1f) yaw %.1f | start brush %d, "
 			"end brush %d\n", anchor.origin.X, anchor.origin.Y, anchor.origin.Z,
@@ -604,9 +622,10 @@ namespace {
 		const int show = res.finishers.size() < 10
 			? static_cast<int>(res.finishers.size()) : 10;
 		for (int i = 0; i < show; ++i)
-			printf("  #%d  %d ticks (%.3f s)  spd %.1f  finish (%.0f, %.0f, "
-				"z %.2f)\n", i + 1, res.finishers[i].tick,
+			printf("  #%d  %d ticks (%.3f s)  spd %.1f  eloss %.0fk  finish "
+				"(%.0f, %.0f, z %.2f)\n", i + 1, res.finishers[i].tick,
 				res.finishers[i].tick * cfg.params.dt, res.finishers[i].speed,
+				res.finishers[i].eloss / 1000.f,
 				res.finishers[i].pos.X, res.finishers[i].pos.Y,
 				res.finishers[i].pos.Z);
 		if (ex.SeedFinishTick() >= 0)
@@ -628,6 +647,7 @@ namespace {
 			ocfg.min_knot = static_cast<int>(1.f
 				/ (cfg.params.dt * cfg.flips_per_sec)) + 1;
 			ocfg.max_path_ticks = cfg.max_path_ticks;
+			ocfg.goal_touch = o.goal_touch;
 			PlayerState root;
 			float root_yaw = 0.f;
 			ex.RootState(&root, &root_yaw);

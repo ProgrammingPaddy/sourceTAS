@@ -41,11 +41,22 @@ namespace Solver {
 		unsigned rng_seed = 1337;    // fixed default = reproducible runs
 		float cell_size = 64.f;      // position quantum
 		float speed_bucket = 100.f;  // 2D-speed quantum
+		// GOAL: false = grounded ON the end platform (full-map contract);
+		// true = any contact with the end brush (segment experiments -
+		// "fastest to ramp N" as a theory test lab).
+		bool goal_touch = false;
+		// Smooth-frontier selection axis: prefer low cumulative energy
+		// dissipation near the finish. Measured 2026-08-13: fast runs
+		// dissipate ~260k with 3 big-loss events; the slow unseeded route
+		// 538k with 8 - dissipation-at-progress is the human-routing signal.
+		// Bias only (fitness stays ticks); off = control arm for A/B.
+		bool eloss_bias = true;
 	};
 
 	struct Finisher {
-		int tick = 0;               // ticks from anchor to grounded-on-end
+		int tick = 0;               // ticks from anchor to the goal
 		float speed = 0.f;          // 2D speed at the finish tick
+		float eloss = 0.f;          // cumulative energy dissipated en route
 		Vec3 pos;                   // finish position (z proves ON-TOP)
 		int entry = -1;             // archive index of the finishing entry
 	};
@@ -109,6 +120,7 @@ namespace Solver {
 			short zone_jumps = 0;
 			short cbrush = -1;          // cell contact brush (census/diagnostics)
 			signed char ckind = 0;      // 0 air, 1 ground, 2 touch
+			float eloss = 0.f;          // cumulative dissipation along the path
 			bool finished = false;
 			// Knots since the parent, INLINE (rollouts append <= 3): POD
 			// entries, no per-entry heap churn at millions of records.
@@ -125,11 +137,6 @@ namespace Solver {
 		// everything reachable. Bias only - nothing is ever culled.
 		std::vector<int> bands_[32];    // dist-to-end / 256
 		std::vector<int> sbands_[16];   // 2D speed / 100
-		// Mechanical energy bands (0.5|v|^2 + g*z): the axis that separates
-		// live pipeline cells (high + fast) from fallen junk (close/fast but
-		// LOW). Energy failed the prior attempt as a SOLE frontier score;
-		// as one round-robin axis it preserves the extreme that matters.
-		std::vector<int> ebands_[32];
 		float min_dist_seen_ = 1e9f;
 		float max_speed_seen_ = 0.f;
 		int min_dist_entry_ = -1;
@@ -166,8 +173,9 @@ namespace Solver {
 		               int parent, int seed_ticks,
 		               const std::vector<Knot>& knots, int cur_knot,
 		               int ticks_into_knot, signed char last_side,
-		               short since_flip, short zone_jumps,
+		               short since_flip, short zone_jumps, float eloss,
 		               const TickEvents& ev);
+		bool GoalReached(const PlayerState& s, const TickEvents& ev) const;
 	};
 
 } // namespace Solver

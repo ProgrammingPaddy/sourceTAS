@@ -30,6 +30,7 @@ namespace Solver {
 		int max_zone_jumps = 1;
 		int min_knot = 14;
 		int max_path_ticks = 4000;
+		bool goal_touch = false;
 		double budget_seconds = 60.0;
 		unsigned rng_seed = 1;
 	};

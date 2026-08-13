@@ -43,8 +43,6 @@ namespace Solver {
 			bands_[b].clear();
 		for (int b = 0; b < 16; ++b)
 			sbands_[b].clear();
-		for (int b = 0; b < 32; ++b)
-			ebands_[b].clear();
 		min_dist_seen_ = 1e9f;
 		max_speed_seen_ = 0.f;
 		min_dist_entry_ = -1;
@@ -133,6 +131,19 @@ namespace Solver {
 			&& InsideZoneXY(s.pos, end_idx_);
 	}
 
+	bool Explorer::GoalReached(const PlayerState& s, const TickEvents& ev) const {
+		if (!cfg_.goal_touch)
+			return IsFinish(s);
+		// Segment-experiment goal: ANY contact with the end brush counts.
+		if (s.on_ground && s.ground_brush >= 0
+			&& w_.brushes[s.ground_brush].id == cfg_.end_brush_id)
+			return true;
+		for (int c = 0; c < ev.ncontacts; ++c)
+			if (w_.brushes[ev.contact_brush[c]].id == cfg_.end_brush_id)
+				return true;
+		return false;
+	}
+
 	unsigned long long Explorer::CellKey(const PlayerState& s, int contact_kind,
 	                                     int contact_brush) const {
 		// Free-air states get 3x cells and 2x-coarse speed buckets: contact-
@@ -161,7 +172,7 @@ namespace Solver {
 	                         int parent, int seed_ticks,
 	                         const std::vector<Knot>& knots, int cur_knot,
 	                         int ticks_into_knot, signed char last_side,
-	                         short since_flip, short zone_jumps,
+	                         short since_flip, short zone_jumps, float eloss,
 	                         const TickEvents& ev) {
 		int kind = 0, brush = -1;
 		if (s.on_ground) {
@@ -193,6 +204,7 @@ namespace Solver {
 		e.last_side = last_side;
 		e.ticks_since_flip = since_flip;
 		e.zone_jumps = zone_jumps;
+		e.eloss = eloss;
 		e.cbrush = static_cast<short>(brush);
 		e.ckind = static_cast<signed char>(kind);
 		if (cur_knot >= 0) {
@@ -228,11 +240,6 @@ namespace Solver {
 		int sband = static_cast<int>(sp2 / 100.f);
 		if (sband > 15) sband = 15;
 		sbands_[sband].push_back(idx);
-		const float energy = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
-		int eband = static_cast<int>(energy / 150000.f) + 8;
-		if (eband < 0) eband = 0;
-		if (eband > 31) eband = 31;
-		ebands_[eband].push_back(idx);
 		return idx;
 	}
 
@@ -244,6 +251,8 @@ namespace Solver {
 		signed char last_side = 0;
 		short since_flip = 999;
 		short zone_jumps = 0;
+		float eloss = 0.f;
+		float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
 		int seeded = 0;
 		std::vector<Knot> none;
 		for (int t = 0; t < static_cast<int>(tape.frames.size()); ++t) {
@@ -251,6 +260,11 @@ namespace Solver {
 			TickEvents ev;
 			MoveTick(s, w_, cfg_.params, f.pitch, f.yaw, f.fmove, f.smove,
 			         f.umove, f.buttons, &ev);
+			const float e_now = 0.5f * Len2(s.vel)
+				+ cfg_.params.gravity * s.pos.Z;
+			if (e_now < e_prev)
+				eloss += e_prev - e_now;
+			e_prev = e_now;
 			signed char side = 0;
 			if (f.buttons & IN_MOVELEFT) side = 1;
 			else if (f.buttons & IN_MOVERIGHT) side = -1;
@@ -261,9 +275,9 @@ namespace Solver {
 			if (ev.jumped && InsideStartZone(s.pos))
 				zone_jumps++;
 			RecordCell(s, f.yaw, t + 1, -1, t + 1, none, -1, 0,
-			           last_side, since_flip, zone_jumps, ev);
+			           last_side, since_flip, zone_jumps, eloss, ev);
 			seeded++;
-			if (IsFinish(s)) {
+			if (GoalReached(s, ev)) {
 				seed_finish_tick_ = t + 1;
 				break;   // restart points past the finish are useless
 			}
@@ -329,18 +343,27 @@ namespace Solver {
 								base = i;
 						}
 					}
-			} else if (mode == 2) {
-				for (int pass = 0; pass < 2 && base < 0; ++pass)
-					for (int b = 31; b >= 0 && base < 0; --b) {
-						if (ebands_[b].empty())
-							continue;
-						if (rng() % 100 < 55) {
-							const std::vector<int>& v = ebands_[b];
-							const int i = v[rng() % v.size()];
-							if (!entries_[i].finished)
-								base = i;
+			} else if (mode == 2 && cfg_.eloss_bias) {
+				// SMOOTH FRONTIER (user's routing intuition, measured: fast
+				// runs dissipate ~260k vs 538k for the meandering route):
+				// among the few contact bands nearest the finish, restart
+				// from the LOWEST cumulative-dissipation entry sampled.
+				float best_l = 1e30f;
+				int nonempty = 0;
+				for (int b = 0; b < 32 && nonempty < 3; ++b) {
+					if (bands_[b].empty())
+						continue;
+					nonempty++;
+					const std::vector<int>& v = bands_[b];
+					for (int c = 0; c < 4; ++c) {
+						const int i = v[rng() % v.size()];
+						if (!entries_[i].finished
+							&& entries_[i].eloss < best_l) {
+							best_l = entries_[i].eloss;
+							base = i;
 						}
 					}
+				}
 			}
 			if (base < 0) {
 				for (int t = 0; t < 8 && base < 0; ++t) {
@@ -358,6 +381,8 @@ namespace Solver {
 			signed char last_side = entries_[base].last_side;
 			short since_flip = entries_[base].ticks_since_flip;
 			short zone_jumps = entries_[base].zone_jumps;
+			float eloss = entries_[base].eloss;
+			float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
 			res.rollouts++;
 
 			knots.clear();
@@ -376,6 +401,11 @@ namespace Solver {
 					KnotTick(s, yaw, kn, t, w_, cfg_.params, &ev, nullptr);
 					tick++;
 					res.ticks_simulated++;
+					const float e_now = 0.5f * Len2(s.vel)
+						+ cfg_.params.gravity * s.pos.Z;
+					if (e_now < e_prev)
+						eloss += e_prev - e_now;
+					e_prev = e_now;
 					if (since_flip < 999) since_flip++;
 					if (ev.jumped && InsideStartZone(s.pos)) {
 						zone_jumps++;
@@ -396,7 +426,8 @@ namespace Solver {
 					int idx = -1;
 					if (eventful || t == kn.dur - 1 || (tick & 3) == 0)
 						idx = RecordCell(s, yaw, tick, base, -1, knots,
-							k, t + 1, last_side, since_flip, zone_jumps, ev);
+							k, t + 1, last_side, since_flip, zone_jumps,
+							eloss, ev);
 					if (!cap_hit && entries_.size() >= 4000000) {
 						// FREEZE the frontier, don't stop the run: rollouts
 						// keep exploring from the existing archive (finisher
@@ -406,7 +437,7 @@ namespace Solver {
 							"continues\n");
 						fflush(stdout);
 					}
-					if (IsFinish(s)) {
+					if (GoalReached(s, ev)) {
 						int fi = idx;
 						if (fi < 0) {
 							// Cell already better - still keep the finisher
@@ -420,6 +451,7 @@ namespace Solver {
 							e.last_side = last_side;
 							e.ticks_since_flip = since_flip;
 							e.zone_jumps = zone_jumps;
+							e.eloss = eloss;
 							e.nknots = static_cast<unsigned char>(k + 1);
 							for (int i = 0; i <= k; ++i)
 								e.knots[i] = knots[i];
@@ -431,6 +463,7 @@ namespace Solver {
 						Finisher fin;
 						fin.tick = tick;
 						fin.speed = Len2D(s.vel);
+						fin.eloss = eloss;
 						fin.pos = s.pos;
 						fin.entry = fi;
 						finishers.push_back(fin);
