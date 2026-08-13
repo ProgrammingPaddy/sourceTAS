@@ -13,6 +13,16 @@
 // distribution), parameter jitter, knot growth, and seed-prefix erosion
 // (branching earlier into a seeded route's human prefix - the optimizer eats
 // backward into the tape).
+//
+// CONTACT-ANCHORED AIMING (v3a, 2026-08-13): the themes study measured where
+// route waste lives - board entries (human boards deflect 9-14 deg costing
+// 10-20k; solver boards 25-33 deg costing 47-80k; user calibration: tangent
+// boarding is the ~95% rule and a primary efficiency driver). When enabled,
+// an instrumented eval records the knot indices active at the route's top
+// energy-loss events, and half of the knot-picking mutations target those
+// knots (or the knot before - the approach shapes the entry) instead of a
+// uniform-random knot. Aim changes WHERE proposals concentrate, never the
+// fitness (still finish tick) and never legality.
 
 #include "SolverExplore.h"
 #include "SolverKnots.h"
@@ -31,6 +41,12 @@ namespace Solver {
 		int min_knot = 14;
 		int max_path_ticks = 4000;
 		bool goal_touch = false;
+		// Contact-anchored aiming measured NEUTRAL on the segment lab
+		// (2026-08-13: ties on touch-11, slightly worse on touch-9) - the
+		// acceptance bottleneck is not proposal targeting at ~1M evals per
+		// subject. Off by default; --aim keeps the apparatus testable on
+		// full-map genomes where 8 loss events are far more selective.
+		bool aim_contacts = false;
 		double budget_seconds = 60.0;
 		unsigned rng_seed = 1;
 	};
@@ -64,10 +80,16 @@ namespace Solver {
 			bool finished = false;
 			int tick = 0;
 		};
+		// loss_top (optional): the route's top-8 one-tick energy drops as
+		// (drop, active knot index); knot -1 = seed-prefix tick (not aimable).
 		Eval Run(const Explorer::FlatGenome& g, int abort_at,
-		         std::vector<TapeFrame>* emit, long long* ticks);
+		         std::vector<TapeFrame>* emit, long long* ticks,
+		         std::vector<std::pair<float, int>>* loss_top = nullptr);
 		bool InsideStartZone(const Vec3& p) const;
 		void SeedFlipState(int prefix, signed char* side, short* since) const;
+		void RefreshAim(const Explorer::FlatGenome& g);
+
+		std::vector<int> aim_;      // knot indices worth targeting (unique)
 
 		const World& w_;
 		OptimizeConfig cfg_;

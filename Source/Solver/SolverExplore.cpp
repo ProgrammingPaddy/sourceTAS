@@ -366,6 +366,11 @@ namespace Solver {
 		int seeded = 0;
 		std::vector<Knot> none;
 		for (int t = 0; t < static_cast<int>(tape.frames.size()); ++t) {
+			// Restart points at/past the tick cap are dead on arrival (every
+			// rollout from them aborts immediately) - matters when tighten
+			// rounds seed the incumbent tape with the cap just below it.
+			if (t + 1 >= cfg_.max_path_ticks)
+				break;
 			const TapeFrame& f = tape.frames[t];
 			TickEvents ev;
 			MoveTick(s, w_, cfg_.params, f.pitch, f.yaw, f.fmove, f.smove,

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <utility>
 
 namespace Solver {
 
@@ -46,14 +47,36 @@ namespace Solver {
 		*since = static_cast<short>(since_flip);
 	}
 
+	namespace {
+		// Fixed-size "top energy drops" accumulator (threshold-free: the
+		// route's own worst ticks define what gets aimed at).
+		void NoteLoss(std::vector<std::pair<float, int>>& top, float drop,
+		              int knot) {
+			if (top.size() < 8) {
+				top.emplace_back(drop, knot);
+				return;
+			}
+			size_t mi = 0;
+			for (size_t i = 1; i < top.size(); ++i)
+				if (top[i].first < top[mi].first)
+					mi = i;
+			if (drop > top[mi].first)
+				top[mi] = std::make_pair(drop, knot);
+		}
+	}
+
 	Optimizer::Eval Optimizer::Run(const Explorer::FlatGenome& g, int abort_at,
 	                               std::vector<TapeFrame>* emit,
-	                               long long* ticks) {
+	                               long long* ticks,
+	                               std::vector<std::pair<float, int>>* loss_top) {
 		Eval res;
 		PlayerState s = root_;
 		float yaw = root_yaw_;
 		int tick = 0;
 		int zone_jumps = 0;
+		float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
+		if (loss_top)
+			loss_top->clear();
 		if (emit)
 			emit->clear();
 
@@ -96,6 +119,13 @@ namespace Solver {
 				if (ticks) (*ticks)++;
 				if (emit)
 					emit->push_back(f);
+				if (loss_top) {
+					const float e_now = 0.5f * Len2(s.vel)
+						+ cfg_.params.gravity * s.pos.Z;
+					if (e_now < e_prev)
+						NoteLoss(*loss_top, e_prev - e_now, -1);
+					e_prev = e_now;
+				}
 				yaw = f.yaw;
 				const int c = check(ev);
 				if (c != 0 || tick >= abort_at) {
@@ -107,7 +137,8 @@ namespace Solver {
 		}
 
 		// Knots.
-		for (const Knot& k : g.knots) {
+		for (size_t ki = 0; ki < g.knots.size(); ++ki) {
+			const Knot& k = g.knots[ki];
 			for (int t = 0; t < k.dur; ++t) {
 				TickEvents ev;
 				TapeFrame f;
@@ -117,6 +148,14 @@ namespace Solver {
 				if (ticks) (*ticks)++;
 				if (emit)
 					emit->push_back(f);
+				if (loss_top) {
+					const float e_now = 0.5f * Len2(s.vel)
+						+ cfg_.params.gravity * s.pos.Z;
+					if (e_now < e_prev)
+						NoteLoss(*loss_top, e_prev - e_now,
+							static_cast<int>(ki));
+					e_prev = e_now;
+				}
 				const int c = check(ev);
 				if (c == 1) {
 					res.finished = true;
@@ -145,6 +184,33 @@ namespace Solver {
 		return true;
 	}
 
+	// Instrumented pass over the current best: which knots were active at the
+	// route's worst one-tick energy drops. Those (and their approach knots)
+	// become mutation targets - the measured "the waste is at board entries"
+	// theme turned into aim, not fitness.
+	void Optimizer::RefreshAim(const Explorer::FlatGenome& g) {
+		aim_.clear();
+		if (!cfg_.aim_contacts)
+			return;
+		std::vector<std::pair<float, int>> top;
+		long long dummy = 0;
+		Run(g, cfg_.max_path_ticks, nullptr, &dummy, &top);
+		for (const auto& lk : top) {
+			const int k = lk.second;
+			if (k < 0)
+				continue;   // seed-prefix tick: erosion reaches it, aim can't
+			for (int t = k - 1; t <= k; ++t) {
+				if (t < 0)
+					continue;
+				bool have = false;
+				for (int a : aim_)
+					if (a == t) { have = true; break; }
+				if (!have)
+					aim_.push_back(t);
+			}
+		}
+	}
+
 	OptimizeResult Optimizer::Improve(Explorer::FlatGenome& g) {
 		OptimizeResult res;
 		const auto t0 = std::chrono::steady_clock::now();
@@ -163,25 +229,68 @@ namespace Solver {
 		res.ok = true;
 		res.initial_tick = e0.tick;
 		int best_tick = e0.tick;
+		RefreshAim(g);
+
+		// Half of the knot-picking mutations aim at the measured loss knots
+		// (when aiming is on and targets exist); the rest stay uniform so
+		// nothing is ever unreachable.
+		auto pick_knot = [&](int nk) -> int {
+			if (!aim_.empty() && static_cast<int>(rng() % 100) < 50) {
+				const int i = aim_[rng() % aim_.size()];
+				if (i < nk)
+					return i;
+			}
+			return static_cast<int>(rng() % nk);
+		};
 
 		while (elapsed() < cfg_.budget_seconds) {
 			Explorer::FlatGenome cand = g;
 			const int op = static_cast<int>(rng() % 100);
 			const int nk = static_cast<int>(cand.knots.size());
-			if (op < 35 && nk > 0) {
+			if (op < 27 && nk > 0) {
 				// Trim a knot (a knot shrinking to nothing is deleted; flip
 				// legality is judged afterward like every mutation).
-				const int i = static_cast<int>(rng() % nk);
+				const int i = pick_knot(nk);
 				cand.knots[i].dur = static_cast<short>(cand.knots[i].dur
 					- (1 + static_cast<int>(rng() % 8)));
 				if (cand.knots[i].dur < 1)
 					cand.knots.erase(cand.knots.begin() + i);
+			} else if (op < 35 && nk > 1) {
+				// Boundary shift: move 1-2 ticks between adjacent knots - a
+				// pure TIMING adjustment (total length preserved, downstream
+				// knots unmoved). This is the tangent-boarding micro-move the
+				// themes data named: the entry angle is set by when the
+				// approach knot hands over, and trim/grow can only express
+				// that by displacing the whole rest of the route.
+				int i = pick_knot(nk);
+				if (i < 1)
+					i = 1;
+				const int d = 1 + static_cast<int>(rng() % 2);
+				Knot& ka = cand.knots[i - 1];
+				Knot& kb = cand.knots[i];
+				if (rng() & 1) {
+					if (ka.dur <= d)
+						continue;
+					ka.dur = static_cast<short>(ka.dur - d);
+					kb.dur = static_cast<short>(kb.dur + d);
+				} else {
+					if (kb.dur <= d)
+						continue;
+					kb.dur = static_cast<short>(kb.dur - d);
+					ka.dur = static_cast<short>(ka.dur + d);
+				}
 			} else if (op < 50 && nk > 1) {
-				cand.knots.erase(cand.knots.begin()
-					+ static_cast<int>(rng() % nk));
+				cand.knots.erase(cand.knots.begin() + pick_knot(nk));
 			} else if (op < 72) {
 				// Resample the suffix with the explorer's own distribution.
-				const int i = static_cast<int>(rng() % (nk + 1));
+				// Aimed: resample FROM a loss knot - re-roll the approach and
+				// everything after it.
+				int i = static_cast<int>(rng() % (nk + 1));
+				if (!aim_.empty() && static_cast<int>(rng() % 100) < 50) {
+					const int a = aim_[rng() % aim_.size()];
+					if (a <= nk)
+						i = a;
+				}
 				signed char ls = cand.base_side;
 				short sf = cand.base_since_flip;
 				for (int j = 0; j < i; ++j) {
@@ -207,7 +316,7 @@ namespace Solver {
 				}
 			} else if (op < 85 && nk > 0) {
 				// Parameter jitter.
-				Knot& k = cand.knots[static_cast<int>(rng() % nk)];
+				Knot& k = cand.knots[pick_knot(nk)];
 				switch (rng() % 4) {
 				case 0:
 					k.ground_turn += (static_cast<int>(rng() % 200) - 100)
@@ -223,7 +332,7 @@ namespace Solver {
 					break;
 				}
 			} else if (op < 93 && nk > 0) {
-				Knot& k = cand.knots[static_cast<int>(rng() % nk)];
+				Knot& k = cand.knots[pick_knot(nk)];
 				k.dur = static_cast<short>(k.dur + 1
 					+ static_cast<int>(rng() % 6));
 			} else if (cand.seed_prefix > 0) {
@@ -250,6 +359,7 @@ namespace Solver {
 				g = cand;
 				best_tick = e.tick;
 				res.improvements++;
+				RefreshAim(g);   // knot indices shift after every accept
 			}
 		}
 		res.best_tick = best_tick;

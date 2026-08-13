@@ -45,7 +45,8 @@ namespace {
 		printf("          first-divergence report vs the Map Solve tab's export\n");
 		printf("  solve   <map.bsp> --end-brush N [--seed-tas run.tas] [--budget-s S]\n");
 		printf("          [--flips F] [--rng N] [--out path.tas] [--cell U]\n");
-		printf("          [--rollouts N] [--max-ticks N] [--threads N] [physics options]\n");
+		printf("          [--rollouts N] [--max-ticks N] [--threads N] [--tighten N]\n");
+		printf("          [--aim] [physics options]\n");
 		printf("          archive route search; best route written as a playable .tas\n");
 		printf("  bench   <map.bsp> [ticks]\n");
 		printf("All commands auto-load Documents\\sourceTAS\\solver\\server_params.cfg\n");
@@ -103,8 +104,11 @@ namespace {
 		float cell = 64.f;
 		int max_ticks = 4000;
 		int threads = 0;            // explorer/optimizer workers; 0 = auto
+		int tighten = 0;            // capped re-explore rounds off the incumbent
 		bool goal_touch = false;
 		bool eloss_bias = true;
+		bool aim = false;           // contact-anchored targeting (measured
+		                            // neutral on segments; --aim to enable)
 		bool edge_bevels = true;    // false = pre-fix clip set (control arm)
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
 	};
@@ -184,6 +188,9 @@ namespace {
 			else if (a == "--no-eloss-bias") o.eloss_bias = false;
 			else if (a == "--no-edge-bevels") o.edge_bevels = false;
 			else if (a == "--legacy-corner") o.corner_true = false;
+			else if (a == "--aim") o.aim = true;
+			else if (a == "--no-aim") o.aim = false;
+			else if (a == "--tighten") ok = next_i(&o.tighten);
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
 		}
@@ -506,6 +513,111 @@ namespace {
 		return 0;
 	}
 
+	// Phase 2 stage shared by the primary solve and every tighten round:
+	// optimize up to `nthreads` distinct-tick finishers in parallel (full
+	// budget each), then build frames for the winner. Falls back to the
+	// explorer's best route when optimization is off or produced nothing.
+	// False only when no frames could be built at all.
+	bool BuildBestFrames(const World& w, const ExploreConfig& cfg,
+	                     const ReplayOpts& o, Explorer& ex,
+	                     const ExploreResult& res, int nthreads,
+	                     const Tape* seed_tape, std::vector<TapeFrame>& frames,
+	                     int* ftick) {
+		frames.clear();
+		*ftick = 0;
+		if (o.optimize_s > 0.5) {
+			OptimizeConfig ocfg;
+			ocfg.params = cfg.params;
+			ocfg.start_brush_idx = w.IndexOfBrushId(cfg.start_brush_id);
+			ocfg.end_brush_id = cfg.end_brush_id;
+			ocfg.end_brush_idx = w.IndexOfBrushId(cfg.end_brush_id);
+			ocfg.max_zone_jumps = cfg.max_zone_jumps;
+			ocfg.min_knot = static_cast<int>(1.f
+				/ (cfg.params.dt * cfg.flips_per_sec)) + 1;
+			ocfg.max_path_ticks = cfg.max_path_ticks;
+			ocfg.goal_touch = o.goal_touch;
+			ocfg.aim_contacts = o.aim;
+			PlayerState root;
+			float root_yaw = 0.f;
+			ex.RootState(&root, &root_yaw);
+
+			// Distinct-tick subjects, one hill-climb THREAD each, every one
+			// with the full budget (they run concurrently - the wall time is
+			// o.optimize_s either way, so parallelism buys subject breadth
+			// instead of splitting one budget three ways).
+			std::vector<int> subjects;
+			for (const Finisher& f : res.finishers) {
+				bool dup = false;
+				for (int si : subjects)
+					if (res.finishers[si].tick == f.tick)
+						{ dup = true; break; }
+				if (!dup)
+					subjects.push_back(
+						static_cast<int>(&f - res.finishers.data()));
+				if (static_cast<int>(subjects.size()) >= nthreads)
+					break;
+			}
+			std::vector<Explorer::FlatGenome> gs(subjects.size());
+			std::vector<OptimizeResult> ors(subjects.size());
+			std::vector<char> valid(subjects.size(), 0);
+			for (size_t si = 0; si < subjects.size(); ++si)
+				valid[si] = ex.ExtractGenome(
+					res.finishers[subjects[si]].entry, gs[si]) ? 1 : 0;
+			printf("solve: OPTIMIZING %d subject(s) in parallel, %.0fs each%s:\n",
+				static_cast<int>(subjects.size()), o.optimize_s,
+				o.aim ? ", contact-anchored aim" : ", uniform aim (control)");
+			fflush(stdout);
+			ocfg.budget_seconds = o.optimize_s;
+			{
+				std::vector<std::thread> othreads;
+				for (size_t si = 0; si < subjects.size(); ++si) {
+					if (!valid[si])
+						continue;
+					OptimizeConfig scfg = ocfg;
+					scfg.rng_seed = cfg.rng_seed + static_cast<unsigned>(si) + 1;
+					othreads.emplace_back([&, si, scfg]() {
+						Optimizer opt2(w, scfg, root, root_yaw, seed_tape);
+						ors[si] = opt2.Improve(gs[si]);
+					});
+				}
+				for (auto& th : othreads)
+					th.join();
+			}
+			Explorer::FlatGenome best_g;
+			int best_tick = -1;
+			for (size_t si = 0; si < subjects.size(); ++si) {
+				if (!valid[si])
+					continue;
+				const OptimizeResult& orr = ors[si];
+				printf("  subject #%d: %d -> %d ticks (%d improvements, "
+					"%lld evals, %.1fM ticks/s)\n",
+					static_cast<int>(si) + 1, orr.initial_tick, orr.best_tick,
+					orr.improvements, orr.evals,
+					orr.ticks_simulated / (orr.seconds > 0 ? orr.seconds : 1)
+						/ 1e6);
+				if (orr.ok && (best_tick < 0 || orr.best_tick < best_tick)) {
+					best_tick = orr.best_tick;
+					best_g = gs[si];
+				}
+			}
+			fflush(stdout);
+			if (best_tick > 0) {
+				Optimizer optb(w, ocfg, root, root_yaw, seed_tape);
+				if (optb.BuildFrames(best_g, frames, ftick)) {
+					printf("solve: OPTIMIZED best %d ticks (%.3f s) vs "
+						"explorer best %d\n", *ftick, *ftick * cfg.params.dt,
+						res.finishers[0].tick);
+					return true;
+				}
+			}
+		}
+		if (!ex.BuildFrames(res.finishers[0].entry, frames, ftick)) {
+			printf("solve: BuildFrames FAILED for the best route - not writing\n");
+			return false;
+		}
+		return true;
+	}
+
 	// Phase 1: archive-explorer route search. Finds legal start-to-finish
 	// routes and writes the best as a .tas the game plays like any recording.
 	int CmdSolve(const std::string& map_path, const ReplayOpts& o) {
@@ -649,97 +761,51 @@ namespace {
 		// strict improvements only, every eval through the proven core).
 		std::vector<TapeFrame> frames;
 		int ftick = 0;
-		bool have_optimized = false;
-		if (o.optimize_s > 0.5) {
-			OptimizeConfig ocfg;
-			ocfg.params = cfg.params;
-			ocfg.start_brush_idx = w.IndexOfBrushId(cfg.start_brush_id);
-			ocfg.end_brush_id = cfg.end_brush_id;
-			ocfg.end_brush_idx = w.IndexOfBrushId(cfg.end_brush_id);
-			ocfg.max_zone_jumps = cfg.max_zone_jumps;
-			ocfg.min_knot = static_cast<int>(1.f
-				/ (cfg.params.dt * cfg.flips_per_sec)) + 1;
-			ocfg.max_path_ticks = cfg.max_path_ticks;
-			ocfg.goal_touch = o.goal_touch;
-			PlayerState root;
-			float root_yaw = 0.f;
-			ex.RootState(&root, &root_yaw);
-
-			// Distinct-tick subjects, one hill-climb THREAD each, every one
-			// with the full budget (they run concurrently - the wall time is
-			// o.optimize_s either way, so parallelism buys subject breadth
-			// instead of splitting one budget three ways).
-			std::vector<int> subjects;
-			for (const Finisher& f : res.finishers) {
-				bool dup = false;
-				for (int si : subjects)
-					if (res.finishers[si].tick == f.tick)
-						{ dup = true; break; }
-				if (!dup)
-					subjects.push_back(
-						static_cast<int>(&f - res.finishers.data()));
-				if (static_cast<int>(subjects.size()) >= nthreads)
-					break;
-			}
-			std::vector<Explorer::FlatGenome> gs(subjects.size());
-			std::vector<OptimizeResult> ors(subjects.size());
-			std::vector<char> valid(subjects.size(), 0);
-			for (size_t si = 0; si < subjects.size(); ++si)
-				valid[si] = ex.ExtractGenome(
-					res.finishers[subjects[si]].entry, gs[si]) ? 1 : 0;
-			printf("solve: OPTIMIZING %d subject(s) in parallel, %.0fs each:\n",
-				static_cast<int>(subjects.size()), o.optimize_s);
-			fflush(stdout);
-			ocfg.budget_seconds = o.optimize_s;
-			{
-				std::vector<std::thread> othreads;
-				for (size_t si = 0; si < subjects.size(); ++si) {
-					if (!valid[si])
-						continue;
-					OptimizeConfig scfg = ocfg;
-					scfg.rng_seed = o.rng + static_cast<unsigned>(si) + 1;
-					othreads.emplace_back([&, si, scfg]() {
-						Optimizer opt2(w, scfg, root, root_yaw,
-							have_seed ? &seed : nullptr);
-						ors[si] = opt2.Improve(gs[si]);
-					});
-				}
-				for (auto& th : othreads)
-					th.join();
-			}
-			Explorer::FlatGenome best_g;
-			int best_tick = -1;
-			for (size_t si = 0; si < subjects.size(); ++si) {
-				if (!valid[si])
-					continue;
-				const OptimizeResult& orr = ors[si];
-				printf("  subject #%d: %d -> %d ticks (%d improvements, "
-					"%lld evals, %.1fM ticks/s)\n",
-					static_cast<int>(si) + 1, orr.initial_tick, orr.best_tick,
-					orr.improvements, orr.evals,
-					orr.ticks_simulated / (orr.seconds > 0 ? orr.seconds : 1)
-						/ 1e6);
-				if (orr.ok && (best_tick < 0 || orr.best_tick < best_tick)) {
-					best_tick = orr.best_tick;
-					best_g = gs[si];
-				}
-			}
-			fflush(stdout);
-			if (best_tick > 0) {
-				Optimizer optb(w, ocfg, root, root_yaw,
-					have_seed ? &seed : nullptr);
-				if (optb.BuildFrames(best_g, frames, &ftick)) {
-					have_optimized = true;
-					printf("solve: OPTIMIZED best %d ticks (%.3f s) vs "
-						"explorer best %d\n", ftick, ftick * cfg.params.dt,
-						res.finishers[0].tick);
-				}
-			}
-		}
-		if (!have_optimized
-			&& !ex.BuildFrames(res.finishers[0].entry, frames, &ftick)) {
-			printf("solve: BuildFrames FAILED for the best route - not writing\n");
+		if (!BuildBestFrames(w, cfg, o, ex, res, nthreads,
+			have_seed ? &seed : nullptr, frames, &ftick))
 			return 3;
+
+		// ---- Tighten rounds: re-explore with the tick cap just below the
+		// incumbent, SEEDED from the incumbent's own tape (restart points all
+		// along the best route - the search only has to find where to deviate,
+		// not rediscover the whole line). Every finish in a capped round is a
+		// strict improvement by construction.
+		for (int round = 1; round <= o.tighten; ++round) {
+			ExploreConfig tcfg = cfg;
+			tcfg.max_path_ticks = ftick - 1;
+			tcfg.rng_seed = o.rng + 7777u * static_cast<unsigned>(round);
+			printf("--- tighten round %d/%d: cap %d ticks, rng %u ---\n",
+				round, o.tighten, tcfg.max_path_ticks, tcfg.rng_seed);
+			fflush(stdout);
+			Explorer ex2(w, tcfg);
+			ex2.SetAnchor(anchor);
+			Tape inc;
+			inc.start = anchor;
+			inc.start.valid = true;
+			inc.frames = frames;
+			const int sn = ex2.SeedFromTape(inc);
+			printf("tighten: seeded %d restart points from the %d-tick "
+				"incumbent\n", sn, ftick);
+			fflush(stdout);
+			ExploreResult r2 = ex2.Run();
+			printf("tighten: %lld rollouts, %d finishes%s\n", r2.rollouts,
+				static_cast<int>(r2.finishers.size()),
+				r2.finishers.empty()
+					? " - no sub-incumbent route this round" : "");
+			fflush(stdout);
+			if (r2.finishers.empty())
+				continue;
+			std::vector<TapeFrame> f2;
+			int t2 = 0;
+			if (!BuildBestFrames(w, tcfg, o, ex2, r2, nthreads, &inc, f2, &t2))
+				continue;
+			if (t2 < ftick) {
+				printf("tighten: IMPROVED %d -> %d ticks (%.3f s)\n",
+					ftick, t2, t2 * cfg.params.dt);
+				frames = f2;
+				ftick = t2;
+			}
+			fflush(stdout);
 		}
 		std::string out_path = o.out_tas;
 		if (out_path.empty()) {

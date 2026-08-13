@@ -824,6 +824,9 @@ ducked ramp-11 spine ride, no flag flips; dv direction (0.59, 0.33, 0.73) matche
 single face — partial-fraction resolution differences). Needs its own micro-study;
 40× smaller than the fixed bug but 3.5u can still flip a knife-edge ending.
 
+**IN-GAME SIGN-OFF (2026-08-13, user):** `surf_basictest_solved4.tas` (1120) FINISHES
+in-game — the first reality-validated unseeded solve on the corrected corner physics.
+
 **Corrected-physics re-solve (rng 1337, 150 s + 60 s optimize):** 2,710 finishes,
 explorer best 1136; the parallel optimize stage earned its keep — all 8 subjects
 improved, best 1136 → **1120 ticks** (16.8 s). Shipped `surf_basictest_solved4.tas`
@@ -851,11 +854,61 @@ but note the real micro-tech: a faster, flatter ballistic ending can use the
 duck's leg-lift (+8.5u) to land EARLIER. The optimizer dropping the crouch on the
 seeded run was consistent with (4).
 
+### Phase 2 v3a — CONTACT AIM (measured neutral), BOUNDARY-SHIFT OP, TIGHTEN LOOP (2026-08-13)
+
+Built after the solved4 in-game sign-off, per the user's "keep moving forward."
+
+**Contact-anchored aiming: built, A/B'd, measured NEUTRAL → default OFF (`--aim`).**
+Instrumented eval records the knot indices at the route's top-8 one-tick energy
+drops; half the knot-picking mutations then target those knots (or the approach knot
+before). Segment-lab A/B on DETERMINISTIC subjects (--threads 1 + fixed --rollouts →
+both arms optimize the identical genome): touch-9 rng{1,2,3} aim 207/264/219 vs
+uniform 205/264/209; touch-11 rng{1,2} exact ties (308/308, 297/297). Verdict: at
+~1M evals/subject the acceptance bottleneck is NOT proposal targeting; aiming
+redistributes proposals without earning ticks. Apparatus kept behind `--aim` (full-map
+genomes are 5× longer — 8 loss events are far more selective there; untested).
+Honest caveat: touch-goal segments also pollute the aim set (the goal contact IS the
+biggest loss).
+
+**Boundary-shift operator (kept, op slice 27-35 from trim's 35):** moves 1-2 ticks
+between ADJACENT knots — total length preserved, downstream knots unmoved. This is
+the only operator that can express "hand over from approach to board knot slightly
+earlier/later" without displacing the rest of the route — the tangent-boarding
+micro-move (user: tangent boarding is the ~95% rule and a primary efficiency
+driver). Segment check vs pre-shift reference: 207/264/210 + 307/297 vs 205/264/209 +
+308/297 — neutral (±2, stream noise). Segments are a SATURATION regime for the
+optimizer (tiny genomes, ~1M evals) — they prove non-harm, not benefit; full-map
+rounds are the real test.
+
+**Tighten loop (`--tighten N`), incumbent-SEEDED:** after the primary
+explore+optimize, each round re-explores with max_path_ticks = incumbent−1 and seeds
+the archive from the incumbent's own frames (in-memory tape, same anchor) — restart
+points all along the best route, so the search only finds where to DEVIATE, not the
+whole line. SeedFromTape now stops at the cap (restart points at/past it are dead on
+arrival). Any finish in a capped round is a strict improvement by construction. The
+optimize stage was refactored into BuildBestFrames (shared by primary + rounds; each
+round's subjects get round-shifted rng).
+
+**Tighten VALIDATED — record cut 1120 → 965 (−14%).** Run: primary seeded from
+solved4 (60 s explore: 631,555 finishes — the seeded line re-walked en masse — but
+8 optimize subjects ALL stuck at 1120: mutation alone cannot break the structure) →
+round 1 (cap 1119, seeded from the incumbent): ONE finish among 35.6M rollouts, a
+969-tick deviation, optimizer → **965** → round 2 (cap 964): dry in 60 s, cleanly
+bounding this seed's progress. Contrast with the COLD capped probe (603 cap, 150 s,
+zero finishes ever): incumbent seeding is what makes capped rounds land. Shipped
+`surf_basictest_solved5.tas` (965, replay-verified: grounded on red @ 379.8 u/s,
+0 startzone jumps, finish y +76 — a genuinely different landing spot than the
+incumbent's y −700, not a shaved copy). Note the primary's dry variance at 90 s
+budgets (the same rng that finished at 150 s found nothing in one 90 s run —
+first-finish time on this map sits near 30-90 s wall, budget accordingly).
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
   halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
 - 544+ capture tail on the 604 route (ducked spine-ride resolution, ≤3.5u) — the
   next capture-precision target.
+- Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
+  shared cells) — next structural operator after v3a.
 - Phase 2 v3 operators (themes-motivated): contact-anchored mutation (target board-
   entry knots), archive-splice, tighten-loop automation ({explore capped at best−1 →
   optimize} rounds — machinery proven, single capped round on rng 1337 found nothing).
