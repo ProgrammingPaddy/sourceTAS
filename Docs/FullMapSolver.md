@@ -902,6 +902,46 @@ incumbent's y −700, not a shaved copy). Note the primary's dry variance at 90 
 budgets (the same rng that finished at 150 s found nothing in one 90 s run —
 first-finish time on this map sits near 30-90 s wall, budget accordingly).
 
+### START-ENERGY + CLEAN-APPROACH EXPERIMENTS (2026-08-13, user-directed)
+
+User theories to test: (1) a startzone jump to ramp 1 "almost certainly helps"
+(free prestrafe+jump energy the walk-off starts leave behind); (2) the endgame
+energy deficit comes from board losses + the missing start energy; (3) requested
+test: "get to the next ramp cleanly while wasting the least energy." New lab
+features: **cleanest-routes table** (finishers re-ranked by eloss, printed beside
+the fastest table), **`--out-eloss`** (write the min-dissipation finisher tape),
+**`--seed-ticks N`** (seed only a tape's first N ticks — hand the archive an
+OPENING without the rest of the line).
+
+**Exp 1 — fastest vs cleanest to ramp-1 touch (30 s, rng 1):** fastest = 100 ticks,
+39.0° entry, 695→563 u/s, **89.6k lost**; cleanest = 130 ticks, ~tangent graze,
+428 u/s retained, **1.1k lost** (30-tick premium buys back ~90k). BOTH openings
+prestrafe + startzone-jump (fast: jump t24 @301; clean: jump t32 @311, airstrafes
+to 375 pre-exit at 4.6° off max-gain vs the slammer's 11.2°) — at segment horizons
+the solver finds and uses the zone jump on its own. Caveat measured in the data:
+for the segment METRIC the slam still wins (563 u/s, 30t earlier) — its true cost
+is downstream direction/energy, which touch-goal ticks cannot price. Segment
+fitness alone would overfit to slams; dissipation-at-progress is what sees it.
+
+**Exp 2 — opening-only seed (--seed-ticks 120 of basictest.tas: prestrafe, jump,
+zone exit, NOTHING after; 150 s + 45 s + tighten 1): RECORD 965 → 630 (−35%).**
+Primary produced 1800-tick meanders; the tighten round (cap 1800, incumbent
+carries the human opening) exploded — 1,030 finishes, optimized 630. Shipped
+`surf_basictest_solved6.tas` (replay-verified: grounded on red @ 423.6 u/s).
+**The twist: seed erosion DELETED the human's jump.** The winner prestrafes 87
+ticks to 316 u/s (human: 70t/282) and WALKS OFF — dropping onto ramp 1's face sets
+up a pump the jump-arc start doesn't get: board @480 → leave @814; ramp 2 GAINS on
+the board (829→893); ramp 3 converts to height. Total start energy favors the jump
+(282²/2+302²/2 > 316²/2); arrival GEOMETRY beat raw energy — the user's "general
+rule with exceptions" caught in the act, and the right verdict process (both
+openings competed in one archive; ticks decided). Start + ramps 1-3 are now
+clean; the ENTIRE remaining gap to the human 432 is the ramp-4 endgame (~260
+ticks of pocket-dancing, two jumps). Honest flags: the 630 ends with a SPINE-TOP
+jump onto red (grounds on ramp-4 spine t579, jumps @408) — the user-disliked
+pattern is back in the record holder and eloss pricing did not kill it; the zone
+jump stays unused. Spine-discouragement mechanism question is now LIVE (bias vs
+operator), and endgame structure is the next target.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
   halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
@@ -909,6 +949,8 @@ first-finish time on this map sits near 30-90 s wall, budget accordingly).
   next capture-precision target.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
+- Ramp-4 endgame structure (the whole remaining human gap); spine-jump
+  discouragement mechanism (bias vs operator — user wants them discouraged).
 - Phase 2 v3 operators (themes-motivated): contact-anchored mutation (target board-
   entry knots), archive-splice, tighten-loop automation ({explore capped at best−1 →
   optimize} rounds — machinery proven, single capped round on rng 1337 found nothing).

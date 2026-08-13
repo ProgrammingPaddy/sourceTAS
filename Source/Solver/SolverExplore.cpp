@@ -371,6 +371,8 @@ namespace Solver {
 			// rounds seed the incumbent tape with the cap just below it.
 			if (t + 1 >= cfg_.max_path_ticks)
 				break;
+			if (cfg_.seed_limit_ticks > 0 && t >= cfg_.seed_limit_ticks)
+				break;
 			const TapeFrame& f = tape.frames[t];
 			TickEvents ev;
 			MoveTick(s, w_, cfg_.params, f.pitch, f.yaw, f.fmove, f.smove,

@@ -60,6 +60,10 @@ namespace Solver {
 		float cell_size = 64.f;      // position quantum
 		float speed_bucket = 100.f;  // 2D-speed quantum
 		int threads = 0;             // worker count; 0 = auto
+		// Seed only the first N tape ticks (0 = all). Lets an experiment hand
+		// the archive JUST a route's opening (e.g. the human prestrafe+jump)
+		// without the rest of the line.
+		int seed_limit_ticks = 0;
 		// GOAL: false = grounded ON the end platform (full-map contract);
 		// true = any contact with the end brush (segment experiments -
 		// "fastest to ramp N" as a theory test lab).

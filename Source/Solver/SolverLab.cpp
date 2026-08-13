@@ -96,6 +96,8 @@ namespace {
 		std::string anchor_file;
 		std::string anchor_tas;
 		std::string out_tas;
+		std::string out_eloss;      // also write the min-dissipation finisher
+		int seed_ticks = 0;         // seed only the first N tape ticks (0=all)
 		double budget_s = 30.0;
 		double optimize_s = 60.0;   // Phase 2 budget after exploration (0 = off)
 		long long rollouts = 0;
@@ -166,6 +168,8 @@ namespace {
 			else if (a == "--stopspeed") ok = next_f(&o.params.stopspeed);
 			else if (a == "--no-jump-fg") o.params.jump_finishgravity = false;
 			else if (a == "--seed-tas") { if (i + 1 < argc) o.seed_tas = argv[++i]; else ok = false; }
+			else if (a == "--seed-ticks") ok = next_i(&o.seed_ticks);
+			else if (a == "--out-eloss") { if (i + 1 < argc) o.out_eloss = argv[++i]; else ok = false; }
 			else if (a == "--anchor") { if (i + 1 < argc) o.anchor_file = argv[++i]; else ok = false; }
 			else if (a == "--anchor-tas") { if (i + 1 < argc) o.anchor_tas = argv[++i]; else ok = false; }
 			else if (a == "--out") { if (i + 1 < argc) o.out_tas = argv[++i]; else ok = false; }
@@ -700,6 +704,7 @@ namespace {
 		cfg.cell_size = o.cell;
 		cfg.max_path_ticks = o.max_ticks;
 		cfg.threads = o.threads;
+		cfg.seed_limit_ticks = o.seed_ticks;
 		cfg.goal_touch = o.goal_touch;
 		cfg.eloss_bias = o.eloss_bias;
 		const int nthreads = ResolveThreadCount(o.threads);
@@ -756,6 +761,45 @@ namespace {
 		if (ex.SeedFinishTick() >= 0)
 			printf("  incumbent (seed tape): %d ticks (%.3f s)\n",
 				ex.SeedFinishTick(), ex.SeedFinishTick() * cfg.params.dt);
+
+		// Cleanest routes - the finisher list re-ranked by cumulative
+		// dissipation (the segment lab's "get there while wasting the least
+		// energy" view; user theory: energy + smooth boards are the primary
+		// drivers). Report only - fitness stays ticks.
+		{
+			std::vector<int> order(res.finishers.size());
+			for (size_t i = 0; i < order.size(); ++i)
+				order[i] = static_cast<int>(i);
+			std::sort(order.begin(), order.end(), [&](int a, int b) {
+				return res.finishers[a].eloss < res.finishers[b].eloss; });
+			const int showe = order.size() < 5
+				? static_cast<int>(order.size()) : 5;
+			printf("solve: cleanest routes (lowest dissipation):\n");
+			for (int i = 0; i < showe; ++i) {
+				const Finisher& f = res.finishers[order[i]];
+				printf("  e%d  %d ticks (%.3f s)  spd %.1f  eloss %.1fk  "
+					"finish (%.0f, %.0f, z %.2f)\n", i + 1, f.tick,
+					f.tick * cfg.params.dt, f.speed, f.eloss / 1000.f,
+					f.pos.X, f.pos.Y, f.pos.Z);
+			}
+			if (!o.out_eloss.empty() && !order.empty()) {
+				std::vector<TapeFrame> ef;
+				int et = 0;
+				if (ex.BuildFrames(res.finishers[order[0]].entry, ef, &et)) {
+					std::string stem_e = map_path;
+					const size_t sl = stem_e.find_last_of("\\/");
+					if (sl != std::string::npos) stem_e = stem_e.substr(sl + 1);
+					const size_t dot = stem_e.find_last_of('.');
+					if (dot != std::string::npos) stem_e = stem_e.substr(0, dot);
+					if (WriteTas(o.out_eloss, anchor, stem_e, ef, &err))
+						printf("solve: cleanest route (%d ticks, %.1fk eloss) "
+							"written -> %s\n", et,
+							res.finishers[order[0]].eloss / 1000.f,
+							o.out_eloss.c_str());
+				}
+			}
+			fflush(stdout);
+		}
 
 		// ---- Phase 2: optimize the best finishers (fitness = finish tick,
 		// strict improvements only, every eval through the proven core).
