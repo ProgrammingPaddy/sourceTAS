@@ -824,6 +824,18 @@ ducked ramp-11 spine ride, no flag flips; dv direction (0.59, 0.33, 0.73) matche
 single face — partial-fraction resolution differences). Needs its own micro-study;
 40× smaller than the fixed bug but 3.5u can still flip a knife-edge ending.
 
+**Corrected-physics re-solve (rng 1337, 150 s + 60 s optimize):** 2,710 finishes,
+explorer best 1136; the parallel optimize stage earned its keep — all 8 subjects
+improved, best 1136 → **1120 ticks** (16.8 s). Shipped `surf_basictest_solved4.tas`
+(replay-verified: grounded on brush 10 @ 452.9 u/s, ZERO startzone jumps, max speed
+750). The 604 exploit class is gone; this route is honest meander-class — long
+low-speed middle around ramp 11, one spine ground+jump (t1070, 402 u/s) launching to
+red. The unseeded gap vs human-class (430) is now legitimately SEARCH quality, which
+is what the v3 operators (tangent-boarding prior, contact-anchored mutation,
+archive-splice) are for. Energy note: with corrected physics the finisher cohort
+re-aligned with the user's intuition even at this horizon — 1136t @ 444k dissipated
+vs 1139t @ 511k (faster = lower loss within-cohort this time).
+
 **User surf calibration recorded this round:** (1) energy: at the current
 poor-quality horizon dissipation won't correlate with best tick among solver runs,
 but vs human/seeded runs lower needless loss still tracks quality; expect the
