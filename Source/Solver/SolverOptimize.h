@@ -57,6 +57,7 @@ namespace Solver {
 
 	struct OptimizeResult {
 		bool ok = false;            // the input genome evaluated to a finish
+		bool clean = false;         // final best's ending class (no jump launch)
 		int initial_tick = 0;
 		int best_tick = 0;
 		long long evals = 0;
@@ -84,6 +85,8 @@ namespace Solver {
 	private:
 		struct Eval {
 			bool finished = false;
+			bool clean = true;  // final launch was NOT a jump (user rule:
+			                    // jump-launched landings are not solutions)
 			int tick = 0;       // absolute ticks from the anchor
 			int rel = 0;        // scored ticks (since zone exit)
 		};

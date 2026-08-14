@@ -74,6 +74,7 @@ namespace Solver {
 		float yaw = root_yaw_;
 		int tick = 0;
 		int zone_jumps = 0;
+		bool launch_jump = false;
 		// Zone clock: -1 while inside the startzone; scored ticks = tick -
 		// exit. Anchors outside any zone start the clock immediately.
 		int exit_tick = InsideStartZone(s.pos) ? -1 : 0;
@@ -136,10 +137,17 @@ namespace Solver {
 				}
 				if (exit_tick < 0 && !InsideStartZone(s.pos))
 					exit_tick = tick;
+				if (ev.left_ground)
+					launch_jump = ev.jumped;
+				else if (!s.on_ground && ev.ncontacts > 0
+					&& w_.brushes[ev.contact_brush[0]].id
+						!= cfg_.end_brush_id)
+					launch_jump = false;   // non-finish face touch only
 				yaw = f.yaw;
 				const int c = check(ev);
 				if (c != 0 || scored() >= abort_at) {
 					res.finished = (c == 1);
+					res.clean = !launch_jump;
 					res.tick = tick;
 					res.rel = scored();
 					return res;
@@ -169,9 +177,16 @@ namespace Solver {
 				}
 				if (exit_tick < 0 && !InsideStartZone(s.pos))
 					exit_tick = tick;
+				if (ev.left_ground)
+					launch_jump = ev.jumped;
+				else if (!s.on_ground && ev.ncontacts > 0
+					&& w_.brushes[ev.contact_brush[0]].id
+						!= cfg_.end_brush_id)
+					launch_jump = false;   // non-finish face touch only
 				const int c = check(ev);
 				if (c == 1) {
 					res.finished = true;
+					res.clean = !launch_jump;
 					res.tick = tick;
 					res.rel = scored();
 					return res;
@@ -250,6 +265,10 @@ namespace Solver {
 		// Run reports rel == tick when the clock is off).
 		res.initial_tick = e0.rel;
 		int best_tick = e0.rel;
+		// Ending-class RATCHET (user rule): a clean subject may never accept
+		// a jump-launched ending; a tainted subject may become clean, and the
+		// bar rises permanently once it does.
+		bool best_clean = e0.clean;
 		RefreshAim(g);
 
 		// Half of the knot-picking mutations aim at the measured loss knots
@@ -376,14 +395,18 @@ namespace Solver {
 				continue;
 			const Eval e = Run(cand, best_tick, nullptr, &res.ticks_simulated);
 			res.evals++;
-			if (e.finished && e.rel < best_tick) {
+			if (e.finished && e.rel < best_tick
+				&& (e.clean || !best_clean)) {
 				g = cand;
 				best_tick = e.rel;
+				if (e.clean)
+					best_clean = true;
 				res.improvements++;
 				RefreshAim(g);   // knot indices shift after every accept
 			}
 		}
 		res.best_tick = best_tick;
+		res.clean = best_clean;
 		res.seconds = elapsed();
 		return res;
 	}

@@ -1275,15 +1275,60 @@ backup). Built entirely under current physics (duck fix in). Snaps 45 (max 67°)
 41 low-speed air ticks — normalcy steady at the record class.
 **Scored ladder: human 319 | 665 | 695* | 762** (*695 model-stale post-duck-fix).
 
+### FINISH-FLIGHT PROBE + CLEAN-ENDING RULE (2026-08-14, user breakthrough round)
+
+**User conditions:** anything over 500 scored = the same trash family; a jump off
+the last ramp's spine into the finish is UNACCEPTABLE (a user-defined acceptance
+criterion, not an internal blocker).
+
+**Built: the FINISH-FLIGHT PROBE** — near-goal contact states get a release
+check (coast/strafe-L/strafe-R at max-gain yaw, duck held, NO jump, ≤120 ticks):
+a landing IS a finisher, the flight appended as one knot in the existing genome
+language. Collapses the horizon from "reach red" to "reach any releasable
+state". Probe cadence tuned through two measured failure modes: accepts-only
+goes silent in mature archives (owned cells reject, no probes); every-contact-
+tick collapses throughput 50× (riding pays 360 sim-ticks/tick). Final: always at
+decision points (accepts, landings) + 1-in-16 on rejected riding ticks (~2.5×
+rollout cost).
+
+**Built: the ENDING CLASSIFIER + ratchets** — four definitional iterations, each
+forced by a counterexample tape:
+1. rollout-window "was the last left_ground a jump" → optimizer freely mutated a
+   clean 674 into a jump 671 → OPTIMIZER RATCHET (clean subjects never accept
+   jump endings; tainted may rise to clean, one-way).
+2. subject-choice + tighten-accept adopted tainted products → PIPELINE-LEVEL
+   ratchet (clean product never traded for tainted, any ticks) + per-subject
+   class labels + [CLEAN/JUMP-END] on every shipped line.
+3. ground-only departures let an old mid-route jump taint face-riding routes →
+   any NON-FINISH face touch resets the ending class.
+4. rollouts initialized the classifier fresh → a late-seed rollout "forgot" the
+   prefix's spine jump (marked the 495 chassis clean) → classifier state is now
+   INHERITED on entries like eloss/zone_jumps. Explorer marks ≡ optimizer evals.
+
+**Results (all rng-1337/41 pipelines):** the probe detonated discovery — 22,473
+sub-cap finishes in one tighten round, cascade 847→560→**495 scored** (7.425 s;
+under the 500 bar)... which the honest classifier then exposed as JUMP-ENDED
+(quiet spine grounding t537). Seeded reruns on that chassis with the final
+classifier: **0 genuinely clean endings in 528,921 finishers** — on this chassis
+the ramp-4 face rides carry ~330 u/s and the release flight cannot reach red.
+THE CLEAN ENDING REQUIRES THE ENERGY CHAIN (human: face exit at 862 u/s). The
+user's diagnosis holds at every level of the system.
+
+**State:** nothing shipped this round (no acceptable tape exists yet — reported
+honestly). The machinery is now trustworthy: probes find every reachable direct
+ending; classification is inheritance-exact; clean beats tainted at every stage.
+The open problem is BUILDING the energy chain: mid-route states fast enough that
+the probe's release reaches red.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- Generator problem STILL OPEN (mid-map bands remain unreachable-class): next
-  candidates = cheap lookahead variants, human-fitted SampleKnot distributions,
-  ML-trained proposals (sanctioned as tools; search stays the product).
-- **StepMove port** (spine-edge walking steers ~3.6° off) — owns the last known
-  1.85u residual.
-- Mix-interleaving; optimize-stage thread underuse; post-cap frontier waste;
-  compromise clauses 2-3; audit verdict-column refresh.
+- **THE energy chain** (clean-sub-500 existence proof beyond the human): probe +
+  clean-first machinery ready; needs chain-preserving discovery — big-budget
+  unseeded probes, human-seeded polish (immediate clean deliverable ~317-scored
+  class), segment-chained targets (compromise clauses 2-3).
+- Generator problem (mid-map unreachable-class) — same root as the chain.
+- **StepMove port** (spine-edge ~3.6°) — last known movement residual.
+- Mix-interleaving; optimize-stage thread underuse; audit verdict-column refresh.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

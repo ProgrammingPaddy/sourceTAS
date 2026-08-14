@@ -118,6 +118,15 @@ namespace Solver {
 		// decisions). 0 = plain sampling.
 		int lookahead_c = 0;
 		int lookahead_h = 16;
+		// FINISH-FLIGHT PROBE (user breakthrough directive 2026-08-14): every
+		// accepted CONTACT record within probe_dist of the goal is checked -
+		// release now and fly max-gain (coast/left/right, current duck held,
+		// NO jump): does it land the finish? A passing state IS a finisher
+		// (the flight appended as one knot). Collapses the horizon from
+		// "reach red" to "reach any releasable state" and produces DIRECT
+		// FACE-EXIT endings by construction. 0 = off.
+		float probe_dist = 1280.f;
+		int probe_max_ticks = 120;
 	};
 
 	struct Finisher {
@@ -128,6 +137,11 @@ namespace Solver {
 		float eloss = 0.f;          // cumulative energy dissipated en route
 		Vec3 pos;                   // finish position (z proves ON-TOP)
 		int entry = -1;             // archive index of the finishing entry
+		// Ending class (user rule: a jump off a non-finish brush into the
+		// landing is NOT an acceptable solution). Clean = the final launch
+		// left a surface without jumping (face exit / probe flight). Clean
+		// finishers ALWAYS outrank tainted ones.
+		bool clean = true;
 	};
 
 	struct ExploreResult {
@@ -198,6 +212,10 @@ namespace Solver {
 			short ticks_since_flip = 999;
 			short zone_jumps = 0;
 			short exit_tick = -1;       // startzone-exit tick (-1 = inside)
+			unsigned char launch_jump = 0;  // ending-classifier state: the
+			                            // path's last surface departure was a
+			                            // jump (inherited - rollouts must not
+			                            // forget a prefix's spine jump)
 			short cbrush = -1;          // cell contact brush (census/diagnostics)
 			signed char ckind = 0;      // 0 air, 1 ground, 2 touch
 			float eloss = 0.f;          // cumulative dissipation along the path
@@ -291,7 +309,8 @@ namespace Solver {
 		               const std::vector<Knot>& knots, int cur_knot,
 		               int ticks_into_knot, signed char last_side,
 		               short since_flip, short zone_jumps, short exit_tick,
-		               float eloss, const TickEvents& ev, bool finished_flag);
+		               bool launch_jump, float eloss, const TickEvents& ev,
+		               bool finished_flag);
 		bool GoalReached(const PlayerState& s, const TickEvents& ev) const;
 		void WorkerLoop(int wid, std::chrono::steady_clock::time_point t0);
 	};

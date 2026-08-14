@@ -252,7 +252,7 @@ namespace Solver {
 	                         const std::vector<Knot>& knots, int cur_knot,
 	                         int ticks_into_knot, signed char last_side,
 	                         short since_flip, short zone_jumps, short exit_tick,
-	                         float eloss, const TickEvents& ev,
+	                         bool launch_jump, float eloss, const TickEvents& ev,
 	                         bool finished_flag) {
 		int kind = 0, brush = -1;
 		if (s.on_ground) {
@@ -325,6 +325,7 @@ namespace Solver {
 			e.ticks_since_flip = since_flip;
 			e.zone_jumps = zone_jumps;
 			e.exit_tick = exit_tick;
+			e.launch_jump = launch_jump ? 1 : 0;
 			e.eloss = eloss;
 			e.cbrush = static_cast<short>(brush);
 			e.ckind = static_cast<signed char>(kind);
@@ -403,6 +404,7 @@ namespace Solver {
 		short since_flip = 999;
 		short zone_jumps = 0;
 		short exit_tick = entries_[0].exit_tick;
+		bool lj = false;
 		float eloss = 0.f;
 		float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
 		int seeded = 0;
@@ -435,12 +437,16 @@ namespace Solver {
 				zone_jumps++;
 			if (exit_tick < 0 && !InsideStartZone(s.pos))
 				exit_tick = static_cast<short>(t + 1);
+			if (ev.left_ground)
+				lj = ev.jumped;
+			else if (!s.on_ground && ev.ncontacts > 0)
+				lj = false;
 			if (cfg_.max_rel_ticks > 0 && exit_tick >= 0
 				&& (t + 1) - exit_tick >= cfg_.max_rel_ticks)
 				break;   // scored cap reached: further seeds are dead
 			RecordCell(s, f.yaw, t + 1, -1, t + 1, none, -1, 0,
-			           last_side, since_flip, zone_jumps, exit_tick, eloss,
-			           ev, false);
+			           last_side, since_flip, zone_jumps, exit_tick, lj,
+			           eloss, ev, false);
 			seeded++;
 			if (GoalReached(s, ev)) {
 				seed_finish_tick_ = t + 1;
@@ -589,6 +595,7 @@ namespace Solver {
 			short since_flip = entries_[base].ticks_since_flip;
 			short zone_jumps = entries_[base].zone_jumps;
 			short exit_tick = entries_[base].exit_tick;
+			bool launch_jump = entries_[base].launch_jump != 0;   // inherited
 			float eloss = entries_[base].eloss;
 			float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
 			rollouts_.fetch_add(1, std::memory_order_relaxed);
@@ -628,6 +635,20 @@ namespace Solver {
 					}
 					if (exit_tick < 0 && !InsideStartZone(s.pos))
 						exit_tick = static_cast<short>(tick);
+					// Ending classifier (user rule): the class of the FINAL
+					// surface departure. A ground departure is a jump-launch
+					// iff it jumped; ANY later face touch resets the ending
+					// to a face exit (an old mid-route jump must not taint a
+					// route that rides a ramp afterward).
+					if (ev.left_ground)
+						launch_jump = ev.jumped;
+					else if (!s.on_ground && ev.ncontacts > 0
+						&& w_.brushes[ev.contact_brush[0]].id
+							!= cfg_.end_brush_id)
+						launch_jump = false;   // non-finish face touch only:
+						                       // the landing impact on the
+						                       // end brush is the landing,
+						                       // not a ride
 					if (tick >= cfg_.max_path_ticks) {
 						aborted = true;
 						break;
@@ -649,7 +670,7 @@ namespace Solver {
 					if (eventful || t == kn.dur - 1 || (tick & 3) == 0)
 						idx = RecordCell(s, yaw, tick, base, -1, knots,
 							k, t + 1, last_side, since_flip, zone_jumps,
-							exit_tick, eloss, ev, goal);
+							exit_tick, launch_jump, eloss, ev, goal);
 					if (goal) {
 						int fi = idx;
 						if (fi < 0) {
@@ -667,6 +688,7 @@ namespace Solver {
 								e.ticks_since_flip = since_flip;
 								e.zone_jumps = zone_jumps;
 								e.exit_tick = exit_tick;
+								e.launch_jump = launch_jump ? 1 : 0;
 								e.eloss = eloss;
 								e.finished = true;
 								e.nknots = static_cast<unsigned char>(k + 1);
@@ -684,6 +706,7 @@ namespace Solver {
 							fin.eloss = eloss;
 							fin.pos = s.pos;
 							fin.entry = fi;
+							fin.clean = !launch_jump;
 							{
 								std::lock_guard<std::mutex> g(fin_mx_);
 								fins_.push_back(fin);
@@ -697,6 +720,132 @@ namespace Solver {
 						}
 						aborted = true;
 						break;
+					}
+					// FINISH-FLIGHT PROBE: from an accepted contact record
+					// near the goal, try releasing NOW - coast / strafe-L /
+					// strafe-R at max-gain yaw, duck state held, no jump. A
+					// landing IS a finisher: the flight becomes one knot on
+					// the recorded entry, reconstructable like any genome,
+					// and the ending is a clean face exit by construction.
+					if (cfg_.probe_dist > 0.f
+						&& (s.on_ground || ev.ncontacts > 0)
+						&& (idx >= 0 || ev.landed || (rng() & 15) == 0)
+						&& Len(s.pos - end_center_) < cfg_.probe_dist) {
+						// Probe cadence (two measured failure modes): on
+						// ACCEPTS only, a mature archive goes silent (near-
+						// goal cells owned, rejects never probe); on EVERY
+						// contact tick, riding rollouts pay 360 sim-ticks
+						// per tick and throughput collapses 50x. So: always
+						// at decision points (accepted records, landings),
+						// 1-in-16 stochastic on rejected riding/touch ticks.
+						int pparent = idx;
+						for (int pol = 0; pol < 3; ++pol) {
+							const signed char pside = pol == 0 ? 0
+								: (pol == 1 ? 1 : -1);
+							if (pside != 0 && last_side != 0
+								&& pside != last_side
+								&& since_flip < min_knot_)
+								continue;   // flip spacing stays law
+							Knot pk;
+							pk.side = pside;
+							pk.flags = static_cast<unsigned char>(
+								s.ducked ? 2 : 0);
+							pk.dur = static_cast<short>(cfg_.probe_max_ticks);
+							PlayerState ps = s;
+							float py = yaw;
+							float pel = eloss;
+							float pe_prev = 0.5f * Len2(ps.vel)
+								+ cfg_.params.gravity * ps.pos.Z;
+							int ptick = -1;
+							for (int pt = 0; pt < cfg_.probe_max_ticks; ++pt) {
+								TickEvents pev;
+								KnotTick(ps, py, pk, pt, w_, cfg_.params,
+								         &pev, nullptr);
+								tloc++;
+								const float pe = 0.5f * Len2(ps.vel)
+									+ cfg_.params.gravity * ps.pos.Z;
+								if (pe < pe_prev)
+									pel += pe_prev - pe;
+								pe_prev = pe;
+								if (GoalReached(ps, pev)) {
+									ptick = pt + 1;
+									break;
+								}
+								// grounding anywhere else = failed flight
+								if (ps.on_ground && (ps.ground_brush < 0
+									|| w_.brushes[ps.ground_brush].id
+										!= cfg_.end_brush_id))
+									break;
+							}
+							if (ptick < 0)
+								continue;
+							if (pparent < 0) {
+								pparent = AllocEntry(true);
+								if (pparent < 0)
+									break;
+								Entry& pe = entries_[pparent];
+								pe.st = s;
+								pe.yaw = yaw;
+								pe.tick = tick;
+								pe.parent = base;
+								pe.seed_ticks = -1;
+								pe.last_side = last_side;
+								pe.ticks_since_flip = since_flip;
+								pe.zone_jumps = zone_jumps;
+								pe.exit_tick = exit_tick;
+								pe.launch_jump = launch_jump ? 1 : 0;
+								pe.eloss = eloss;
+								pe.nknots = static_cast<unsigned char>(k + 1);
+								for (int i2 = 0; i2 <= k; ++i2)
+									pe.knots[i2] = knots[i2];
+								pe.knots[k].dur = static_cast<short>(t + 1);
+								ready_[pparent].store(1,
+									std::memory_order_release);
+							}
+							const int fi = AllocEntry(true);
+							if (fi < 0)
+								break;
+							Entry& e = entries_[fi];
+							e.st = ps;
+							e.yaw = py;
+							e.tick = tick + ptick;
+							e.parent = pparent;
+							e.seed_ticks = -1;
+							e.last_side = pside != 0 ? pside : last_side;
+							e.ticks_since_flip = 999;
+							e.zone_jumps = zone_jumps;
+							e.exit_tick = exit_tick;
+							e.launch_jump = 0;   // flight = face exit
+							e.eloss = pel;
+							e.finished = true;
+							e.nknots = 1;
+							Knot fk = pk;
+							fk.dur = static_cast<short>(ptick);
+							e.knots[0] = fk;
+							ready_[fi].store(1, std::memory_order_release);
+							Finisher fin;
+							fin.tick = tick + ptick;
+							fin.rel = RelTicks(tick + ptick, exit_tick);
+							fin.speed = Len2D(ps.vel);
+							fin.eloss = pel;
+							fin.pos = ps.pos;
+							fin.entry = fi;
+							fin.clean = true;
+							{
+								std::lock_guard<std::mutex> g(fin_mx_);
+								fins_.push_back(fin);
+							}
+							fin_count_.fetch_add(1, std::memory_order_relaxed);
+							int cur = best_fin_tick_.load(
+								std::memory_order_relaxed);
+							while ((cur < 0 || fin.rel < cur)
+								&& !best_fin_tick_.compare_exchange_weak(
+									cur, fin.rel)) {}
+							aborted = true;
+							break;
+						}
+						if (aborted)
+							break;
 					}
 				}
 			}
@@ -792,8 +941,11 @@ namespace Solver {
 			fflush(stdout);
 		}
 		std::vector<Finisher> finishers = fins_;
+		// Clean endings (face exits) ALWAYS outrank jump-launched landings -
+		// the user's rule: a spine hop into the finish is not a solution.
 		std::sort(finishers.begin(), finishers.end(),
 			[](const Finisher& a, const Finisher& b) {
+				if (a.clean != b.clean) return a.clean > b.clean;
 				return a.rel != b.rel ? a.rel < b.rel : a.tick < b.tick;
 			});
 		res.finishers = std::move(finishers);

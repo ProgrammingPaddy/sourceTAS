@@ -123,6 +123,7 @@ namespace {
 		int lookahead_c = 0;       // knot candidates per decision (0 = off;
 		                           // measured: archive flip yes, ticks no)
 		int lookahead_h = 16;      // lookahead horizon ticks
+		float probe_dist = 1280.f; // finish-flight probe range (0 = off)
 		std::string audit_tas;     // solve --audit <tape>: valuation audit
 		bool aim = false;           // contact-anchored targeting (measured
 		                            // neutral on segments; --aim to enable)
@@ -222,6 +223,7 @@ namespace {
 				} else ok = false;
 			}
 			else if (a == "--no-lookahead") { o.lookahead_c = 0; }
+			else if (a == "--probe-dist") ok = next_f(&o.probe_dist);
 			else if (a == "--emix") {
 				if (i + 2 < argc) {
 					o.emix_mu = static_cast<float>(atof(argv[++i]));
@@ -609,10 +611,12 @@ namespace {
 	                     const ReplayOpts& o, Explorer& ex,
 	                     const ExploreResult& res, int nthreads,
 	                     const Tape* seed_tape, std::vector<TapeFrame>& frames,
-	                     int* ftick, int* frel) {
+	                     int* ftick, int* frel, bool* fclean = nullptr) {
 		frames.clear();
 		*ftick = 0;
 		*frel = 0;
+		if (fclean)
+			*fclean = res.finishers[0].clean;
 		if (o.optimize_s > 0.5) {
 			OptimizeConfig ocfg;
 			ocfg.params = cfg.params;
@@ -674,18 +678,25 @@ namespace {
 			}
 			Explorer::FlatGenome best_g;
 			int best_tick = -1;
+			bool best_clean = false;
 			for (size_t si = 0; si < subjects.size(); ++si) {
 				if (!valid[si])
 					continue;
 				const OptimizeResult& orr = ors[si];
-				printf("  subject #%d: %d -> %d ticks (%d improvements, "
+				printf("  subject #%d [%s]: %d -> %d ticks (%d improvements, "
 					"%lld evals, %.1fM ticks/s)\n",
-					static_cast<int>(si) + 1, orr.initial_tick, orr.best_tick,
+					static_cast<int>(si) + 1, orr.clean ? "clean" : "JUMP ",
+					orr.initial_tick, orr.best_tick,
 					orr.improvements, orr.evals,
 					orr.ticks_simulated / (orr.seconds > 0 ? orr.seconds : 1)
 						/ 1e6);
-				if (orr.ok && (best_tick < 0 || orr.best_tick < best_tick)) {
+				// clean products ALWAYS outrank jump-launched (user rule)
+				if (orr.ok && (best_tick < 0
+					|| (orr.clean && !best_clean)
+					|| (orr.clean == best_clean
+						&& orr.best_tick < best_tick))) {
 					best_tick = orr.best_tick;
+					best_clean = orr.clean;
 					best_g = gs[si];
 				}
 			}
@@ -693,9 +704,13 @@ namespace {
 			if (best_tick > 0) {
 				Optimizer optb(w, ocfg, root, root_yaw, seed_tape);
 				if (optb.BuildFrames(best_g, frames, ftick, frel)) {
-					printf("solve: OPTIMIZED best %d scored ticks (%.3f s; "
-						"%d abs) vs explorer best %d\n", *frel,
-						*frel * cfg.params.dt, *ftick, res.finishers[0].rel);
+					printf("solve: OPTIMIZED best [%s] %d scored ticks "
+						"(%.3f s; %d abs) vs explorer best %d\n",
+						best_clean ? "clean" : "JUMP-END",
+						*frel, *frel * cfg.params.dt, *ftick,
+						res.finishers[0].rel);
+					if (fclean)
+						*fclean = best_clean;
 					return true;
 				}
 			}
@@ -799,6 +814,10 @@ namespace {
 		cfg.efrontier_lambda = o.emix_lambda;
 		cfg.lookahead_c = o.lookahead_c;
 		cfg.lookahead_h = o.lookahead_h;
+		cfg.probe_dist = o.probe_dist;
+		if (o.probe_dist > 0.f)
+			printf("solve: finish-flight probe ON (release check within %.0fu; "
+				"clean face-exit endings outrank jump-launched)\n", o.probe_dist);
 		if (o.energy_frontier)
 			printf("solve: value-mix frontier ON (V = KE + %.2f*gz - %.2f*eloss)\n",
 				o.emix_mu, o.emix_lambda);
@@ -852,9 +871,20 @@ namespace {
 			static_cast<int>(res.finishers.size()));
 		const int show = res.finishers.size() < 10
 			? static_cast<int>(res.finishers.size()) : 10;
+		{
+			int nclean = 0;
+			for (const Finisher& f : res.finishers)
+				if (f.clean) nclean++;
+			printf("solve: ending classes: %d CLEAN (face exit) / %d "
+				"jump-launched%s\n", nclean,
+				static_cast<int>(res.finishers.size()) - nclean,
+				nclean == 0 ? "  ** NO CLEAN ENDING FOUND **" : "");
+		}
 		for (int i = 0; i < show; ++i)
-			printf("  #%d  %d scored (%.3f s; %d abs)  spd %.1f  eloss %.0fk  "
-				"finish (%.0f, %.0f, z %.2f)\n", i + 1, res.finishers[i].rel,
+			printf("  #%d %s %d scored (%.3f s; %d abs)  spd %.1f  eloss %.0fk  "
+				"finish (%.0f, %.0f, z %.2f)\n", i + 1,
+				res.finishers[i].clean ? "[clean]" : "[JUMP ]",
+				res.finishers[i].rel,
 				res.finishers[i].rel * cfg.params.dt, res.finishers[i].tick,
 				res.finishers[i].speed,
 				res.finishers[i].eloss / 1000.f,
@@ -930,8 +960,9 @@ namespace {
 		// strict improvements only, every eval through the proven core).
 		std::vector<TapeFrame> frames;
 		int ftick = 0, frel = 0;
+		bool fclean = false;
 		if (!BuildBestFrames(w, cfg, o, ex, res, nthreads,
-			have_seed ? &seed : nullptr, frames, &ftick, &frel))
+			have_seed ? &seed : nullptr, frames, &ftick, &frel, &fclean))
 			return 3;
 
 		// ---- Tighten rounds: re-explore with the SCORED cap just below the
@@ -970,15 +1001,21 @@ namespace {
 				continue;
 			std::vector<TapeFrame> f2;
 			int t2 = 0, r2rel = 0;
+			bool r2clean = false;
 			if (!BuildBestFrames(w, tcfg, o, ex2, r2, nthreads, &inc, f2,
-				&t2, &r2rel))
+				&t2, &r2rel, &r2clean))
 				continue;
-			if (r2rel < frel) {
-				printf("tighten: IMPROVED %d -> %d scored ticks (%.3f s)\n",
-					frel, r2rel, r2rel * cfg.params.dt);
+			// Pipeline-level ending ratchet (user rule): never trade a clean
+			// incumbent for a jump-launched product, no matter the ticks.
+			if ((r2clean && !fclean)
+				|| (r2clean == fclean && r2rel < frel)) {
+				printf("tighten: IMPROVED %d -> %d scored ticks (%.3f s) "
+					"[%s]\n", frel, r2rel, r2rel * cfg.params.dt,
+					r2clean ? "clean" : "JUMP-END");
 				frames = f2;
 				ftick = t2;
 				frel = r2rel;
+				fclean = r2clean;
 			}
 			fflush(stdout);
 		}
@@ -1015,7 +1052,8 @@ namespace {
 			printf("solve: WriteTas failed: %s\n", err.c_str());
 			return 3;
 		}
-		printf("solve: best route (%d scored ticks, %d abs) written -> %s\n",
+		printf("solve: best route [%s] (%d scored ticks, %d abs) written -> %s\n",
+			fclean ? "CLEAN ending" : "JUMP-END - NOT an acceptable solution",
 			frel, ftick, out_path.c_str());
 		printf("solve: play it in-game from the Record tab (it loads like any "
 			"recording; teleport-to-anchor + play).\n");
