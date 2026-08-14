@@ -199,6 +199,71 @@ namespace Solver {
 			}
 		}
 
+		// CGameMovement::StepMove, 1:1 (user directive 2026-08-14: perfect
+		// engine representation - the deferred "slides only" walk path owned
+		// the tick-537 spine divergence that broke the 495 tape in-game).
+		// Semantics, verbatim from the SDK:
+		//   1. DOWN attempt: plain TryPlayerMove from the current state.
+		//   2. Reset; trace UP by stepsize+DIST_EPSILON (partial ok);
+		//      TryPlayerMove; trace DOWN by stepsize+DIST_EPSILON.
+		//   3. If the down trace's plane is NOT walkable (a fraction-1 trace
+		//      leaves the normal zeroed, which also fails the check - the
+		//      engine's own behavior), the DOWN attempt wins outright.
+		//   4. Otherwise apply the down trace endpoint and keep whichever
+		//      attempt traveled farther in XY; when the STEP wins, the
+		//      slide's vertical velocity carries over.
+		void StepMove(PlayerState& s, const World& w, const MoveParams& p,
+		              TickEvents* ev) {
+			const float kDistEpsilon = 0.03125f;   // engine DIST_EPSILON
+			const Vec3 pos0 = s.pos;
+			const Vec3 vel0 = s.vel;
+
+			// (1) Slide move down.
+			TryPlayerMove(s, w, p, ev);
+			const Vec3 down_pos = s.pos;
+			const Vec3 down_vel = s.vel;
+
+			// (2) Reset, step up (partial application, SDK-style).
+			s.pos = pos0;
+			s.vel = vel0;
+			{
+				const Vec3 up_to(pos0.X, pos0.Y,
+					pos0.Z + p.stepsize + kDistEpsilon);
+				TraceResult tr;
+				const float f = w.TraceHull(s.pos, up_to, s.ducked, &tr);
+				s.pos = s.pos + Scale(up_to - s.pos, f);
+			}
+			// Slide move up (contacts already recorded by the down attempt;
+			// physics identical, bookkeeping single-counted).
+			TryPlayerMove(s, w, p, nullptr);
+			// Step down.
+			const Vec3 down_to(s.pos.X, s.pos.Y,
+				s.pos.Z - (p.stepsize + kDistEpsilon));
+			TraceResult dn;
+			const float fd = w.TraceHull(s.pos, down_to, s.ducked, &dn);
+
+			// (3) Landed on a non-walkable plane (or nothing): slide wins.
+			if (dn.normal.Z < p.walkable_z) {
+				s.pos = down_pos;
+				s.vel = down_vel;
+				return;
+			}
+			// (4) Apply the down endpoint; farther XY attempt wins.
+			s.pos = s.pos + Scale(down_to - s.pos, fd);
+			const float ddown =
+				(down_pos.X - pos0.X) * (down_pos.X - pos0.X)
+				+ (down_pos.Y - pos0.Y) * (down_pos.Y - pos0.Y);
+			const float dup =
+				(s.pos.X - pos0.X) * (s.pos.X - pos0.X)
+				+ (s.pos.Y - pos0.Y) * (s.pos.Y - pos0.Y);
+			if (ddown > dup) {
+				s.pos = down_pos;
+				s.vel = down_vel;
+			} else {
+				s.vel.Z = down_vel.Z;   // copy z from the slide move
+			}
+		}
+
 		void StayOnGround(PlayerState& s, const World& w, const MoveParams& p) {
 			Vec3 start = s.pos;
 			start.Z += 2.f;
@@ -256,9 +321,9 @@ namespace Solver {
 				s.vel = Vec3();
 				return;
 			}
-			// Straight attempt first; on a hit, slide via TryPlayerMove.
-			// (Full StepMove step-up/step-down comparison is deferred - flat
-			// start platforms never need it; logged as a known gap.)
+			// Straight attempt first; on a hit, the engine's FULL StepMove
+			// (slide vs step-up/slide/step-down, farther XY wins) - the
+			// former slide-only path was the last known movement gap.
 			const Vec3 dest(s.pos.X + s.vel.X * p.dt,
 			                s.pos.Y + s.vel.Y * p.dt, s.pos.Z);
 			TraceResult tr;
@@ -266,7 +331,7 @@ namespace Solver {
 			if (frac >= 1.f) {
 				s.pos = dest;
 			} else {
-				TryPlayerMove(s, w, p, ev);
+				StepMove(s, w, p, ev);
 			}
 			StayOnGround(s, w, p);
 			s.vel.Z = 0.f;

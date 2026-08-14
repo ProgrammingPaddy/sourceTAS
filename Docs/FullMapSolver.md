@@ -1562,9 +1562,55 @@ after injecting (not when already in a server); inject-into-running-server
 crash. No fixes attempted (none certain); breadcrumb protocol first when
 picked up.
 
+## 2026-08-14 (final) — STEPMOVE PORT + THE ALIGNMENT BATTERY
+
+**StepMove: PORTED 1:1** (user directive: perfect engine representation).
+CGameMovement::StepMove verbatim in SolverMove.cpp: slide attempt vs
+step-up/slide/step-down, farther-XY wins, down-trace walkability veto
+(fraction-1 zeroed normal fails the check, engine-identical), z-velocity
+carryover from the slide when the step wins. Validation vs the user's
+engine captures: **292 CLEAN and solved12 replay BIT-EXACT (max dpos
+0.000u through full length)** - zero regression, and flat-walk parity now
+covers the blocked-walk branch too.
+
+**The 495's REAL breaker is NOT StepMove.** With the port in, the tick-537
+divergence is unchanged; the context dump shows an AIR UNDUCK tick (d1->d0
+both sides, XY exact) where the core exits with **vz +100.18 u/s higher**
+than the engine. Same pre-tick state, same inputs: an unknown engine
+behavior inside air-unduck ticks near faces (standing-hull interaction the
+measured -8.5 shift doesn't capture). Per the user's directive this gets
+MEASURED, not guessed: it is now a battery deck.
+
+**ALIGNMENT BATTERY built (both halves):**
+- `SolverLab battery-gen <map.bsp>` writes 9 mechanism decks as normal
+  recordings (battery_*.tas), anchors core-settled (green / green edge /
+  ramp-2 SPINE): walk_spine (StepMove/edge walking), walk_edge (lip ride +
+  walk-off), duck_air (clean +-8.5 cycles), stamina (5-gap jump ladder),
+  friction (fresh + stamina-dragged decel), prestrafe (both arcs),
+  duck_ground (the documented lifecycle gap - measured at last),
+  duckjump (duck-held jump + the user's duck-release-before-landing,
+  closed-loop synthesized), unduck_face (THE tick-537 scenario: board
+  ramp 1 ducked at 370 u/s, ride 32 contact ticks, unduck ON the face -
+  verified in-core).
+- In-game: Map Solve tab -> **"Run ALIGNMENT battery"** - ONE CLICK plays
+  every battery_* recording in sequence with real-state capture armed
+  (menu-independent sequencer on the update pump, 30-frame settle gaps,
+  abortable). Each run exports playback_battery_*.csv as usual.
+- `SolverLab battery <map.bsp>` scores every capture against the core:
+  per-mechanism table (ticks, first>0.1u, max dpos, PASS/FAIL). A FAIL is
+  a measurement, not a bug report - the engine truth for that mechanism is
+  already on disk, ready to fit.
+
+Protocol going forward: battery PASSES = the core is engine-exact on every
+exercised mechanism; any future tape divergence means a MISSING DECK - add
+the scenario, rerun, fit. No more one-divergence-at-a-time archaeology.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- **StepMove port** — PROMOTED to correctness-blocking (tick-537 diff).
+- ~~StepMove port~~ DONE 1:1, zero regression (bit-exact 292/solved12).
+- **AIR-UNDUCK vz gap** (the 495 breaker, +100.18 u/s at t537): awaiting
+  the user's battery run - fit from playback_battery_unduck_face.csv.
+- **Battery run** (user, one click after reinject) -> `SolverLab battery`.
 - **Chain endgame**: carve control BUILT (gene 5: into-face vs along-face
   wish blend, own yaw targeting under the same caps) but v13 MEASURED A
   REGRESSION (v12-live boards died; ENDs d313+ except one d54): the carve

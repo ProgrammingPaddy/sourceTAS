@@ -8046,6 +8046,12 @@ namespace {
 	std::string g_playcap_name_override;   // tab-chosen export name (wins)
 	std::string g_playcap_last;
 
+	// Alignment-battery queue state (see TeleportPlayCapture below).
+	std::vector<int> g_battery_q;
+	size_t g_battery_next = 0;
+	bool g_battery_on = false;
+	int g_battery_wait = 0;
+
 	// Combo getter over the recording library (Map Solve capture picker).
 	bool RunItemGetter(void*, int idx, const char** out) {
 		static char buf[160];
@@ -8093,6 +8099,41 @@ namespace {
 		g_status = FmtStr("Map Solve: captured %d REAL playback ticks of '%s' -> %s",
 			n, g_playcap_run.c_str(), path.c_str());
 		g_playcap_name_override.clear();
+		if (g_battery_on)
+			g_battery_wait = 30;   // settle frames before the next deck
+	}
+
+	// ---- ALIGNMENT BATTERY (user-directed 2026-08-14): ONE click plays
+	// every 'battery_*' recording in sequence with capture armed; the
+	// offline harness (SolverLab battery) scores every capture against the
+	// core per mechanism. ----
+	bool TeleportPlayCapture(int lib_idx, const char* export_name) {
+		const std::vector<Run>& lib = g_tas.Library();
+		if (lib_idx < 0 || lib_idx >= static_cast<int>(lib.size())
+			|| lib[lib_idx].Empty())
+			return false;
+		const Run& r = lib[lib_idx];
+		if (r.start.valid && engine) {
+			char cmd[192];
+			if (g_freecam)
+				Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
+					r.start.origin.X, r.start.origin.Y, r.start.origin.Z);
+			else
+				Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+					r.start.origin.X, r.start.origin.Y, r.start.origin.Z,
+					r.start.pitch, r.start.yaw);
+			engine->ClientCmd_Unrestricted(cmd);
+		}
+		Run copy = lib[lib_idx];
+		g_playcap_name_override = (export_name && export_name[0])
+			? export_name : lib[lib_idx].name;
+		g_playcap_armed = true;
+		if (!g_tas.PlayEphemeral(std::move(copy), 12)) {
+			g_playcap_armed = false;
+			g_playcap_name_override.clear();
+			return false;
+		}
+		return true;
 	}
 
 	// ---- TRACE ORACLE (engine-truth collision, user-directed 2026-08-13) ----
@@ -8393,26 +8434,9 @@ namespace {
 			} else if (s_cap_run >= 0 && s_cap_run < static_cast<int>(lib.size())
 				&& !lib[s_cap_run].Empty()) {
 				if (ImGui::Button("Teleport, play & capture", ImVec2(240, 0))) {
-					const Run& r = lib[s_cap_run];
-					if (r.start.valid && engine) {
-						char cmd[192];
-						if (g_freecam)
-							Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
-								r.start.origin.X, r.start.origin.Y,
-								r.start.origin.Z);
-						else
-							Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
-								r.start.origin.X, r.start.origin.Y,
-								r.start.origin.Z, r.start.pitch, r.start.yaw);
-						engine->ClientCmd_Unrestricted(cmd);
-					}
-					Run copy = lib[s_cap_run];
-					g_playcap_name_override = g_solver_export_name[0]
-						? g_solver_export_name : lib[s_cap_run].name;
-					g_playcap_armed = true;
-					if (!g_tas.PlayEphemeral(std::move(copy), 12)) {
-						g_playcap_armed = false;
-						g_playcap_name_override.clear();
+					if (!TeleportPlayCapture(s_cap_run,
+						g_solver_export_name[0] ? g_solver_export_name
+							: nullptr)) {
 						g_status = "Map Solve: can't play now - recorder busy.";
 					} else {
 						g_status = FmtStr("Map Solve: playing '%s', exporting "
@@ -8432,6 +8456,50 @@ namespace {
 				"below.");
 			if (!g_playcap_last.empty())
 				ImGui::TextDisabled("last capture: %s", g_playcap_last.c_str());
+
+			// ONE-CLICK ALIGNMENT BATTERY (user-directed 2026-08-14).
+			if (g_battery_on) {
+				ImGui::TextColored(Theme::Warning, "BATTERY: run %d/%d...",
+					static_cast<int>(g_battery_next),
+					static_cast<int>(g_battery_q.size()));
+				ImGui::SameLine();
+				if (ImGui::Button("Abort battery")) {
+					g_battery_on = false;
+					g_playcap_armed = false;
+					if (g_playcap_active) {
+						g_playcap_active = false;
+						g_playcap.clear();
+					}
+					g_playcap_name_override.clear();
+					g_tas.EmergencyStop();
+				}
+			} else if (ImGui::Button(
+				"Run ALIGNMENT battery (all battery_* runs)",
+				ImVec2(300, 0))) {
+				g_battery_q.clear();
+				g_battery_next = 0;
+				const std::vector<Run>& blib = g_tas.Library();
+				for (int i = 0; i < static_cast<int>(blib.size()); ++i)
+					if (blib[i].name.rfind("battery_", 0) == 0
+						&& !blib[i].Empty())
+						g_battery_q.push_back(i);
+				if (g_battery_q.empty()) {
+					g_status = "Battery: no 'battery_*' recordings - run "
+						"SolverLab battery-gen <map.bsp>, then reinject "
+						"(fresh library scan).";
+				} else {
+					g_battery_on = true;
+					g_battery_wait = 0;
+					g_status = FmtStr("Battery: %d decks queued.",
+						static_cast<int>(g_battery_q.size()));
+				}
+			}
+			Theme::Help("ONE CLICK, whole battery: plays every battery_* "
+				"recording (mechanism decks written by SolverLab "
+				"battery-gen) back to back, capturing REAL engine states "
+				"for each. Score offline with SolverLab battery <map.bsp> "
+				"- every FAIL row is a measured model gap whose engine "
+				"truth is already on disk.");
 		}
 
 		SubHeading("Ground truth export");
@@ -8742,6 +8810,25 @@ void TasEditor::Update() {
 	// would pollute it - the diff loses exactly one tick.)
 	if (g_playcap_active && !g_tas.IsPlaying())
 		FinalizePlaybackCapture();
+	// Alignment-battery sequencer: after each capture lands (and a settle
+	// gap), start the next queued deck. Menu-independent by design.
+	if (g_battery_on && !g_playcap_active && !g_playcap_armed
+		&& !g_tas.IsPlaying()) {
+		if (g_battery_wait > 0) {
+			--g_battery_wait;
+		} else if (g_battery_next < g_battery_q.size()) {
+			const int idx = g_battery_q[g_battery_next++];
+			if (!TeleportPlayCapture(idx, nullptr)) {
+				g_battery_on = false;
+				g_status = "Battery: playback failed - aborted.";
+			}
+		} else {
+			g_battery_on = false;
+			g_status = FmtStr("ALIGNMENT BATTERY COMPLETE: %d captures in "
+				"solver\\. Score offline: SolverLab battery <map.bsp>",
+				static_cast<int>(g_battery_q.size()));
+		}
+	}
 
 	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: end");
 }

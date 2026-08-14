@@ -64,6 +64,10 @@ namespace {
 		printf("          [--depth D] [--optimize-s S] [--rng N] [physics options]\n");
 		printf("          UNSEEDED two-layer solve: exhaustive skeleton search over\n");
 		printf("          surf-face sequences x chained segment CMA (no tape inputs)\n");
+		printf("  battery-gen <map.bsp>   write battery_* mechanism decks to recordings\n");
+		printf("  battery <map.bsp>       score in-game battery captures vs the core\n");
+		printf("          (in-game: Map Solve tab -> 'Run ALIGNMENT battery' plays all\n");
+		printf("          decks + captures in ONE click)\n");
 		printf("  bench   <map.bsp> [ticks]\n");
 		printf("All commands auto-load Documents\\sourceTAS\\solver\\server_params.cfg\n");
 		printf("(written by the Map Solve tab from LIVE server values); --params <file>\n");
@@ -1516,6 +1520,397 @@ namespace {
 		return r.clean ? 0 : 4;
 	}
 
+	// ---- ALIGNMENT BATTERY (user-directed 2026-08-14: "query anything else
+	// you are unsure of ingame so we can confirm perfect engine alignment
+	// without running into this issue over and over") ----
+	//
+	// battery-gen synthesizes one .tas INPUT DECK per mechanism the core
+	// relies on, anchored at core-settled standing spots. The decks are
+	// inputs only - the ENGINE decides what happens; the in-game battery
+	// button plays them all with capture armed, and `battery` scores every
+	// capture against the core tick by tick. A FAIL is not a bug report,
+	// it is a measurement: the mechanism's engine truth is now on disk.
+
+	struct BatteryDeck {
+		std::string name;
+		TapeAnchor anchor;
+		std::vector<TapeFrame> frames;
+	};
+
+	void DeckFrame(BatteryDeck& d, float yaw, float fmove, float smove,
+	               int buttons, int repeat) {
+		TapeFrame f;
+		f.yaw = yaw;
+		f.fmove = fmove;
+		f.smove = smove;
+		f.buttons = buttons;
+		for (int i = 0; i < repeat; ++i)
+			d.frames.push_back(f);
+	}
+
+	// Core-settled standing anchor at (x, y, z_probe). False if not ground.
+	bool SettleAnchor(const World& w, const MoveParams& p, float x, float y,
+	                  float z, float yaw, TapeAnchor& out) {
+		PlayerState s;
+		s.pos = Vec3(x, y, z);
+		TraceResult tr;
+		const float gf = w.TraceHull(s.pos, s.pos - Vec3(0.f, 0.f, 64.f),
+			false, &tr);
+		if (gf >= 1.f || tr.brush < 0 || tr.normal.Z < p.walkable_z)
+			return false;
+		out.valid = true;
+		out.origin = s.pos - Vec3(0.f, 0.f, 64.f * gf);
+		out.origin.Z += 0.5f;   // settle margin; engine re-grounds on spawn
+		out.velocity = Vec3();
+		out.yaw = yaw;
+		out.pitch = 0.f;
+		out.ducked = false;
+		out.stamina = 0.f;
+		return true;
+	}
+
+	int CmdBatteryGen(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		std::vector<BatteryDeck> decks;
+
+		// Anchor spots (settle-verified below, coordinates from the map's
+		// collision set: green top 448, ramp-2 spine ~256 at y -192).
+		TapeAnchor a_green, a_edge, a_spine;
+		const bool ok_green = SettleAnchor(w, p, -1600.f, -430.f, 452.f, 0.f,
+			a_green);
+		const bool ok_edge = SettleAnchor(w, p, -1300.f, -430.f, 452.f, 0.f,
+			a_edge);
+		bool ok_spine = false;
+		for (float yy = -200.f; yy <= -184.f && !ok_spine; yy += 2.f)
+			ok_spine = SettleAnchor(w, p, -352.f, yy, 260.f, 0.f, a_spine);
+		printf("battery-gen: anchors green=%d edge=%d spine=%d\n",
+			ok_green ? 1 : 0, ok_edge ? 1 : 0, ok_spine ? 1 : 0);
+
+		if (ok_spine) {
+			// STEPMOVE/EDGE WALKING: the spine walk that carried the 495's
+			// ending. Straight hold, then weaves that cross the edge.
+			BatteryDeck d;
+			d.name = "battery_walk_spine";
+			d.anchor = a_spine;
+			DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 50);
+			for (int c = 0; c < 4; ++c) {
+				DeckFrame(d, 10.f, 450.f, 0.f, IN_FORWARD, 15);
+				DeckFrame(d, -10.f, 450.f, 0.f, IN_FORWARD, 15);
+			}
+			DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 30);
+			decks.push_back(d);
+		}
+		if (ok_edge) {
+			// EDGE RIDE + WALK-OFF: along the platform lip, then off it.
+			BatteryDeck d;
+			d.name = "battery_walk_edge";
+			d.anchor = a_edge;
+			DeckFrame(d, 80.f, 450.f, 0.f, IN_FORWARD, 90);   // along +y, drifting to lip
+			DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 120);   // straight off the edge
+			decks.push_back(d);
+		}
+		if (ok_green) {
+			{
+				// AIR DUCK/UNDUCK cycles clear of surfaces (+-8.5 shifts).
+				BatteryDeck d;
+				d.name = "battery_duck_air";
+				d.anchor = a_green;
+				for (int c = 0; c < 3; ++c) {
+					DeckFrame(d, 0.f, 0.f, 0.f, 0, 10);
+					DeckFrame(d, 0.f, 0.f, 0.f, IN_JUMP, 1);
+					DeckFrame(d, 0.f, 0.f, 0.f, 0, 8 + 6 * c);
+					DeckFrame(d, 0.f, 0.f, 0.f, IN_DUCK, 20);
+					DeckFrame(d, 0.f, 0.f, 0.f, 0, 40);
+				}
+				decks.push_back(d);
+			}
+			{
+				// STAMINA LADDER: jump presses at varied gaps, W held.
+				BatteryDeck d;
+				d.name = "battery_stamina";
+				d.anchor = a_green;
+				DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 40);
+				const int gaps[5] = { 20, 30, 45, 70, 100 };
+				for (int g = 0; g < 5; ++g) {
+					DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD | IN_JUMP, 1);
+					DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, gaps[g]);
+				}
+				decks.push_back(d);
+			}
+			{
+				// FRICTION/STOPSPEED decel, fresh and stamina-dragged.
+				BatteryDeck d;
+				d.name = "battery_friction";
+				d.anchor = a_green;
+				DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 60);
+				DeckFrame(d, 0.f, 0.f, 0.f, 0, 100);
+				DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 30);
+				DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD | IN_JUMP, 1);
+				DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 50);
+				DeckFrame(d, 0.f, 0.f, 0.f, 0, 90);
+				decks.push_back(d);
+			}
+			{
+				// PRESTRAFE ARCS both directions.
+				BatteryDeck d;
+				d.name = "battery_prestrafe";
+				d.anchor = a_green;
+				float yaw = 0.f;
+				for (int i = 0; i < 80; ++i) {
+					yaw += 2.f;
+					DeckFrame(d, yaw, 450.f, -450.f,
+						IN_FORWARD | IN_MOVELEFT, 1);
+				}
+				for (int i = 0; i < 80; ++i) {
+					yaw -= 2.f;
+					DeckFrame(d, yaw, 450.f, 450.f,
+						IN_FORWARD | IN_MOVERIGHT, 1);
+				}
+				decks.push_back(d);
+			}
+			{
+				// GROUND DUCK LIFECYCLE (documented model gap - measure it).
+				BatteryDeck d;
+				d.name = "battery_duck_ground";
+				d.anchor = a_green;
+				for (int c = 0; c < 3; ++c) {
+					DeckFrame(d, 0.f, 0.f, 0.f, 0, 10);
+					DeckFrame(d, 0.f, 0.f, 0.f, IN_DUCK, 50);
+					DeckFrame(d, 0.f, 0.f, 0.f, 0, 30);
+				}
+				decks.push_back(d);
+			}
+			{
+				// DUCK-JUMP FAMILY incl. the user's duck-before-landing:
+				// duck-held jump; then jump with a mid-air duck released
+				// shortly before touchdown (closed-loop via the core: the
+				// release fires when a 3-tick fall reaches ground range).
+				BatteryDeck d;
+				d.name = "battery_duckjump";
+				d.anchor = a_green;
+				DeckFrame(d, 0.f, 0.f, 0.f, IN_DUCK | IN_JUMP, 1);
+				DeckFrame(d, 0.f, 0.f, 0.f, IN_DUCK, 60);
+				DeckFrame(d, 0.f, 0.f, 0.f, 0, 60);
+				{
+					PlayerState s;
+					s.pos = d.anchor.origin;
+					float yaw = 0.f;
+					for (const TapeFrame& f : d.frames) {
+						MoveTick(s, w, p, 0.f, f.yaw, f.fmove, f.smove, 0.f,
+							f.buttons, nullptr);
+						yaw = f.yaw;
+					}
+					// Phase 2: jump, duck at apex, release near landing.
+					DeckFrame(d, yaw, 0.f, 0.f, IN_JUMP, 1);
+					MoveTick(s, w, p, 0.f, yaw, 0.f, 0.f, 0.f, IN_JUMP,
+						nullptr);
+					bool ducked_phase = false;
+					for (int t = 0; t < 160; ++t) {
+						int btn = 0;
+						if (t > 12)
+							ducked_phase = true;
+						if (ducked_phase) {
+							TraceResult tr;
+							const float dist = fmaxf(4.f,
+								-s.vel.Z * p.dt * 3.f);
+							const float gf = w.TraceHull(s.pos,
+								s.pos - Vec3(0.f, 0.f, dist), true, &tr);
+							const bool near_ground = gf < 1.f
+								&& tr.normal.Z >= p.walkable_z
+								&& s.vel.Z < 0.f;
+							btn = near_ground ? 0 : IN_DUCK;
+							if (near_ground)
+								ducked_phase = false;
+						}
+						DeckFrame(d, yaw, 0.f, 0.f, btn, 1);
+						MoveTick(s, w, p, 0.f, yaw, 0.f, 0.f, 0.f, btn,
+							nullptr);
+						if (s.on_ground && t > 30)
+							break;
+					}
+					DeckFrame(d, yaw, 0.f, 0.f, 0, 30);
+				}
+				decks.push_back(d);
+			}
+		}
+		if (ok_edge) {
+			// UNDUCK ON A RAMP FACE - the tick-537 divergence scenario:
+			// jump toward ramp 1 ducked, ride the face, unduck ON it.
+			// Closed-loop synthesis via the core (aim at the face, hold).
+			BatteryDeck d;
+			d.name = "battery_unduck_face";
+			d.anchor = a_edge;
+			PlayerState s;
+			s.pos = d.anchor.origin;
+			const Vec3 target(-928.f, -440.f, 60.f);
+			int contact_run = 0;
+			bool released = false;
+			DeckFrame(d, 25.f, 450.f, 0.f, IN_FORWARD, 8);
+			for (int i = 0; i < 8; ++i)
+				MoveTick(s, w, p, 0.f, 25.f, 450.f, 0.f, 0.f, IN_FORWARD,
+					nullptr);
+			DeckFrame(d, 25.f, 450.f, 0.f, IN_FORWARD | IN_JUMP, 1);
+			MoveTick(s, w, p, 0.f, 25.f, 450.f, 0.f, 0.f,
+				IN_FORWARD | IN_JUMP, nullptr);
+			for (int t = 0; t < 320; ++t) {
+				const float yaw = atan2f(target.Y - s.pos.Y,
+					target.X - s.pos.X) * (180.f / kPi);
+				int btn = released ? 0 : IN_DUCK;
+				TickEvents ev;
+				DeckFrame(d, yaw, 450.f, 0.f, btn | IN_FORWARD, 1);
+				MoveTick(s, w, p, 0.f, yaw, 450.f, 0.f, 0.f,
+					btn | IN_FORWARD, &ev);
+				bool face = false;
+				for (int c = 0; c < ev.ncontacts; ++c)
+					if (w.brushes[ev.contact_brush[c]].id == 7)
+						face = true;
+				contact_run = face ? contact_run + 1 : 0;
+				if (!released && contact_run >= 25)
+					released = true;   // unduck ON the face
+				if (s.pos.Z < -900.f)
+					break;
+			}
+			decks.push_back(d);
+		}
+
+		const std::string dir = RecordingsDir();
+		int wrote = 0;
+		for (const BatteryDeck& d : decks) {
+			const std::string path = dir + d.name + ".tas";
+			if (WriteTas(path, d.anchor, MapStem(map_path), d.frames, &err)) {
+				printf("  %-24s %4d ticks -> %s\n", d.name.c_str(),
+					static_cast<int>(d.frames.size()), path.c_str());
+				wrote++;
+			} else {
+				printf("  %-24s WRITE FAILED: %s\n", d.name.c_str(),
+					err.c_str());
+			}
+		}
+		printf("battery-gen: %d decks written. In-game: inject (fresh library"
+			" scan), Map Solve tab -> 'Run ALIGNMENT battery'. Then:\n"
+			"  SolverLab battery <map.bsp>\n", wrote);
+		fflush(stdout);
+		return wrote > 0 ? 0 : 1;
+	}
+
+	// Score every battery capture against the core, per mechanism.
+	int CmdBattery(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		const std::string rec = RecordingsDir();
+		char documents[MAX_PATH];
+		std::string sol;
+		if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents)))
+			sol = std::string(documents) + "\\sourceTAS\\solver\\";
+		WIN32_FIND_DATAA fd;
+		HANDLE h = FindFirstFileA((rec + "battery_*.tas").c_str(), &fd);
+		if (h == INVALID_HANDLE_VALUE) {
+			printf("battery: no battery_*.tas decks in %s - run battery-gen "
+				"first.\n", rec.c_str());
+			return 1;
+		}
+		printf("battery: %-22s %6s %11s %10s  %s\n", "mechanism", "ticks",
+			"first>0.1u", "max dpos", "verdict");
+		int pass = 0, fail = 0, missing = 0;
+		do {
+			std::string name = fd.cFileName;
+			name = name.substr(0, name.size() - 4);   // strip .tas
+			Tape tape;
+			if (!LoadTas(rec + fd.cFileName, tape, &err))
+				continue;
+			// Newest matching capture: playback_<name>*.csv
+			std::string best_csv;
+			FILETIME best_t = { 0, 0 };
+			WIN32_FIND_DATAA cd;
+			HANDLE hc = FindFirstFileA(
+				(sol + "playback_" + name + "*.csv").c_str(), &cd);
+			if (hc != INVALID_HANDLE_VALUE) {
+				do {
+					if (CompareFileTime(&cd.ftLastWriteTime, &best_t) > 0) {
+						best_t = cd.ftLastWriteTime;
+						best_csv = sol + cd.cFileName;
+					}
+				} while (FindNextFileA(hc, &cd));
+				FindClose(hc);
+			}
+			if (best_csv.empty()) {
+				printf("battery: %-22s %6d %11s %10s  NO CAPTURE\n",
+					name.c_str() + 8,
+					static_cast<int>(tape.frames.size()), "-", "-");
+				missing++;
+				continue;
+			}
+			std::vector<EngineRow> eng;
+			if (!LoadEngineCsv(best_csv, eng)) {
+				printf("battery: %-22s capture unreadable\n",
+					name.c_str() + 8);
+				missing++;
+				continue;
+			}
+			int first_row = eng[0].tick == -1 ? 1 : 0;
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			const int n = static_cast<int>(tape.frames.size())
+				< static_cast<int>(eng.size()) - first_row
+				? static_cast<int>(tape.frames.size())
+				: static_cast<int>(eng.size()) - first_row;
+			int first01 = -1;
+			float maxd = 0.f;
+			for (int t = 0; t < n; ++t) {
+				const TapeFrame& f = tape.frames[t];
+				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+					f.umove, f.buttons, nullptr);
+				const float dd = Len(s.pos - eng[first_row + t].pos);
+				if (dd > maxd)
+					maxd = dd;
+				if (first01 < 0 && dd > 0.1f)
+					first01 = t;
+			}
+			const bool okp = first01 < 0;
+			char fbuf[16];
+			if (okp)
+				_snprintf_s(fbuf, sizeof(fbuf), _TRUNCATE, "never");
+			else
+				_snprintf_s(fbuf, sizeof(fbuf), _TRUNCATE, "%d", first01);
+			printf("battery: %-22s %6d %11s %9.3fu  %s\n",
+				name.c_str() + 8, n, fbuf, maxd,
+				okp ? "PASS" : "FAIL  <- engine truth on disk, fit it");
+			if (okp) pass++; else fail++;
+		} while (FindNextFileA(h, &fd));
+		FindClose(h);
+		printf("battery: %d PASS, %d FAIL, %d missing capture\n",
+			pass, fail, missing);
+		fflush(stdout);
+		return fail > 0 ? 2 : 0;
+	}
+
 	int CmdBench(const std::string& map_path, long long ticks) {
 		World w;
 		std::string err;
@@ -1739,6 +2134,18 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdChain(argv[2], o);
+	}
+	if (cmd == "battery-gen" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdBatteryGen(argv[2], o);
+	}
+	if (cmd == "battery" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdBattery(argv[2], o);
 	}
 	if (cmd == "bench" && argc >= 3) {
 		const long long ticks = (argc >= 4) ? atoll(argv[3]) : 2000000LL;
