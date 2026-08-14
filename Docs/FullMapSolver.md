@@ -1167,17 +1167,50 @@ tighten dry below 694. **Shipped `surf_basictest_solved11.tas` (695 scored /
 780 abs, 10.425 s). Ladder: human 319 | 695 | 762 | 804.** Snaps 47 (>10°), max
 67° — normalcy holding around the 800-class level, not yet improving below it.
 
+### UNDUCK-LANDING MECHANISM FOUND (2026-08-13/14) — settle-class root-caused
+
+solved11 FAILED in-game (user; also: the 780-frame tape vs "695" = zone-clock
+display — 695 is the SCORED portion, tape length is absolute). Capture: discrete
+branch at t729 (0.1u and 1u the same tick), 18.2u by the end. Gate: 0/1,993
+mismatches — collision exonerated a THIRD time. The route at t729: LANDS DUCKED
+on the ramp-4 spine with the duck released the same tick, jumps next tick.
+
+**Mechanism (capture-fitted in two steps):** the SDK's PlayerMove RE-CATEGORIZES
+POSITION right after Duck() — an unduck origin drop (−8.5) that lands the origin
+within ground range makes the WHOLE tick a ground tick: friction (v 414.9→388.9
+measured ✓), walk accel, stay-on-ground (ends ON the surface: 256.031 = top +
+DIST_EPSILON ✓) — while the end-categorize-only model ran it as an air tick and
+kept phantom speed + 1.9u of height. **Fix: CategorizePosition after any
+duck-state change** (SDK-shaped, narrow; air duck/unduck far from ground is
+untouched). solved11 capture: 18.2u → **1.85u**; ALL prior parity EXACT (0.000 /
+0.000 / 0.024 / 0.137 / solved7 0.000 full).
+
+**Remaining 1.85u:** a ~3.6° heading difference during the ground-tick WALK on
+the 32u-wide spine — the documented Phase-0 StepMove gap (our WalkMove slides
+only) with its first live exhibit. StepMove port queued. Every settle-class event
+(604 t544 ducked ride, solved8 t1472, solved11 t729) is duck+near-ground; this
+mechanism plausibly covers the family — re-measure after StepMove.
+
+**Systemic note (the user's fundamental point):** the failing tapes keep dying on
+1-tick duck stunts at knife-edge spine states — routes the search LOVES because
+marginal/phantom gains at fragile states win ticks. With the ground-tick
+mechanism modeled, unduck-landings now cost real friction in the model too
+(26 u/s/instance), pricing the stunt honestly. The class-level answer is next:
+(1) ROBUSTNESS SHIP-GATE — re-eval the winner under small state perturbations,
+ship only if it still finishes (kills <2u-margin routes regardless of residual
+model gaps); (2) SCORING/FILTERING refit from the ladder (loss functional:
+linear vs quadratic vs max-event — "smooth most of the time" = few big events;
+plateau-drift acceptance in the optimizer: equal-tick lower-loss moves accepted).
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- Settle-class movement-layer residual (3 data points; trace answers engine-exact)
-  — tick-level query-log diff hunt.
-- solved10 (762) / solved11 (695) gate + in-game tests (gate staged for 695:
-  1,993 queries, run-5 backup).
-- MIX-INTERLEAVING across tighten rounds (fitted deep-cutter + old broad-cutter
-  alternate; both are one CLI knob) — cheap diversity, next lever.
-- Optimize stage underuses threads when subjects < workers; post-cap
-  frontier-freeze wastes late rollouts.
-- Compromise clauses 2-3 if the ramp-4 energy deficit persists at 695-class.
+- **StepMove port** (walk step-up/down; spine-edge walking steers ~3.6° off) —
+  the last named movement gap; owns the remaining 1.85u.
+- Robustness ship-gate (jitter re-eval) + scoring/filtering refit (loss
+  functional fit, plateau drift, cell/finisher filters) — the normalcy program.
+- solved10 (762) in-game status unknown; 695 reality-INVALID until StepMove.
+- Mix-interleaving across tighten rounds; optimize-stage thread underuse;
+  post-cap frontier waste; compromise clauses 2-3.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

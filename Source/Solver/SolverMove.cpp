@@ -368,8 +368,18 @@ namespace Solver {
 				s.stamina = 0.f;
 		}
 
-		// PlayerMove: Duck() runs before the move itself.
+		// PlayerMove: Duck() runs before the move itself, and the SDK
+		// re-categorizes position right after it - so a duck-state origin
+		// shift (air-duck +8.5 / unduck -8.5) that lands the origin within
+		// ground range makes the WHOLE tick a ground tick (friction, walk
+		// accel, stay-on-ground). Capture-fitted 2026-08-13 (solved11 t729):
+		// the engine ran the unduck-landing tick as ground movement (ended
+		// ON the surface at 256.031 with one tick of friction, v 414->389)
+		// while the end-categorize-only model ran it as an air tick.
+		const bool was_ducked = s.ducked;
 		HandleDuck(s, w, p, buttons, ev);
+		if (s.ducked != was_ducked)
+			CategorizePosition(s, w, p, nullptr);
 
 		// FullWalkMove.
 		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // StartGravity
@@ -391,6 +401,7 @@ namespace Solver {
 		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // FinishGravity
 		if (s.on_ground)
 			s.vel.Z = 0.f;
+
 	}
 
 } // namespace Solver
