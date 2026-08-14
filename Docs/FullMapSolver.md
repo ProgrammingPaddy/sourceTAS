@@ -1492,10 +1492,37 @@ that detonated discovery in the archive era) + z-margin in the landing aim
 (aim past the near lip on a descending arc); (2) the 3>4 link - enumerate
 exit SIDES (around the +-y face ends) the way heights are banded.
 
+**Endgame round (v11-v12, user "continue"):**
+- v11 (raised landing aim, land_margin 40): d31 -> d67; the aim plane was
+  NOT the binding constraint. The DUMP told the real story: an END segment
+  from [7>8] discovered a 2->4 transfer, boarded ramp 4 at 838 u/s - then
+  rode STRAIGHT UP the face (homing pulls toward red = up-slope), bleeding
+  487 u/s into the climb, exiting at 351 u/s with red unreachable, wall
+  taps at z158 (98 below the lip). The archive era's exact dead end
+  (~330 u/s face rides), rediscovered by a different searcher. The human
+  carves ALONG the face and exits the side at 862.
+- Root cause of dead ramp-4 FACE segments found in the same dump: the
+  tangent lead-in DEGENERATES on frontal approaches (in-plane component
+  ~0 -> lead vanishes -> pure-pursuit smash) -> MINIMUM-LEAD rule: frontal
+  approaches synthesize the lead along the face's horizontal axis toward
+  the board point's side (carve entry).
+- v12 (carve entries): ramp-4 boards from depth-1 junctions now EXIST at
+  908 u/s (previously dead) - but still lossy (V -487k..-1420k) and END
+  attempts plateau d135-188. The remaining control gap is the RIDE itself:
+  between board and release the only steering is the hold (into face);
+  along-face travel direction is uncontrolled, so rides climb and bleed.
+
+**Next mechanism (concrete): CARVE CONTROL** - during the ride hold, blend
+a small along-face steering component toward a gene-chosen exit side, so
+ramp-4 rides travel the face horizontally and release around the y-end at
+speed with the landing homing engaged from a y-offset. Plus duck-pump
+usage at the lip (genes exist). User intuition on the ramp-4 ride is
+worth asking for before building further.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- **Chain endgame**: probe-in-segment for END conversion (d31 plateau);
-  exit-side bands for the 3>4 link; then long campaigns + rng arms.
+- **Chain endgame**: carve control (along-face ride steering + exit-side
+  gene); then long campaigns + rng arms. END aim margin kept (40u).
 - **Erosion campaign automation**: ladder loop (rng arms × rungs, carry-best,
   auto-reseed) as a lab mode — walk the prefix to 0 and the whole line is
   machine-owned. Candidate: `smooth --erode` (unbuilt).

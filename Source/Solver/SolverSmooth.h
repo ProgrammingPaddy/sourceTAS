@@ -114,6 +114,12 @@ namespace Solver {
 		// is conserved in flight, so a single V pick collapses them).
 		float ty_lo = 0.f;
 		float ty_hi = 1.f;
+		// END-landing aim margin: the guidance's aim plane sits this far
+		// ABOVE the platform top, so flights arc OVER the lip and descend
+		// into the footprint (measured d31 plateau: aiming AT the top
+		// plane is satisfied by grazing the near lip with zero margin -
+		// the under-lip family). Search knob, not physics.
+		float land_margin = 40.f;
 	};
 
 	// Per-rollout observables (reported, and the objective's inputs).

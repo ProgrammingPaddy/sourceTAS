@@ -62,13 +62,15 @@ namespace Solver {
 		}
 		if (cfg_.chain_genes && cfg_.goal_face_brush < 0 && end_idx_ >= 0) {
 			// END-landing guidance frame: the landing footprint's top
-			// rectangle (the probe insight as a controller - home on a
-			// gene-chosen landing point).
+			// rectangle RAISED by land_margin (the probe insight as a
+			// controller - home on a gene-chosen point ABOVE the landing,
+			// arc over the lip, descend in).
 			const WorldBrush& b = w_.brushes[end_idx_];
 			face_n_ = Vec3(0.f, 0.f, 1.f);
-			face_d_ = b.bmax.Z;
+			face_d_ = b.bmax.Z + cfg_.land_margin;
 			face_center_ = Vec3(0.5f * (b.gmin_stand.X + b.gmax_stand.X),
-				0.5f * (b.gmin_stand.Y + b.gmax_stand.Y), b.bmax.Z);
+				0.5f * (b.gmin_stand.Y + b.gmax_stand.Y),
+				b.bmax.Z + cfg_.land_margin);
 			face_t1_ = Vec3(1.f, 0.f, 0.f);
 			face_t2_ = Vec3(0.f, 1.f, 0.f);
 			face_e1_ = 0.5f * (b.gmax_stand.X - b.gmin_stand.X);
@@ -386,15 +388,30 @@ namespace Solver {
 							// (Measured without it: pure pursuit built
 							// hard landings by construction - V collapsed
 							// link by link, ramp-3 boards at spd 349.)
+							// MINIMUM-LEAD rule: a FRONTAL approach has no
+							// in-plane component, the lead vanishes, and
+							// pursuit reverts to a smash (measured: face
+							// segments died on ramp 4 while a through-
+							// flight boarded it) - synthesize the lead
+							// along the face's horizontal axis toward the
+							// board point's side: a CARVE entry.
 							const Vec3 toT = board_target - s.pos;
+							const float toTl = Len(toT);
 							Vec3 inp = toT
 								- Scale(face_n_, Dot(face_n_, toT));
-							const float ipl = Len(inp);
+							float ipl = Len(inp);
+							if (ipl < 0.3f * toTl) {
+								const float sgn =
+									Dot(toT, face_t1_) >= 0.f ? 1.f : -1.f;
+								inp = inp + Scale(face_t1_,
+									sgn * 0.5f * toTl);
+								ipl = Len(inp);
+							}
 							Vec3 aim_pt = board_target;
 							if (ipl > 1.f)
 								aim_pt = board_target - Scale(
 									Scale(inp, 1.f / ipl),
-									0.5f * Len(toT));
+									0.5f * toTl);
 							Vec3 pred = s.pos + Scale(s.vel, tau);
 							pred.Z -= 0.5f * p.gravity * tau * tau;
 							const Vec3 miss = aim_pt - pred;
