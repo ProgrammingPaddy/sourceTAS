@@ -275,6 +275,9 @@ namespace Solver {
 		Vec3 board_target = face_center_;
 		float guide_gain = 0.f;
 		int guide_from = 0;
+		float carve = 0.f;
+		if (cfg_.chain_genes && static_cast<int>(x.size()) >= ncp_ + 8)
+			carve = static_cast<float>(Clampd(x[ncp_ + 7], -1.0, 1.0));
 		if (cfg_.chain_genes
 			&& static_cast<int>(x.size()) >= ncp_ + 7) {
 			const float tx = static_cast<float>(
@@ -334,19 +337,53 @@ namespace Solver {
 				float u = SplineEval(x, t);
 				u = static_cast<float>(Clampd(u, -2.0, 2.0));
 
-				// STRUCTURAL RIDE HOLD: pre-release (or during the settle),
-				// while steep-face contact is fresh, press INTO the face -
-				// the spline modulates intensity, never the commitment.
+				// CARVE-HOLD: pre-release (or during the settle), while
+				// steep-face contact is fresh, the wish direction blends
+				// from pure into-face (carve 0) toward along-face travel
+				// (|carve| -> 1, sign = which end). Explicit wish, own
+				// yaw target; the same 15 deg/tick cap and 14-tick flip
+				// law apply. This is the traverse the user described -
+				// rides that climb frontally bleed to ~350 u/s (measured).
+				bool carved = false;
 				if (cfg_.chain_genes && !s.on_ground
 					&& t - hold_fresh <= 3
 					&& (t < guide_from || st.touched)) {
-					const float wlx = -s.vel.Y, wly = s.vel.X;
-					const int side_hold =
-						(wlx * -hold_n.X + wly * -hold_n.Y) > 0.f ? 1 : -1;
-					float au = fabsf(u);
-					if (au < 0.7f) au = 0.7f;
-					if (au > 1.5f) au = 1.5f;
-					u = static_cast<float>(side_hold) * au;
+					Vec3 t1h(-hold_n.Y, hold_n.X, 0.f);
+					const float t1l = Len2D(t1h);
+					if (t1l > 1e-4f) {
+						t1h = Scale(t1h, 1.f / t1l);
+						const float ac = fabsf(carve);
+						float wx = -hold_n.X * (1.f - ac) + t1h.X * carve;
+						float wy = -hold_n.Y * (1.f - ac) + t1h.Y * carve;
+						const float wl = sqrtf(wx * wx + wy * wy);
+						if (wl > 1e-4f) {
+							wx /= wl;
+							wy /= wl;
+							const float wyaw = atan2f(wy, wx)
+								* (180.f / kPi);
+							const float v1 = NormYawDeg(wyaw - 90.f);
+							const float v2 = NormYawDeg(wyaw + 90.f);
+							int side = fabsf(NormYawDeg(v1 - yaw))
+								<= fabsf(NormYawDeg(v2 - yaw)) ? 1 : -1;
+							if (last_side != 0 && side != last_side
+								&& since_flip < 14)
+								side = last_side;
+							const float target = side > 0 ? v1 : v2;
+							float dyw = NormYawDeg(target - yaw);
+							if (dyw > 15.f) dyw = 15.f;
+							else if (dyw < -15.f) dyw = -15.f;
+							yaw = NormYawDeg(yaw + dyw);
+							buttons |= (side > 0) ? IN_MOVELEFT
+								: IN_MOVERIGHT;
+							smove = (side > 0) ? -450.f : 450.f;
+							if (last_side != 0 && side != last_side)
+								since_flip = 0;
+							last_side = static_cast<signed char>(side);
+							if (since_flip < 999)
+								since_flip++;
+							carved = true;
+						}
+					}
 				}
 				// CLOSED-LOOP GUIDANCE (chain segments, in flight, after
 				// release): predict the ballistic crossing of the target
@@ -355,7 +392,7 @@ namespace Solver {
 				// through the same wish mapping, flip guard, and yaw cap
 				// as any u - position control the open-loop spline cannot
 				// do.
-				if (cfg_.chain_genes && guide_gain > 0.01f
+				if (!carved && cfg_.chain_genes && guide_gain > 0.01f
 					&& t >= guide_from && !st.touched && !s.on_ground) {
 					const float spg = Len2D(s.vel);
 					if (spg > 50.f) {
@@ -451,7 +488,9 @@ namespace Solver {
 				const float heading = sp > 1.f
 					? atan2f(s.vel.Y, s.vel.X) * (180.f / kPi) : yaw;
 
-				if (s.on_ground) {
+				if (carved) {
+					// carve-hold already set yaw/keys this tick
+				} else if (s.on_ground) {
 					// Ground: W-accelerate; u arcs the yaw (prestrafe) with
 					// the matching strafe key held.
 					fmove = 450.f;
@@ -519,13 +558,15 @@ namespace Solver {
 					&& !(zone_jumps >= 1 && !zone_exited))
 					buttons |= IN_JUMP;
 
-				if (want != 0) {
-					if (last_side != 0 && want != last_side)
-						since_flip = 0;
-					last_side = want;
+				if (!carved) {
+					if (want != 0) {
+						if (last_side != 0 && want != last_side)
+							since_flip = 0;
+						last_side = want;
+					}
+					if (since_flip < 999)
+						since_flip++;
 				}
-				if (since_flip < 999)
-					since_flip++;
 			}
 
 			if (emit) {
@@ -957,6 +998,8 @@ namespace Solver {
 					// the exit (a low board must climb first).
 					mean[ncp_ + 6] = 2.0
 						+ 5.0 * (static_cast<double>(rng() & 0xFF) / 255.0);
+					if (n > ncp_ + 7)
+						mean[ncp_ + 7] = 0.0;   // carve: neutral hold
 				}
 				sigma = cfg_.sigma0;
 			}

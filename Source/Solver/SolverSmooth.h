@@ -207,8 +207,13 @@ namespace Solver {
 		// segments never found a face without it; always-on homing broke
 		// rides at tick 0). The guided u passes through the SAME wish
 		// mapping, flip guard, and yaw cap - structure rules hold.
+		// Chain gene 5 (carve): the ride's wish direction blends from pure
+		// into-face (carve 0) toward along-face travel (|carve| -> 1, sign
+		// = which end). User calibration 2026-08-14: the fastest line
+		// LAUNCHES OFF THE SIDE of the last ramp - the ride must be able
+		// to traverse, not just climb.
 		int Dims() const {
-			return ncp_ + 3 + (cfg_.chain_genes ? 4 : 0);
+			return ncp_ + 3 + (cfg_.chain_genes ? 5 : 0);
 		}
 
 		// The seeded init mean (empty before SeedFromTape) - lets the lab

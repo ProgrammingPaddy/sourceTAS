@@ -1519,10 +1519,59 @@ speed with the landing homing engaged from a y-offset. Plus duck-pump
 usage at the lip (genes exist). User intuition on the ramp-4 ride is
 worth asking for before building further.
 
+## 2026-08-14 (later still) — USER CALIBRATION + TAPE VERDICTS + CARVE
+
+**User calibration (answers to the ramp-4 question, 2026-08-14):**
+- The human goes OVER THE TOP of ramp 4 only because it is the consistent
+  human move; the FASTEST line LAUNCHES OFF THE SIDE. (Carve control =
+  the required vocabulary; built as chain gene 5.)
+- Duck usage: crouch extends flight distance at a lower approach angle /
+  lower speed; ideal press is A FEW TICKS BEFORE LANDING; crouching during
+  strafe hurts speed gain (physics already models this via ducked
+  wishspeed - the timing rule is search guidance, not a new mechanic).
+- Energy framework refinement (user): HOW energy converts matters -
+  smooth PE->KE conversions along a face vs. losing it in a hard/low
+  landing. Framework mapping: realized conversion loss IS the eloss
+  ledger (clip events); FOREGONE conversion (boarding low = wasted
+  runway) is the clause-3/reach dimension (height bands + total-E
+  junction V). No new prescriptive weight added; the user themself
+  flagged "KE slightly over PE" as overly prescriptive - the fitted
+  shaping mix (0.4) and the junction total-E mix stay as-is until a
+  measured failure says otherwise.
+
+**Tape verdicts (user tested both exports in-game):**
+- 292 CLEAN: finishes in-game; trace oracle run by the user: 1905 traces,
+  0 mismatches (1891 exact) - the pre-ship gate is CLOSED on the first
+  fully certified machine tape.
+- 495 JUMP export: does NOT finish in-game. diff vs the user's playback
+  capture: first divergence at TICK 537 = the spine-grounding tick (walk
+  ticks before the spine jump); ground/duck flags never mismatch. This is
+  the KNOWN StepMove residual (~3.6 deg heading error walking spine
+  edges) - now PROMOTED from cosmetic to tape-breaking for any line with
+  mid-route ground contact. **StepMove port is now a correctness
+  requirement**, not a nicety.
+
+**Fixed this round:** editor run-line cut off at exactly tick 400
+(user-reported): WorldDraw.cpp decimation stride used FLOOR division
+(count 401-799 -> stride 1 -> no decimation -> overlay budget exhausted at
+~400 points). Ceiling division; Basehook.dll rebuilt.
+
+**Deferred (user-directed, until solver sign-off):** three crash reports
+recorded in the crash-hunt memory - tabbed-out crash; `map`-command freeze
+after injecting (not when already in a server); inject-into-running-server
+crash. No fixes attempted (none certain); breadcrumb protocol first when
+picked up.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- **Chain endgame**: carve control (along-face ride steering + exit-side
-  gene); then long campaigns + rng arms. END aim margin kept (40u).
+- **StepMove port** — PROMOTED to correctness-blocking (tick-537 diff).
+- **Chain endgame**: carve control BUILT (gene 5: into-face vs along-face
+  wish blend, own yaw targeting under the same caps) but v13 MEASURED A
+  REGRESSION (v12-live boards died; ENDs d313+ except one d54): the carve
+  hold changes junction dynamics enough to break downstream connection.
+  Needs its own dump-diagnosis cycle (carve-hold trajectories) before
+  further campaigns; do AFTER the StepMove port. END aim margin kept (40u).
+- Deferred crash triage (3 reports) after solver sign-off.
 - **Erosion campaign automation**: ladder loop (rng arms × rungs, carry-best,
   auto-reseed) as a lab mode — walk the prefix to 0 and the whole line is
   machine-owned. Candidate: `smooth --erode` (unbuilt).

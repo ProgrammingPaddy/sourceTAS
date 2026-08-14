@@ -387,7 +387,11 @@ void WorldDraw::Render() {
 			debugoverlay->AddBoxOverlay(ed.anchor.origin, Vector(-3.f, -3.f, 0.f), Vector(3.f, 3.f, 8.f),
 			                            kNoRotation, 60, 255, 60, 140, duration);
 
-		const int stride = ed.count > 400 ? ed.count / 400 : 1;
+		// Ceiling division: count 401..799 used to floor to stride 1 (no
+		// decimation), exhausting the overlay budget at ~400 points - the
+		// drawn line CUT OFF at exactly tick 400 (user-reported). Rounding
+		// up keeps the whole run under the budget at every length.
+		const int stride = ed.count > 400 ? (ed.count + 399) / 400 : 1;
 		Vector prev = ed.anchor.origin;
 		bool prev_ok = FiniteWorldPoint(prev);
 		int next_seg = 0;
