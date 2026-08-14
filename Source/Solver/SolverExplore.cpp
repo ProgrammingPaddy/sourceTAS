@@ -511,6 +511,33 @@ namespace Solver {
 						}
 					}
 				}
+			} else if (mode == 3 && cfg_.energy_frontier) {
+				// KINETIC FRONTIER (user's compromise equation, clause 1:
+				// board the next ramp with as much energy as possible):
+				// among the contact bands nearest the finish, restart from
+				// the FASTEST entry sampled. Dissipation cannot see slow
+				// flailing (it loses nothing); this axis starves it. KINETIC
+				// only - the full-E form (+gz) let ALTITUDE dominate and
+				// selected slow high touches (measured 2026-08-13: A/B arm
+				// scored 2774 vs control 804, archive diversity collapsed;
+				// same dead end as the prior attempt's absolute-E score).
+				float best_e = -1e30f;
+				int nonempty = 0;
+				for (int b = 0; b < 32 && nonempty < 3; ++b) {
+					if (band_n_[b].load(std::memory_order_relaxed) == 0)
+						continue;
+					nonempty++;
+					std::lock_guard<std::mutex> g(band_mx_[b]);
+					const std::vector<int>& v = bands_[b];
+					for (int c = 0; c < 4; ++c) {
+						const int i = v[rng() % v.size()];
+						const float e = Len2(entries_[i].st.vel);
+						if (!entries_[i].finished && e > best_e) {
+							best_e = e;
+							base = i;
+						}
+					}
+				}
 			}
 			if (base < 0) {
 				for (int t = 0; t < 8 && base < 0; ++t) {

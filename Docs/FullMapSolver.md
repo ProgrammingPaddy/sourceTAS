@@ -1053,13 +1053,66 @@ known residual; confined to a dead route class; own hunt later.
 **New pre-ship gate:** every candidate tape's full trace log gets oracle-verified
 (one in-game click) BEFORE the tape is handed over for play.
 
+### PIPELINE CLOSED + ROUTE NORMALCY ROUND (2026-08-13, user-directed)
+
+**solved8 FINISHES IN-GAME** — first reality-confirmed finish on engine-verified
+collision. Gate: 0 mismatches in its 4,292 traces (4,168 bit-exact). Capture:
+0.1u through tick 1471 of 1661 (89%), one movement-layer residual event after
+(10.2u peak, 2.4u final — survivable; third settle-class data point, still
+confined to trace-issuing patterns, not trace answers). It uses the STARTZONE
+JUMP (exit t198) — the first full-map route to take the free energy, now that
+the phantom walk-off shortcut died with the corner fix.
+
+**User verdict: finishes, but bizarre — "get the solutions to be normal." Spotted
+1-tick yaw snaps.** Measured (per-tick |Δyaw|): human max 5.1°, ZERO snaps >10°;
+solved8: 180 snaps >10°, 15 >30°, max 169° — EVERY large snap airborne at
+40-110 u/s. Mechanism: air yaw = MaxGainYaw tracks the VELOCITY HEADING
+absolutely; at low speed the heading is ill-conditioned (30 u/s per-tick gain
+rotates a 40 u/s velocity ~40°), so the controller faithfully chases a flailing
+target. The snaps are the SYMPTOM. The disease: low-speed pocket-flailing
+survives selection because it is DISSIPATION-CHEAP (a slow meander loses almost
+nothing — the eloss axis reads it as clean). Loss-at-progress cannot distinguish
+parked from fast.
+
+**Fix (user's compromise equation, clause 1, as a selection axis — no gates, no
+rate limits per the user's framing):** ENERGY FRONTIER — the round-robin's idle
+mode-3 slot now restarts from the HIGHEST-energy entry (0.5|v|²+gz) among the 3
+contact bands nearest the finish; exact mirror of the smooth-frontier, no new
+storage, `--no-energy-frontier` control arm. Snaps lose their habitat instead of
+being gated. A/B in flight (full pipelines, rng 1337, on/off).
+
+**Energy-frontier A/B VERDICT (full pipelines, rng 1337): full-E form HARMFUL —
+2774 scored vs control 804.** Altitude dominated (E = ½v²+gz lets 300u of height
+outvote 700 u/s), the axis selected slow HIGH touches, and restart concentration
+collapsed archive diversity (522k entries at 29s vs the usual ~1.7M). The prior
+attempt's absolute-E dead end, rebuilt as a bias and killed by the same measurement.
+DEAD END — do not resurrect E-with-gz selection in any form. Kinetic-only revision
+(fastest contact near the finish) measured NEUTRAL on seeded 90s screens → default
+OFF (`--energy-frontier` enables for a future full-budget test).
+
+**The control arm set the RECORD: 804 scored (933 abs)** — same config as solved8's
+1463, pure seed variance. AND it is the most normal solver route yet: 46 snaps >10°
+(vs solved8's 180), max 66° (vs 169°), only 44 low-speed airborne ticks of 933 —
+faster routes shed the flail habitat, exactly the user's prediction that efficiency
+filters the snaps. Shipped `surf_basictest_solved9.tas`, gate queries staged
+(2,444; run-2/3 batteries backed up).
+
+**Experiment-cadence discipline (user: "taking way too long"):** screens run at
+60s+30s no-tighten (~90s); SEEDED screens for A/Bs (unseeded 60s primaries are
+first-finish-variance noise — both arms dry); full budgets ONLY for record
+attempts after a change proves out at screen scale. Screens saturate (804 tie both
+arms) — they prove non-harm, not benefit; treat accordingly.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
   halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
-- Settle event (604 t544-548, ~5 u/s once): movement-layer query-pattern
-  divergence (trace answers engine-exact). Hunt via a tick-level query-log diff
-  when a live route class exercises it.
-- solved8 candidate: oracle pre-ship gate, then in-game test.
+- Settle-class movement-layer residual (now 3 data points: 604 t544, solved8
+  t1472; trace answers engine-exact) — hunt via tick-level query-log diff.
+- solved9 gate + in-game test; then grind: multi-seed tighten rounds on the 804
+  incumbent (the proven lever) — snaps are dropping with route quality, keep
+  measuring per candidate.
+- Compromise-equation clauses 2-3 (leave cleanly / preserve reach) still unbuilt;
+  revisit after the pocket shrinks further or a full-budget kinetic test.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

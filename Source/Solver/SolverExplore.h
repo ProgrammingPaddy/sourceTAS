@@ -85,6 +85,13 @@ namespace Solver {
 		// signal ON THIS MAP (one measurement, not a law - keep testing).
 		// Bias only (fitness stays ticks); off = control arm for A/B.
 		bool eloss_bias = true;
+		// Kinetic-at-progress axis (user's compromise equation, clause 1):
+		// restart from the FASTEST entry among the contact bands nearest the
+		// finish. Full-E (+gz) measured HARMFUL (altitude dominated, archive
+		// diversity collapsed: 2774 vs control 804); kinetic-only measured
+		// NEUTRAL on seeded short screens. Unproven machinery defaults OFF -
+		// --energy-frontier enables it for full-budget tests.
+		bool energy_frontier = false;
 	};
 
 	struct Finisher {
