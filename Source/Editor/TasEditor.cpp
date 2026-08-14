@@ -8052,6 +8052,62 @@ namespace {
 	bool g_battery_on = false;
 	int g_battery_wait = 0;
 
+	// ENGINE-QUERY battery (user-directed 2026-08-14: "can't you just query
+	// the engine code for the response?"): each battery deck runs through
+	// Prediction::RequestSim - the engine's OWN SetupMove/ProcessMovement/
+	// FinishMove pipeline from the deck's anchor, with the live player
+	// restored byte-for-byte afterward. No teleports, no physical playback,
+	// nobody falls off a platform; the whole battery takes seconds. The
+	// physical playback battery below remains as the arbiter path (it goes
+	// through the authoritative server tick; a disagreement between the two
+	// would itself be a finding).
+	std::vector<Frame> g_batsim_frames;   // current deck, flattened
+	std::vector<int> g_batsim_q;
+	size_t g_batsim_next = 0;
+	bool g_batsim_on = false;
+	bool g_batsim_own = false;            // a battery-owned sim is in flight
+	int g_batsim_done = 0;
+	std::string g_batsim_name;
+
+	void BatSimProvider(int tick, const Prediction::SimState&, Frame* out) {
+		if (tick >= 0 && tick < static_cast<int>(g_batsim_frames.size())) {
+			*out = g_batsim_frames[tick];
+		} else {
+			Frame f;
+			memset(&f, 0, sizeof(f));
+			*out = f;
+		}
+	}
+
+	void ExportBatSim(const std::vector<Frame>& fr,
+	                  const std::vector<Prediction::SimState>& st) {
+		const std::string dir = SolverDir();
+		if (dir.empty() || st.empty())
+			return;
+		const std::string path = UniqueSolverCsv("enginesim_"
+			+ SanitizeName(g_batsim_name));
+		std::ofstream out(path, std::ios::trunc);
+		if (!out)
+			return;
+		out << "tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw\n";
+		char line[320];
+		for (size_t t = 0; t < st.size(); ++t) {
+			const Prediction::SimState& s = st[t];
+			const Frame& f = t < fr.size() ? fr[t] : fr.back();
+			Sfmt(line, "%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%d,%d,%d,%.4f\n",
+				static_cast<int>(t), s.origin.X, s.origin.Y, s.origin.Z,
+				s.velocity.X, s.velocity.Y, s.velocity.Z,
+				sqrtf(s.velocity.X * s.velocity.X
+					+ s.velocity.Y * s.velocity.Y),
+				(s.flags & 1) ? 1 : 0,        // FL_ONGROUND
+				(s.flags & 2) ? 1 : 0,        // FL_DUCKING
+				f.buttons, f.viewangles[1]);
+			out << line;
+		}
+		AppendExportLog("enginesim", path, g_batsim_name.c_str(),
+			static_cast<int>(st.size()));
+	}
+
 	// Combo getter over the recording library (Map Solve capture picker).
 	bool RunItemGetter(void*, int idx, const char** out) {
 		static char buf[160];
@@ -8458,12 +8514,55 @@ namespace {
 				ImGui::TextDisabled("last capture: %s", g_playcap_last.c_str());
 
 			// ONE-CLICK ALIGNMENT BATTERY (user-directed 2026-08-14).
+			// PRIMARY: engine QUERY - the decks run through the engine's
+			// own movement pipeline (Prediction::RequestSim), player
+			// untouched. Seconds, no teleports, no falling.
+			if (g_batsim_on) {
+				ImGui::TextColored(Theme::Warning,
+					"BATTERY (query): %d/%d...",
+					static_cast<int>(g_batsim_next),
+					static_cast<int>(g_batsim_q.size()));
+				ImGui::SameLine();
+				if (ImGui::Button("Abort##batsim")) {
+					g_batsim_on = false;
+					g_batsim_own = false;
+				}
+			} else if (ImGui::Button(
+				"Run ALIGNMENT battery (engine query)", ImVec2(300, 0))) {
+				g_batsim_q.clear();
+				g_batsim_next = 0;
+				g_batsim_done = 0;
+				const std::vector<Run>& blib = g_tas.Library();
+				for (int i = 0; i < static_cast<int>(blib.size()); ++i)
+					if (blib[i].name.rfind("battery_", 0) == 0
+						&& !blib[i].Empty() && blib[i].start.valid)
+						g_batsim_q.push_back(i);
+				if (g_batsim_q.empty()) {
+					g_status = "Battery: no 'battery_*' recordings - run "
+						"SolverLab battery-gen <map.bsp>, then reinject "
+						"(fresh library scan).";
+				} else {
+					g_batsim_on = true;
+					g_status = FmtStr("Battery(query): %d decks queued.",
+						static_cast<int>(g_batsim_q.size()));
+				}
+			}
+			Theme::Help("ONE CLICK: runs every battery_* deck through the "
+				"ENGINE'S OWN movement code (SetupMove/ProcessMovement/"
+				"FinishMove via the prediction hook) from each deck's "
+				"anchor. You stay where you are; the player is restored "
+				"byte-for-byte. Exports solver\\enginesim_battery_*.csv in "
+				"seconds. Score offline: SolverLab battery <map.bsp>.");
+
+			// FALLBACK: physical playback (authoritative server path) -
+			// the arbiter if a query verdict is ever in doubt.
 			if (g_battery_on) {
-				ImGui::TextColored(Theme::Warning, "BATTERY: run %d/%d...",
+				ImGui::TextColored(Theme::Warning,
+					"BATTERY (physical): run %d/%d...",
 					static_cast<int>(g_battery_next),
 					static_cast<int>(g_battery_q.size()));
 				ImGui::SameLine();
-				if (ImGui::Button("Abort battery")) {
+				if (ImGui::Button("Abort##batphys")) {
 					g_battery_on = false;
 					g_playcap_armed = false;
 					if (g_playcap_active) {
@@ -8474,8 +8573,7 @@ namespace {
 					g_tas.EmergencyStop();
 				}
 			} else if (ImGui::Button(
-				"Run ALIGNMENT battery (all battery_* runs)",
-				ImVec2(300, 0))) {
+				"Battery via physical playback (arbiter)", ImVec2(300, 0))) {
 				g_battery_q.clear();
 				g_battery_next = 0;
 				const std::vector<Run>& blib = g_tas.Library();
@@ -8485,21 +8583,18 @@ namespace {
 						g_battery_q.push_back(i);
 				if (g_battery_q.empty()) {
 					g_status = "Battery: no 'battery_*' recordings - run "
-						"SolverLab battery-gen <map.bsp>, then reinject "
-						"(fresh library scan).";
+						"SolverLab battery-gen first.";
 				} else {
 					g_battery_on = true;
 					g_battery_wait = 0;
-					g_status = FmtStr("Battery: %d decks queued.",
+					g_status = FmtStr("Battery(physical): %d decks queued.",
 						static_cast<int>(g_battery_q.size()));
 				}
 			}
-			Theme::Help("ONE CLICK, whole battery: plays every battery_* "
-				"recording (mechanism decks written by SolverLab "
-				"battery-gen) back to back, capturing REAL engine states "
-				"for each. Score offline with SolverLab battery <map.bsp> "
-				"- every FAIL row is a measured model gap whose engine "
-				"truth is already on disk.");
+			Theme::Help("Same decks, physically played on the server with "
+				"teleports + real-state capture (playback_battery_*.csv). "
+				"Slower; use when a query verdict needs the authoritative "
+				"server tick as the final word.");
 		}
 
 		SubHeading("Ground truth export");
@@ -8750,7 +8845,7 @@ void TasEditor::Update() {
 	// The whole chain runs under the same fault guard as the search jobs: a
 	// crash anywhere in it becomes a NAMED stage in solver_fault.log and the
 	// pumps stop, instead of a dead game with no evidence.
-	if (Prediction::SimReady()) {
+	if (Prediction::SimReady() && !g_batsim_own) {
 		if (!SimLandedGuarded()) {
 			char note[256];
 			Sfmt(note, "EDITOR FAULT 0x%08X in stage %s (verify idx %d, batch idx %d) "
@@ -8810,6 +8905,62 @@ void TasEditor::Update() {
 	// would pollute it - the diff loses exactly one tick.)
 	if (g_playcap_active && !g_tas.IsPlaying())
 		FinalizePlaybackCapture();
+	// ENGINE-QUERY battery pump: take our sim, export, request the next.
+	if (g_batsim_on) {
+		if (g_batsim_own && Prediction::SimReady()) {
+			const int n = Prediction::SimCount();
+			const bool faulted = Prediction::SimFaulted();
+			std::vector<Frame> fr(n > 0 ? n : 1);
+			std::vector<Prediction::SimState> st(n > 0 ? n : 1);
+			if (n > 0)
+				Prediction::TakeSim(fr.data(), st.data());
+			g_batsim_own = false;
+			if (!faulted && n > 0) {
+				fr.resize(n);
+				st.resize(n);
+				ExportBatSim(fr, st);
+				g_batsim_done++;
+			}
+		}
+		if (!g_batsim_own && !Prediction::SimBusy()
+			&& !Prediction::SimReady() && !g_sim_requested) {
+			if (g_batsim_next < g_batsim_q.size()) {
+				const std::vector<Run>& blib = g_tas.Library();
+				const int idx = g_batsim_q[g_batsim_next++];
+				if (idx >= 0 && idx < static_cast<int>(blib.size())
+					&& blib[idx].start.valid && !blib[idx].Empty()) {
+					const Run& r = blib[idx];
+					g_batsim_frames.clear();
+					for (const Segment& sg : r.segments)
+						g_batsim_frames.insert(g_batsim_frames.end(),
+							sg.begin(), sg.end());
+					int ticks = static_cast<int>(g_batsim_frames.size());
+					if (ticks > Prediction::kMaxSimTicks)
+						ticks = Prediction::kMaxSimTicks;
+					g_batsim_name = r.name;
+					if (Prediction::RequestSim(r.start, ticks,
+						&BatSimProvider)) {
+						g_batsim_own = true;
+						g_status = FmtStr("Battery(query): %s (%d/%d)...",
+							r.name.c_str(),
+							static_cast<int>(g_batsim_next),
+							static_cast<int>(g_batsim_q.size()));
+					}
+					// RequestSim false: slot busy this frame - retry next
+					// pump pass (g_batsim_next already advanced; step back).
+					if (!g_batsim_own)
+						g_batsim_next--;
+				}
+			} else {
+				g_batsim_on = false;
+				ExportServerParams();
+				g_status = FmtStr("ENGINE-QUERY BATTERY COMPLETE: %d/%d "
+					"decks exported to solver\\enginesim_*.csv. Score: "
+					"SolverLab battery <map.bsp>", g_batsim_done,
+					static_cast<int>(g_batsim_q.size()));
+			}
+		}
+	}
 	// Alignment-battery sequencer: after each capture lands (and a settle
 	// gap), start the next queued deck. Menu-independent by design.
 	if (g_battery_on && !g_playcap_active && !g_playcap_armed

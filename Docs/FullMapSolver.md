@@ -1592,13 +1592,24 @@ MEASURED, not guessed: it is now a battery deck.
   closed-loop synthesized), unduck_face (THE tick-537 scenario: board
   ramp 1 ducked at 370 u/s, ride 32 contact ticks, unduck ON the face -
   verified in-core).
-- In-game: Map Solve tab -> **"Run ALIGNMENT battery"** - ONE CLICK plays
-  every battery_* recording in sequence with real-state capture armed
-  (menu-independent sequencer on the update pump, 30-frame settle gaps,
-  abortable). Each run exports playback_battery_*.csv as usual.
+- In-game, TWO modes (user question 2026-08-14: "can't you just query the
+  engine code for the response?" - yes, and it is the default):
+  - **"Run ALIGNMENT battery (engine query)"** - PRIMARY. Every deck runs
+    through Prediction::RequestSim = the engine's OWN SetupMove/
+    ProcessMovement/FinishMove from the deck's anchor, live player
+    restored byte-for-byte. No teleports, nobody falls off anything, the
+    whole battery takes seconds. Exports solver\enginesim_battery_*.csv.
+    (Ownership flag g_batsim_own keeps the editor's sim-land stage from
+    consuming battery results.)
+  - **"Battery via physical playback (arbiter)"** - the same decks played
+    for real on the authoritative server tick (teleport + capture,
+    playback_battery_*.csv). The final word if a query verdict is ever in
+    doubt; a query-vs-playback disagreement would itself be a finding
+    (prediction/server divergence).
 - `SolverLab battery <map.bsp>` scores every capture against the core:
-  per-mechanism table (ticks, first>0.1u, max dpos, PASS/FAIL). A FAIL is
-  a measurement, not a bug report - the engine truth for that mechanism is
+  per-mechanism table (ticks, first>0.1u, max dpos, [query/play] source,
+  PASS/FAIL). Newest capture of either source wins. A FAIL is a
+  measurement, not a bug report - the engine truth for that mechanism is
   already on disk, ready to fit.
 
 Protocol going forward: battery PASSES = the core is engine-exact on every

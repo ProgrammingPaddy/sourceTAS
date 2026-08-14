@@ -1831,17 +1831,24 @@ namespace {
 			Tape tape;
 			if (!LoadTas(rec + fd.cFileName, tape, &err))
 				continue;
-			// Newest matching capture: playback_<name>*.csv
-			std::string best_csv;
+			// Newest matching capture from EITHER source: engine query
+			// (enginesim_<name>*.csv) or physical playback
+			// (playback_<name>*.csv). Newest wins; source is reported.
+			std::string best_csv, src = "?";
 			FILETIME best_t = { 0, 0 };
-			WIN32_FIND_DATAA cd;
-			HANDLE hc = FindFirstFileA(
-				(sol + "playback_" + name + "*.csv").c_str(), &cd);
-			if (hc != INVALID_HANDLE_VALUE) {
+			const char* prefixes[2] = { "enginesim_", "playback_" };
+			const char* srctag[2] = { "query", "play" };
+			for (int pi = 0; pi < 2; ++pi) {
+				WIN32_FIND_DATAA cd;
+				HANDLE hc = FindFirstFileA(
+					(sol + prefixes[pi] + name + "*.csv").c_str(), &cd);
+				if (hc == INVALID_HANDLE_VALUE)
+					continue;
 				do {
 					if (CompareFileTime(&cd.ftLastWriteTime, &best_t) > 0) {
 						best_t = cd.ftLastWriteTime;
 						best_csv = sol + cd.cFileName;
+						src = srctag[pi];
 					}
 				} while (FindNextFileA(hc, &cd));
 				FindClose(hc);
@@ -1899,8 +1906,8 @@ namespace {
 				_snprintf_s(fbuf, sizeof(fbuf), _TRUNCATE, "never");
 			else
 				_snprintf_s(fbuf, sizeof(fbuf), _TRUNCATE, "%d", first01);
-			printf("battery: %-22s %6d %11s %9.3fu  %s\n",
-				name.c_str() + 8, n, fbuf, maxd,
+			printf("battery: %-22s %6d %11s %9.3fu  [%s] %s\n",
+				name.c_str() + 8, n, fbuf, maxd, src.c_str(),
 				okp ? "PASS" : "FAIL  <- engine truth on disk, fit it");
 			if (okp) pass++; else fail++;
 		} while (FindNextFileA(h, &fd));
