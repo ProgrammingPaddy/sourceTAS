@@ -512,16 +512,13 @@ namespace Solver {
 					}
 				}
 			} else if (mode == 3 && cfg_.energy_frontier) {
-				// KINETIC FRONTIER (user's compromise equation, clause 1:
-				// board the next ramp with as much energy as possible):
-				// among the contact bands nearest the finish, restart from
-				// the FASTEST entry sampled. Dissipation cannot see slow
-				// flailing (it loses nothing); this axis starves it. KINETIC
-				// only - the full-E form (+gz) let ALTITUDE dominate and
-				// selected slow high touches (measured 2026-08-13: A/B arm
-				// scored 2774 vs control 804, archive diversity collapsed;
-				// same dead end as the prior attempt's absolute-E score).
-				float best_e = -1e30f;
+				// VALUE-MIX FRONTIER (user directive: energy is how humans
+				// route; control the PE/KE mix and the loss penalty):
+				// V = KE + mu*gz - lambda*eloss, best of 12 samples from the
+				// 3 contact bands nearest the finish. Raw E (mu=1, lambda=0)
+				// measured harmful - unconverted potential in slow lineages
+				// outvoted speed; the mix knobs are what the results tuned.
+				float best_v = -1e30f;
 				int nonempty = 0;
 				for (int b = 0; b < 32 && nonempty < 3; ++b) {
 					if (band_n_[b].load(std::memory_order_relaxed) == 0)
@@ -531,9 +528,13 @@ namespace Solver {
 					const std::vector<int>& v = bands_[b];
 					for (int c = 0; c < 4; ++c) {
 						const int i = v[rng() % v.size()];
-						const float e = Len2(entries_[i].st.vel);
-						if (!entries_[i].finished && e > best_e) {
-							best_e = e;
+						const Entry& e = entries_[i];
+						const float val = 0.5f * Len2(e.st.vel)
+							+ cfg_.efrontier_mu * cfg_.params.gravity
+								* e.st.pos.Z
+							- cfg_.efrontier_lambda * e.eloss;
+						if (!e.finished && val > best_v) {
+							best_v = val;
 							base = i;
 						}
 					}

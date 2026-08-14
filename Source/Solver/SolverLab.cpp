@@ -117,7 +117,9 @@ namespace {
 		int tighten = 0;            // capped re-explore rounds off the incumbent
 		bool goal_touch = false;
 		bool eloss_bias = true;
-		bool energy_frontier = false;
+		bool energy_frontier = true;
+		float emix_mu = 0.5f;
+		float emix_lambda = 0.5f;
 		bool aim = false;           // contact-anchored targeting (measured
 		                            // neutral on segments; --aim to enable)
 		bool zone_clock = true;     // score = ticks from startzone exit
@@ -208,6 +210,12 @@ namespace {
 			else if (a == "--no-eloss-bias") o.eloss_bias = false;
 			else if (a == "--energy-frontier") o.energy_frontier = true;
 			else if (a == "--no-energy-frontier") o.energy_frontier = false;
+			else if (a == "--emix") {
+				if (i + 2 < argc) {
+					o.emix_mu = static_cast<float>(atof(argv[++i]));
+					o.emix_lambda = static_cast<float>(atof(argv[++i]));
+				} else ok = false;
+			}
 			else if (a == "--no-edge-bevels") o.edge_bevels = false;
 			else if (a == "--legacy-corner") o.corner_true = false;
 			else if (a == "--aim") o.aim = true;
@@ -775,6 +783,11 @@ namespace {
 		cfg.goal_touch = o.goal_touch;
 		cfg.eloss_bias = o.eloss_bias;
 		cfg.energy_frontier = o.energy_frontier;
+		cfg.efrontier_mu = o.emix_mu;
+		cfg.efrontier_lambda = o.emix_lambda;
+		if (o.energy_frontier)
+			printf("solve: value-mix frontier ON (V = KE + %.2f*gz - %.2f*eloss)\n",
+				o.emix_mu, o.emix_lambda);
 		const int nthreads = ResolveThreadCount(o.threads);
 		printf("solve: clock = %s\n", o.zone_clock
 			? "ZONE (score starts at startzone exit; prestrafe is free)"

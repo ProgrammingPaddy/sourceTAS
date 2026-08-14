@@ -1103,16 +1103,49 @@ first-finish-variance noise — both arms dry); full budgets ONLY for record
 attempts after a change proves out at screen scale. Screens saturate (804 tie both
 arms) — they prove non-harm, not benefit; treat accordingly.
 
+### VALUE-MIX FRONTIER — THE USER'S ENERGY MODEL WINS (2026-08-13)
+
+**User correction:** raw-E failing ≠ energy failing — the directive is a CONTROLLED
+tradeoff: "find the best value mix between potential and kinetic energy for the
+lowest loss." And: unless something beats the human run without energy, energy
+stays in the search. Also: narrate long runs live (monitor went dark), and account
+for throughput honestly (a 150 s solve = ~10 BILLION ticks / ~100M rollouts; the
+funnel to ~2M archived entries and 10²-10³ finishes is best-per-cell selectivity,
+not idle hardware; search efficiency, not tick throughput, is the lever).
+
+**Implemented: V = KE + μ·(g·z) − λ·eloss** as the mode-3 restart axis (`--emix μ λ`;
+within a band absolute-z cancels — only the mix matters, nothing map-specific).
+
+**Sweep (150 s explore-only, rng 1337, narrated live):**
+| arm | μ | λ | finishes | best scored |
+|---|---|---|---|---|
+| A | 0.25 | 0.5 | 1,142 | **778** |
+| B | 0.50 | 0.5 | 1,126 | 1824 |
+| C | 0.00 | 1.0 | 5,107 | 2268 |
+| control | off | — | 104 | 1117 |
+The genuine mix beats both poles AND the control (10× finisher stream, −339 raw
+ticks). μ=0.25/λ=0.5 is now the DEFAULT. The user's energy framework, at the right
+ratio, is measurably the best restart signal the search has.
+
+**Record: 778 → 762 scored** via two seeded tighten rounds on the sweep-winner tape
+(778→768→762; a same-flags rerun of the primary hit thread-interleaving variance —
+1 finish at 79 s — killed it rather than wait; tighten-on-incumbent is the reliable
+lever). Shipped `surf_basictest_solved10.tas` (762 scored / 846 abs, walk-off exit
+t84, landing (1200,−828)). **Normalcy trend intact: snaps>10° per record: 180 →
+46 → 27; max 169° → 66° → 44°** — efficiency filters the flailing, zero gates.
+Gate queries staged (2,037; run-4 backup).
+
+Scored ladder: human 319 | solved10 762 | solved9 804 (in-game status pending both).
+
 ### Open items
-- ~~Worker-pool parallelism~~ SHIPPED v2b (10.3× at 19 workers, dam broken, record
-  halved). Remaining follow-on: NUMA/affinity untested, >20-core boxes unprofiled.
-- Settle-class movement-layer residual (now 3 data points: 604 t544, solved8
-  t1472; trace answers engine-exact) — hunt via tick-level query-log diff.
-- solved9 gate + in-game test; then grind: multi-seed tighten rounds on the 804
-  incumbent (the proven lever) — snaps are dropping with route quality, keep
-  measuring per candidate.
-- Compromise-equation clauses 2-3 (leave cleanly / preserve reach) still unbuilt;
-  revisit after the pocket shrinks further or a full-budget kinetic test.
+- ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
+- Settle-class movement-layer residual (3 data points; trace answers engine-exact)
+  — tick-level query-log diff hunt.
+- solved9/solved10 gate + in-game tests.
+- μ/λ refinement (finer sweep around 0.25/0.5; per-band-depth mix?) + compromise
+  clauses 2-3 if the ramp-4 pocket persists at 762-class routes.
+- Optimize stage underuses threads when subjects < workers (run rng restarts per
+  subject); post-cap frontier-freeze wastes late rollouts.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

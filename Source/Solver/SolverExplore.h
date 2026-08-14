@@ -85,13 +85,18 @@ namespace Solver {
 		// signal ON THIS MAP (one measurement, not a law - keep testing).
 		// Bias only (fitness stays ticks); off = control arm for A/B.
 		bool eloss_bias = true;
-		// Kinetic-at-progress axis (user's compromise equation, clause 1):
-		// restart from the FASTEST entry among the contact bands nearest the
-		// finish. Full-E (+gz) measured HARMFUL (altitude dominated, archive
-		// diversity collapsed: 2774 vs control 804); kinetic-only measured
-		// NEUTRAL on seeded short screens. Unproven machinery defaults OFF -
-		// --energy-frontier enables it for full-budget tests.
-		bool energy_frontier = false;
+		// VALUE-MIX frontier (user directive 2026-08-13: energy IS how humans
+		// think about completing maps; control the PE/KE tradeoff and the
+		// loss penalty rather than maximizing raw E): among the contact bands
+		// nearest the finish, restart from the entry with the highest
+		//     V = KE + mu*(g*z) - lambda*eloss
+		// Within a band the absolute-z offset cancels, so only the MIX
+		// matters - nothing map-specific. mu=1,lambda=0 = the measured-
+		// harmful raw-E axis; mu=0,lambda=inf = the smooth frontier. The
+		// knobs are swept by results; the winning mix is the default.
+		bool energy_frontier = true;
+		float efrontier_mu = 0.5f;
+		float efrontier_lambda = 0.5f;
 	};
 
 	struct Finisher {
