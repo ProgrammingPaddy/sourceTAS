@@ -109,6 +109,15 @@ namespace Solver {
 		bool energy_frontier = true;
 		float efrontier_mu = 0.4f;
 		float efrontier_lambda = 6.5f;
+		// Micro-lookahead generator. Measured 2026-08-14: flips the archive
+		// composition as designed (zone-jump census 500:1 starved -> 3:1
+		// jump-DOMINANT) but the ~2.4x tick tax loses end-to-end - cold
+		// primary 2726 vs incumbent-class, seeded tighten screens 706/dry vs
+		// control 665/767. DEFAULT OFF (results define conditions); the
+		// apparatus stays for cheaper variants (smaller C/H, contact-only
+		// decisions). 0 = plain sampling.
+		int lookahead_c = 0;
+		int lookahead_h = 16;
 	};
 
 	struct Finisher {

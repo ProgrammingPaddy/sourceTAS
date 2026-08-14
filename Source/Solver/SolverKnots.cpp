@@ -101,6 +101,43 @@ namespace Solver {
 		return kn;
 	}
 
+	Knot LookaheadKnot(std::mt19937& rng, const PlayerState& s, float yaw,
+	                   const World& w, const MoveParams& p,
+	                   float mu, float lambda, int candidates, int horizon,
+	                   signed char last_side, short since_flip, int min_knot,
+	                   long long* sim_ticks) {
+		Knot best = SampleKnot(rng, last_side, since_flip, min_knot);
+		if (candidates <= 1 || horizon <= 0)
+			return best;
+		float best_v = -1e30f;
+		for (int c = 0; c < candidates; ++c) {
+			const Knot k = (c == 0)
+				? best : SampleKnot(rng, last_side, since_flip, min_knot);
+			PlayerState sim = s;
+			float sim_yaw = yaw;
+			float loss = 0.f;
+			float e_prev = 0.5f * Len2(sim.vel) + p.gravity * sim.pos.Z;
+			const int h = k.dur < horizon ? k.dur : horizon;
+			for (int t = 0; t < h; ++t) {
+				KnotTick(sim, sim_yaw, k, t, w, p, nullptr, nullptr);
+				const float e_now = 0.5f * Len2(sim.vel)
+					+ p.gravity * sim.pos.Z;
+				if (e_now < e_prev)
+					loss += e_prev - e_now;
+				e_prev = e_now;
+			}
+			if (sim_ticks)
+				*sim_ticks += h;
+			const float v = 0.5f * Len2(sim.vel)
+				+ mu * p.gravity * sim.pos.Z - lambda * loss;
+			if (v > best_v) {
+				best_v = v;
+				best = k;
+			}
+		}
+		return best;
+	}
+
 	bool FlipsLegal(const std::vector<Knot>& knots, int min_knot,
 	                signed char last_side0, short since_flip0) {
 		signed char last_side = last_side0;

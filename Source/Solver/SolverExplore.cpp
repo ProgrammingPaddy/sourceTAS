@@ -598,7 +598,10 @@ namespace Solver {
 			const int K = 1 + static_cast<int>(rng() % 3);
 			bool aborted = false;
 			for (int k = 0; k < K && !aborted; ++k) {
-				Knot kn = SampleKnot(rng, last_side, since_flip, min_knot_);
+				Knot kn = LookaheadKnot(rng, s, yaw, w_, cfg_.params,
+					cfg_.efrontier_mu, cfg_.efrontier_lambda,
+					cfg_.lookahead_c, cfg_.lookahead_h,
+					last_side, since_flip, min_knot_, &tloc);
 				if (kn.side != 0 && last_side != 0 && kn.side != last_side)
 					since_flip = 0;
 				if (kn.side != 0)

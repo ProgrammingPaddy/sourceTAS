@@ -120,6 +120,9 @@ namespace {
 		bool energy_frontier = true;
 		float emix_mu = 0.4f;      // joint refit w/ loss functionals (lossfit.py)
 		float emix_lambda = 6.5f;
+		int lookahead_c = 0;       // knot candidates per decision (0 = off;
+		                           // measured: archive flip yes, ticks no)
+		int lookahead_h = 16;      // lookahead horizon ticks
 		std::string audit_tas;     // solve --audit <tape>: valuation audit
 		bool aim = false;           // contact-anchored targeting (measured
 		                            // neutral on segments; --aim to enable)
@@ -212,6 +215,13 @@ namespace {
 			else if (a == "--energy-frontier") o.energy_frontier = true;
 			else if (a == "--no-energy-frontier") o.energy_frontier = false;
 			else if (a == "--audit") { if (i + 1 < argc) o.audit_tas = argv[++i]; else ok = false; }
+			else if (a == "--lookahead") {
+				if (i + 2 < argc) {
+					o.lookahead_c = atoi(argv[++i]);
+					o.lookahead_h = atoi(argv[++i]);
+				} else ok = false;
+			}
+			else if (a == "--no-lookahead") { o.lookahead_c = 0; }
 			else if (a == "--emix") {
 				if (i + 2 < argc) {
 					o.emix_mu = static_cast<float>(atof(argv[++i]));
@@ -787,9 +797,14 @@ namespace {
 		cfg.energy_frontier = o.energy_frontier;
 		cfg.efrontier_mu = o.emix_mu;
 		cfg.efrontier_lambda = o.emix_lambda;
+		cfg.lookahead_c = o.lookahead_c;
+		cfg.lookahead_h = o.lookahead_h;
 		if (o.energy_frontier)
 			printf("solve: value-mix frontier ON (V = KE + %.2f*gz - %.2f*eloss)\n",
 				o.emix_mu, o.emix_lambda);
+		if (o.lookahead_c > 1)
+			printf("solve: micro-lookahead ON (%d candidates x %d-tick horizon "
+				"per knot)\n", o.lookahead_c, o.lookahead_h);
 		const int nthreads = ResolveThreadCount(o.threads);
 		printf("solve: clock = %s\n", o.zone_clock
 			? "ZONE (score starts at startzone exit; prestrafe is free)"

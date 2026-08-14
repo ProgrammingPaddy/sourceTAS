@@ -40,6 +40,22 @@ namespace Solver {
 	Knot SampleKnot(std::mt19937& rng, signed char last_side, short since_flip,
 	                int min_knot);
 
+	// MICRO-LOOKAHEAD sampling (user directive 2026-08-14: "the solver should
+	// always know the most efficient possible moves available"): draw
+	// `candidates` legal knots from the SampleKnot distribution, simulate each
+	// for up to `horizon` ticks from the current state, and return the one
+	// with the best fitted value V = KE + mu*gz - lambda*(loss over the
+	// horizon). The per-tick yaw inside each sim is already the max-gain
+	// optimum; this lifts the same certainty to the DISCRETE choices (side,
+	// duration, jump, duck, turn rate). Randomness lives in the candidate
+	// draws - the archive's diversity machinery is untouched. sim_ticks (if
+	// set) accrues the lookahead's simulation cost for honest accounting.
+	Knot LookaheadKnot(std::mt19937& rng, const PlayerState& s, float yaw,
+	                   const World& w, const MoveParams& p,
+	                   float mu, float lambda, int candidates, int horizon,
+	                   signed char last_side, short since_flip, int min_knot,
+	                   long long* sim_ticks);
+
 	// Structural flip legality over a knot list: every L/R sign change must be
 	// at least min_knot ticks after the previous one (coasts don't reset the
 	// clock). last_side0/since_flip0 describe the state at the list's start.

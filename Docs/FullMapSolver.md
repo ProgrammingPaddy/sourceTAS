@@ -1249,12 +1249,39 @@ human tape's measured knot statistics. ML-as-tool (learned V or learned knot
 proposals trained across maps) stays sanctioned if hand-built lookahead
 plateaus; per-map ML stays out.
 
+### MICRO-LOOKAHEAD: BUILT, MEASURED, DEFAULT OFF (2026-08-14)
+
+User greenlit with the principle "the solver should always know the most
+efficient possible moves available." Built `LookaheadKnot` (SolverKnots): each
+knot decision draws C candidates from the legal distribution, simulates each up
+to H ticks, continues with the best fitted-V (`--lookahead C H`, honest tick
+accounting into the rollout totals; per-tick air yaw inside each sim is already
+the max-gain optimum, so this lifts the certainty to the discrete choices).
+
+**Measured:** the designed structural effect LANDED — zone-jump census flipped
+from 500:1 walk-off-starved to **3:1 JUMP-DOMINANT** (325,733 vs 112,655); zone
+band best-V rose 120k→190k. But END-TO-END the ~2.4× tick tax loses: cold
+primary 2726 scored (noise-prone, but poor); decision-grade seeded tighten
+screens (from the 695-class incumbent, which re-rolls to ~706 under the duck-fix
+physics — its old ending exploited the phantom unduck): lookahead 706 + one dry
+arm vs control **665 / 767**. On seeded screens the incumbent already supplies
+good states and raw rollout volume wins. **DEFAULT OFF** — apparatus kept for
+cheaper variants (smaller C/H; lookahead only at contact-adjacent decisions;
+candidate reuse). Results define conditions, including for my own builds.
+
+**Screen byproduct = NEW BEST: 665 scored (750 abs, 9.975 s)** from the control
+arm — shipped `surf_basictest_solved12.tas`, gate staged (1,949 queries, run-6
+backup). Built entirely under current physics (duck fix in). Snaps 45 (max 67°),
+41 low-speed air ticks — normalcy steady at the record class.
+**Scored ladder: human 319 | 665 | 695* | 762** (*695 model-stale post-duck-fix).
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- **Generator: micro-lookahead sampling under fitted V** — the audit-named
-  bottleneck; the round's successor.
-- **StepMove port** (spine-edge walking steers ~3.6° off) — owns the last 1.85u;
-  695 reality-INVALID until then.
+- Generator problem STILL OPEN (mid-map bands remain unreachable-class): next
+  candidates = cheap lookahead variants, human-fitted SampleKnot distributions,
+  ML-trained proposals (sanctioned as tools; search stays the product).
+- **StepMove port** (spine-edge walking steers ~3.6° off) — owns the last known
+  1.85u residual.
 - Mix-interleaving; optimize-stage thread underuse; post-cap frontier waste;
   compromise clauses 2-3; audit verdict-column refresh.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
