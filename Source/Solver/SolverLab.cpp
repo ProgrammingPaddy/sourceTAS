@@ -17,6 +17,7 @@
 #include "SolverExplore.h"
 #include "SolverMove.h"
 #include "SolverOptimize.h"
+#include "SolverChain.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -59,6 +60,10 @@ namespace {
 		printf("          [--rng N] [--threads N] [--out path.tas] [physics options]\n");
 		printf("          LINE-SPACE search: smooth strafe-intensity spline + CMA-ES\n");
 		printf("          (deterministic; clean endings required; labeled output)\n");
+		printf("  chain   <map.bsp> --end-brush N [--budget-s S] [--seg-s S] [--beam B]\n");
+		printf("          [--depth D] [--optimize-s S] [--rng N] [physics options]\n");
+		printf("          UNSEEDED two-layer solve: exhaustive skeleton search over\n");
+		printf("          surf-face sequences x chained segment CMA (no tape inputs)\n");
 		printf("  bench   <map.bsp> [ticks]\n");
 		printf("All commands auto-load Documents\\sourceTAS\\solver\\server_params.cfg\n");
 		printf("(written by the Map Solve tab from LIVE server values); --params <file>\n");
@@ -143,6 +148,11 @@ namespace {
 		float wloss = 6.5f;         // non-finisher dissipation shaping weight
 		int seed_follow = 0;        // verbatim seed-tape prefix ticks
 		bool seed_duck = true;      // carry the seed's duck overlay
+		// chain (two-layer unseeded) options
+		double seg_s = 8.0;         // per-segment CMA budget
+		double end_s = 15.0;        // END-landing attempt budget
+		int beam = 3;               // junction beam per (depth, face)
+		int depth = 5;              // skeleton board cap
 	};
 
 	bool ParseCommon(int argc, char** argv, int first, ReplayOpts& o) {
@@ -249,6 +259,10 @@ namespace {
 			else if (a == "--wloss") ok = next_f(&o.wloss);
 			else if (a == "--seed-follow") ok = next_i(&o.seed_follow);
 			else if (a == "--no-seed-duck") o.seed_duck = false;
+			else if (a == "--seg-s") { if (i + 1 < argc) o.seg_s = atof(argv[++i]); else ok = false; }
+			else if (a == "--end-s") { if (i + 1 < argc) o.end_s = atof(argv[++i]); else ok = false; }
+			else if (a == "--beam") ok = next_i(&o.beam);
+			else if (a == "--depth") ok = next_i(&o.depth);
 			else if (a == "--aim") o.aim = true;
 			else if (a == "--no-aim") o.aim = false;
 			else if (a == "--tighten") ok = next_i(&o.tighten);
@@ -1405,6 +1419,103 @@ namespace {
 		return st.clean ? 0 : 4;
 	}
 
+	// UNSEEDED two-layer solver: exhaustive skeleton search over surf-face
+	// sequences x chained segment CMA. No human inputs anywhere.
+	int CmdChain(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		if (o.end_brush < 0) {
+			printf("chain needs --end-brush N (mapinfo lists brush ids)\n");
+			return 1;
+		}
+		// Anchor: Map Solve capture > map spawn (no tape inputs by design).
+		TapeAnchor anchor;
+		bool miss = false;
+		std::string anchor_src;
+		if (!o.anchor_file.empty()) {
+			if (!LoadAnchorFile(o.anchor_file, anchor, &miss)) {
+				printf("LOAD FAILED (anchor file): %s\n",
+					o.anchor_file.c_str());
+				return 1;
+			}
+			anchor_src = o.anchor_file;
+		} else if (LoadAnchorFile(CanonicalAnchorPath(), anchor, &miss)) {
+			anchor_src = CanonicalAnchorPath() + " (Map Solve capture)";
+		} else {
+			anchor.valid = true;
+			anchor.origin = w.spawn_origin;
+			anchor.pitch = w.spawn_pitch;
+			anchor.yaw = w.spawn_yaw;
+			anchor_src = "map spawn (entities lump)";
+		}
+		printf("chain: anchor source = %s (UNSEEDED - no tape inputs)\n",
+			anchor_src.c_str());
+
+		ChainConfig cfg;
+		cfg.params = o.params;
+		cfg.end_brush_id = o.end_brush;
+		cfg.start_brush_id = (o.start_brush >= 0) ? o.start_brush
+			: w.BrushUnder(anchor.origin, anchor.ducked);
+		cfg.total_seconds = o.budget_s;
+		cfg.seg_seconds = o.seg_s;
+		cfg.end_seconds = o.end_s;
+		cfg.final_seconds = o.optimize_s;
+		cfg.beam = o.beam;
+		cfg.max_depth = o.depth;
+		cfg.cp_ticks = o.cp_ticks;
+		cfg.rng_seed = o.rng;
+		cfg.threads = o.threads;
+		cfg.wloss = o.wloss;
+		cfg.mix_mu = o.emix_mu;
+		cfg.dump_dir = o.csv;   // reuse --csv as the dump directory
+		printf("chain: start brush %d, end brush %d\n",
+			cfg.start_brush_id, cfg.end_brush_id);
+		fflush(stdout);
+
+		ChainSolver cs(w, cfg, anchor);
+		ChainResult r = cs.Run();
+		printf("---\n");
+		printf("chain: %d nodes, %d segment solves, %d clean finishes, "
+			"%lld ticks, %.1fs\n", r.nodes_expanded, r.segments_solved,
+			r.finishes, r.ticks_simulated, r.seconds);
+		if (!r.ok) {
+			printf("chain: NO clean line assembled. More --budget-s, "
+				"another --rng, more --seg-s.\n");
+			return 2;
+		}
+		std::string sk = "[";
+		for (size_t i = 0; i < r.skeleton.size(); ++i) {
+			if (i) sk += ">";
+			sk += std::to_string(
+				cs.Faces()[r.skeleton[i]].brush_id);
+		}
+		sk += "]";
+		printf("chain: best skeleton %s - %s %d scored (%d abs)\n",
+			sk.c_str(), r.clean ? "[clean]" : "[JUMP ]", r.scored,
+			r.abs_tick);
+		QualityScan(w, cfg.params, anchor, r.frames, cfg.start_brush_id,
+			cfg.end_brush_id, true);
+		const std::string out_path = o.out_tas.empty()
+			? LabeledOutPath(map_path, "chain", r.scored, r.abs_tick,
+				r.clean)
+			: o.out_tas;
+		if (!WriteTas(out_path, anchor, MapStem(map_path), r.frames,
+			&err)) {
+			printf("chain: WriteTas failed: %s\n", err.c_str());
+			return 3;
+		}
+		printf("chain: written -> %s\n", out_path.c_str());
+		PrintTestCard(out_path, r.scored, r.abs_tick, r.clean,
+			cfg.params.dt);
+		fflush(stdout);
+		return r.clean ? 0 : 4;
+	}
+
 	int CmdBench(const std::string& map_path, long long ticks) {
 		World w;
 		std::string err;
@@ -1619,6 +1730,15 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdSmooth(argv[2], o);
+	}
+	if (cmd == "chain" && argc >= 3) {
+		ReplayOpts o;
+		o.budget_s = 240.0;   // chain default: a campaign, not a screen
+		o.optimize_s = 30.0;  // final global polish
+		o.cp_ticks = 8;       // board windows need the fine basis
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdChain(argv[2], o);
 	}
 	if (cmd == "bench" && argc >= 3) {
 		const long long ticks = (argc >= 4) ? atoll(argv[3]) : 2000000LL;

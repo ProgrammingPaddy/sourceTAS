@@ -1412,8 +1412,90 @@ rng-arm ladders (cheap, automatable tonight) or the board-anchored closed-loop
 step: aim conditions at the NEXT face (tangent-arrival) as the generator
 between spline segments — map geometry as DATA, not map rules.
 
+## 2026-08-14 (later) — UNSEEDED TWO-LAYER SOLVER (`chain`)
+
+User direction: seeding is not the mission ("the point is to do full map
+without relying on existing inputs"); the skeleton idea approved,
+"especially if it enables a true exhaustive search"; ML explicitly weighed
+and benched (physics is cheap and exact here; one map of data; no-per-map-
+training constraint — a learned proposal prior stays available for measured
+bottlenecks only). Flip law re-confirmed structural before building: the
+14-tick decode guard + 15 deg/tick yaw cap make 1-tick strafing
+unrepresentable in ANY smooth/chain output.
+
+**Architecture** (Source/Solver/SolverChain.{h,cpp}, `chain` command):
+- LAYER 1 — SKELETONS: surfable faces read from the collision set (brush
+  planes with 0 < n.z < walkable_z; live params, no map rules — basictest
+  yields exactly the 4 ramp faces). Skeleton = face sequence (depth cap).
+  Best-first tree over sequences, priority = junction value; every expanded
+  node also attempts the END landing. At this scale the enumeration is
+  EXHAUSTIVE within budget — the meaningful version of "exhaustive best
+  line" (per-tick exhaustive is ~10^205 on this map; the archive already
+  demonstrated dense enumeration of the wrong language).
+- LAYER 2 — SEGMENTS: each edge is a smooth-spline CMA solve (segment mode
+  in SolverSmooth): target = CONTACT with the next face; fitness = the
+  user's compromise equation, w_tick*ticks − (V_board − wloss*eloss),
+  V = KE + mu*g*z fitted mix. END edges use the clean-finish fitness (jump
+  endings never assemble). Junction handoff = RIDE-ANCHORED: a contact tick
+  ≥ touch_settle (16) after first touch, face lost for a full window =
+  touch canceled. (Iteration history: first-touch junctions handed off
+  corner clips → children starved; survive-only settle was gamed into
+  single-graze ballistic "boards" — energy conservation makes tap-and-fly
+  V-optimal — → contact-anchored ride requirement, the physical definition
+  of a board.)
+- Junction BEAM per (depth, face), POSITION-DIVERSE (beam_sep 96u): three
+  copies of the same corner clip starve downstream; arrival diversity is
+  the handoff's load-bearing lesson.
+- ASSEMBLY: segments emit per-tick frames from exactly the parent's end
+  state; concatenation replays identically from the anchor (verified by an
+  authoritative re-replay before ranking). Best clean assembly gets a
+  global smooth-CMA polish (machine streams invert near-losslessly).
+- Zone-jump budget structural (single gene + in-zone guard); walker aborts
+  (>60 grounded post-exit, >400 in-zone) are sim-budget bounds.
+
+**Campaign log (10 iterations, every fix driven by a DUMPED TRAJECTORY, not
+a guess; rng 1337 throughout):**
+- v1-v3: tree enumerates correctly; children die. Fixed: first-touch
+  junctions (corner clips) -> settle windows; survive-only settle gamed
+  into tap-and-fly (energy conservation makes a single graze V-optimal) ->
+  contact-anchored ride requirement.
+- v4-v5: segments starved (max_restarts early-stop burned 8s budgets in
+  ~1s on failure stalls) -> early-stop only after success. Guidance added;
+  still dead: cold splines cannot HOLD a ride (mean-zero u slides off the
+  face before release) -> structural ride hold + release gene.
+- v6 dump: the "best board of ramp 2" was a 982 u/s BOTTOM-RIM graze at
+  z=-68 OUTSIDE the face polygon, descending -> honest boards (settle must
+  finalize INSIDE the face rect; junction V uses total energy, chain_mu=1,
+  since riding makes PE/KE fungible).
+- v7: FIRST FULL TOPOLOGY [7>8>9>11] chains unseeded - but links SMASH
+  (V370k -> -1958k; ramp-3 boards at spd 349). Pure-pursuit guidance
+  builds hard landings by construction (the user's exact words about the
+  old solver) -> TANGENT LEAD-IN (aim displaced along the face plane,
+  collapsing with range; normal component nulls before contact).
+- v8: links carry real energy (ramp-4 board V+307k at spd 933; 1>2>3 at
+  ~970 u/s). END attempts reach d49-d89 (energy-aware) - never land.
+  Junctions all LOW on faces: with E conserved in flight, a single V pick
+  collapses to "earliest cheapest board" - clause 3 (preserve reach) was
+  missing -> HEIGHT BANDS (each edge solved in low/mid/high thirds of the
+  face; each band a separate junction).
+- v9-v10: high boards exist (ramp-1 z 175-180); beams expand diverse
+  variants; END budget raised to 45s -> best END attempt **d31** - the
+  under-lip regime again, budget shrinks the gap but does not convert.
+  The 3>4 link still smashes (V -2256k class; the sharpest turn on the
+  map). 73-113 segment solves / ~20B ticks per campaign.
+
+**State:** the unseeded solver BUILDS real multi-ramp chains and is
+exhaustive at the skeleton level; no unseeded clean finish yet. The two
+measured gaps: (1) END conversion - import the FINISH-FLIGHT PROBE into
+END-segment rollouts (release checks from near-goal states; the mechanism
+that detonated discovery in the archive era) + z-margin in the landing aim
+(aim past the near lip on a descending arc); (2) the 3>4 link - enumerate
+exit SIDES (around the +-y face ends) the way heights are banded.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
+- **Chain endgame**: probe-in-segment for END conversion (d31 plateau);
+  exit-side bands for the 3>4 link; then long campaigns + rng arms.
 - **Erosion campaign automation**: ladder loop (rng arms × rungs, carry-best,
   auto-reseed) as a lab mode — walk the prefix to 0 and the whole line is
   machine-owned. Candidate: `smooth --erode` (unbuilt).

@@ -60,10 +60,68 @@ namespace Solver {
 			end_center_ = Vec3(0.5f * (b.bmin.X + b.bmax.X),
 			                   0.5f * (b.bmin.Y + b.bmax.Y), b.bmax.Z);
 		}
+		if (cfg_.chain_genes && cfg_.goal_face_brush < 0 && end_idx_ >= 0) {
+			// END-landing guidance frame: the landing footprint's top
+			// rectangle (the probe insight as a controller - home on a
+			// gene-chosen landing point).
+			const WorldBrush& b = w_.brushes[end_idx_];
+			face_n_ = Vec3(0.f, 0.f, 1.f);
+			face_d_ = b.bmax.Z;
+			face_center_ = Vec3(0.5f * (b.gmin_stand.X + b.gmax_stand.X),
+				0.5f * (b.gmin_stand.Y + b.gmax_stand.Y), b.bmax.Z);
+			face_t1_ = Vec3(1.f, 0.f, 0.f);
+			face_t2_ = Vec3(0.f, 1.f, 0.f);
+			face_e1_ = 0.5f * (b.gmax_stand.X - b.gmin_stand.X);
+			face_e2_ = 0.5f * (b.gmax_stand.Y - b.gmin_stand.Y);
+		}
+		if (cfg_.goal_face_brush >= 0
+			&& cfg_.goal_face_brush < static_cast<int>(w_.brushes.size())) {
+			// Target-face frame: center projected onto the plane + two
+			// tangent axes + extents (the 8 AABB corners projected). The
+			// guidance genes pick the board point inside this rectangle.
+			const WorldBrush& b = w_.brushes[cfg_.goal_face_brush];
+			Vec3 c = Vec3(0.5f * (b.bmin.X + b.bmax.X),
+			              0.5f * (b.bmin.Y + b.bmax.Y),
+			              0.5f * (b.bmin.Z + b.bmax.Z));
+			const int pi = cfg_.goal_face_plane;
+			if (pi >= 0 && pi < static_cast<int>(b.n.size())) {
+				face_n_ = b.n[pi];
+				face_d_ = b.d[pi];
+				const float off = Dot(face_n_, c) - face_d_;
+				c = c - Scale(face_n_, off);
+				// Horizontal along-face axis + up-slope axis.
+				Vec3 t1(-face_n_.Y, face_n_.X, 0.f);
+				const float t1l = Len(t1);
+				face_t1_ = t1l > 1e-4f ? Scale(t1, 1.f / t1l)
+					: Vec3(1.f, 0.f, 0.f);
+				face_t2_ = Vec3(
+					face_n_.Y * face_t1_.Z - face_n_.Z * face_t1_.Y,
+					face_n_.Z * face_t1_.X - face_n_.X * face_t1_.Z,
+					face_n_.X * face_t1_.Y - face_n_.Y * face_t1_.X);
+				float e1 = 0.f, e2 = 0.f;
+				for (int k = 0; k < 8; ++k) {
+					const Vec3 corner(
+						(k & 1) ? b.bmax.X : b.bmin.X,
+						(k & 2) ? b.bmax.Y : b.bmin.Y,
+						(k & 4) ? b.bmax.Z : b.bmin.Z);
+					const Vec3 r = corner - c;
+					e1 = fmaxf(e1, fabsf(Dot(r, face_t1_)));
+					e2 = fmaxf(e2, fabsf(Dot(r, face_t2_)));
+				}
+				face_e1_ = e1;
+				face_e2_ = e2;
+			}
+			face_center_ = c;
+		}
 		float mz = 1e9f;
 		for (const WorldBrush& b : w_.brushes)
 			mz = fminf(mz, b.bmin.Z);
 		world_min_z_ = mz - 512.f;
+	}
+
+	void SmoothOpt::SetRoot(const PlayerState& s, float yaw) {
+		root_ = s;
+		root_yaw_ = yaw;
 	}
 
 	bool SmoothOpt::SeedFromTape(const Tape& tape) {
@@ -210,10 +268,35 @@ namespace Solver {
 			: static_cast<int>(x[ncp_ + 1] * 10.0 + 0.5);
 		const int duck_off = x[ncp_ + 2] < 0.0 ? (1 << 28)
 			: static_cast<int>(x[ncp_ + 2] * 10.0 + 0.5);
+		// Guidance genes (chain segments): board/landing point + gain +
+		// engagement tick (the release decision).
+		Vec3 board_target = face_center_;
+		float guide_gain = 0.f;
+		int guide_from = 0;
+		if (cfg_.chain_genes
+			&& static_cast<int>(x.size()) >= ncp_ + 7) {
+			const float tx = static_cast<float>(
+				Clampd(x[ncp_ + 3], 0.0, 1.0)) * 2.f - 1.f;
+			const float tyu = cfg_.ty_lo + (cfg_.ty_hi - cfg_.ty_lo)
+				* static_cast<float>(Clampd(x[ncp_ + 4], 0.0, 1.0));
+			const float ty = tyu * 2.f - 1.f;
+			guide_gain = static_cast<float>(
+				Clampd(x[ncp_ + 5], 0.0, 1.0));
+			guide_from = x[ncp_ + 6] < 0.0 ? 0
+				: static_cast<int>(x[ncp_ + 6] * 10.0 + 0.5);
+			board_target = face_center_
+				+ Scale(face_t1_, tx * 0.8f * face_e1_)
+				+ Scale(face_t2_, ty * 0.8f * face_e2_);
+		}
 
 		signed char last_side = 0;
 		short since_flip = 999;
 		bool launch_jump = false;
+		int touch_at = -1;
+		int last_contact = -1;
+		// Structural ride hold: the steep face contacted most recently.
+		int hold_fresh = -999;
+		Vec3 hold_n;
 		float e_prev = 0.5f * Len2(s.vel) + p.gravity * s.pos.Z;
 		bool zone_exited = start_idx_ < 0;
 		const int follow = cfg_.seed_follow
@@ -248,6 +331,94 @@ namespace Solver {
 			} else {
 				float u = SplineEval(x, t);
 				u = static_cast<float>(Clampd(u, -2.0, 2.0));
+
+				// STRUCTURAL RIDE HOLD: pre-release (or during the settle),
+				// while steep-face contact is fresh, press INTO the face -
+				// the spline modulates intensity, never the commitment.
+				if (cfg_.chain_genes && !s.on_ground
+					&& t - hold_fresh <= 3
+					&& (t < guide_from || st.touched)) {
+					const float wlx = -s.vel.Y, wly = s.vel.X;
+					const int side_hold =
+						(wlx * -hold_n.X + wly * -hold_n.Y) > 0.f ? 1 : -1;
+					float au = fabsf(u);
+					if (au < 0.7f) au = 0.7f;
+					if (au > 1.5f) au = 1.5f;
+					u = static_cast<float>(side_hold) * au;
+				}
+				// CLOSED-LOOP GUIDANCE (chain segments, in flight, after
+				// release): predict the ballistic crossing of the target
+				// plane, steer the horizontal velocity to null the miss
+				// against the gene-chosen point. The guided u passes
+				// through the same wish mapping, flip guard, and yaw cap
+				// as any u - position control the open-loop spline cannot
+				// do.
+				if (cfg_.chain_genes && guide_gain > 0.01f
+					&& t >= guide_from && !st.touched && !s.on_ground) {
+					const float spg = Len2D(s.vel);
+					if (spg > 50.f) {
+						const float sd = Dot(face_n_, s.pos) - face_d_;
+						const float aq = -0.5f * p.gravity * face_n_.Z;
+						const float bq = Dot(face_n_, s.vel);
+						float tau = -1.f;
+						if (fabsf(aq) < 1e-3f) {
+							if (bq < -1.f)
+								tau = -sd / bq;
+						} else {
+							const float disc = bq * bq - 4.f * aq * sd;
+							if (disc >= 0.f) {
+								const float sq = sqrtf(disc);
+								const float r1 = (-bq + sq) / (2.f * aq);
+								const float r2 = (-bq - sq) / (2.f * aq);
+								tau = 1e9f;
+								if (r1 > 0.f && r1 < tau) tau = r1;
+								if (r2 > 0.f && r2 < tau) tau = r2;
+								if (tau > 1e8f) tau = -1.f;
+							}
+						}
+						if (tau > 0.f) {
+							if (tau > 3.f) tau = 3.f;
+							// TANGENT LEAD-IN: aim at a point displaced
+							// from the board point along the face plane,
+							// collapsing as the range closes - the final
+							// approach asymptotes the tangent line,
+							// nulling the normal component BEFORE contact.
+							// (Measured without it: pure pursuit built
+							// hard landings by construction - V collapsed
+							// link by link, ramp-3 boards at spd 349.)
+							const Vec3 toT = board_target - s.pos;
+							Vec3 inp = toT
+								- Scale(face_n_, Dot(face_n_, toT));
+							const float ipl = Len(inp);
+							Vec3 aim_pt = board_target;
+							if (ipl > 1.f)
+								aim_pt = board_target - Scale(
+									Scale(inp, 1.f / ipl),
+									0.5f * Len(toT));
+							Vec3 pred = s.pos + Scale(s.vel, tau);
+							pred.Z -= 0.5f * p.gravity * tau * tau;
+							const Vec3 miss = aim_pt - pred;
+							const Vec3 aimv(
+								aim_pt.X - s.pos.X + miss.X,
+								aim_pt.Y - s.pos.Y + miss.Y, 0.f);
+							if (Len2D(aimv) > 1.f) {
+								const float ah = atan2f(aimv.Y, aimv.X)
+									* (180.f / kPi);
+								const float hh = atan2f(s.vel.Y, s.vel.X)
+									* (180.f / kPi);
+								const float err = NormYawDeg(ah - hh);
+								const float turn = fmaxf(0.5f,
+									p.air_speed_cap / spg
+										* (180.f / kPi));
+								float ua = err / turn;
+								if (ua > 1.5f) ua = 1.5f;
+								else if (ua < -1.5f) ua = -1.5f;
+								u = u * (1.f - guide_gain)
+									+ ua * guide_gain;
+							}
+						}
+					}
+				}
 
 				// Structural flip guard: a sign change sooner than 14 ticks
 				// after the previous one holds the old side (spline
@@ -356,6 +527,20 @@ namespace Solver {
 			st.sim_ticks++;
 			if (ev.jumped && !zone_exited)
 				zone_jumps++;
+			// Ride-hold bookkeeping: remember the steep face just clipped.
+			if (cfg_.chain_genes) {
+				for (int c = 0; c < ev.ncontacts; ++c) {
+					const WorldBrush& cb = w_.brushes[ev.contact_brush[c]];
+					const int cp = ev.contact_plane[c];
+					if (cp >= 0 && cp < static_cast<int>(cb.n.size())) {
+						const Vec3& cn = cb.n[cp];
+						if (cn.Z > 0.05f && cn.Z < p.walkable_z) {
+							hold_n = cn;
+							hold_fresh = t;
+						}
+					}
+				}
+			}
 
 			// Energy ledger (dissipation = every drop of KE + PE).
 			const float e_now = 0.5f * Len2(s.vel) + p.gravity * s.pos.Z;
@@ -386,7 +571,9 @@ namespace Solver {
 				st.exit_tick = t;
 			}
 
-			const float d = DistToEnd(s.pos, s.vel.Z);
+			const float d = cfg_.goal_face_brush >= 0
+				? Len(s.pos - face_center_)
+				: DistToEnd(s.pos, s.vel.Z);
 			if (d < st.dmin) {
 				st.dmin = d;
 				st.eloss_at_dmin = st.eloss;
@@ -394,7 +581,53 @@ namespace Solver {
 					+ cfg_.mix_mu * p.gravity * s.pos.Z;
 			}
 
-			if (end_idx_ >= 0 && s.on_ground && s.ground_brush >= 0
+			// Segment mode: success = boarding the target face and RIDING
+			// it - the junction is a CONTACT tick at least touch_settle
+			// after the first touch. A tap-and-fly (graze, then ballistic)
+			// never qualifies: losing the face for a full window cancels
+			// the touch (measured failure: energy-optimal "settles" were
+			// single grazes flying away, and every child segment died).
+			if (cfg_.goal_face_brush >= 0) {
+				bool hit = false;
+				for (int c = 0; c < ev.ncontacts; ++c)
+					if (ev.contact_brush[c] == cfg_.goal_face_brush
+						&& (cfg_.goal_face_plane < 0
+							|| ev.contact_plane[c] == cfg_.goal_face_plane))
+						hit = true;
+				if (hit) {
+					if (!st.touched) {
+						st.touched = true;
+						touch_at = t;
+					}
+					last_contact = t;
+					// Finalize only INSIDE the face polygon (with margin):
+					// rim grazes ride the plane's edge for ticks without
+					// ever being ON the face - that is not a board.
+					const Vec3 r = s.pos - face_center_;
+					const bool in_rect =
+						fabsf(Dot(r, face_t1_)) <= face_e1_ * 0.9f
+						&& fabsf(Dot(r, face_t2_)) <= face_e2_ * 0.9f;
+					if (in_rect && t >= touch_at + cfg_.touch_settle) {
+						st.clean = !launch_jump;
+						st.tick = t;
+						st.rel = st.exit_tick >= 0 ? t - st.exit_tick : t;
+						st.finish_speed = Len2D(s.vel);
+						st.vboard = 0.5f * Len2(s.vel)
+							+ cfg_.chain_mu * p.gravity * s.pos.Z;
+						st.end_state = s;
+						st.end_yaw = yaw;
+						break;
+					}
+					if (t - touch_at > 120) {
+						st.touched = false;   // stuck grazing; not a board
+						touch_at = -1;
+					}
+				} else if (st.touched
+					&& t - last_contact > cfg_.touch_settle) {
+					st.touched = false;   // lost the face; a later board
+					touch_at = -1;        // may re-arm
+				}
+			} else if (end_idx_ >= 0 && s.on_ground && s.ground_brush >= 0
 				&& w_.brushes[s.ground_brush].id == cfg_.end_brush_id
 				&& InsideXY(s.pos, w_.brushes[end_idx_])) {
 				st.finished = true;
@@ -402,10 +635,14 @@ namespace Solver {
 				st.tick = t;
 				st.rel = st.exit_tick >= 0 ? t - st.exit_tick : t;
 				st.finish_speed = Len2D(s.vel);
+				st.end_state = s;
+				st.end_yaw = yaw;
 				break;
 			}
-			if (s.pos.Z < world_min_z_)
-				break;   // fell out of the world - dead line
+			if (s.pos.Z < world_min_z_) {
+				st.touched = false;   // died mid-settle: not a junction
+				break;
+			}
 
 			// Sim-budget bounds (same class as max_path_ticks, never route
 			// rules): a line that walks grounded for a full second after the
@@ -417,12 +654,17 @@ namespace Solver {
 				grounded_run = 0;
 			if (zone_exited) {
 				if (grounded_run > 60 && s.ground_brush >= 0
-					&& w_.brushes[s.ground_brush].id != cfg_.end_brush_id)
+					&& w_.brushes[s.ground_brush].id != cfg_.end_brush_id) {
+					st.touched = false;
 					break;
+				}
 			} else if (t > 400) {
 				break;
 			}
 		}
+		// Rollout ended inside the settle window (domain edge): no junction.
+		if (cfg_.goal_face_brush >= 0 && st.touched && st.tick == 0)
+			st.touched = false;
 
 		if (stats)
 			*stats = st;
@@ -436,6 +678,14 @@ namespace Solver {
 				leash += 0.001 * (a - 2.0) * (a - 2.0);
 		}
 
+		if (cfg_.fitness_mode == 1) {
+			// Junction fitness (CMA is rank-based - raw energy units are
+			// fine): maximize board value minus fitted waste, pay per tick.
+			if (st.touched)
+				return cfg_.w_tick * st.tick
+					- (st.vboard - cfg_.wloss * st.eloss) + leash;
+			return 1e9 + st.dmin + leash;
+		}
 		if (st.finished && st.clean)
 			return st.rel + st.eloss * 1e-7 - 100000.0 + leash;
 		if (st.finished)
@@ -453,7 +703,8 @@ namespace Solver {
 		out.clear();
 		SmoothStats st;
 		Evaluate(x, &st, &out);
-		if (st.finished && static_cast<int>(out.size()) > st.tick + 1)
+		if ((st.finished || st.touched)
+			&& static_cast<int>(out.size()) > st.tick + 1)
 			out.resize(st.tick + 1);
 		if (stats)
 			*stats = st;
@@ -631,12 +882,14 @@ namespace Solver {
 			* (1.0 - 1.0 / (4.0 * n) + 1.0 / (21.0 * n * n));
 
 		const int nthreads = ResolveThreadCount(cfg_.threads);
-		printf("smooth: %d dims (%d CPs @ %d ticks + jump), pop %d, "
-			"%d workers, %s init, budget %.0fs (deterministic, rng %u)\n",
-			n, ncp_, cfg_.cp_ticks, lambda, nthreads,
-			have_seed_mean_ ? "SEEDED" : "cold", cfg_.budget_seconds,
-			cfg_.rng_seed);
-		fflush(stdout);
+		if (!quiet_) {
+			printf("smooth: %d dims (%d CPs @ %d ticks + jump), pop %d, "
+				"%d workers, %s init, budget %.0fs (deterministic, rng %u)\n",
+				n, ncp_, cfg_.cp_ticks, lambda, nthreads,
+				have_seed_mean_ ? "SEEDED" : "cold", cfg_.budget_seconds,
+				cfg_.rng_seed);
+			fflush(stdout);
+		}
 
 		SmoothResult res;
 		std::mt19937_64 rng(cfg_.rng_seed);
@@ -660,6 +913,8 @@ namespace Solver {
 			std::fill(ps.begin(), ps.end(), 0.0);
 			if (have_seed_mean_) {
 				mean = seed_mean_;
+				if (static_cast<int>(mean.size()) < n)
+					mean.resize(n, 0.5);
 				// Escalating restart step: the same basin keeps catching
 				// gentle re-inits; each restart doubles the reach (cap 8x).
 				const double esc = first ? 1.0
@@ -672,6 +927,20 @@ namespace Solver {
 					* (static_cast<double>(rng() & 0xFFFF) / 65535.0);
 				mean[ncp_ + 1] = -0.5;   // duck genes start disabled
 				mean[ncp_ + 2] = -0.5;
+				if (n > ncp_ + 3) {
+					// Guidance genes: center of the face, mostly guided,
+					// homing from ~a quarter second in (release timing is
+					// CMA's to move).
+					mean[ncp_ + 3] = 0.3 + 0.4
+						* (static_cast<double>(rng() & 0xFF) / 255.0);
+					mean[ncp_ + 4] = 0.3 + 0.4
+						* (static_cast<double>(rng() & 0xFF) / 255.0);
+					mean[ncp_ + 5] = 0.7;
+					// Release window: rides can need 20-70 ticks before
+					// the exit (a low board must climb first).
+					mean[ncp_ + 6] = 2.0
+						+ 5.0 * (static_cast<double>(rng() & 0xFF) / 255.0);
+				}
 				sigma = cfg_.sigma0;
 			}
 			if (!first)
@@ -730,7 +999,7 @@ namespace Solver {
 				best_f = F[bi];
 				res.best_x = X[bi];
 				res.best_stats = S[bi];
-				if (S[bi].finished) {
+				if (S[bi].finished || S[bi].touched) {
 					// Announce only CLASS or TICK improvements (the eloss
 					// tie-break otherwise spams equal-rel "NEW BEST" lines).
 					const bool worth = !res.ok
@@ -741,7 +1010,7 @@ namespace Solver {
 					res.clean = S[bi].clean;
 					res.best_tick = S[bi].tick;
 					res.best_rel = S[bi].rel;
-					if (worth) {
+					if (worth && !quiet_) {
 						printf("[smooth] gen %5d  NEW BEST  %s %d scored "
 							"(%d abs)  eloss %.0fk  impact %.0f\n",
 							gen, S[bi].clean ? "[clean]" : "[JUMP ]",
@@ -825,6 +1094,13 @@ namespace Solver {
 			for (int i = 0; i < n; ++i)
 				dmax = fmax(dmax, D[i]);
 			if (restart_stall >= cfg_.stall_gens || sigma * dmax < 1e-4) {
+				// Early return only once SUCCESSFUL and explored - a
+				// segment that hasn't found its target yet keeps hunting
+				// for its whole budget (measured: failure-stalls burned 3
+				// restarts in ~1s and handed back 8s budgets unused).
+				if (cfg_.max_restarts > 0 && res.ok
+					&& res.restarts + 1 >= cfg_.max_restarts)
+					break;
 				reinit(false);
 				restart_best = 1e30;
 				restart_stall = 0;
@@ -833,8 +1109,8 @@ namespace Solver {
 			}
 
 			const auto now = std::chrono::steady_clock::now();
-			if (std::chrono::duration<double>(now - last_beat).count()
-				>= 5.0) {
+			if (!quiet_ && std::chrono::duration<double>(now - last_beat)
+				.count() >= 5.0) {
 				last_beat = now;
 				char bb[128];
 				if (res.ok)

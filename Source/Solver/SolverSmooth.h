@@ -63,6 +63,8 @@ namespace Solver {
 		                            // (the fitted human mix, lossfit.py)
 		float overdrive_deg = 35.f; // wish-angle overshoot span for |u|>1
 		int stall_gens = 400;       // restart after this many flat generations
+		int max_restarts = 0;       // return early after N restarts (0 = run
+		                            // the full budget; segments use 2)
 		double sigma0 = 0.5;        // cold-start step size (u units)
 		double sigma_seed = 0.15;   // seeded-polish step size
 		// Follow the seed tape's frames VERBATIM for the first N ticks; the
@@ -72,15 +74,59 @@ namespace Solver {
 		// Carry the seed tape's per-tick duck buttons as a fixed overlay
 		// (duck is not a gene yet; the human's pumps are part of the line).
 		bool seed_duck = true;
+		// SEGMENT MODE (the chain solver's building block): when
+		// goal_face_brush >= 0, success = CONTACT with that face (brush
+		// INDEX + plane index; plane -1 = any plane of the brush) instead
+		// of grounding on the end platform.
+		int goal_face_brush = -1;
+		int goal_face_plane = -1;
+		// Fitness: 0 = clean-finish scored ticks (the full-map contract);
+		// 1 = junction value: maximize V = KE + mu*g*z - wloss-scaled waste
+		// at the board, minus w_tick per tick spent (the user's compromise
+		// equation, clause 1+2: board the next face with max energy having
+		// left the previous cleanly).
+		int fitness_mode = 0;
+		float w_tick = 500.f;
+		// Segment mode: ride N more ticks after the touch before handing
+		// the junction off - the state passed onward is an ESTABLISHED
+		// ride, not a corner clip; V is measured settled. A rollout that
+		// dies during the settle window loses its touch (self-filtering).
+		int touch_settle = 0;
+		// CHAIN GENES: every chain segment (face AND end-landing) carries
+		// 4 guidance genes (board/landing point, gain, release tick) and
+		// the STRUCTURAL RIDE HOLD - while steep-face contact is fresh and
+		// the release gene hasn't fired, u is forced INTO that face (the
+		// spline modulates intensity). Measured: cold splines cannot hold
+		// a ride (mean-zero u slides off before homing engages; children
+		// stalled 278-492u from their targets).
+		bool chain_genes = false;
+		// Junction VALUE mix: on a ramp, riding makes PE and KE fungible,
+		// so a junction's reach is its TOTAL energy (mu=1) minus waste.
+		// (Measured with the route-quality mix 0.4: the "best board" of
+		// ramp 2 was a 982 u/s BOTTOM-RIM graze at z=-68, outside the
+		// face polygon, descending - altitude was priced too cheap for
+		// the chain's purpose.) Separate knob from mix_mu on purpose.
+		float chain_mu = 1.0f;
+		// Board-point band: the ty gene maps into [ty_lo, ty_hi] of the
+		// face's up-slope axis. The chain enumerates height bands per edge
+		// (clause 3 of the user's compromise equation - a low-fast board
+		// and a high-slow board are DIFFERENT reach options; total energy
+		// is conserved in flight, so a single V pick collapses them).
+		float ty_lo = 0.f;
+		float ty_hi = 1.f;
 	};
 
 	// Per-rollout observables (reported, and the objective's inputs).
 	struct SmoothStats {
 		bool finished = false;
+		bool touched = false;       // segment mode: target face contacted
 		bool clean = true;          // ending class (last departure not a jump)
-		int tick = 0;               // absolute finish tick
+		int tick = 0;               // absolute finish/touch tick
 		int rel = 0;                // scored ticks (since zone exit)
 		int exit_tick = -1;
+		float vboard = 0.f;         // junction value at the touch
+		PlayerState end_state;      // state AT the stop tick (junction pass)
+		float end_yaw = 0.f;
 		float dmin = 1e9f;          // closest approach to the landing box
 		float eloss = 0.f;          // cumulative energy dissipated
 		float eloss_at_dmin = 0.f;  // dissipation up to the closest approach
@@ -114,6 +160,13 @@ namespace Solver {
 		SmoothOpt(const World& w, const SmoothConfig& cfg,
 		          const TapeAnchor& anchor);
 
+		// Chain segments start mid-air mid-map: override the root state
+		// (skips the anchor ground settle).
+		void SetRoot(const PlayerState& s, float yaw);
+		// Silence the per-generation narration (chain runs many small
+		// solves; the chain narrates at the node level instead).
+		void SetQuiet(bool q) { quiet_ = q; }
+
 		// Initialize the CMA mean by INVERTING the tape's controls into u(t):
 		// a full core replay recovers each tick's regime - ground u = yaw
 		// rate / arc rate; air u = the wish-angle map inverted against the
@@ -138,7 +191,19 @@ namespace Solver {
 		// is the pump: an airborne unduck lifts the origin duck_air_shift
 		// (8.5u measured) - the human's lip-clearing tool, now a decision
 		// variable instead of a stale overlay.
-		int Dims() const { return ncp_ + 3; }
+		// FACE-TARGET segments append 4 GUIDANCE genes: (tx, ty) = the
+		// board point on the face rectangle, g = guidance gain, and
+		// guide_from = the tick homing engages (10-tick units) - the
+		// RELEASE decision: before it the spline rides the previous face,
+		// after it the decoder blends in a closed-loop u that steers the
+		// ballistic-predicted plane crossing onto the board point. This is
+		// position control the open-loop spline cannot do (measured: cold
+		// segments never found a face without it; always-on homing broke
+		// rides at tick 0). The guided u passes through the SAME wish
+		// mapping, flip guard, and yaw cap - structure rules hold.
+		int Dims() const {
+			return ncp_ + 3 + (cfg_.chain_genes ? 4 : 0);
+		}
 
 		// The seeded init mean (empty before SeedFromTape) - lets the lab
 		// evaluate/inspect the PROJECTION itself, the thing CMA polishes.
@@ -162,7 +227,13 @@ namespace Solver {
 		int ncp_ = 0;
 		int start_idx_ = -1, end_idx_ = -1;
 		Vec3 end_center_;
+		Vec3 face_center_;          // segment mode: target-face shaping point
+		Vec3 face_n_;               // target-face frame (guidance)
+		Vec3 face_t1_, face_t2_;
+		float face_e1_ = 0.f, face_e2_ = 0.f;
+		float face_d_ = 0.f;
 		float world_min_z_ = -8192.f;
+		bool quiet_ = false;
 		bool have_seed_mean_ = false;
 		std::vector<double> seed_mean_;
 		std::vector<TapeFrame> seed_frames_;      // prefix-follow source
