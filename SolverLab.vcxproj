@@ -54,6 +54,7 @@
     <ClCompile Include="Source\Solver\SolverKnots.cpp" />
     <ClCompile Include="Source\Solver\SolverExplore.cpp" />
     <ClCompile Include="Source\Solver\SolverOptimize.cpp" />
+    <ClCompile Include="Source\Solver\SolverSmooth.cpp" />
     <ClCompile Include="Source\Solver\SolverLab.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -65,6 +66,7 @@
     <ClInclude Include="Source\Solver\SolverKnots.h" />
     <ClInclude Include="Source\Solver\SolverExplore.h" />
     <ClInclude Include="Source\Solver\SolverOptimize.h" />
+    <ClInclude Include="Source\Solver\SolverSmooth.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

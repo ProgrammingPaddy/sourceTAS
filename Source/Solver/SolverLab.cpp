@@ -18,6 +18,7 @@
 #include "SolverMove.h"
 #include "SolverOptimize.h"
 #include "SolverParams.h"
+#include "SolverSmooth.h"
 #include "SolverTape.h"
 #include "SolverWorld.h"
 
@@ -53,6 +54,11 @@ namespace {
 		printf("          our TraceHull vs the in-game engine oracle, per trace\n");
 		printf("          (replay --trace-log [--trace-window a b] writes queries;\n");
 		printf("          the Map Solve tab's 'Run trace oracle' answers them)\n");
+		printf("  smooth  <map.bsp> --end-brush N [--seed-tas run.tas] [--budget-s S]\n");
+		printf("          [--pop N] [--cp-ticks N] [--wloss X] [--max-ticks N]\n");
+		printf("          [--rng N] [--threads N] [--out path.tas] [physics options]\n");
+		printf("          LINE-SPACE search: smooth strafe-intensity spline + CMA-ES\n");
+		printf("          (deterministic; clean endings required; labeled output)\n");
 		printf("  bench   <map.bsp> [ticks]\n");
 		printf("All commands auto-load Documents\\sourceTAS\\solver\\server_params.cfg\n");
 		printf("(written by the Map Solve tab from LIVE server values); --params <file>\n");
@@ -131,6 +137,12 @@ namespace {
 		                            // (--clock anchor for the old absolute)
 		bool edge_bevels = true;    // false = pre-fix clip set (control arm)
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
+		// smooth (line-space CMA) options
+		int pop = 0;                // population (0 = auto)
+		int cp_ticks = 16;          // spline control-point spacing
+		float wloss = 6.5f;         // non-finisher dissipation shaping weight
+		int seed_follow = 0;        // verbatim seed-tape prefix ticks
+		bool seed_duck = true;      // carry the seed's duck overlay
 	};
 
 	bool ParseCommon(int argc, char** argv, int first, ReplayOpts& o) {
@@ -232,6 +244,11 @@ namespace {
 			}
 			else if (a == "--no-edge-bevels") o.edge_bevels = false;
 			else if (a == "--legacy-corner") o.corner_true = false;
+			else if (a == "--pop") ok = next_i(&o.pop);
+			else if (a == "--cp-ticks") ok = next_i(&o.cp_ticks);
+			else if (a == "--wloss") ok = next_f(&o.wloss);
+			else if (a == "--seed-follow") ok = next_i(&o.seed_follow);
+			else if (a == "--no-seed-duck") o.seed_duck = false;
 			else if (a == "--aim") o.aim = true;
 			else if (a == "--no-aim") o.aim = false;
 			else if (a == "--tighten") ok = next_i(&o.tighten);
@@ -255,6 +272,184 @@ namespace {
 	bool InsideXY(const Vec3& p, const WorldBrush& b) {
 		return p.X >= b.gmin_stand.X && p.X <= b.gmax_stand.X
 			&& p.Y >= b.gmin_stand.Y && p.Y <= b.gmax_stand.Y;
+	}
+
+	// ---- Output labeling (user-directed 2026-08-14: outputs must identify
+	// themselves for in-game testing). The filename carries the score and the
+	// ending class; the test card repeats them loudly. ----
+
+	std::string RecordingsDir() {
+		char documents[MAX_PATH];
+		if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents)))
+			return std::string(documents) + "\\sourceTAS\\recordings\\";
+		return std::string();
+	}
+
+	std::string MapStem(const std::string& map_path) {
+		std::string stem = map_path;
+		const size_t sl = stem.find_last_of("\\/");
+		if (sl != std::string::npos) stem = stem.substr(sl + 1);
+		const size_t dot = stem.find_last_of('.');
+		if (dot != std::string::npos) stem = stem.substr(0, dot);
+		return stem;
+	}
+
+	// <recordings>\<map>_<tag>_S<scored>_A<abs>_<CLEAN|JUMP>_<MMDD-HHMM>.tas
+	std::string LabeledOutPath(const std::string& map_path, const char* tag,
+	                           int rel, int abs_tick, bool clean) {
+		SYSTEMTIME t;
+		GetLocalTime(&t);
+		char name[256];
+		_snprintf_s(name, sizeof(name), _TRUNCATE,
+			"%s_%s_S%d_A%d_%s_%02d%02d-%02d%02d",
+			MapStem(map_path).c_str(), tag, rel, abs_tick,
+			clean ? "CLEAN" : "JUMP", t.wMonth, t.wDay, t.wHour, t.wMinute);
+		const std::string dir = RecordingsDir();
+		std::string path = dir.empty() ? std::string(name) + ".tas"
+			: dir + name + ".tas";
+		for (int n = 2; GetFileAttributesA(path.c_str())
+			!= INVALID_FILE_ATTRIBUTES; ++n)
+			path = (dir.empty() ? std::string(name) : dir + name)
+				+ " (" + std::to_string(n) + ").tas";
+		return path;
+	}
+
+	void PrintTestCard(const std::string& path, int rel, int abs_tick,
+	                   bool clean, float dt) {
+		std::string file = path;
+		const size_t sl = file.find_last_of("\\/");
+		if (sl != std::string::npos) file = file.substr(sl + 1);
+		printf("================= TEST IN GAME =================\n");
+		printf("  file   : %s\n", file.c_str());
+		printf("  scored : %d ticks (%.3f s, zone clock)\n", rel, rel * dt);
+		printf("  abs    : %d ticks from anchor\n", abs_tick);
+		printf("  ending : %s\n", clean
+			? "CLEAN (face exit)" : "JUMP-LAUNCHED - NOT acceptable");
+		printf("  play   : Record tab -> library -> teleport-to-anchor + play\n");
+		printf("================================================\n");
+	}
+
+	// ---- Tape quality scan (user definition of clean, 2026-08-14: "landing
+	// hard on a ramp while pointing tangent to it is still a hard landing" -
+	// the measure is the SPEED THE CLIP REMOVED at contact, not the view).
+	// Replays frames through the core and reports every hard contact, the
+	// air yaw-rate profile, flips/sec, and the ending class. ----
+
+	struct QualityReport {
+		int finish_tick = -1;
+		int exit_tick = -1;
+		bool clean = true;
+		float total_clip_loss = 0.f;
+		float max_impact = 0.f;
+		float max_yaw_rate = 0.f;
+		float p95_yaw_rate = 0.f;
+		int flips = 0;
+	};
+
+	QualityReport QualityScan(const World& w, const MoveParams& p,
+	                          const TapeAnchor& anchor,
+	                          const std::vector<TapeFrame>& frames,
+	                          int start_id, int end_id, bool print) {
+		QualityReport q;
+		PlayerState s;
+		s.pos = anchor.origin;
+		s.vel = anchor.velocity;
+		s.ducked = anchor.ducked;
+		s.stamina = anchor.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
+				s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0 && tr.normal.Z >= p.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		const int start_idx = w.IndexOfBrushId(start_id);
+		const int end_idx = w.IndexOfBrushId(end_id);
+		struct Impact { int tick; int brush; float loss; float speed; };
+		std::vector<Impact> impacts;
+		std::vector<float> rates;
+		bool launch_jump = false;
+		float prev_yaw = anchor.yaw;
+		float prev_smove = 0.f;
+		for (int t = 0; t < static_cast<int>(frames.size()); ++t) {
+			const TapeFrame& f = frames[t];
+			TickEvents ev;
+			MoveTick(s, w, p, f.pitch, f.yaw, f.fmove, f.smove, f.umove,
+				f.buttons, &ev);
+			float loss = 0.f;
+			int cb = -1;
+			for (int c = 0; c < ev.ncontacts; ++c) {
+				loss += ev.contact_loss[c];
+				if (cb < 0)
+					cb = w.brushes[ev.contact_brush[c]].id;
+			}
+			q.total_clip_loss += loss;
+			if (loss > q.max_impact)
+				q.max_impact = loss;
+			if (loss > 20.f)
+				impacts.push_back({ t, cb, loss, Len2D(s.vel) });
+			const float dy = fabsf(NormYawDeg(f.yaw - prev_yaw));
+			prev_yaw = f.yaw;
+			if (!s.on_ground) {
+				rates.push_back(dy);
+				if (dy > q.max_yaw_rate)
+					q.max_yaw_rate = dy;
+			}
+			if (f.smove != 0.f && prev_smove != 0.f
+				&& ((f.smove > 0.f) != (prev_smove > 0.f)))
+				q.flips++;
+			if (f.smove != 0.f)
+				prev_smove = f.smove;
+			if (ev.left_ground)
+				launch_jump = ev.jumped;
+			else if (!s.on_ground && ev.ncontacts > 0
+				&& w.brushes[ev.contact_brush[0]].id != end_id)
+				launch_jump = false;
+			if (q.exit_tick < 0 && start_idx >= 0
+				&& !InsideXY(s.pos, w.brushes[start_idx]))
+				q.exit_tick = t;
+			if (q.finish_tick < 0 && end_idx >= 0 && s.on_ground
+				&& s.ground_brush >= 0
+				&& w.brushes[s.ground_brush].id == end_id
+				&& InsideXY(s.pos, w.brushes[end_idx])) {
+				q.finish_tick = t;
+				break;
+			}
+		}
+		q.clean = !launch_jump;
+		if (!rates.empty()) {
+			std::sort(rates.begin(), rates.end());
+			size_t k = rates.size() * 95 / 100;
+			if (k >= rates.size())
+				k = rates.size() - 1;
+			q.p95_yaw_rate = rates[k];
+		}
+		if (print) {
+			const float dur = frames.size() * p.dt;
+			printf("quality: %d hard contacts (clip > 20 u/s) | total clip "
+				"loss %.0f | max one-tick %.0f\n",
+				static_cast<int>(impacts.size()), q.total_clip_loss,
+				q.max_impact);
+			std::sort(impacts.begin(), impacts.end(),
+				[](const Impact& a, const Impact& b) {
+					return a.loss > b.loss; });
+			const int show = impacts.size() < 10
+				? static_cast<int>(impacts.size()) : 10;
+			for (int i = 0; i < show; ++i)
+				printf("  t %5d  brush %-3d  clip %6.0f u/s  (speed %.0f)\n",
+					impacts[i].tick, impacts[i].brush, impacts[i].loss,
+					impacts[i].speed);
+			printf("quality: air yaw rate max %.1f deg/tick, p95 %.2f | "
+				"flips %.2f/s | ending %s\n",
+				q.max_yaw_rate, q.p95_yaw_rate,
+				dur > 0.f ? q.flips / dur : 0.f,
+				q.clean ? "CLEAN" : "JUMP-LAUNCHED");
+		}
+		return q;
 	}
 
 	int CmdReplay(const std::string& map_path, const std::string& tas_path,
@@ -413,6 +608,17 @@ namespace {
 			printf("zone clock: exit tick %d -> %d SCORED ticks (%.3f s)\n",
 				zone_exit_tick, first_finish - zone_exit_tick,
 				(first_finish - zone_exit_tick) * o.params.dt);
+		// Tape quality truth (hard boards, yaw rates, ending class).
+		{
+			TapeAnchor qa = tape.start;
+			if (!qa.valid) {
+				qa.valid = true;
+				qa.origin = w.spawn_origin;
+				qa.yaw = w.spawn_yaw;
+			}
+			QualityScan(w, o.params, qa, tape.frames, start_id, o.end_brush,
+				true);
+		}
 		if (!o.trace_log.empty()) {
 			w.trace_log = nullptr;
 			FILE* tl = nullptr;
@@ -1019,46 +1225,184 @@ namespace {
 			}
 			fflush(stdout);
 		}
-		std::string out_path = o.out_tas;
-		if (out_path.empty()) {
-			char documents[MAX_PATH];
-			if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
-				SHGFP_TYPE_CURRENT, documents))) {
-				// Map stem for the default name.
-				std::string stem = map_path;
-				const size_t sl = stem.find_last_of("\\/");
-				if (sl != std::string::npos) stem = stem.substr(sl + 1);
-				const size_t dot = stem.find_last_of('.');
-				if (dot != std::string::npos) stem = stem.substr(0, dot);
-				// Never overwrite a shipped tape (captures may reference it).
-				const std::string base = std::string(documents)
-					+ "\\sourceTAS\\recordings\\" + stem + "_solved";
-				out_path = base + ".tas";
-				for (int n = 2; GetFileAttributesA(out_path.c_str())
-					!= INVALID_FILE_ATTRIBUTES; ++n)
-					out_path = base + " (" + std::to_string(n) + ").tas";
-			} else {
-				out_path = "solved.tas";
-			}
-		}
-		std::string stem_map = map_path;
-		{
-			const size_t sl = stem_map.find_last_of("\\/");
-			if (sl != std::string::npos) stem_map = stem_map.substr(sl + 1);
-			const size_t dot = stem_map.find_last_of('.');
-			if (dot != std::string::npos) stem_map = stem_map.substr(0, dot);
-		}
-		if (!WriteTas(out_path, anchor, stem_map, frames, &err)) {
+		// Labeled output (user-directed): the filename says what it is.
+		const std::string out_path = o.out_tas.empty()
+			? LabeledOutPath(map_path, "arch", frel, ftick, fclean)
+			: o.out_tas;
+		if (!WriteTas(out_path, anchor, MapStem(map_path), frames, &err)) {
 			printf("solve: WriteTas failed: %s\n", err.c_str());
 			return 3;
 		}
+		QualityScan(w, cfg.params, anchor, frames, cfg.start_brush_id,
+			cfg.end_brush_id, true);
 		printf("solve: best route [%s] (%d scored ticks, %d abs) written -> %s\n",
 			fclean ? "CLEAN ending" : "JUMP-END - NOT an acceptable solution",
 			frel, ftick, out_path.c_str());
-		printf("solve: play it in-game from the Record tab (it loads like any "
-			"recording; teleport-to-anchor + play).\n");
+		PrintTestCard(out_path, frel, ftick, fclean, cfg.params.dt);
 		fflush(stdout);
 		return 0;
+	}
+
+	// LINE-SPACE search (the paradigm shift, user-directed 2026-08-14): a
+	// smooth strafe-intensity spline + CMA-ES over its control points. Every
+	// candidate is smooth by construction - the efficient family is the ONLY
+	// family this search can express. See SolverSmooth.h for the full design.
+	int CmdSmooth(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		if (o.end_brush < 0) {
+			printf("smooth needs --end-brush N (mapinfo lists brush ids)\n");
+			return 1;
+		}
+		Tape seed;
+		bool have_seed = false;
+		if (!o.seed_tas.empty()) {
+			if (!LoadTas(o.seed_tas, seed, &err)) {
+				printf("LOAD FAILED (seed tas): %s\n", err.c_str());
+				return 1;
+			}
+			have_seed = true;
+		}
+		// Anchor resolution - the same chain as solve.
+		TapeAnchor anchor;
+		std::string anchor_src;
+		bool miss = false;
+		if (!o.anchor_file.empty()) {
+			if (!LoadAnchorFile(o.anchor_file, anchor, &miss)) {
+				printf("LOAD FAILED (anchor file): %s\n",
+					o.anchor_file.c_str());
+				return 1;
+			}
+			anchor_src = o.anchor_file;
+		} else if (!o.anchor_tas.empty()) {
+			Tape at;
+			if (!LoadTas(o.anchor_tas, at, &err) || !at.start.valid) {
+				printf("LOAD FAILED (anchor tas): %s\n", err.c_str());
+				return 1;
+			}
+			anchor = at.start;
+			anchor_src = std::string("anchor of ") + o.anchor_tas;
+		} else if (LoadAnchorFile(CanonicalAnchorPath(), anchor, &miss)) {
+			anchor_src = CanonicalAnchorPath() + " (Map Solve capture)";
+		} else if (have_seed && seed.start.valid) {
+			anchor = seed.start;
+			anchor_src = "seed tape anchor";
+		} else {
+			anchor.valid = true;
+			anchor.origin = w.spawn_origin;
+			anchor.pitch = w.spawn_pitch;
+			anchor.yaw = w.spawn_yaw;
+			anchor_src = "map spawn (entities lump)";
+		}
+		printf("smooth: anchor source = %s\n", anchor_src.c_str());
+		if (have_seed && seed.start.valid
+			&& Len(seed.start.origin - anchor.origin) > 0.5f) {
+			printf("smooth: WARNING seed anchor differs %.1f u - seeding "
+				"DISABLED\n", Len(seed.start.origin - anchor.origin));
+			have_seed = false;
+		}
+
+		SmoothConfig cfg;
+		cfg.params = o.params;
+		cfg.end_brush_id = o.end_brush;
+		cfg.start_brush_id = (o.start_brush >= 0) ? o.start_brush
+			: w.BrushUnder(anchor.origin, anchor.ducked);
+		cfg.max_ticks = o.max_ticks;
+		cfg.cp_ticks = o.cp_ticks;
+		cfg.pop = o.pop;
+		cfg.budget_seconds = o.budget_s;
+		cfg.rng_seed = o.rng;
+		cfg.threads = o.threads;
+		cfg.zone_clock = o.zone_clock;
+		cfg.wloss = o.wloss;
+		cfg.mix_mu = o.emix_mu;
+		cfg.seed_follow = o.seed_follow;
+		cfg.seed_duck = o.seed_duck;
+		if (o.seed_follow > 0)
+			printf("smooth: prefix-follow ON - first %d ticks verbatim from "
+				"the seed tape\n", o.seed_follow);
+		printf("smooth: anchor (%.1f, %.1f, %.1f) yaw %.1f | start brush %d, "
+			"end brush %d | domain %d ticks\n",
+			anchor.origin.X, anchor.origin.Y, anchor.origin.Z, anchor.yaw,
+			cfg.start_brush_id, cfg.end_brush_id, cfg.max_ticks);
+		fflush(stdout);
+
+		SmoothOpt opt(w, cfg, anchor);
+		if (have_seed) {
+			opt.SeedFromTape(seed);
+			printf("smooth: init mean = strafe skeleton of %s (%d frames)\n",
+				o.seed_tas.c_str(), static_cast<int>(seed.frames.size()));
+			// The projection's own truth: where the un-perturbed mean gets.
+			SmoothStats ms;
+			opt.Evaluate(opt.SeedMean(), &ms, nullptr);
+			if (ms.finished)
+				printf("smooth: projection rollout: %s FINISH %d scored  "
+					"eloss %.0fk  max impact %.0f  exit %d\n",
+					ms.clean ? "[clean]" : "[JUMP ]", ms.rel,
+					ms.eloss / 1000.f, ms.max_impact, ms.exit_tick);
+			else
+				printf("smooth: projection rollout: no finish, dmin %.0f  "
+					"eloss %.0fk  max impact %.0f  exit %d\n",
+					ms.dmin, ms.eloss / 1000.f, ms.max_impact,
+					ms.exit_tick);
+			fflush(stdout);
+		}
+		SmoothResult res = opt.Run();
+		printf("---\n");
+		printf("smooth: %d generations, %lld evals, %lld ticks "
+			"(%.1fM ticks/s), %d restarts, %.1fs\n",
+			res.generations, res.evals, res.ticks_simulated,
+			res.ticks_simulated / (res.seconds > 0 ? res.seconds : 1) / 1e6,
+			res.restarts, res.seconds);
+		if (!res.ok) {
+			printf("smooth: NO finish found (closest approach %.0f u). More "
+				"budget, --seed-tas, another --rng, or more --max-ticks.\n",
+				res.best_stats.dmin);
+			// Diagnosis payload: the best non-finisher, written + scanned so
+			// the failure is a trajectory we can look at, not a number.
+			std::vector<TapeFrame> nf;
+			SmoothStats nst;
+			if (opt.BuildFrames(res.best_x, nf, &nst) && !o.out_tas.empty()) {
+				const std::string np = o.out_tas + ".nofin.tas";
+				QualityScan(w, cfg.params, anchor, nf, cfg.start_brush_id,
+					cfg.end_brush_id, true);
+				if (WriteTas(np, anchor, MapStem(map_path), nf, &err))
+					printf("smooth: best NON-finisher written -> %s\n",
+						np.c_str());
+			}
+			return 2;
+		}
+		printf("smooth: best %s %d scored (%d abs)  finish speed %.0f  "
+			"eloss %.0fk  max impact %.0f\n",
+			res.clean ? "[clean]" : "[JUMP ]", res.best_rel, res.best_tick,
+			res.best_stats.finish_speed, res.best_stats.eloss / 1000.f,
+			res.best_stats.max_impact);
+
+		std::vector<TapeFrame> frames;
+		SmoothStats st;
+		if (!opt.BuildFrames(res.best_x, frames, &st) || !st.finished) {
+			printf("smooth: BuildFrames failed to reproduce the finish - "
+				"not writing\n");
+			return 3;
+		}
+		QualityScan(w, cfg.params, anchor, frames, cfg.start_brush_id,
+			cfg.end_brush_id, true);
+		const std::string out_path = o.out_tas.empty()
+			? LabeledOutPath(map_path, "cma", st.rel, st.tick, st.clean)
+			: o.out_tas;
+		if (!WriteTas(out_path, anchor, MapStem(map_path), frames, &err)) {
+			printf("smooth: WriteTas failed: %s\n", err.c_str());
+			return 3;
+		}
+		printf("smooth: written -> %s\n", out_path.c_str());
+		PrintTestCard(out_path, st.rel, st.tick, st.clean, cfg.params.dt);
+		fflush(stdout);
+		return st.clean ? 0 : 4;
 	}
 
 	int CmdBench(const std::string& map_path, long long ticks) {
@@ -1267,6 +1611,14 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdSolve(argv[2], o);
+	}
+	if (cmd == "smooth" && argc >= 3) {
+		ReplayOpts o;
+		o.max_ticks = 1200;   // smooth default: spline domain, not the
+		                      // explorer's 4000 junk bound (--max-ticks wins)
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdSmooth(argv[2], o);
 	}
 	if (cmd == "bench" && argc >= 3) {
 		const long long ticks = (argc >= 4) ? atoll(argv[3]) : 2000000LL;

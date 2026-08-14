@@ -1320,12 +1320,112 @@ ending; classification is inheritance-exact; clean beats tainted at every stage.
 The open problem is BUILDING the energy chain: mid-route states fast enough that
 the probe's release reaches red.
 
+## 2026-08-14 — PARADIGM SHIFT: LINE-SPACE SEARCH (smooth spline + CMA-ES)
+
+User verdict opening the round: *"We need a new paradigm for the search... the
+boards are not clean (landing hard on a ramp while pointing tangent to it means
+its still a hard landing since the approach wasn't clean). There is still yaw
+jumping all over the place. I think the knots are not helping... I don't know
+how its even possible to search this many combinations and NOT get an
+efficient line when that is basically a driving component of the search."*
+
+**The answer to that question (now measured, not argued):** knots are a
+BANG-BANG controller. Every air tick strafes at exactly max-gain, so the turn
+rate is physics-dictated (~1719/speed deg/tick) and the ONLY control authority
+is when to flip sides. Clean approaches need CONTINUOUS modulation of how hard
+you strafe — trading gain for line curvature so the VELOCITY (not the view)
+arrives tangent. That family is unrepresentable in knot space: the archive
+ranked 100M rollouts of the same jittery class because the generator never
+proposed anything else. Valuation picks the best of what is proposed; it
+cannot manufacture what is never proposed.
+
+**The new control language** (Source/Solver/SolverSmooth.{h,cpp}, `smooth`
+command): u(t), a Catmull-Rom spline over control points every cp_ticks.
+u=±1 = max-gain strafe; |u|<1 = partial (wish projection eats (1-|u|) of the
+live cap — the per-tick ADD is linear in |u|); |u|>1 = carve past 90°
+(overdrive_deg span); sign = strafe key. One jump gene + duck on/off tick
+genes (10-tick units). Yaw = heading + side*(phi-90) from LIVE params — and a
+STRUCTURAL 15 deg/tick yaw-rate cap in the decoder (human max: 5.1; the cap
+only ever binds where low-speed heading noise would thrash). Flip legality
+enforced in decode (14-tick spacing) regardless of CP spacing. Search:
+standard CMA-ES (full covariance, Jacobi eigen) over ~80-155 dims;
+population evaluated on a persistent worker pool; rollouts are pure, so runs
+are DETERMINISTIC at fixed rng regardless of thread count. ~30-45M ticks/s,
+~60k generations/min at pop 64.
+
+**Objective:** clean finish = scored ticks − 1e5 (eloss tie-break); jump
+finish = scored + 5e3 (never competitive — the user's acceptance rule);
+non-finisher = energy-aware distance + fitted waste penalty (wloss 6.5).
+
+**Three measured traps, three physics fixes (each found by dumping the best
+non-finisher and LOOKING, not guessing):**
+1. Distance-to-CENTER read ~900u for lines brushing the platform edge (the
+   human FINISHES at "dmin 890") → clamped-box distance to the hull-expanded
+   landing footprint.
+2. The LOB trap: with positional shaping, the optimizer's best line traded
+   all speed for height and apexed 6u below the lip at SPEED 19 (2.9M evals
+   of wall kisses). → the vertical term became the ENERGY SHORTFALL height
+   max(0, gap − climb). First cut credited total v²/2g and created 882 u/s
+   UNDER-platform speeders reading dmin 0 → only max(0,vz)²/2g is ballistic
+   truth. The lob then reads its full shortfall, a rising fast kiss reads ~0.
+3. Low-speed heading noise wrote 177 deg/tick yaw thrash into tapes (p95
+   61.7) → the decoder rate cap. After: p95 3.9 on every output.
+
+**Seeding and the prefix ladder:** control INVERSION (ground u = yaw-rate/arc,
+air u = wish-angle map inverted against the core-replayed heading) projects a
+tape onto the basis — but an open-loop projection of a 4-board chaotic line
+diverges (the basis is closed-loop in HEADING, open-loop in POSITION; drift
+compounds at each board). Measured boundary on basictest: projection of the
+human tape finishes from prefix ≥335 (post-r4-board-hold), dies ≤330. The
+critical windows are the few ticks of board entry/hold — 16-tick CPs cannot
+express them; **8-tick CPs can** (still ≥14-tick flip spacing structurally).
+So: `--seed-follow N` follows the seed tape verbatim to a checkpoint, the
+spline owns the rest, and EROSION re-runs with the previous winner as seed at
+ever-earlier N. Each rung re-solves ~one board window.
+
+**RESULTS (the ladder, one evening, 45-90s per rung):**
+- rung 335 (cp16): **298 scored clean** — FIRST SUB-HUMAN CLEAN TAPE EVER.
+- rung 330 (cp8): 296. rung 320: 293 (impact 23!). rung 310: **292 scored
+  (404 abs), landing impact 31 u/s, total clip loss 224, eloss 171k, yaw p95
+  3.94, flips 1.65/s** — every quality number AT or BETTER than the human
+  (319 / 189 impact / 391 clip / 259k eloss / p95 3.76).
+- rung 300 (spline owns the whole r4 board): found clean 305 but not 292 at
+  the fixed rng — deeper rungs need rng multi-start arms (deterministic runs
+  retrace themselves; budget alone changes nothing).
+- **SHIPPED: surf_basictest_cma_S292_A404_CLEAN_0814-0248.tas** (recordings).
+  Trace-oracle queries written to solver\trace_queries.csv (1905) — pre-ship
+  gate pending the in-game oracle run.
+
+**Output labeling (user-directed):** all solve/smooth outputs now write
+`<map>_<tag>_S<scored>_A<abs>_<CLEAN|JUMP>_<MMDD-HHMM>.tas` + a TEST IN GAME
+card, and every produced/replayed tape prints the QUALITY SCAN: hard contacts
+(clip >20 u/s, the user's definition of a hard landing — "pointing tangent"
+doesn't make an approach clean, the clip loss does), air yaw-rate max/p95,
+flips/s, ending class.
+
+**Where this leaves the paradigm:** spline+CMA is a proven FINISHER/polisher —
+it beat the human on the human's own route the first evening, with cleaner
+contacts than the human. What it does NOT yet do: own multiple boards at once
+(open-loop position drift; each board is a narrow basin CMA must thread). The
+erosion ladder walks boards one at a time; full-line ownership wants either
+rng-arm ladders (cheap, automatable tonight) or the board-anchored closed-loop
+step: aim conditions at the NEXT face (tangent-arrival) as the generator
+between spline segments — map geometry as DATA, not map rules.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- **THE energy chain** (clean-sub-500 existence proof beyond the human): probe +
-  clean-first machinery ready; needs chain-preserving discovery — big-budget
-  unseeded probes, human-seeded polish (immediate clean deliverable ~317-scored
-  class), segment-chained targets (compromise clauses 2-3).
+- **Erosion campaign automation**: ladder loop (rng arms × rungs, carry-best,
+  auto-reseed) as a lab mode — walk the prefix to 0 and the whole line is
+  machine-owned. Candidate: `smooth --erode` (unbuilt).
+- **Board-anchored closed-loop generator** (the structural fix for multi-board
+  ownership): tangent-arrival targets on the next face between spline
+  segments. BSP faces as data; no map-specific logic.
+- **THE energy chain** — REFRAMED by this round: the chain is now solvable
+  rung-by-rung (each erosion rung re-carves one segment under the clean-first
+  objective). The unseeded full-chain remains open.
+- Cold-start smooth (no seed): still dies mid-map (multimodal cliffs) — needs
+  the closed-loop step or archive hybridization (archive finisher → invert →
+  polish).
 - Generator problem (mid-map unreachable-class) — same root as the chain.
 - **StepMove port** (spine-edge ~3.6°) — last known movement residual.
 - Mix-interleaving; optimize-stage thread underuse; audit verdict-column refresh.
