@@ -118,8 +118,9 @@ namespace {
 		bool goal_touch = false;
 		bool eloss_bias = true;
 		bool energy_frontier = true;
-		float emix_mu = 0.9f;      // human-ladder fitted (mixfit.py)
-		float emix_lambda = 2.0f;
+		float emix_mu = 0.4f;      // joint refit w/ loss functionals (lossfit.py)
+		float emix_lambda = 6.5f;
+		std::string audit_tas;     // solve --audit <tape>: valuation audit
 		bool aim = false;           // contact-anchored targeting (measured
 		                            // neutral on segments; --aim to enable)
 		bool zone_clock = true;     // score = ticks from startzone exit
@@ -210,6 +211,7 @@ namespace {
 			else if (a == "--no-eloss-bias") o.eloss_bias = false;
 			else if (a == "--energy-frontier") o.energy_frontier = true;
 			else if (a == "--no-energy-frontier") o.energy_frontier = false;
+			else if (a == "--audit") { if (i + 1 < argc) o.audit_tas = argv[++i]; else ok = false; }
 			else if (a == "--emix") {
 				if (i + 2 < argc) {
 					o.emix_mu = static_cast<float>(atof(argv[++i]));
@@ -890,6 +892,23 @@ namespace {
 				}
 			}
 			fflush(stdout);
+		}
+
+		// Valuation audit mode: cross-reference a reference tape against the
+		// live archive, then stop (no optimize/tighten/output).
+		if (!o.audit_tas.empty()) {
+			Tape ref;
+			if (!LoadTas(o.audit_tas, ref, &err)) {
+				printf("audit: cannot load %s: %s\n", o.audit_tas.c_str(),
+					err.c_str());
+				return 1;
+			}
+			if (ref.start.valid
+				&& Len(ref.start.origin - anchor.origin) > 0.5f)
+				printf("audit: WARNING reference anchor differs %.1fu\n",
+					Len(ref.start.origin - anchor.origin));
+			ex.AuditTape(ref);
+			return 0;
 		}
 
 		// ---- Phase 2: optimize the best finishers (fitness = finish tick,

@@ -1202,15 +1202,61 @@ model gaps); (2) SCORING/FILTERING refit from the ladder (loss functional:
 linear vs quadratic vs max-event — "smooth most of the time" = few big events;
 plateau-drift acceptance in the optimizer: equal-tick lower-loss moves accepted).
 
+### VALUATION AUDIT (2026-08-14, user-directed) — the generator is the bottleneck
+
+**User boundaries:** NO robustness gate, no arbitrary blockers of any kind — a
+landed run counts wherever it lands. Scoring refit only. Free start energy must
+rise on its own; smooth boards/turns must rise on their own; the human run is the
+calibration reference ("I don't want it to learn the map, but I do want it to
+know how to surf"); ML acceptable only for TRAINING the search's valuation —
+search stays the product.
+
+**Loss-functional refit (lossfit.py):** LINEAR cumulative loss WINS (Spearman
+0.691) over quadratic (0.667) and worst-event (0.607) — "few big events" as a
+formula does not beat the plain sum. Joint fit moved the mix: **μ=0.40, λ=6.5**
+(waste punished ~3× harder than the previous fit). New defaults.
+
+**New instrument: `solve --audit <tape>`** — replays a reference tape against the
+LIVE archive: per-band cell verdicts (add/replace/tie/lose), reference-V
+percentile vs 400 band samples, zone-jump census.
+
+**Audit findings (human vs 150 s unseeded archive):**
+1. **Valuation: FIXED.** Under μ.4/λ6.5 the human outranks ~400/400 archive
+   samples in every band past the launch (archBest −1,380k at band 10 vs human
+   +284k). Selection would choose human states everywhere — they just don't exist.
+2. **Zone-exit tie inversion: MEASURED then FIXED.** Human 251k-V exit states
+   were tie-rejected by 198k first-comers (±4 rel band, first-come ownership).
+   Fix: PRE-EXIT cells decide ties by VALUE with a materiality margin from the
+   archive's own quantization (one speed-bucket's KE width — no new constants).
+   TWO CHURN LESSONS on the way (both measured, both reverted): global V-ties
+   ate the whole 4M entry budget in 77 s (every +ε flip allocates; 52k cells,
+   search parked); margined-but-global still churned (eloss deltas beat any KE
+   margin). Zone-scoped = healthy dynamics (1.87M entries / 1.57M cells).
+   (Audit's verdict column still classifies by the old ±4 rule — cosmetic,
+   update with the next audit change.)
+3. **THE BOTTLENECK: the GENERATOR.** Bands 10→3 are all "add" — the search
+   never visits human-class cells at all. From a good frontier state, random
+   knot continuations hemorrhage energy within a band or two (every band's
+   archBest is deep-negative); the frontier polishes the best of a garbage
+   population. Selection cannot fix what sampling never generates. "Knowing how
+   to surf" must live in the CONTINUATION SAMPLER.
+
+**Next (the generator program):** micro-lookahead knot sampling — at rollout
+knot boundaries, sample K candidate knots, simulate each a short horizon, keep
+the best under the fitted V (a player considering options; map-general, pure
+search). Optionally refit SampleKnot's distributions (dur/side/turn) from the
+human tape's measured knot statistics. ML-as-tool (learned V or learned knot
+proposals trained across maps) stays sanctioned if hand-built lookahead
+plateaus; per-map ML stays out.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- **StepMove port** (walk step-up/down; spine-edge walking steers ~3.6° off) —
-  the last named movement gap; owns the remaining 1.85u.
-- Robustness ship-gate (jitter re-eval) + scoring/filtering refit (loss
-  functional fit, plateau drift, cell/finisher filters) — the normalcy program.
-- solved10 (762) in-game status unknown; 695 reality-INVALID until StepMove.
-- Mix-interleaving across tighten rounds; optimize-stage thread underuse;
-  post-cap frontier waste; compromise clauses 2-3.
+- **Generator: micro-lookahead sampling under fitted V** — the audit-named
+  bottleneck; the round's successor.
+- **StepMove port** (spine-edge walking steers ~3.6° off) — owns the last 1.85u;
+  695 reality-INVALID until then.
+- Mix-interleaving; optimize-stage thread underuse; post-cap frontier waste;
+  compromise clauses 2-3; audit verdict-column refresh.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

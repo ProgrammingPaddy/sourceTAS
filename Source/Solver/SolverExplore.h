@@ -102,9 +102,13 @@ namespace Solver {
 		// total energy is the right quantity (the user's claim); the missing
 		// piece of the failed raw-E axis was the loss penalty, not the PE
 		// term (gz ALONE anti-predicts at -0.28; eloss alone = 0.63).
+		// Joint refit with loss FUNCTIONALS (2026-08-14, lossfit.py): linear
+		// cumulative loss beats quadratic (0.667) and worst-event (0.607) at
+		// Spearman 0.691 with mu=0.40, lambda=6.5 - waste punished ~3x
+		// harder than the first fit, moderate PE weight.
 		bool energy_frontier = true;
-		float efrontier_mu = 0.9f;
-		float efrontier_lambda = 2.0f;
+		float efrontier_mu = 0.4f;
+		float efrontier_lambda = 6.5f;
 	};
 
 	struct Finisher {
@@ -166,6 +170,12 @@ namespace Solver {
 		// The archive's root state (anchor after ground settling) + yaw -
 		// the optimizer re-rolls genomes from exactly here.
 		void RootState(PlayerState* s, float* yaw) const;
+
+		// VALUATION AUDIT (user-directed): replay a reference tape against
+		// the LIVE archive and report every place the machinery ranks the
+		// archive's lineages above the reference - cell rejections, per-band
+		// V percentile, and the zone-jump census. Read-only; call after Run.
+		void AuditTape(const Tape& tape);
 
 	private:
 		struct Entry {

@@ -271,16 +271,46 @@ namespace Solver {
 		{
 			std::lock_guard<std::mutex> g(sh.m);
 			auto it = sh.map.find(key);
-			// Hysteresis: replace only a meaningfully earlier arrival (tick-
-			// level churn was flooding the archive in the first unseeded
-			// runs). Under the zone clock "earlier" means fewer SCORED ticks
-			// - a long free prestrafe no longer loses its cells to a quick
-			// walk-off that arrives sooner on the wall clock.
+			// Cell ownership (audit-measured 2026-08-14): clearly-faster
+			// arrivals replace, clearly-slower are rejected (the original
+			// anti-churn hysteresis) - but INSIDE the ±4 tie band the
+			// HIGHER-VALUE state owns the cell. First-come ownership was
+			// tie-rejecting the reference tape's 251k-V zone-exit states in
+			// favor of 198k incumbents - free energy could not rise to the
+			// top at the exact place it is earned. V = the fitted mix.
 			if (it != sh.map.end()) {
 				const Entry& old = entries_[it->second];
-				if (RelTicks(old.tick, old.exit_tick)
-					<= RelTicks(tick, exit_tick) + 4)
-					return -1;
+				const int orel = RelTicks(old.tick, old.exit_tick);
+				const int nrel = RelTicks(tick, exit_tick);
+				if (nrel > orel + 4)
+					return -1;   // clearly slower
+				if (orel <= nrel + 4) {
+					// Tie band. PRE-EXIT (zone) cells: the higher-VALUE
+					// state owns the cell, with a materiality margin from
+					// the archive's own quantization (one speed-bucket's KE
+					// width) - the audit measured 251k-V human exit states
+					// tie-rejected by 198k first-comers exactly here, and
+					// the zone is where free energy is earned. POST-EXIT
+					// ties keep first-come: global value-ties churned the
+					// whole 4M entry budget in 77s twice (measured; flips
+					// allocate entries), and the audit found NO mid-map
+					// tie-inversions - those bands were empty, a
+					// reachability problem the frontier restarts own.
+					if (exit_tick >= 0)
+						return -1;
+					const float vo = 0.5f * Len2(old.st.vel)
+						+ cfg_.efrontier_mu * cfg_.params.gravity
+							* old.st.pos.Z
+						- cfg_.efrontier_lambda * old.eloss;
+					const float vn = 0.5f * Len2(s.vel)
+						+ cfg_.efrontier_mu * cfg_.params.gravity * s.pos.Z
+						- cfg_.efrontier_lambda * eloss;
+					const float w = kind == 0 ? cfg_.speed_bucket * 2.f
+					                          : cfg_.speed_bucket;
+					const float margin = w * Len2D(s.vel) + 0.5f * w * w;
+					if (vn <= vo + margin)
+						return -1;
+				}
 			}
 			idx = AllocEntry(finished_flag);
 			if (idx < 0)
@@ -775,6 +805,122 @@ namespace Solver {
 		}
 		res.seconds = elapsed();
 		return res;
+	}
+
+	void Explorer::AuditTape(const Tape& tape) {
+		if (nentries_.load(std::memory_order_relaxed) == 0 || !tape.start.valid)
+			return;
+		std::mt19937 rng(12345);
+		PlayerState s = entries_[0].st;
+		short exit_tick = entries_[0].exit_tick;
+		float eloss = 0.f;
+		float e_prev = 0.5f * Len2(s.vel) + cfg_.params.gravity * s.pos.Z;
+		const float mu = cfg_.efrontier_mu, lam = cfg_.efrontier_lambda;
+		auto val = [&](const PlayerState& st, float el) {
+			return 0.5f * Len2(st.vel) + mu * cfg_.params.gravity * st.pos.Z
+				- lam * el;
+		};
+		// per-band audit rows: human V, archive best/percentile, cell verdicts
+		struct BandRow {
+			int n = 0, add = 0, replace = 0, tie = 0, lose = 0;
+			float hv = -1e30f;          // best human V seen in the band
+			int htick = 0;
+			float arch_best = -1e30f;   // best sampled archive V
+			int above = 0, sampled = 0; // archive samples above human V
+		};
+		BandRow rows[32];
+		printf("audit: reference tape vs live archive (V = KE + %.2f*gz - "
+			"%.2f*eloss)\n", mu, lam);
+		for (int t = 0; t < static_cast<int>(tape.frames.size()); ++t) {
+			const TapeFrame& f = tape.frames[t];
+			TickEvents ev;
+			MoveTick(s, w_, cfg_.params, f.pitch, f.yaw, f.fmove, f.smove,
+			         f.umove, f.buttons, &ev);
+			const float e_now = 0.5f * Len2(s.vel)
+				+ cfg_.params.gravity * s.pos.Z;
+			if (e_now < e_prev)
+				eloss += e_prev - e_now;
+			e_prev = e_now;
+			if (exit_tick < 0 && !InsideStartZone(s.pos))
+				exit_tick = static_cast<short>(t + 1);
+			int kind = 0, brush = -1;
+			if (s.on_ground) { kind = 1; brush = s.ground_brush; }
+			else if (ev.ncontacts > 0) { kind = 2; brush = ev.contact_brush[0]; }
+			if (kind == 0)
+				continue;   // audit the contact pipeline (what bands hold)
+			const int rel = RelTicks(t + 1, exit_tick);
+			int band = static_cast<int>(Len(s.pos - end_center_) / 256.f);
+			if (band > 31) band = 31;
+			BandRow& br = rows[band];
+			br.n++;
+			// cell verdict
+			const unsigned long long key = CellKey(s, kind, brush);
+			CellShard& sh = CSHARDS().s[ShardOf(key)];
+			{
+				std::lock_guard<std::mutex> g(sh.m);
+				auto it = sh.map.find(key);
+				if (it == sh.map.end()) br.add++;
+				else {
+					const Entry& inc = entries_[it->second];
+					const int irel = RelTicks(inc.tick, inc.exit_tick);
+					if (irel <= rel + 4 && rel <= irel + 4) br.tie++;
+					else if (irel > rel + 4) br.replace++;
+					else br.lose++;
+				}
+			}
+			const float hv = val(s, eloss);
+			if (hv > br.hv) { br.hv = hv; br.htick = rel; }
+			// archive percentile: sample the band vector
+			if (band_n_[band].load(std::memory_order_relaxed) > 0
+				&& br.sampled < 400) {
+				std::lock_guard<std::mutex> g(band_mx_[band]);
+				const std::vector<int>& v = bands_[band];
+				for (int c = 0; c < 40 && !v.empty(); ++c) {
+					const Entry& e = entries_[v[rng() % v.size()]];
+					const float av = val(e.st, e.eloss);
+					br.sampled++;
+					if (av > hv) br.above++;
+					if (av > br.arch_best) br.arch_best = av;
+				}
+			}
+		}
+		printf("  band  refN  add rep tie lose |   ref V(k) @rel | arch>ref /smp  archBest(k)\n");
+		for (int b = 31; b >= 0; --b) {
+			const BandRow& br = rows[b];
+			if (br.n == 0)
+				continue;
+			printf("  %4d  %4d  %3d %3d %3d %4d | %9.1f @%4d | %5d /%4d  %9.1f\n",
+				b, br.n, br.add, br.replace, br.tie, br.lose,
+				br.hv / 1000.f, br.htick, br.above, br.sampled,
+				br.arch_best > -1e29f ? br.arch_best / 1000.f : 0.f);
+		}
+		// zone-jump census: does the archive even hold jump-start lineages,
+		// and what value do they carry vs walk-offs?
+		{
+			long long nj = 0, nw = 0;
+			float jbest[32], wbest[32];
+			for (int b = 0; b < 32; ++b) { jbest[b] = -1e30f; wbest[b] = -1e30f; }
+			const int n = Count();
+			for (int i = 0; i < n; ++i) {
+				const Entry& e = entries_[i];
+				if (e.ckind == 0)
+					continue;
+				int band = static_cast<int>(Len(e.st.pos - end_center_) / 256.f);
+				if (band > 31) band = 31;
+				const float v = val(e.st, e.eloss);
+				if (e.zone_jumps > 0) { nj++; if (v > jbest[band]) jbest[band] = v; }
+				else { nw++; if (v > wbest[band]) wbest[band] = v; }
+			}
+			printf("  zone-jump census: %lld jump-lineage contacts vs %lld "
+				"walk-off; per-band best V (k) jump|walk:\n", nj, nw);
+			for (int b = 31; b >= 0; --b)
+				if (jbest[b] > -1e29f || wbest[b] > -1e29f)
+					printf("    band %2d: %9.1f | %9.1f%s\n", b,
+						jbest[b] > -1e29f ? jbest[b] / 1000.f : -999.f,
+						wbest[b] > -1e29f ? wbest[b] / 1000.f : -999.f,
+						jbest[b] > wbest[b] ? "  <- jump leads" : "");
+		}
+		fflush(stdout);
 	}
 
 	bool Explorer::BuildFrames(int entry_index, std::vector<TapeFrame>& out,
