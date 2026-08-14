@@ -1137,15 +1137,47 @@ Gate queries staged (2,037; run-4 backup).
 
 Scored ladder: human 319 | solved10 762 | solved9 804 (in-game status pending both).
 
+### HUMAN-CALIBRATED MIX FIT + RECORD 695 (2026-08-13, user-directed)
+
+**The human run as the tuning baseline (user directive), made rigorous:** band
+every run's FIRST-ARRIVAL CONTACT state by distance-to-goal (the explorer's own
+256u bands), then grid-search (μ, λ) for the mix under which V ranks states the
+way reality ranks the routes (9-run quality ladder: human 319 + 762/778/804/1117/
+1463/1824/2268/2774; scratchpad/mixfit.py). **FIT: μ=0.90, λ=2.0** — Spearman
+0.670 vs 0.581 for the hand-picked 0.25/0.5; the human ranks #1 in 7/9 shared
+bands under it. Reading: **V ≈ E_total − 2×waste** — the user's "total energy
+matters every time" is the fitted truth; the raw-E failure was the MISSING LOSS
+PENALTY, not the PE term (gz alone anti-predicts at −0.28; eloss alone 0.63 =
+strongest single feature). NEW DEFAULTS μ=0.9 λ=2.0.
+
+**The gap, quantified per band (human vs 762):** through bands 4-6 (ramp-3→4
+stage) the human carries 373-436k KE having spent 70-132k; the 762 arrives with
+165-233k having wasted 252-304k — half the energy, triple the waste; and even at
+ramps 1-2 the human's boards lose ~5× less. The ramp-4 farming is an
+energy-budget deficit that builds from the first board.
+
+**Validation (cold explores too high-variance to referee — measured again):
+tighten-screen A/B from the 762 incumbent, cap 761, 2 seeds/mix:** fitted mix =
+one dry + one DEEP single-deviation cut (761→731, −31); old mix = shallow-frequent
+(864 finishes → −10, plus a 760 from the optimizer). Different search characters
+(focused/rare/deep vs diffuse/common/shallow); the record came from the fitted
+mix. Chained pass on the 731: the seeded primary's OPTIMIZER cut 731→**695**
+(−36; the archive around the line finally gave mutation compressible subjects);
+tighten dry below 694. **Shipped `surf_basictest_solved11.tas` (695 scored /
+780 abs, 10.425 s). Ladder: human 319 | 695 | 762 | 804.** Snaps 47 (>10°), max
+67° — normalcy holding around the 800-class level, not yet improving below it.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
 - Settle-class movement-layer residual (3 data points; trace answers engine-exact)
   — tick-level query-log diff hunt.
-- solved9/solved10 gate + in-game tests.
-- μ/λ refinement (finer sweep around 0.25/0.5; per-band-depth mix?) + compromise
-  clauses 2-3 if the ramp-4 pocket persists at 762-class routes.
-- Optimize stage underuses threads when subjects < workers (run rng restarts per
-  subject); post-cap frontier-freeze wastes late rollouts.
+- solved10 (762) / solved11 (695) gate + in-game tests (gate staged for 695:
+  1,993 queries, run-5 backup).
+- MIX-INTERLEAVING across tighten rounds (fitted deep-cutter + old broad-cutter
+  alternate; both are one CLI knob) — cheap diversity, next lever.
+- Optimize stage underuses threads when subjects < workers; post-cap
+  frontier-freeze wastes late rollouts.
+- Compromise clauses 2-3 if the ramp-4 energy deficit persists at 695-class.
 - Archive-splice operator (graft archive-best prefixes onto finisher suffixes at
   shared cells) — next structural operator after v3a.
 - Ramp-4 endgame structure (the whole remaining human gap); spine-jump

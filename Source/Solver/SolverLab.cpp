@@ -118,8 +118,8 @@ namespace {
 		bool goal_touch = false;
 		bool eloss_bias = true;
 		bool energy_frontier = true;
-		float emix_mu = 0.5f;
-		float emix_lambda = 0.5f;
+		float emix_mu = 0.9f;      // human-ladder fitted (mixfit.py)
+		float emix_lambda = 2.0f;
 		bool aim = false;           // contact-anchored targeting (measured
 		                            // neutral on segments; --aim to enable)
 		bool zone_clock = true;     // score = ticks from startzone exit

@@ -94,9 +94,17 @@ namespace Solver {
 		// matters - nothing map-specific. mu=1,lambda=0 = the measured-
 		// harmful raw-E axis; mu=0,lambda=inf = the smooth frontier. The
 		// knobs are swept by results; the winning mix is the default.
+		// Defaults fitted from the HUMAN RUN + the 9-run quality ladder
+		// (2026-08-13, scratchpad/mixfit.py): mu=0.9 lambda=2.0 maximizes
+		// rank-agreement between V and final route quality at equal progress
+		// (0.670 vs 0.581 for the hand-picked 0.25/0.5), and the human ranks
+		// #1 in 7/9 shared bands under it. Reads as V = E_total - 2*waste:
+		// total energy is the right quantity (the user's claim); the missing
+		// piece of the failed raw-E axis was the loss penalty, not the PE
+		// term (gz ALONE anti-predicts at -0.28; eloss alone = 0.63).
 		bool energy_frontier = true;
-		float efrontier_mu = 0.5f;
-		float efrontier_lambda = 0.5f;
+		float efrontier_mu = 0.9f;
+		float efrontier_lambda = 2.0f;
 	};
 
 	struct Finisher {
