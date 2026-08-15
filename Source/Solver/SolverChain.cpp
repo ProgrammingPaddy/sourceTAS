@@ -151,8 +151,11 @@ namespace Solver {
 		out.finished = target_face < 0
 			? (st.finished && st.clean)
 			: (st.finished && st.fin_clean);   // v15 continuation landing
-		out.V = st.vboard - cfg_.wloss * st.eloss;
-		out.eloss = st.eloss;
+		// Junction value from the ledger frozen AT the junction (segment
+		// mode); END mode keeps the whole-rollout ledger.
+		out.V = st.vboard - cfg_.wloss
+			* (target_face >= 0 ? st.eloss_jct : st.eloss);
+		out.eloss = target_face >= 0 ? st.eloss_jct : st.eloss;
 		out.speed = st.finish_speed;
 		out.ticks = st.tick;
 		out.end_state = st.end_state;

@@ -676,6 +676,7 @@ namespace Solver {
 							+ cfg_.chain_mu * p.gravity * s.pos.Z;
 						st.end_state = s;
 						st.end_yaw = yaw;
+						st.eloss_jct = st.eloss;   // freeze the ledger HERE
 						// v15: DO NOT break - the junction is fixed and the
 						// rollout continues toward the end brush, so every
 						// segment rollout is a potential finisher (the old
@@ -768,9 +769,11 @@ namespace Solver {
 				return -1e7 + st.fin_rel + leash;
 			// Junction fitness (CMA is rank-based - raw energy units are
 			// fine): maximize board value minus fitted waste, pay per tick.
+			// eloss_jct, NOT eloss: the continuation's dissipation is the
+			// finisher case's business, never the junction's.
 			if (st.touched)
 				return cfg_.w_tick * st.tick
-					- (st.vboard - cfg_.wloss * st.eloss) + leash;
+					- (st.vboard - cfg_.wloss * st.eloss_jct) + leash;
 			return 1e9 + st.dmin + leash;
 		}
 		if (st.finished && st.clean)

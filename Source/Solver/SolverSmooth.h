@@ -135,6 +135,11 @@ namespace Solver {
 		int  fin_tick = -1;         // absolute landing tick (segment mode)
 		int  fin_rel = 0;           // scored ticks at the landing
 		bool fin_clean = false;     // landing class (no jump departure)
+		// Dissipation UP TO the junction: the continuation keeps the global
+		// ledger (eloss) running, which must never leak into junction
+		// fitness - v15's first campaign optimized "have a lucky afterlife"
+		// through the polluted ledger and picked 239 u/s boards over 527.
+		float eloss_jct = 0.f;
 		bool finished = false;
 		bool touched = false;       // segment mode: target face contacted
 		bool clean = true;          // ending class (last departure not a jump)
