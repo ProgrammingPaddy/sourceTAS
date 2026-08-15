@@ -777,10 +777,15 @@ namespace {
 						continue;
 					if (!g)            // only ticks the engine had GROUNDED
 						continue;
+					// The flag goes in CLEARED. A control that arrives already
+					// grounded only proves the function did not CLEAR it -
+					// which is not the direction under test and is exactly
+					// how the first control block fooled me. Forcing 0 means
+					// the engine must SET ground for the control to pass.
 					char buf[400];
 					_snprintf_s(buf, sizeof(buf), _TRUNCATE,
 						"CategorizePosition,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
-						"0,0,0,1,%d,0,0,0,0,1,1,%.9g,%.9g,0,0",
+						"0,0,0,0,%d,0,0,0,0,1,1,%.9g,%.9g,0,0",
 						x, y, z, vx, vy, vz, dk, dk ? 54.f : 72.f, yw);
 					ctrl.push_back(buf);
 					if (ctrl.size() >= 400)
@@ -939,13 +944,15 @@ namespace {
 				if ((rs[i].flags & 1) != 0) ok_g++; else bad_g++;
 			}
 			printf("funcdiff: CONTROL %d states the engine recorded as "
-				"GROUNDED in a real run -> isolated call says grounded %d, "
-				"NOT grounded %d\n", nctrl, ok_g, bad_g);
-			if (bad_g > ok_g) {
-				printf("funcdiff: HARNESS VOID - the isolated call disagrees "
-					"with the engine's own capture on states we KNOW were "
-					"grounded. The probe state is not reaching the function; "
-					"no verdict from this batch means anything.\n");
+				"GROUNDED in a real run, fed in with the flag CLEARED -> "
+				"isolated call SET ground %d, left it clear %d\n",
+				nctrl, ok_g, bad_g);
+			if (bad_g > 0) {
+				printf("funcdiff: HARNESS VOID - the isolated call failed to "
+					"SET ground on states the engine itself recorded as "
+					"grounded. It can evidently only preserve or clear the "
+					"flag, so every 'ours grounds, engine does not' verdict "
+					"in this batch is an artifact, not a defect.\n");
 				return 1;
 			}
 			printf("funcdiff: harness VALIDATED on controls.\n");
