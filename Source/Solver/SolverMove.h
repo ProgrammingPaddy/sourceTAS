@@ -58,6 +58,13 @@ namespace Solver {
 		//    0.05 u/s; zero-tax confirmed at gap 900). The two scales are
 		//    fitted independently per regime - do not unify without data.
 		// Landings arm NOTHING (jump-free -775 u/s landing: scale 1.00000).
+		// TESTED 2026-08-14: the textbook CS:S stamina constants (25/19/100
+		// -> arm 25000/19, scales 0.00019 unified) scored WORSE on the
+		// battery capture (7.7u vs 0.118u) - recollected source does not
+		// outrank the measured engine. The per-regime fitted values stand;
+		// the remaining 0.118u/310t drift is queued for a proper
+		// least-squares refit over the 5-jump stamina capture (an
+		// engine-read regression, not a guess).
 		float stamina_jump_ms = 1317.5f;
 		float stamina_scale_per_ms = 0.00019833f;
 		float stamina_jump_scale_per_ms = 0.000186f;
