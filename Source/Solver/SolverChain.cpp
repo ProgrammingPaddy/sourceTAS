@@ -279,6 +279,19 @@ namespace Solver {
 		unsigned seg_counter = 0;
 		std::set<std::string> fin_skels;
 		std::vector<int> fin_scored;
+		// v18 SKELETON FAIRNESS: expansions per skeleton - each distinct
+		// skeleton gets tried before any is re-tried (the exhaustive-
+		// enumeration promise; v17b burned 520s re-expanding direct-board
+		// junk before ever touching [7]).
+		std::unordered_map<std::string, int> skel_expanded;
+		// Platform top for the energy-deficit prior (from the end brush -
+		// no map constants).
+		float end_top_z = 256.f;
+		{
+			const int ei = w_.IndexOfBrushId(cfg_.end_brush_id);
+			if (ei >= 0)
+				end_top_z = w_.brushes[ei].bmax.Z;
+		}
 
 		auto skel_str = [&](const std::vector<int>& sk) {
 			std::string s = "[";
@@ -292,8 +305,37 @@ namespace Solver {
 
 		while (!pq.empty()
 			&& elapsed() < cfg_.total_seconds - cfg_.final_seconds) {
-			const Node node = nodes[pq.top().idx];
-			pq.pop();
+			// v18 pop: skeleton-fair effective priority. Drain-and-rescan is
+			// fine at these queue sizes (tens); each prior expansion of the
+			// SAME skeleton costs one full fd-range (2000), so breadth over
+			// skeleton space comes first and measured-good subtrees win the
+			// revisits.
+			int pick;
+			{
+				std::vector<PQE> drained;
+				drained.reserve(pq.size());
+				while (!pq.empty()) {
+					drained.push_back(pq.top());
+					pq.pop();
+				}
+				size_t bi = 0;
+				float be = -1e30f;
+				for (size_t k = 0; k < drained.size(); ++k) {
+					std::string sk = skel_str(nodes[drained[k].idx].skel);
+					const float eff = drained[k].pri
+						- 2000.f * skel_expanded[sk];
+					if (eff > be) {
+						be = eff;
+						bi = k;
+					}
+				}
+				pick = drained[bi].idx;
+				for (size_t k = 0; k < drained.size(); ++k)
+					if (k != bi)
+						pq.push(drained[k]);
+			}
+			const Node node = nodes[pick];
+			skel_expanded[skel_str(node.skel)]++;
 			res.nodes_expanded++;
 
 			std::string line = "[chain] d" + std::to_string(node.depth)
@@ -316,7 +358,7 @@ namespace Solver {
 				// the money segment - re-arm with GROWING budgets (2x, then
 				// 3x if still sub-60) instead of one same-size retry. The
 				// v16 d49 corridor is exactly the class this feeds.
-				if (!endseg.finished && endseg.dmin < 100.f
+				if (!endseg.finished && endseg.dmin < 200.f
 					&& elapsed() < cfg_.total_seconds - cfg_.final_seconds) {
 					SegOut retry = SolveSegment(node.st, node.yaw, -1, false,
 						cfg_.rng_seed + 7919u * ++seg_counter + 13u,
@@ -325,7 +367,7 @@ namespace Solver {
 					line += " ->END retry2x";
 					if (retry.finished || retry.dmin < endseg.dmin)
 						endseg = retry;
-					if (!endseg.finished && endseg.dmin < 60.f
+					if (!endseg.finished && endseg.dmin < 80.f
 						&& elapsed() < cfg_.total_seconds
 							- cfg_.final_seconds) {
 						SegOut r3 = SolveSegment(node.st, node.yaw, -1,
@@ -473,16 +515,23 @@ namespace Solver {
 						child.skel = node.skel;
 						child.skel.push_back(fi);
 						nodes.push_back(child);
-						// GOAL-FIRST ordering v17: the child's OWN
-						// continuation approach (fd) is the primary prior -
-						// it correctly ranked every v16 child ([7>8] fd
-						// 1023-1053 vs [7>9] fd 485-665) where the V
-						// tie-break burned three expansions on the dead hot
-						// class. Parent endgame distance tie-breaks.
+						// GOAL-FIRST ordering v18: fd (the child's own
+						// continuation approach) PLUS the energy-deficit
+						// height - fd alone is proximity-biased (v17b spent
+						// 520s on direct boards that are NEAR the end but
+						// energy-wrecked at V -1M). A junction whose total
+						// specific energy V/g cannot ballistically reach the
+						// platform top carries its deficit in the SAME
+						// height units as fd. No map constants: end_top_z
+						// from the end brush, gravity live.
 						const float fdc = seg.fin_dmin < 1e8f
 							? (seg.fin_dmin < 2000.f ? seg.fin_dmin : 2000.f)
 							: dend_here;
-						pq.push({ -fdc - dend_here * 1e-4f,
+						float deficit = end_top_z + 40.f
+							- seg.V / cfg_.params.gravity;
+						if (deficit < 0.f)
+							deficit = 0.f;
+						pq.push({ -(fdc + deficit) - dend_here * 1e-4f,
 							static_cast<int>(nodes.size()) - 1 });
 						char b[128];
 						_snprintf_s(b, sizeof(b), _TRUNCATE,
