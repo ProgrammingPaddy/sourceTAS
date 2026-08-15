@@ -1611,7 +1611,14 @@ namespace {
 	VerifyCtx g_verify;
 	void StartVerify(int seg_index); // fwd
 
-	struct FastState { Vector p, v; float yaw; };
+	// sfric = m_surfaceFriction, which scales the air-accel budget. The
+	// engine sets 0.25 when its end-of-move ground probe finds no walkable
+	// plane while the player is RISING (0 < vz <= 140; above that the probe
+	// is skipped and the value stays 1). Solver-core measurement 2026-08-15
+	// (fuzz decks, engine applied exactly 150*85*0.015*0.25 = 47.8125 u/s);
+	// carried per-state because the value that governs a tick is the one the
+	// PREVIOUS tick's end-of-move probe left.
+	struct FastState { Vector p, v; float yaw; float sfric = 1.f; };
 
 	// One airborne tick WITHOUT collision: set the tick's view yaw, half
 	// gravity, air-accelerate along the side key's wishdir, integrate, half
@@ -1625,7 +1632,13 @@ namespace {
 		const float cur = s.v.X * wx + s.v.Y * wy;
 		float add = g_search.cap - cur;
 		if (add > 0.f) {
-			if (add > g_search.accel_amt) add = g_search.accel_amt;
+			// Budget scales by m_surfaceFriction (see FastState::sfric).
+			// NOTE: the OPTIMAL strafe angle and its per-tick gain are
+			// unaffected - with budget >= the 30 cap in both regimes the
+			// optimum is the perpendicular wish either way - so the planner
+			// math needs no change; this only corrects OFF-optimal wishes.
+			const float budget = g_search.accel_amt * s.sfric;
+			if (add > budget) add = budget;
 			s.v.X += add * wx;
 			s.v.Y += add * wy;
 		}
@@ -1728,7 +1741,9 @@ namespace {
 		const float cur = s.v.X * wx + s.v.Y * wy;
 		float add = g_search.cap - cur;
 		if (add > 0.f) {
-			if (add > g_search.accel_amt) add = g_search.accel_amt;
+			// accel budget scales by m_surfaceFriction (see FastState).
+			const float budget = g_search.accel_amt * s.sfric;
+			if (add > budget) add = budget;
 			s.v.X += add * wx;
 			s.v.Y += add * wy;
 		}
@@ -1820,7 +1835,12 @@ namespace {
 		// while the model slid the face below). Striking a walkable plane
 		// mid-bump leaves the hull ON it, so this probe also covers what
 		// the old direct-contact grounding caught.
+		// This probe also OWNS m_surfaceFriction for the NEXT tick (see
+		// FastState::sfric): reset to 1, and 0.25 when nothing walkable is
+		// under a RISING player. Above vz 140 the engine skips the probe
+		// entirely, so the previous value stands.
 		if (s.v.Z <= 140.f) {
+			s.sfric = 1.f;
 			int gb, gpl;
 			const float gf = TraceHullWorld(s.p, s.p - Vector(0.f, 0.f, 2.f), &gb, &gpl);
 			if (gf < 1.f && gb >= 0
@@ -1828,6 +1848,8 @@ namespace {
 				s.p.Z -= 2.f * gf;           // engine: origin = trace endpos
 				seg_pts[++nseg] = s.p;       // the perigee sees the snapped point
 				*grounded = true;
+			} else if (s.v.Z > 0.f) {
+				s.sfric = 0.25f;
 			}
 		}
 		s.v.Z -= g_search.gravity * g_search.dt * 0.5f;          // FinishGravity
