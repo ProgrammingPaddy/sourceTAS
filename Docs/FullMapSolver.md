@@ -1875,6 +1875,80 @@ reads, self-describing captures, static RE toolkit) turns any future
 divergence into one capture + one decode. Solver search (chain
 endgame, task #28) is unblocked pending user sign-off.
 
+## 2026-08-15 — FINISH-FIRST SEARCH + THE SEAM RECKONING + TOTAL PARITY
+
+### Finish-first pathbuilding (v14–v19, five campaigns, rng 1337)
+User verdict opening the round: energy-loss allowance too high; "we
+really should be seeing thousands if not millions of finish-able
+combinations... the pathbuilding framework is not well defined for our
+goals." The 292 witness recontextualized it: it SKIPS ramp 2 (route
+R1>R3>R4 in ramp terms; brushes 7>9>11), boards ramp 4 LOW (z −7.7) at
+855 — SLOWER than the chain's 908–970 arrivals. Convertibility, not
+stored energy, is the value axis. Framework rebuilt in five steps, one
+campaign each: goal-ranked expansion (END distance was measured then
+DISCARDED — now it orders the tree), continuation finishing (segment
+rollouts BROKE at the junction — of 21B ticks/campaign not one could
+stumble into a finish; now every rollout runs to the end brush and a
+clean landing dominates fitness), ledger freeze (continuation
+dissipation polluted junction fitness — v15's campaign optimized
+"lucky afterlives"), fd shaping + energy-deficit prior + skeleton-fair
+pop (proximity-biased fd burned 60% of a campaign on energy-wrecked
+direct boards, V −1M), warm-started escalation (cold retries reproduced
+identical dmins; SetSeedX continues the basin). Ladder of best END
+distances: d1007 → d342 → d128 → d125. Near-miss export added: every
+campaign now writes its closest assembly as chainMISSdN tape (user:
+"I want to look at it in game").
+Lessons that stand: fd is proximity-biased without an energy screen;
+sibling redundancy starves breadth without per-skeleton fairness; the
+user's eye finds in minutes what campaigns can't (the RAMP-1 board
+"certainly better than any previous version"; the mid-ride view snap =
+segment-handoff whip, cosmetic, unfixed).
+
+### The seam reckoning (user capture, one tick)
+The d125 tape FALLS in-game before ramp 3. Capture diff: bit-identical
+to t189, then at (−251, −464, −64) — the FLOOR-LEVEL SEAM at ramp 2's
+base — the engine clips a PURE AXIAL side (vy → exactly 0.000, hull
+pinned at y −464.008 = brush side −448 hull-expanded) while our trace
+elects the SLOPED face and manufactures +109 vz of climb. The campaign
+line cashed that fictional climb; the engine never grants it. Every
+prior claim of "1-to-1" was true only over the EXERCISED envelope: 11
+decks + 3 tapes + 3662 oracle traces, none of which visit this seam.
+User: "if we were 1-to-1... there would be no divergence no matter how
+insane the inputs are" — correct, and the answer is instrumentation
+that certifies the whole surface, not visited paths.
+
+### Total parity package (user: "we are doing all of this at once")
+One injection, two clicks, everything else offline:
+- **tracegen-map**: 6624 generated queries covering every brush face
+  (normal + glancing crossings), every AABB edge (parallel passes at
+  hull-scale offsets 12/17/40 — the seam class), both hulls; + the 76
+  seam-window queries. One oracle click = engine truth for the ENTIRE
+  map's collision; tracediff iterates fixes offline against the same
+  results file. Geometry parity becomes provable, not asserted.
+- **Fuzz decks** (battery_fuzz_a/b/wall): LCG-deterministic extreme
+  inputs — ±180 yaw snaps, duck/jump spam, stick reversals, wall ram.
+  "Insane inputs" is now a scored deck class.
+- **Trigger port** (gravity/push/teleport) into the solver core,
+  mirroring the DLL's BspWorld/RequestSim implementation 1:1: entity
+  parse + per-model brush tagging + raw-plane Minkowski touch;
+  FL_BASEVELOCITY lifecycle, ent_gravity scaling, basevel-z integrate-
+  and-clear, lateral basevel around Walk/AirMove, post-move apply.
+  No-op on basictest (no triggers) — board unchanged, proven. Real
+  certification lands with the first triggered map's captures.
+- Offline revalidation: 11 PASS, 292/solved12/495-playback 0.000.
+
+### Open items (this era)
+- ONE-SESSION protocol pending: inject → "Run trace oracle" (6700
+  queries) → "Run ALIGNMENT battery" (13 decks). Then offline: fix the
+  seam class from tracediff, fit any fuzz gaps, seam deck to 0.000,
+  board 14/14.
+- Segment-handoff yaw snap (cosmetic; yaw-continuity seeding).
+- Trunk-budget reallocation campaign (approved direction, waiting on
+  geometry truth first).
+- Trigger certification decks: first map with triggers.
+- User calibration: ramp-4 endgame "off the side is best" — verified
+  nothing in the machinery forbids it; the search must find it.
+
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
 - 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
