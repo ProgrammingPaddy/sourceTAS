@@ -120,6 +120,11 @@ namespace Solver {
 		// plane is satisfied by grazing the near lip with zero margin -
 		// the under-lip family). Search knob, not physics.
 		float land_margin = 40.f;
+		// v16: weight on the continuation's closest energy-aware approach
+		// to the end in segment-mode fitness (units: fitness per distance
+		// unit; 100 makes a 500u approach difference worth 50k - the scale
+		// of real junction-V differences, without drowning them).
+		float w_fin_dmin = 100.f;
 	};
 
 	// Per-rollout observables (reported, and the objective's inputs).
@@ -140,6 +145,14 @@ namespace Solver {
 		// fitness - v15's first campaign optimized "have a lucky afterlife"
 		// through the polluted ledger and picked 239 u/s boards over 527.
 		float eloss_jct = 0.f;
+		// v16: the continuation's closest energy-aware approach to the end
+		// (DistToEnd over post-junction ticks). 90M v15 rollouts landed
+		// ZERO continuations - board-optimal populations never stumble in
+		// by luck, so this is the gradient that pulls them: among boards,
+		// the one whose continuation flies TOWARD the platform wins (the
+		// difference between the sideways spine graze at hdg 103 and the
+		// 292's +40-degree climb).
+		float fin_dmin = 1e9f;
 		bool finished = false;
 		bool touched = false;       // segment mode: target face contacted
 		bool clean = true;          // ending class (last departure not a jump)

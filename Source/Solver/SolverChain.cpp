@@ -156,6 +156,7 @@ namespace Solver {
 		out.V = st.vboard - cfg_.wloss
 			* (target_face >= 0 ? st.eloss_jct : st.eloss);
 		out.eloss = target_face >= 0 ? st.eloss_jct : st.eloss;
+		out.fin_dmin = st.fin_dmin;
 		out.speed = st.finish_speed;
 		out.ticks = st.tick;
 		out.end_state = st.end_state;
@@ -462,11 +463,12 @@ namespace Solver {
 						// finishing is already nearly true.
 						pq.push({ -dend_here + seg.V * 1e-9f,
 							static_cast<int>(nodes.size()) - 1 });
-						char b[112];
+						char b[128];
 						_snprintf_s(b, sizeof(b), _TRUNCATE,
-							"  F%d/%c V%.0fk spd%.0f z%.0f el%.0fk", fi,
-							"LMH"[bnd], seg.V / 1000.f, seg.speed,
-							seg.end_state.pos.Z, seg.eloss / 1000.f);
+							"  F%d/%c V%.0fk spd%.0f z%.0f el%.0fk fd%.0f",
+							fi, "LMH"[bnd], seg.V / 1000.f, seg.speed,
+							seg.end_state.pos.Z, seg.eloss / 1000.f,
+							seg.fin_dmin < 1e8f ? seg.fin_dmin : -1.f);
 						line += b;
 					}
 					if (!any)

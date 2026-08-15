@@ -694,8 +694,12 @@ namespace Solver {
 					touch_at = -1;        // may re-arm
 				}
 			} else if (cfg_.goal_face_brush >= 0 && junction_done) {
-				// Continuation landing: the finish check runs with the
-				// junction's stats untouched - fin_* carries the landing.
+				// Continuation: track the energy-aware closest approach to
+				// the end (the shaping gradient) and detect the landing -
+				// the junction's stats stay untouched, fin_* carries both.
+				const float fd = DistToEnd(s.pos, s.vel.Z);
+				if (fd < st.fin_dmin)
+					st.fin_dmin = fd;
 				if (end_idx_ >= 0 && s.on_ground && s.ground_brush >= 0
 					&& w_.brushes[s.ground_brush].id == cfg_.end_brush_id
 					&& InsideXY(s.pos, w_.brushes[end_idx_])) {
@@ -771,9 +775,16 @@ namespace Solver {
 			// fine): maximize board value minus fitted waste, pay per tick.
 			// eloss_jct, NOT eloss: the continuation's dissipation is the
 			// finisher case's business, never the junction's.
-			if (st.touched)
+			// v16 continuation shaping: the closest energy-aware approach
+			// the continuation achieved pulls the population toward boards
+			// whose ride AIMS at the platform (capped so a wild continuation
+			// cannot drown real board-value differences).
+			if (st.touched) {
+				const float fd = st.fin_dmin < 2000.f ? st.fin_dmin : 2000.f;
 				return cfg_.w_tick * st.tick
-					- (st.vboard - cfg_.wloss * st.eloss_jct) + leash;
+					- (st.vboard - cfg_.wloss * st.eloss_jct)
+					+ cfg_.w_fin_dmin * fd + leash;
+			}
 			return 1e9 + st.dmin + leash;
 		}
 		if (st.finished && st.clean)

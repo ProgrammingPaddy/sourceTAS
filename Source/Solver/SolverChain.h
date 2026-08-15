@@ -104,6 +104,7 @@ namespace Solver {
 			std::vector<TapeFrame> frames;
 			float dmin = 1e9f;
 			float eloss = 0.f;       // segment energy dissipated (ledger units)
+			float fin_dmin = 1e9f;   // continuation's closest end approach
 			// v15: when the segment's CONTINUATION landed the end brush,
 			// finished is true and fin_frames carries the full stream to the
 			// landing (frames still stops at the junction for the child).
