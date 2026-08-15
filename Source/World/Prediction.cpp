@@ -344,11 +344,19 @@ namespace {
 				Prediction::SimState st;
 				st.origin   = *reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff);
 				st.velocity = *reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff);
+				// Direct reads (no layout inference): both CMoveData float
+				// candidates around m_flMaxSpeed, raw.
+				st.mspd_a = *reinterpret_cast<float*>(movebuf + 0x3C);
+				st.mspd_b = *reinterpret_cast<float*>(movebuf + 0x40);
 
 				g_orig_finishmove(g_pred, player, cmd, movebuf);
 				*s_p_curtime += g_interval;
 
 				st.flags = g_off.flags ? *reinterpret_cast<int*>(pb + g_off.flags) : 0;
+				// The collision hull the engine ACTUALLY carries after this
+				// tick (CCollisionProperty m_vecMaxs.z, origin-relative).
+				st.hull_top = g_off.maxs
+					? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
 
 				// TRIGGERS: server-side entities the client prediction never
 				// runs - fire touched trigger_teleport / trigger_gravity here

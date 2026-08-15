@@ -8089,19 +8089,22 @@ namespace {
 		std::ofstream out(path, std::ios::trunc);
 		if (!out)
 			return;
-		out << "tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw\n";
-		char line[320];
+		out << "tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw,"
+			"hulltop,mspd_a,mspd_b\n";
+		char line[384];
 		for (size_t t = 0; t < st.size(); ++t) {
 			const Prediction::SimState& s = st[t];
 			const Frame& f = t < fr.size() ? fr[t] : fr.back();
-			Sfmt(line, "%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%d,%d,%d,%.4f\n",
+			Sfmt(line, "%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%d,%d,%d,"
+				"%.4f,%.3f,%.3f,%.3f\n",
 				static_cast<int>(t), s.origin.X, s.origin.Y, s.origin.Z,
 				s.velocity.X, s.velocity.Y, s.velocity.Z,
 				sqrtf(s.velocity.X * s.velocity.X
 					+ s.velocity.Y * s.velocity.Y),
 				(s.flags & 1) ? 1 : 0,        // FL_ONGROUND
 				(s.flags & 2) ? 1 : 0,        // FL_DUCKING
-				f.buttons, f.viewangles[1]);
+				f.buttons, f.viewangles[1],
+				s.hull_top, s.mspd_a, s.mspd_b);
 			out << line;
 		}
 		AppendExportLog("enginesim", path, g_batsim_name.c_str(),

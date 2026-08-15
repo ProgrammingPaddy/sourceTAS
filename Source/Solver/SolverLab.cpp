@@ -1975,6 +1975,30 @@ namespace {
 				missing++;
 				continue;
 			}
+			// Extended DIRECT-READ columns (hulltop, mspd_a, mspd_b) when
+			// the capture carries them - the engine's own hull and movedata
+			// values, compared per tick instead of inferred.
+			std::vector<float> eng_hull, eng_ma, eng_mb;
+			{
+				FILE* xf = nullptr;
+				if (fopen_s(&xf, best_csv.c_str(), "r") == 0 && xf) {
+					char xline[512];
+					fgets(xline, sizeof(xline), xf);
+					while (fgets(xline, sizeof(xline), xf)) {
+						int tk, g, dk, bt;
+						float x, y, z, vx, vy, vz, sp, yw, ht, ma, mb;
+						if (sscanf_s(xline,
+							"%d,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f",
+							&tk, &x, &y, &z, &vx, &vy, &vz, &sp, &g, &dk,
+							&bt, &yw, &ht, &ma, &mb) == 15) {
+							eng_hull.push_back(ht);
+							eng_ma.push_back(ma);
+							eng_mb.push_back(mb);
+						}
+					}
+					fclose(xf);
+				}
+			}
 			int first_row = eng[0].tick == -1 ? 1 : 0;
 			PlayerState s;
 			s.pos = tape.start.origin;
@@ -2002,6 +2026,7 @@ namespace {
 				: static_cast<int>(eng.size()) - first_row;
 			int first01 = -1;
 			float maxd = 0.f;
+			int hull_first = -1, hull_bad = 0;
 			for (int t = 0; t < n; ++t) {
 				const TapeFrame& f = tape.frames[t];
 				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
@@ -2011,6 +2036,20 @@ namespace {
 					maxd = dd;
 				if (first01 < 0 && dd > 0.1f)
 					first01 = t;
+				// Hull verification: the engine's carried hull top vs the
+				// model's hull_state, per tick (a READ, not an inference).
+				if (t < static_cast<int>(eng_hull.size())
+					&& eng_hull[t] >= 0.f) {
+					const float ours = s.hull_state == 1
+						? o.hulls.duck_max.Z
+						: s.hull_state == 2 ? o.hulls.unduck_max.Z
+						: o.hulls.stand_max.Z;
+					if (fabsf(ours - eng_hull[t]) > 0.1f) {
+						hull_bad++;
+						if (hull_first < 0)
+							hull_first = t;
+					}
+				}
 			}
 			const bool okp = first01 < 0;
 			char fbuf[16];
@@ -2021,6 +2060,29 @@ namespace {
 			printf("battery: %-22s %6d %11s %9.3fu  [%s] %s\n",
 				name.c_str() + 8, n, fbuf, maxd, src.c_str(),
 				okp ? "PASS" : "FAIL  <- engine truth on disk, fit it");
+			if (!eng_hull.empty()) {
+				// Distinct movedata values (field identification data).
+				std::vector<float> da, db;
+				for (size_t k = 0; k < eng_ma.size(); ++k) {
+					bool fa = false, fb = false;
+					for (float v : da) if (fabsf(v - eng_ma[k]) < 0.01f) fa = true;
+					for (float v : db) if (fabsf(v - eng_mb[k]) < 0.01f) fb = true;
+					if (!fa && da.size() < 4) da.push_back(eng_ma[k]);
+					if (!fb && db.size() < 4) db.push_back(eng_mb[k]);
+				}
+				printf("battery:   reads: hull %s",
+					hull_first < 0 ? "eng==model every tick" : "");
+				if (hull_first >= 0)
+					printf("MISMATCH first t%d (%d ticks; eng %.1f)",
+						hull_first, hull_bad, eng_hull[hull_first]);
+				printf(" | mspd_a {");
+				for (size_t k = 0; k < da.size(); ++k)
+					printf("%s%.1f", k ? "," : "", da[k]);
+				printf("} mspd_b {");
+				for (size_t k = 0; k < db.size(); ++k)
+					printf("%s%.1f", k ? "," : "", db[k]);
+				printf("}\n");
+			}
 			if (okp) pass++; else fail++;
 		} while (FindNextFileA(h, &fd));
 		FindClose(h);

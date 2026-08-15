@@ -26,6 +26,15 @@ namespace Prediction {
 		Vector origin;     // feet origin after the tick
 		Vector velocity;   // velocity after the tick
 		int    flags;      // player m_fFlags after the tick (FL_ONGROUND etc.)
+		// DIRECT READS (user directive 2026-08-14: no guessing - the hooked
+		// engine is queryable): the collision hull top the engine actually
+		// carries after the tick (CCollisionProperty m_vecMaxs.z; -1 if the
+		// netvar is unresolved), and the two CMoveData float candidates for
+		// m_flMaxSpeed read right after ProcessMovement - exported raw so
+		// the capture itself identifies the field, no layout inference.
+		float  hull_top = -1.f;
+		float  mspd_a = -1.f;      // movedata +0x3C
+		float  mspd_b = -1.f;      // movedata +0x40
 	};
 
 	// Fills `out` with the input for `tick`, given the simulated state after the
