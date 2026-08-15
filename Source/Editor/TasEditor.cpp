@@ -7886,7 +7886,13 @@ namespace {
 			out << line;
 		}
 		if (Cvars::GetFloat("sv_stopspeed", &v)) {
-			Sfmt(line, "stopspeed %g  # live server cvar\n", v);
+			// MEASURED CONFLICT (2026-08-14 battery): this cvar reads 100
+			// client-side while the engine's own movement captures behave
+			// as 75 bit-exactly (six decks + three tapes). The read is not
+			// the movement truth here (non-replicated copy?) - export as a
+			// note only; the behavior-proven value stays authoritative.
+			Sfmt(line, "# sv_stopspeed cvar reads %g; engine BEHAVIOR "
+				"measures 75 - behavior wins\n", v);
 			out << line;
 		}
 		return static_cast<bool>(out);

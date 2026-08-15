@@ -1910,10 +1910,27 @@ namespace {
 				s.ground_brush = tr.brush;
 			}
 		}
+		// Contact states cannot seed the engine sim (measured: a mid-ride
+		// anchor triggered the engine's stuck resolution - velocity zeroed,
+		// player extruded). Snap the start BACK to the last FREE-AIR tick
+		// (no contacts, not grounded) at or before the requested one.
+		PlayerState free_state = s;
+		int free_tick = 0;
 		for (int t = 0; t < start; ++t) {
 			const TapeFrame& f = tape.frames[t];
+			TickEvents ev;
 			MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
-				f.umove, f.buttons, nullptr);
+				f.umove, f.buttons, &ev);
+			if (ev.ncontacts == 0 && !s.on_ground) {
+				free_state = s;
+				free_tick = t + 1;
+			}
+		}
+		if (free_tick != start) {
+			printf("battery-slice: start %d is a contact state - snapped "
+				"back to free-air tick %d\n", start, free_tick);
+			s = free_state;
+			start = free_tick;
 		}
 		TapeAnchor a;
 		a.valid = true;

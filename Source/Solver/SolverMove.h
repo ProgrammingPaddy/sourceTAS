@@ -66,9 +66,14 @@ namespace Solver {
 		// and jump-scale are degenerate (only the product is pinned) -
 		// the redesigned stay-on-platform ladder deck separates them.
 		// Textbook 25/19/100 constants tested and REJECTED by the capture.
+		// SEPARATED + CONVERGED on the six-jump ladder capture (2026-08-14):
+		// arm 1317.5 independently pinned (V-shaped minimum, +-3.5ms costs
+		// 1.7u); walk scale confirmed; jump scale converged to 0.0001855
+		// with the residual FLAT at 0.010u over 672 ticks (precision floor,
+		// ~1/3 of one 1/32 coordinate quantum).
 		float stamina_jump_ms = 1317.5f;
 		float stamina_scale_per_ms = 0.00019833f;
-		float stamina_jump_scale_per_ms = 0.00018565f;
+		float stamina_jump_scale_per_ms = 0.0001855f;
 		// SDK CheckJumpButton calls FinishGravity() inside itself - an extra
 		// half-gravity on the jump tick on top of FullWalkMove's own pair.
 		// Kept as a toggle so replay parity data can arbitrate the quirk.

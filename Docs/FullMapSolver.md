@@ -1654,15 +1654,44 @@ solved12 replay 0.000u under 62. Remaining:
   divergence becomes a deck (replay-to-tick anchor + frame window).
   battery_unduck_spine495.tas = the 495's own ticks 500-602, generated.
 
+## 2026-08-14 — ZERO-DRIFT CAMPAIGN (user standard: any drift unacceptable)
+
+Sequence of battery rounds converging the last residuals, with three
+findings that only the instrument could deliver:
+1. **wall_stand discriminator PASSED bit-exact under standing-72**: the
+   transient-hull correction is behavior-proven from both sides.
+2. **The "hull" netvar reads a CONSTANT 62.0 in every state** (ducked
+   decks included) - that field was NEVER the movement hull; the ancient
+   confusing 62 read is demystified. m_flMaxSpeed = 250 read-confirmed.
+3. **sv_stopspeed cvar reads 100 while the engine's movement behaves as
+   75 BIT-EXACTLY** (six decks + three tapes): the live-cvar export of
+   stopspeed briefly broke six perfect decks at tick 3 - caught by the
+   battery within one run. Rule established: BEHAVIOR CAPTURE outranks a
+   cvar read when they conflict (non-replicated copies lie). accelerate
+   10 / friction 4 reads AGREE with behavior and are exported live.
+4. **Stamina constants separated and converged** on the redesigned
+   six-jump stay-on-platform ladder (v1 ran off the platform and left
+   arm/scale degenerate): arm 1317.5 independently pinned (V minimum,
+   +-3.5ms costs 1.7u), walk 0.00019833 confirmed, jump scale converged
+   to 0.0001855 - residual FLAT at 0.010u/672t (precision floor). The
+   textbook 25/19/100 constants REJECTED by measurement.
+5. **battery-slice free-air snap**: contact-state anchors trigger the
+   engine's stuck resolution (velocity zeroed - measured); the slicer
+   now snaps the start back to the last free-flight tick (spine495 deck
+   regenerated anchored at t482, covering board/unduck-537/ending).
+
+**Board: 10/11 bit-exact-or-subquantum.** Remaining: unduck_spine495
+awaits ONE capture click (free-air deck); duck_air 0.064u birth analysis;
+stamina 0.010u = precision floor.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- ~~StepMove port~~ DONE 1:1. ~~Unduck gap~~ = transient hull + cap rule.
-- **Next battery click** (user, after reinject): scores wall_stand (the
-  72-vs-transient discriminator), unduck_spine495 (t537's own window),
-  and the full rerun; then fit stamina's 0.118.
+- ~~StepMove~~ ~~unduck hull/cap~~ ~~stamina separation~~ DONE.
+- **One battery click**: captures the free-air spine495 slice (t537's
+  own window) -> fit whatever it states -> board 11/11.
+- duck_air 0.064u birth analysis (same method as unduck_face).
 - Duck-hull top height: undiscriminated (needs overhang geometry).
-- Transient end condition: grounding is fitted; re-duck/re-unduck
-  re-basing untested (a future deck if a tape ever exercises it).
+- Transient end condition: grounding fitted; re-duck re-basing untested.
 - **Chain endgame**: carve control BUILT (gene 5: into-face vs along-face
   wish blend, own yaw targeting under the same caps) but v13 MEASURED A
   REGRESSION (v12-live boards died; ENDs d313+ except one d54): the carve
