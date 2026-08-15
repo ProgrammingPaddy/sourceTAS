@@ -529,14 +529,15 @@ namespace Solver {
 				s.duck_timer_ms = 0.f;
 		}
 
-		// SDK PlayerMove calls CategorizePosition() BEFORE Duck() and the
-		// movetype switch; the part that governs THIS tick's movement is
-		// m_surfaceFriction. Recomputed here from the tick-entry state (the
-		// same post-FinishGravity velocity the engine sees) without
-		// re-tracing: airborne already means the last probe found nothing
-		// walkable at this position.
-		s.surface_friction = (!s.on_ground && s.vel.Z > 0.f
-			&& s.vel.Z <= p.non_jump_velocity) ? p.air_friction_up : 1.f;
+		// NOTE (measured, fuzz_a t117 vs fuzz_b t22): m_surfaceFriction is
+		// NOT recomputed at tick entry - the value that governs this tick's
+		// accel is the one left by the END-OF-MOVE CategorizePosition of the
+		// previous tick (which runs BEFORE FinishGravity), plus any duck-
+		// transition recategorize. t116 ended its move at vz 143.5, above
+		// NON_JUMP_VELOCITY, so the engine skipped the ground probe and left
+		// friction 1.0 - and t117 then accelerated on the FULL addspeed
+		// (55.6) instead of the 0.25 budget (47.81). A tick-entry recompute
+		// (vz 137.5, below the gate) would have forced 0.25 and broken it.
 
 		// PlayerMove: Duck() runs before the move itself, and the SDK
 		// re-categorizes position right after it - so a duck-state origin
