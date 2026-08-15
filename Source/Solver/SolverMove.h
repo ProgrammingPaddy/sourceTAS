@@ -71,9 +71,22 @@ namespace Solver {
 		// 1.7u); walk scale confirmed; jump scale converged to 0.0001855
 		// with the residual FLAT at 0.010u over 672 ticks (precision floor,
 		// ~1/3 of one 1/32 coordinate quantum).
-		float stamina_jump_ms = 1317.5f;
+		// SOLVED by regression over the six-jump ladder (2026-08-14):
+		// arm = 25000/19 (the textbook value, CONFIRMED by measurement to
+		// 0.006 ms this time); jump scale = the textbook 0.00019 applied
+		// to the WHOLE post-impulse vz (see CheckJumpButton). Walk scale
+		// stays at its independently fitted value pending the same
+		// formula-shape check.
+		float stamina_jump_ms = 25000.f / 19.f;
+		// WALK drag law regressed over 84 dragged ticks (2026-08-14): the
+		// per-tick ratio is AFFINE in stamina, 1 - (stam*scale + offset):
+		// slope = 0.00019833 (the original fit, vindicated as the slope),
+		// intercept 0.000327 measured (mechanism unidentified - candidate:
+		// a constant term in the engine's formula). Reproduces every
+		// sampled tick's ratio to ~1e-5.
 		float stamina_scale_per_ms = 0.00019833f;
-		float stamina_jump_scale_per_ms = 0.0001855f;
+		float stamina_walk_offset = 0.000327f;
+		float stamina_jump_scale_per_ms = 0.00019f;
 		// SDK CheckJumpButton calls FinishGravity() inside itself - an extra
 		// half-gravity on the jump tick on top of FullWalkMove's own pair.
 		// Kept as a toggle so replay parity data can arbitrate the quirk.

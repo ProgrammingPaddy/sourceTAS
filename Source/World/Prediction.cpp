@@ -340,6 +340,17 @@ namespace {
 				cmd->impulse        = f.impulse;
 
 				CallV<kSetupMoveIdx>(g_pred, player, cmd, g_helper, movebuf);
+				if (i == 0) {
+					// MEASURED (2026-08-14, slice decks): the netvar
+					// velocity write never reaches SetupMove's copy (abs-
+					// velocity path) - nonzero-velocity anchors started at
+					// v=0. Seed the FIRST tick's movedata directly through
+					// the pinned offsets; FinishMove propagates onward.
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff)
+						= s_sim_anchor.velocity;
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff)
+						= s_sim_anchor.origin;
+				}
 				CallV<kProcessMovementIdx>(g_gm, player, movebuf);
 
 				Prediction::SimState st;

@@ -182,13 +182,19 @@ namespace Solver {
 			// Hot-stamina jumps are taxed (REAL-playback fit, 4 jumps - see
 			// MoveParams). The earlier "no tax" conclusion came from pairing
 			// the wrong sim export with a rewritten tape file - retracted.
-			float impulse = sqrtf(2.f * p.gravity * p.jump_height);
-			if (s.stamina > 0.f)
-				impulse *= 1.f - s.stamina * p.stamina_jump_scale_per_ms;
+			// FORMULA CORRECTED by 5-jump regression (2026-08-14): the
+			// stamina ratio applies to the WHOLE vz after the impulse
+			// (StartGravity's -6 included), not to the impulse alone - the
+			// regressed effective impulse-only scale 0.00018622 equals
+			// 0.00019*(296/302) exactly, unmasking the textbook scale
+			// under the whole-vz application. Line-fit residuals < 0.001.
+			const float impulse = sqrtf(2.f * p.gravity * p.jump_height);
 			if (s.ducked || s.ducking)
 				s.vel.Z = impulse;
 			else
 				s.vel.Z += impulse;
+			if (s.stamina > 0.f)
+				s.vel.Z *= 1.f - s.stamina * p.stamina_jump_scale_per_ms;
 			if (p.jump_finishgravity)
 				s.vel.Z -= p.gravity * 0.5f * p.dt;   // SDK's in-jump FinishGravity
 				                                      // (confirmed by the -6 -6 tail)
@@ -293,7 +299,10 @@ namespace Solver {
 			// reaching here - measured: t432 kept full speed, t480+ decayed).
 			// Applied after Friction, before Accelerate (fit order A).
 			if (s.stamina > 0.f) {
-				const float ratio = 1.f - s.stamina * p.stamina_scale_per_ms;
+				// Affine drag law (see MoveParams: regressed slope +
+				// measured intercept).
+				const float ratio = 1.f - (s.stamina * p.stamina_scale_per_ms
+					+ p.stamina_walk_offset);
 				s.vel.X *= ratio;
 				s.vel.Y *= ratio;
 			}
