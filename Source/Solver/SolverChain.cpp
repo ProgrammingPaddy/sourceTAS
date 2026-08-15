@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <queue>
+#include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace Solver {
@@ -145,13 +148,23 @@ namespace Solver {
 		if (!(st.finished || st.touched))
 			return out;
 		out.ok = true;
-		out.finished = st.finished && st.clean;
+		out.finished = target_face < 0
+			? (st.finished && st.clean)
+			: (st.finished && st.fin_clean);   // v15 continuation landing
 		out.V = st.vboard - cfg_.wloss * st.eloss;
+		out.eloss = st.eloss;
 		out.speed = st.finish_speed;
 		out.ticks = st.tick;
 		out.end_state = st.end_state;
 		out.end_yaw = st.end_yaw;
 		out.frames = frames;
+		if (target_face >= 0 && out.finished) {
+			// Continuation finisher: full frames (to the landing) go to
+			// assembly; the child junction keeps frames to the junction.
+			out.fin_frames = frames;
+			if (static_cast<int>(out.frames.size()) > st.tick + 1)
+				out.frames.resize(st.tick + 1);
+		}
 		return out;
 	}
 
@@ -235,18 +248,30 @@ namespace Solver {
 			nodes.push_back(r);
 			pq.push({ 1e9f, 0 });   // root first, always
 		}
-		// Beam ledger: top-V junctions per (depth, face), POSITION-DIVERSE
-		// (three copies of the same corner clip starve everything after -
-		// arrival diversity is the load-bearing lesson).
+		// Beam ledger: top-V junctions per (SKELETON PREFIX, face, band),
+		// POSITION-DIVERSE within each slot. Keying by the full prefix +
+		// board band keeps witnessed finisher classes alive - the certified
+		// 292 SKIPS ramp 8 and boards ramp 4 LOW at 855 u/s, a corridor
+		// that hotter arrivals from busier prefixes evicted under the old
+		// (depth, face) pooling (framework redefinition 2026-08-15).
 		struct BeamEnt { float V; Vec3 pos; };
-		std::vector<std::vector<BeamEnt>> beamv(
-			static_cast<size_t>(cfg_.max_depth + 1) * faces_.size());
+		std::unordered_map<uint64_t, std::vector<BeamEnt>> beams;
+		auto beam_key = [](const std::vector<int>& skel, int fi, int bnd) {
+			uint64_t h = 1469598103934665603ull;
+			auto mix = [&h](uint64_t v) { h ^= v; h *= 1099511628211ull; };
+			for (int s : skel) mix(static_cast<uint64_t>(s) + 1u);
+			mix(static_cast<uint64_t>(fi) + 0x100u);
+			mix(static_cast<uint64_t>(bnd) + 0x200u);
+			return h;
+		};
 
 		std::vector<TapeFrame> best_frames;
 		std::vector<int> best_skel;
 		int best_scored = 1 << 28;
 		bool have_best = false;
 		unsigned seg_counter = 0;
+		std::set<std::string> fin_skels;
+		std::vector<int> fin_scored;
 
 		auto skel_str = [&](const std::vector<int>& sk) {
 			std::string s = "[";
@@ -267,12 +292,48 @@ namespace Solver {
 			std::string line = "[chain] d" + std::to_string(node.depth)
 				+ " " + skel_str(node.skel);
 
-			// 1) Try to LAND from here (clean finishes only).
+			// 1) Try to LAND from here (clean finishes only). The result is
+			// ALSO the expansion prior for this node's children: the tree
+			// grows toward junctions whose endgame nearly lands instead of
+			// toward raw energy (framework redefinition, user directive
+			// 2026-08-15 - beams arrived RICHER than the certified 292's
+			// 855 u/s and still could not convert; convertibility, not
+			// stored energy, is the value axis the goal defines).
+			float dend_here = 1500.f;   // neutral prior (root)
 			if (node.depth > 0) {
 				SegOut endseg = SolveSegment(node.st, node.yaw, -1, false,
 					cfg_.rng_seed + 7919u * ++seg_counter,
 					&res.ticks_simulated);
 				res.segments_solved++;
+				// NEAR-MISS ESCALATION: a sub-100u endgame is often one rng
+				// arm from landing (the d31 plateau) - retry once before
+				// moving on.
+				if (!endseg.finished && endseg.dmin < 100.f
+					&& elapsed() < cfg_.total_seconds - cfg_.final_seconds) {
+					SegOut retry = SolveSegment(node.st, node.yaw, -1, false,
+						cfg_.rng_seed + 7919u * ++seg_counter + 13u,
+						&res.ticks_simulated);
+					res.segments_solved++;
+					line += " ->END retry";
+					if (retry.finished || retry.dmin < endseg.dmin)
+						endseg = retry;
+				}
+				dend_here = endseg.finished ? 0.f
+					: (endseg.dmin < 1500.f ? endseg.dmin : 1500.f);
+				// Corridor telemetry (the 292 witness reads z-8 spd855
+				// hdg~+x): where this junction sits and how it moves, so
+				// campaign logs show WHY endgames convert or miss.
+				{
+					const float spd2 = sqrtf(node.st.vel.X * node.st.vel.X
+						+ node.st.vel.Y * node.st.vel.Y);
+					const float hdg = atan2f(node.st.vel.Y, node.st.vel.X)
+						* 57.29578f;
+					char cb[64];
+					_snprintf_s(cb, sizeof(cb), _TRUNCATE,
+						" [z%.0f spd%.0f hdg%.0f]",
+						node.st.pos.Z, spd2, hdg);
+					line += cb;
+				}
 				if (endseg.finished) {
 					std::vector<TapeFrame> full = node.stream;
 					full.insert(full.end(), endseg.frames.begin(),
@@ -282,6 +343,8 @@ namespace Solver {
 						const int scored = a.exit >= 0
 							? a.finish - a.exit : a.finish;
 						res.finishes++;
+						fin_skels.insert(skel_str(node.skel));
+						fin_scored.push_back(scored);
 						line += " ->END FINISH " + std::to_string(scored)
 							+ " scored";
 						if (!have_best || scored < best_scored) {
@@ -326,9 +389,37 @@ namespace Solver {
 						if (!seg.ok)
 							continue;
 						any = true;
-						std::vector<BeamEnt>& bv = beamv[
-							static_cast<size_t>(node.depth + 1)
-								* faces_.size() + fi];
+						// v15: the segment's own CONTINUATION landed the end
+						// brush - record the finisher BEFORE beam admission
+						// (a beam-rejected junction can still be a finish).
+						if (seg.finished) {
+							std::vector<TapeFrame> full = node.stream;
+							full.insert(full.end(), seg.fin_frames.begin(),
+								seg.fin_frames.end());
+							const AsmStats a = ReplayAssembly(full);
+							if (a.finish >= 0 && a.clean) {
+								const int scored = a.exit >= 0
+									? a.finish - a.exit : a.finish;
+								res.finishes++;
+								std::vector<int> fsk = node.skel;
+								fsk.push_back(fi);
+								fin_skels.insert(skel_str(fsk));
+								fin_scored.push_back(scored);
+								char fb[64];
+								_snprintf_s(fb, sizeof(fb), _TRUNCATE,
+									" *SEG-FINISH %d*", scored);
+								line += fb;
+								if (!have_best || scored < best_scored) {
+									have_best = true;
+									best_scored = scored;
+									best_frames = full;
+									best_skel = fsk;
+									line += " ** NEW BEST **";
+								}
+							}
+						}
+						std::vector<BeamEnt>& bv = beams[
+							beam_key(node.skel, fi, bnd)];
 						// Position-diverse beam admission.
 						int near = -1;
 						for (size_t k = 0; k < bv.size(); ++k)
@@ -362,13 +453,17 @@ namespace Solver {
 						child.skel = node.skel;
 						child.skel.push_back(fi);
 						nodes.push_back(child);
-						pq.push({ seg.V,
+						// GOAL-FIRST ordering: children inherit this node's
+						// endgame distance as expansion priority; junction V
+						// only tie-breaks. The queue spends END budget where
+						// finishing is already nearly true.
+						pq.push({ -dend_here + seg.V * 1e-9f,
 							static_cast<int>(nodes.size()) - 1 });
-						char b[96];
+						char b[112];
 						_snprintf_s(b, sizeof(b), _TRUNCATE,
-							"  F%d/%c V%.0fk spd%.0f z%.0f", fi,
+							"  F%d/%c V%.0fk spd%.0f z%.0f el%.0fk", fi,
 							"LMH"[bnd], seg.V / 1000.f, seg.speed,
-							seg.end_state.pos.Z);
+							seg.end_state.pos.Z, seg.eloss / 1000.f);
 						line += b;
 					}
 					if (!any)
@@ -382,6 +477,23 @@ namespace Solver {
 				have_best ? std::to_string(best_scored).c_str() : "-");
 			line += tail;
 			printf("%s\n", line.c_str());
+			fflush(stdout);
+		}
+
+		// FINISHER CLOUD: the campaign headline is how COMMON finishing is
+		// (user standard 2026-08-15: a well-defined framework should
+		// stumble into finishers constantly), not only the single best.
+		res.finisher_skels = static_cast<int>(fin_skels.size());
+		if (!fin_scored.empty()) {
+			int mn = fin_scored[0], mx = fin_scored[0];
+			for (int v : fin_scored) {
+				mn = v < mn ? v : mn;
+				mx = v > mx ? v : mx;
+			}
+			printf("chain: FINISHER CLOUD %d finishes / %d skeletons, "
+				"scored %d..%d\n", res.finishes, res.finisher_skels, mn, mx);
+			for (const std::string& s : fin_skels)
+				printf("chain:   finisher skeleton %s\n", s.c_str());
 			fflush(stdout);
 		}
 

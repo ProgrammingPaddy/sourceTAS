@@ -124,6 +124,17 @@ namespace Solver {
 
 	// Per-rollout observables (reported, and the objective's inputs).
 	struct SmoothStats {
+		// v15 CONTINUATION (framework redefinition 2026-08-15): in segment
+		// mode the rollout no longer stops at the junction - it keeps
+		// simulating toward the end brush, so EVERY segment rollout is a
+		// potential finisher (the old break made accidental finishes
+		// structurally impossible for 95% of campaign compute). `finished`
+		// then means the continuation landed the end brush; the fin_*
+		// fields carry that landing, while tick/rel/vboard/end_state keep
+		// describing the JUNCTION.
+		int  fin_tick = -1;         // absolute landing tick (segment mode)
+		int  fin_rel = 0;           // scored ticks at the landing
+		bool fin_clean = false;     // landing class (no jump departure)
 		bool finished = false;
 		bool touched = false;       // segment mode: target face contacted
 		bool clean = true;          // ending class (last departure not a jump)

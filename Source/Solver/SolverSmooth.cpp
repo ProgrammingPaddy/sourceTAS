@@ -300,6 +300,7 @@ namespace Solver {
 		bool launch_jump = false;
 		int touch_at = -1;
 		int last_contact = -1;
+		bool junction_done = false;   // v15: junction fixed, rollout continues
 		// Structural ride hold: the steep face contacted most recently.
 		int hold_fresh = -999;
 		Vec3 hold_n;
@@ -646,7 +647,7 @@ namespace Solver {
 			// never qualifies: losing the face for a full window cancels
 			// the touch (measured failure: energy-optimal "settles" were
 			// single grazes flying away, and every child segment died).
-			if (cfg_.goal_face_brush >= 0) {
+			if (cfg_.goal_face_brush >= 0 && !junction_done) {
 				bool hit = false;
 				for (int c = 0; c < ev.ncontacts; ++c)
 					if (ev.contact_brush[c] == cfg_.goal_face_brush
@@ -675,9 +676,14 @@ namespace Solver {
 							+ cfg_.chain_mu * p.gravity * s.pos.Z;
 						st.end_state = s;
 						st.end_yaw = yaw;
-						break;
-					}
-					if (t - touch_at > 120) {
+						// v15: DO NOT break - the junction is fixed and the
+						// rollout continues toward the end brush, so every
+						// segment rollout is a potential finisher (the old
+						// break made stumbled-into finishes structurally
+						// impossible during segment compute - the root of
+						// "we haven't even stumbled into one").
+						junction_done = true;
+					} else if (t - touch_at > 120) {
 						st.touched = false;   // stuck grazing; not a board
 						touch_at = -1;
 					}
@@ -685,6 +691,18 @@ namespace Solver {
 					&& t - last_contact > cfg_.touch_settle) {
 					st.touched = false;   // lost the face; a later board
 					touch_at = -1;        // may re-arm
+				}
+			} else if (cfg_.goal_face_brush >= 0 && junction_done) {
+				// Continuation landing: the finish check runs with the
+				// junction's stats untouched - fin_* carries the landing.
+				if (end_idx_ >= 0 && s.on_ground && s.ground_brush >= 0
+					&& w_.brushes[s.ground_brush].id == cfg_.end_brush_id
+					&& InsideXY(s.pos, w_.brushes[end_idx_])) {
+					st.finished = true;
+					st.fin_clean = !launch_jump;
+					st.fin_tick = t;
+					st.fin_rel = st.exit_tick >= 0 ? t - st.exit_tick : t;
+					break;
 				}
 			} else if (end_idx_ >= 0 && s.on_ground && s.ground_brush >= 0
 				&& w_.brushes[s.ground_brush].id == cfg_.end_brush_id
@@ -699,8 +717,10 @@ namespace Solver {
 				break;
 			}
 			if (s.pos.Z < world_min_z_) {
-				st.touched = false;   // died mid-settle: not a junction
-				break;
+				if (!junction_done)
+					st.touched = false;   // died mid-settle: not a junction
+				break;                    // (a fixed junction survives its
+				                          // continuation dying)
 			}
 
 			// Sim-budget bounds (same class as max_path_ticks, never route
@@ -714,7 +734,8 @@ namespace Solver {
 			if (zone_exited) {
 				if (grounded_run > 60 && s.ground_brush >= 0
 					&& w_.brushes[s.ground_brush].id != cfg_.end_brush_id) {
-					st.touched = false;
+					if (!junction_done)
+						st.touched = false;
 					break;
 				}
 			} else if (t > 400) {
@@ -738,6 +759,13 @@ namespace Solver {
 		}
 
 		if (cfg_.fitness_mode == 1) {
+			// v15: a CLEAN continuation landing dominates every board-only
+			// score - once any rollout stumbles into the finish, the whole
+			// population races toward finishing (the user's standard: a
+			// well-defined framework stumbles into finishers constantly).
+			// Among finishers, fewer scored ticks win.
+			if (st.finished && st.fin_clean)
+				return -1e7 + st.fin_rel + leash;
 			// Junction fitness (CMA is rank-based - raw energy units are
 			// fine): maximize board value minus fitted waste, pay per tick.
 			if (st.touched)
@@ -762,9 +790,13 @@ namespace Solver {
 		out.clear();
 		SmoothStats st;
 		Evaluate(x, &st, &out);
+		// v15: a segment rollout that landed the end brush keeps frames to
+		// the LANDING; junction-only rollouts truncate at the junction.
+		const int stop = (cfg_.goal_face_brush >= 0 && st.finished
+			&& st.fin_tick >= 0) ? st.fin_tick : st.tick;
 		if ((st.finished || st.touched)
-			&& static_cast<int>(out.size()) > st.tick + 1)
-			out.resize(st.tick + 1);
+			&& static_cast<int>(out.size()) > stop + 1)
+			out.resize(stop + 1);
 		if (stats)
 			*stats = st;
 		return !out.empty();

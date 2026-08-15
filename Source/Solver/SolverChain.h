@@ -70,6 +70,7 @@ namespace Solver {
 		int nodes_expanded = 0;
 		int segments_solved = 0;
 		int finishes = 0;
+		int finisher_skels = 0;      // distinct skeletons among finishers
 		long long ticks_simulated = 0;
 		double seconds = 0.0;
 	};
@@ -102,6 +103,11 @@ namespace Solver {
 			float end_yaw = 0.f;
 			std::vector<TapeFrame> frames;
 			float dmin = 1e9f;
+			float eloss = 0.f;       // segment energy dissipated (ledger units)
+			// v15: when the segment's CONTINUATION landed the end brush,
+			// finished is true and fin_frames carries the full stream to the
+			// landing (frames still stops at the junction for the child).
+			std::vector<TapeFrame> fin_frames;
 		};
 		// target_face < 0 = END landing attempt. [ty_lo, ty_hi] = board
 		// height band on the face (clause-3 enumeration).
