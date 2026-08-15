@@ -8648,6 +8648,44 @@ namespace {
 					g_batsim_on = false;
 					g_batsim_own = false;
 				}
+			} else if (Prediction::FuncProbeBusy()) {
+				int ftot = 0, fok = 0;
+				const int fdone = Prediction::FuncProbeProgress(&ftot, &fok);
+				ImGui::TextColored(Theme::Warning,
+					"FUNCPROBE: %d/%d calls (%d clean)...", fdone, ftot, fok);
+			} else if (ImGui::Button("Run FUNCPROBE (per-function)",
+				ImVec2(300, 0))) {
+				// Calls ONE engine function at a time by RVA. Unlike the
+				// whole-tick fuzz, a mismatch here names its own defect.
+				const std::string pdir = SolverDir();
+				const int gate = Prediction::FuncProbeCtxGate();
+				if (pdir.empty()) {
+					g_status = "FUNCPROBE: couldn't resolve the solver directory.";
+				} else if (gate != 1) {
+					char gb[192];
+					Sfmt(gb, "FUNCPROBE BLOCKED: CGameMovement context gate "
+						"= %d (need 1). Move around once so a real movement "
+						"tick runs, then retry.", gate);
+					g_status = gb;
+				} else {
+					const std::string pin = pdir + "\\func_pins.cfg";
+					const std::string pin_in = pdir + "\\func_probes.csv";
+					const std::string pout = pdir + "\\func_results.csv";
+					const int pn = Prediction::RunFuncProbe(pin.c_str(),
+						pin_in.c_str(), pout.c_str());
+					if (pn == -2) {
+						g_status = "FUNCPROBE: context gate failed - refusing "
+							"to call through unverified offsets.";
+					} else if (pn < 0) {
+						g_status = "FUNCPROBE: missing func_pins.cfg or "
+							"func_probes.csv (run SolverLab funcgen).";
+					} else {
+						char pb2[192];
+						Sfmt(pb2, "FUNCPROBE: %d calls queued...", pn);
+						g_status = pb2;
+						AppendExportLog("funcprobe", pout, "per-function", pn);
+					}
+				}
 			} else if (Prediction::FuzzBusy()) {
 				int ftot = 0, fok = 0;
 				const int fdone = Prediction::FuzzProgress(&ftot, &fok);

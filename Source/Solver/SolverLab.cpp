@@ -712,6 +712,215 @@ namespace {
 	// oracle answers them all with IEngineTrace; every disagreement with
 	// our TraceHull becomes a concrete fix case via `tracediff`, iterable
 	// OFFLINE against the same results file. ----
+	// ---- FUNCPROBE: per-function probes + differ --------------------------
+	// One function at a time. Inputs are arbitrary values of differing
+	// shapes; the verdict is whether OUR function returns the engine's
+	// outputs for the same inputs. No composition, so a mismatch names its
+	// own defect.
+	int CmdFuncGen(const std::string& map_path, const ReplayOpts& o,
+	               int nprobes, unsigned seed, const std::string& out_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		FILE* f = nullptr;
+		if (fopen_s(&f, out_path.c_str(), "w") != 0 || !f) {
+			printf("funcgen: cannot open %s\n", out_path.c_str());
+			return 1;
+		}
+		unsigned rng = seed ? seed : 1u;
+		auto next = [&rng]() {
+			rng = rng * 1664525u + 1013904223u;
+			return (rng >> 8) & 0xFFFFu;
+		};
+		auto frand = [&next]() { return next() / 65535.f; };
+		auto span = [&frand](float lo, float hi) { return lo + (hi - lo) * frand(); };
+
+		// Shapes that matter to a function reading a z-velocity against a
+		// threshold and probing 2 units down: values straddling the gate by
+		// one ULP, zero, denormals, and both signs at every magnitude.
+		const float kVz[16] = {
+			0.f, -1e-30f, 1e-30f, -1e-7f, 1e-7f, -0.03125f, 0.03125f,
+			139.999985f, 140.f, 140.000015f, -140.f, 250.f, -250.f,
+			3499.9998f, -3500.f, 3600.f };
+		// Height above a surface, including exactly the probe distance.
+		const float kDz[12] = {
+			-2.f, -0.03125f, 0.f, 0.001f, 0.03125f, 0.5f, 1.f, 1.999f,
+			2.f, 2.001f, 8.f, 64.f };
+		const float kHull[2] = { 72.f, 54.f };
+
+		fprintf(f, "# funcprobe probes v1 seed %u map %s\n", seed,
+			MapStem(map_path).c_str());
+		fprintf(f, "fn,ox,oy,oz,vx,vy,vz,bx,by,bz,onground,ducked,ducking,"
+			"buttons,ducktime,stamina,sfric,gravity,hullmaxz,yaw,fmove,smove\n");
+
+		int wrote = 0;
+		for (int i = 0; i < nprobes; ++i) {
+			Vec3 pos;
+			// Half the probes sit a chosen distance above a real face (any
+			// face, any orientation); half are free-floating anywhere.
+			if (!w.brushes.empty() && (i & 1)) {
+				const WorldBrush& b = w.brushes[next() % w.brushes.size()];
+				const int pi = static_cast<int>(next()
+					% static_cast<unsigned>(b.nsides > 0 ? b.nsides : 1));
+				const Vec3 n = b.n[pi];
+				Vec3 q(span(b.bmin.X, b.bmax.X), span(b.bmin.Y, b.bmax.Y),
+					span(b.bmin.Z, b.bmax.Z));
+				q = q - Scale(n, Dot(n, q) - b.d[pi]);
+				pos = q + Scale(n, kDz[next() % 12]);
+			} else {
+				pos = Vec3(span(-2600.f, 2600.f), span(-2600.f, 1600.f),
+					span(-1400.f, 1600.f));
+			}
+			const float vz = kVz[next() % 16];
+			fprintf(f, "CategorizePosition,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+				"0,0,0,%d,%d,%d,%d,%.9g,%.9g,%.9g,1,%.9g,%.9g,0,0\n",
+				pos.X, pos.Y, pos.Z,
+				span(-900.f, 900.f), span(-900.f, 900.f), vz,
+				(next() & 1) ? 1 : 0,                       // onground
+				(next() % 3u == 0u) ? 1 : 0,                // ducked
+				(next() % 4u == 0u) ? 1 : 0,                // ducking
+				0,                                          // buttons
+				(next() % 3u == 0u) ? span(0.f, 1000.f) : 0.f,
+				(next() % 3u == 0u) ? span(0.f, 1400.f) : 0.f,
+				(next() & 1) ? 0.25f : 1.f,                 // sfric in
+				kHull[next() % 2],
+				span(-180.f, 180.f));
+			wrote++;
+		}
+		fclose(f);
+		printf("funcgen: %d probes -> %s\n", wrote, out_path.c_str());
+		printf("funcgen: in-game Map Solve tab -> 'Run FUNCPROBE', then\n"
+			"  SolverLab funcdiff <map.bsp> \"%s\" <func_results.csv>\n",
+			out_path.c_str());
+		fflush(stdout);
+		return 0;
+	}
+
+	int CmdFuncDiff(const std::string& map_path, const ReplayOpts& o,
+	                const std::string& ppath, const std::string& rpath) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		struct P {
+			char fn[48];
+			float ox, oy, oz, vx, vy, vz, bx, by, bz;
+			int onground, ducked, ducking, buttons;
+			float ducktime, stamina, sfric, gravity, hullmaxz, yaw, fmove, smove;
+		};
+		std::vector<P> ps;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, ppath.c_str(), "r") != 0 || !f) {
+				printf("funcdiff: cannot read %s\n", ppath.c_str());
+				return 1;
+			}
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				if (l[0] == '#' || l[0] == 'f') continue;
+				P q = {};
+				if (sscanf_s(l, "%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,"
+					"%d,%f,%f,%f,%f,%f,%f,%f,%f",
+					q.fn, static_cast<unsigned>(sizeof(q.fn)),
+					&q.ox, &q.oy, &q.oz, &q.vx, &q.vy, &q.vz,
+					&q.bx, &q.by, &q.bz, &q.onground, &q.ducked, &q.ducking,
+					&q.buttons, &q.ducktime, &q.stamina, &q.sfric, &q.gravity,
+					&q.hullmaxz, &q.yaw, &q.fmove, &q.smove) == 22)
+					ps.push_back(q);
+			}
+			fclose(f);
+		}
+		struct R {
+			char fn[48];
+			float ox, oy, oz, vx, vy, vz;
+			int flags, ducked, ducking;
+			float ducktime, stamina, sfric, maxz;
+			int ret, ok;
+		};
+		std::vector<R> rs;
+		int ctxgate = -1;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, rpath.c_str(), "r") != 0 || !f) {
+				printf("funcdiff: cannot read %s\n", rpath.c_str());
+				return 1;
+			}
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				if (strncmp(l, "# funcprobe", 11) == 0) {
+					sscanf_s(l, "# funcprobe v1 ctxgate %d", &ctxgate);
+					continue;
+				}
+				if (l[0] == '#' || l[0] == 'i') continue;
+				R r = {};
+				int id = 0;
+				if (sscanf_s(l, "%d,%47[^,],%f,%f,%f,%f,%f,%f,%d,%d,%d,"
+					"%f,%f,%f,%f,%d,%d",
+					&id, r.fn, static_cast<unsigned>(sizeof(r.fn)),
+					&r.ox, &r.oy, &r.oz, &r.vx, &r.vy, &r.vz,
+					&r.flags, &r.ducked, &r.ducking, &r.ducktime, &r.stamina,
+					&r.sfric, &r.maxz, &r.ret, &r.ok) == 17)
+					rs.push_back(r);
+			}
+			fclose(f);
+		}
+		if (ctxgate != 1) {
+			printf("funcdiff: REFUSING to grade - context gate %d (need 1). "
+				"The CGameMovement member offsets were not confirmed against "
+				"the live hook, so every call wrote through unverified "
+				"offsets.\n", ctxgate);
+			return 1;
+		}
+		const size_t n = ps.size() < rs.size() ? ps.size() : rs.size();
+		int exact = 0, bad = 0, faulted = 0, shown = 0;
+		for (size_t i = 0; i < n; ++i) {
+			if (!rs[i].ok) { faulted++; continue; }
+			PlayerState s;
+			s.pos = Vec3(ps[i].ox, ps[i].oy, ps[i].oz);
+			s.vel = Vec3(ps[i].vx, ps[i].vy, ps[i].vz);
+			s.on_ground = ps[i].onground != 0;
+			s.ducked = ps[i].ducked != 0;
+			s.ducking = ps[i].ducking != 0;
+			s.duck_timer_ms = ps[i].ducktime;
+			s.stamina = ps[i].stamina;
+			s.gravity_scale = ps[i].gravity;
+			s.surface_friction = ps[i].sfric;
+			s.hull_state = ps[i].hullmaxz < 60.f ? 1 : 0;
+			Fn::CategorizePosition(s, w, o.params);
+			const bool eng_ground = (rs[i].flags & 1) != 0;
+			const float dp = Len(s.pos - Vec3(rs[i].ox, rs[i].oy, rs[i].oz));
+			const float dv = Len(s.vel - Vec3(rs[i].vx, rs[i].vy, rs[i].vz));
+			const bool ok = dp <= 0.001f && dv <= 0.001f
+				&& eng_ground == s.on_ground
+				&& fabsf(rs[i].sfric - s.surface_friction) <= 0.0001f;
+			if (ok) { exact++; continue; }
+			bad++;
+			if (shown < 10) {
+				shown++;
+				printf("  probe %d  in pos(%.3f,%.3f,%.3f) vz %.4f hull %.0f "
+					"sfric %.2f\n", static_cast<int>(i), ps[i].ox, ps[i].oy,
+					ps[i].oz, ps[i].vz, ps[i].hullmaxz, ps[i].sfric);
+				printf("    eng  ground %d sfric %.4f pos(%.3f,%.3f,%.3f)\n",
+					eng_ground ? 1 : 0, rs[i].sfric, rs[i].ox, rs[i].oy, rs[i].oz);
+				printf("    ours ground %d sfric %.4f pos(%.3f,%.3f,%.3f)\n",
+					s.on_ground ? 1 : 0, s.surface_friction,
+					s.pos.X, s.pos.Y, s.pos.Z);
+			}
+		}
+		printf("funcdiff: CategorizePosition | %d probes | EXACT %d | "
+			"MISMATCH %d | engine-faulted %d\n",
+			static_cast<int>(n), exact, bad, faulted);
+		fflush(stdout);
+		return bad > 0 ? 2 : 0;
+	}
+
 	// Compare our trace's SOLID FLAGS against the engine's, over the oracle
 	// query file. These columns were captured all along and excluded from
 	// scoring as "startsolid noise" - they are in fact the engine's own
@@ -3307,6 +3516,25 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdBatteryGen(argv[2], o);
+	}
+	if (cmd == "funcgen" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		const int n = o.fuzz_n > 0 ? o.fuzz_n : 20000;
+		const unsigned seed = o.rng ? o.rng : 20260815u;
+		char documents[MAX_PATH];
+		std::string outp = "func_probes.csv";
+		if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents)))
+			outp = std::string(documents) + "\\sourceTAS\\solver\\func_probes.csv";
+		return CmdFuncGen(argv[2], o, n, seed, outp);
+	}
+	if (cmd == "funcdiff" && argc >= 5) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 5, o))
+			return 1;
+		return CmdFuncDiff(argv[2], o, argv[3], argv[4]);
 	}
 	if (cmd == "soliddiff" && argc >= 5) {
 		ReplayOpts o;

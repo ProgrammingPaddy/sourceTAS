@@ -418,6 +418,162 @@ namespace {
 		}
 	}
 
+	// ---- FUNCPROBE ---------------------------------------------------------
+	// CGameMovement member offsets, confirmed by disassembly (client.dll
+	// CategorizePosition @0x1174f0): "mov rax,[rcx+8]" -> player, and
+	// "mov rax,[rsi+0x10]" -> mv. The latch below re-proves both every run
+	// against pointers the live hook already knows, so an update that moves
+	// them fails closed instead of answering with garbage.
+	constexpr int kGmPlayerOff = 0x08;
+	constexpr int kGmMvOff     = 0x10;
+	int g_gm_ctx_gate = -1;   // -1 unknown, 1 verified, 0 mismatch
+
+	// Supported call shapes. Every CGameMovement method we pin takes only
+	// `this` in RCX; the difference is whether it returns a value.
+	enum FuncAbi { kAbiVoidThis = 0, kAbiIntThis = 1 };
+
+	struct FuncPin {
+		char name[48];
+		unsigned rva;
+		int abi;
+	};
+	struct FuncProbeIn {
+		int pin;                     // index into pins
+		float ox, oy, oz, vx, vy, vz, bx, by, bz;
+		int   onground, ducked, ducking, buttons;
+		float ducktime, stamina, sfric, gravity, hullmax_z, yaw, fmove, smove;
+	};
+	struct FuncProbeOut {
+		float ox, oy, oz, vx, vy, vz;
+		int   flags, ducked, ducking, ret;
+		float ducktime, stamina, sfric, maxz;
+		int   ok;
+	};
+
+	std::vector<FuncPin>      s_fp_pins;
+	std::vector<FuncProbeIn>  s_fp_probes;
+	std::vector<FuncProbeOut> s_fp_outs;
+	std::string s_fp_out_path;
+	volatile int s_fp_pending = 0;
+	int s_fp_next = 0;
+	int s_fp_ok = 0;
+
+	// One isolated call: install our state into the movedata + player, point
+	// the CGameMovement context at them, invoke the pinned function, read
+	// every observable back. POD-only so SEH can wrap it.
+	int RunOneFuncProbeSEH(void* player, const FuncPin* pin,
+	                       const FuncProbeIn* in, FuncProbeOut* out) {
+		__try {
+			if (!BeginStateGuard(player))
+				return 0;
+			char* pb = reinterpret_cast<char*>(player);
+			char* gm = reinterpret_cast<char*>(g_gm);
+
+			// Player-side inputs.
+			if (g_off.origin)
+				*reinterpret_cast<Vector*>(pb + g_off.origin) = Vector(in->ox, in->oy, in->oz);
+			if (g_off.velocity)
+				*reinterpret_cast<Vector*>(pb + g_off.velocity) = Vector(in->vx, in->vy, in->vz);
+			if (g_off.basevel)
+				*reinterpret_cast<Vector*>(pb + g_off.basevel) = Vector(in->bx, in->by, in->bz);
+			if (g_off.flags) {
+				int fl = *reinterpret_cast<int*>(pb + g_off.flags);
+				fl = in->onground ? (fl | FL_ONGROUND) : (fl & ~FL_ONGROUND);
+				fl = in->ducked ? (fl | FL_DUCKING) : (fl & ~FL_DUCKING);
+				*reinterpret_cast<int*>(pb + g_off.flags) = fl;
+			}
+			if (g_off.ducked)   *reinterpret_cast<bool*>(pb + g_off.ducked) = in->ducked != 0;
+			if (g_off.ducking)  *reinterpret_cast<bool*>(pb + g_off.ducking) = in->ducking != 0;
+			if (g_off.ducktime) *reinterpret_cast<float*>(pb + g_off.ducktime) = in->ducktime;
+			if (g_off.stamina)  *reinterpret_cast<float*>(pb + g_off.stamina) = in->stamina;
+			if (g_off.gravity)  *reinterpret_cast<float*>(pb + g_off.gravity) = in->gravity;
+			*reinterpret_cast<float*>(pb + kSurfFricOff) = in->sfric;
+			if (g_off.mins)
+				*reinterpret_cast<Vector*>(pb + g_off.mins) = Vector(-16.f, -16.f, 0.f);
+			if (g_off.maxs)
+				*reinterpret_cast<Vector*>(pb + g_off.maxs) = Vector(16.f, 16.f, in->hullmax_z);
+
+			// Movedata: build a real one through SetupMove, then overwrite
+			// the fields under test so the function sees exactly our input.
+			alignas(16) unsigned char cmdbuf[sizeof(CUserCmd)];
+			CUserCmd* cmd = reinterpret_cast<CUserCmd*>(cmdbuf);
+			unsigned char movebuf[kMoveDataBufSize];
+			memset(cmdbuf, 0, sizeof(cmdbuf));
+			memset(movebuf, 0, sizeof(movebuf));
+			cmd->command_number = 1;
+			cmd->tick_count     = 1;
+			cmd->viewangles     = QAngle(0.f, in->yaw, 0.f);
+			cmd->forwardmove    = in->fmove;
+			cmd->sidemove       = in->smove;
+			cmd->buttons        = in->buttons;
+			CallV<kSetupMoveIdx>(g_pred, player, cmd, g_helper, movebuf);
+			*reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff) =
+				Vector(in->ox, in->oy, in->oz);
+			*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff) =
+				Vector(in->vx, in->vy, in->vz);
+
+			// Point the movement context at our player + movedata, call the
+			// isolated function, then put the context back exactly.
+			void* save_player = *reinterpret_cast<void**>(gm + kGmPlayerOff);
+			void* save_mv     = *reinterpret_cast<void**>(gm + kGmMvOff);
+			*reinterpret_cast<void**>(gm + kGmPlayerOff) = player;
+			*reinterpret_cast<void**>(gm + kGmMvOff)     = movebuf;
+
+			int ret = 0;
+			const uintptr_t fn = g_client_base + pin->rva;
+			if (pin->abi == kAbiIntThis)
+				ret = reinterpret_cast<int(*)(void*)>(fn)(g_gm);
+			else
+				reinterpret_cast<void(*)(void*)>(fn)(g_gm);
+
+			*reinterpret_cast<void**>(gm + kGmPlayerOff) = save_player;
+			*reinterpret_cast<void**>(gm + kGmMvOff)     = save_mv;
+
+			const Vector& mo = *reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff);
+			const Vector& mvv = *reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff);
+			out->ox = mo.X; out->oy = mo.Y; out->oz = mo.Z;
+			out->vx = mvv.X; out->vy = mvv.Y; out->vz = mvv.Z;
+			out->flags    = g_off.flags ? *reinterpret_cast<int*>(pb + g_off.flags) : 0;
+			out->ducked   = g_off.ducked ? (*reinterpret_cast<bool*>(pb + g_off.ducked) ? 1 : 0) : 0;
+			out->ducking  = g_off.ducking ? (*reinterpret_cast<bool*>(pb + g_off.ducking) ? 1 : 0) : 0;
+			out->ducktime = g_off.ducktime ? *reinterpret_cast<float*>(pb + g_off.ducktime) : 0.f;
+			out->stamina  = g_off.stamina ? *reinterpret_cast<float*>(pb + g_off.stamina) : 0.f;
+			out->sfric    = *reinterpret_cast<float*>(pb + kSurfFricOff);
+			out->maxz     = g_off.maxs ? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
+			out->ret      = ret;
+			out->ok       = 1;
+			EndStateGuard();
+			return 1;
+		}
+		__except (FaultFilter(GetExceptionInformation())) {
+			if (s_restore_ready)
+				EndStateGuard();
+			return 0;
+		}
+	}
+
+	void WriteFuncResults() {
+		FILE* fo = nullptr;
+		if (fopen_s(&fo, s_fp_out_path.c_str(), "w") != 0 || !fo)
+			return;
+		fprintf(fo, "# funcprobe v1 ctxgate %d\n", g_gm_ctx_gate);
+		fprintf(fo, "id,fn,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,ducktime,"
+			"stamina,sfric,maxz,ret,ok\n");
+		for (size_t i = 0; i < s_fp_probes.size(); ++i) {
+			const FuncProbeOut& o = s_fp_outs[i];
+			const int pi = s_fp_probes[i].pin;
+			fprintf(fo, "%d,%s,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
+				"%.9g,%.9g,%.9g,%.9g,%d,%d\n",
+				static_cast<int>(i),
+				(pi >= 0 && pi < static_cast<int>(s_fp_pins.size()))
+					? s_fp_pins[pi].name : "?",
+				o.ox, o.oy, o.oz, o.vx, o.vy, o.vz, o.flags, o.ducked,
+				o.ducking, o.ducktime, o.stamina, o.sfric, o.maxz,
+				o.ret, o.ok);
+		}
+		fclose(fo);
+	}
+
 	// Deferred fuzz job state (filled by RunFuzz, executed in OnFinishMove).
 	std::vector<FuzzProbeIn> s_fuzz_probes;
 	std::vector<FuzzTickOut> s_fuzz_outs;
@@ -649,6 +805,41 @@ namespace {
 			g_pred_flags_valid = true;
 		}
 
+		// FUNCPROBE CONTEXT LATCH: the real ProcessMovement just ran with
+		// this player and this movedata, so if our offsets are right the
+		// CGameMovement object must hold exactly those two pointers. This
+		// is the zero-cost proof that +0x08/+0x10 survived a game update.
+		if (g_gm_ctx_gate < 0 && g_gm && player && movedata) {
+			char* g = reinterpret_cast<char*>(g_gm);
+			g_gm_ctx_gate =
+				(*reinterpret_cast<void**>(g + kGmPlayerOff) == player
+				 && *reinterpret_cast<void**>(g + kGmMvOff) == movedata)
+				? 1 : 0;
+		}
+
+		// FUNCPROBE: one engine function per call, chunked like the fuzz.
+		if (s_fp_pending && player) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: funcprobe chunk");
+			g_in_hook_work = true;
+			constexpr int kFpChunk = 400;
+			int did = 0;
+			while (s_fp_next < static_cast<int>(s_fp_probes.size())
+				&& did < kFpChunk) {
+				const FuncProbeIn& q = s_fp_probes[s_fp_next];
+				s_restore_ready = false;
+				s_fp_ok += RunOneFuncProbeSEH(player, &s_fp_pins[q.pin], &q,
+					&s_fp_outs[s_fp_next]);
+				s_fp_next++;
+				did++;
+			}
+			g_in_hook_work = false;
+			if (s_fp_next >= static_cast<int>(s_fp_probes.size())) {
+				WriteFuncResults();
+				s_fp_pending = 0;
+			}
+			return;
+		}
+
 		// FUNCTION FUZZ runs HERE, not from the UI thread: ProcessMovement is
 		// only valid inside this hook's context (the first attempt drove it
 		// from the ImGui button and every probe faulted). Chunked so a huge
@@ -850,6 +1041,100 @@ int Prediction::RunFuzz(const char* probe_path, const char* out_path) {
 	s_fuzz_pending = 1;
 	return static_cast<int>(s_fuzz_probes.size());
 }
+
+int Prediction::RunFuncProbe(const char* pin_path, const char* probe_path,
+                             const char* out_path) {
+	if (!g_pred || !g_gm || !g_helper || !pin_path || !probe_path || !out_path)
+		return -1;
+	void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
+	if (!player)
+		return -1;
+	ResolveOffsets();
+	if (!g_off.origin || !g_off.velocity)
+		return -1;
+	// FAIL CLOSED: without a verified context latch every call would write
+	// through guessed offsets. -1 (never observed) is as fatal as 0.
+	if (g_gm_ctx_gate != 1)
+		return -2;
+
+	std::vector<FuncPin> pins;
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, pin_path, "r") != 0 || !f)
+			return -1;
+		char line[256];
+		while (fgets(line, sizeof(line), f)) {
+			if (line[0] == '#' || line[0] == '\n')
+				continue;
+			FuncPin p = {};
+			unsigned rva = 0;
+			int abi = 0;
+			if (sscanf_s(line, "%47[^,],%x,%d", p.name,
+				static_cast<unsigned>(sizeof(p.name)), &rva, &abi) == 3) {
+				p.rva = rva;
+				p.abi = abi;
+				pins.push_back(p);
+			}
+		}
+		fclose(f);
+	}
+	if (pins.empty())
+		return -1;
+
+	std::vector<FuncProbeIn> probes;
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, probe_path, "r") != 0 || !f)
+			return -1;
+		char line[512];
+		while (fgets(line, sizeof(line), f)) {
+			if (line[0] == '#' || line[0] == 'f')
+				continue;
+			FuncProbeIn q = {};
+			char fname[48] = "";
+			if (sscanf_s(line,
+				"%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%d,"
+				"%f,%f,%f,%f,%f,%f,%f,%f",
+				fname, static_cast<unsigned>(sizeof(fname)),
+				&q.ox, &q.oy, &q.oz, &q.vx, &q.vy, &q.vz,
+				&q.bx, &q.by, &q.bz,
+				&q.onground, &q.ducked, &q.ducking, &q.buttons,
+				&q.ducktime, &q.stamina, &q.sfric, &q.gravity,
+				&q.hullmax_z, &q.yaw, &q.fmove, &q.smove) == 22) {
+				q.pin = -1;
+				for (size_t k = 0; k < pins.size(); ++k)
+					if (_stricmp(pins[k].name, fname) == 0) {
+						q.pin = static_cast<int>(k);
+						break;
+					}
+				if (q.pin >= 0)
+					probes.push_back(q);
+			}
+		}
+		fclose(f);
+	}
+	if (probes.empty())
+		return -1;
+
+	s_fp_pins.swap(pins);
+	s_fp_probes.swap(probes);
+	s_fp_outs.assign(s_fp_probes.size(), FuncProbeOut{});
+	s_fp_out_path = out_path;
+	s_fp_next = 0;
+	s_fp_ok = 0;
+	s_fp_pending = 1;
+	return static_cast<int>(s_fp_probes.size());
+}
+
+bool Prediction::FuncProbeBusy() { return s_fp_pending != 0; }
+
+int Prediction::FuncProbeProgress(int* total, int* ok) {
+	if (total) *total = static_cast<int>(s_fp_probes.size());
+	if (ok) *ok = s_fp_ok;
+	return s_fp_next;
+}
+
+int Prediction::FuncProbeCtxGate() { return g_gm_ctx_gate; }
 
 bool Prediction::FuzzBusy() { return s_fuzz_pending != 0; }
 

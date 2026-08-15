@@ -65,6 +65,24 @@ namespace Prediction {
 	// Returns probes processed; fills total and the count that ran cleanly.
 	int FuzzProgress(int* total, int* ok);
 
+	// ---- FUNCPROBE: per-function isolation --------------------------------
+	// The whole-tick fuzz can only prove that a COMPOSITION of ~25 functions
+	// diverged; it can never say which one. FUNCPROBE calls ONE engine
+	// function at a time, by RVA, with state we write directly into the
+	// CGameMovement context (this->player at +0x08, this->mv at +0x10 -
+	// both confirmed in situ by disassembling CategorizePosition @0x1174f0,
+	// which reads [rcx+8] for the player and [rsi+0x10] for the movedata).
+	//
+	// Every pin is verified each run: a game update that moves an RVA or a
+	// member offset must ABORT, never silently answer with garbage.
+	int RunFuncProbe(const char* pin_path, const char* probe_path,
+	                 const char* out_path);
+	bool FuncProbeBusy();
+	int FuncProbeProgress(int* total, int* ok);
+	// Gate result: 1 = this->player/mv offsets confirmed against the live
+	// hook, 0 = MISMATCH (batch refuses to run), -1 = not yet observed.
+	int FuncProbeCtxGate();
+
 	// Resolve interfaces and install the FinishMove hook (from basehook_init).
 	void Install();
 

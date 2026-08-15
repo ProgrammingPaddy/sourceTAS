@@ -149,4 +149,13 @@ namespace Solver {
 	              float pitch, float yaw, float fmove, float smove, float umove,
 	              int buttons, TickEvents* ev);
 
+	// ---- FUNCPROBE: individually callable mirrors -------------------------
+	// The whole-tick comparison can only say the COMPOSITION diverged. These
+	// expose single functions so each can be diffed against the engine's own
+	// body in isolation (see Docs/FuncProbe.md and solver/func_pins.cfg).
+	namespace Fn {
+		void CategorizePosition(PlayerState& s, const World& w,
+		                        const MoveParams& p);
+	}
+
 } // namespace Solver

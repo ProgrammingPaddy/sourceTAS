@@ -577,6 +577,14 @@ namespace Solver {
 
 	} // namespace
 
+	// FUNCPROBE mirror: exactly the same code the tick runs, callable alone.
+	namespace Fn {
+		void CategorizePosition(PlayerState& s, const World& w,
+		                        const MoveParams& p) {
+			::Solver::CategorizePosition(s, w, p, nullptr);
+		}
+	}
+
 	void MoveTick(PlayerState& s, const World& w, const MoveParams& p,
 	              float /*pitch*/, float yaw, float fmove, float smove,
 	              float /*umove*/, int buttons, TickEvents* ev) {
