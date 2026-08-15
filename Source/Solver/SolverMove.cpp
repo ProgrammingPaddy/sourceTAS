@@ -528,6 +528,12 @@ namespace Solver {
 				// (air: dropped) candidate origin.
 				const Vec3 cand = s.on_ground
 					? s.pos : Vec3(s.pos.X, s.pos.Y, s.pos.Z - lift);
+				// NOTE: the SDK's CanUnduck() offsets its test origin by the
+				// full hull delta (18) when airborne, not by the applied 8.5
+				// shift. TRIED AND REVERTED 2026-08-15: testing at -18 broke
+				// FIVE battery decks (engine-captured truth) and took the
+				// fuzz corpus 98.86% -> 96.61%. The measured 8.5 test is what
+				// this build does; recollected SDK source loses to capture.
 				if (!w.OriginInSolid(cand, false)) {
 					// Release while FULLY ducked restarts the shared timer
 					// for the unduck transition; a mid-duck release keeps
