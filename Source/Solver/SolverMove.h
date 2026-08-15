@@ -58,16 +58,17 @@ namespace Solver {
 		//    0.05 u/s; zero-tax confirmed at gap 900). The two scales are
 		//    fitted independently per regime - do not unify without data.
 		// Landings arm NOTHING (jump-free -775 u/s landing: scale 1.00000).
-		// TESTED 2026-08-14: the textbook CS:S stamina constants (25/19/100
-		// -> arm 25000/19, scales 0.00019 unified) scored WORSE on the
-		// battery capture (7.7u vs 0.118u) - recollected source does not
-		// outrank the measured engine. The per-regime fitted values stand;
-		// the remaining 0.118u/310t drift is queued for a proper
-		// least-squares refit over the 5-jump stamina capture (an
-		// engine-read regression, not a guess).
+		// REFINED against the engine-sim battery capture (2026-08-14,
+		// sweep-converged): walk scale confirmed at its optimum; jump
+		// scale 0.000186 -> 0.00018565 takes the stamina deck from 0.118u
+		// to 0.008u over 310 ticks (a quarter of one 1/32 coordinate
+		// quantum). NOTE the current deck exercises ONE hot jump, so arm
+		// and jump-scale are degenerate (only the product is pinned) -
+		// the redesigned stay-on-platform ladder deck separates them.
+		// Textbook 25/19/100 constants tested and REJECTED by the capture.
 		float stamina_jump_ms = 1317.5f;
 		float stamina_scale_per_ms = 0.00019833f;
-		float stamina_jump_scale_per_ms = 0.000186f;
+		float stamina_jump_scale_per_ms = 0.00018565f;
 		// SDK CheckJumpButton calls FinishGravity() inside itself - an extra
 		// half-gravity on the jump tick on top of FullWalkMove's own pair.
 		// Kept as a toggle so replay parity data can arbitrate the quirk.

@@ -266,6 +266,9 @@ namespace {
 			else if (a == "--hull-stand") ok = next_f(&o.hulls.stand_max.Z);
 			else if (a == "--hull-duck") ok = next_f(&o.hulls.duck_max.Z);
 			else if (a == "--no-unduck-defer") o.params.unduck_hull_defer = false;
+			else if (a == "--stam-arm") ok = next_f(&o.params.stamina_jump_ms);
+			else if (a == "--stam-jump") ok = next_f(&o.params.stamina_jump_scale_per_ms);
+			else if (a == "--stam-walk") ok = next_f(&o.params.stamina_scale_per_ms);
 			else if (a == "--seg-s") { if (i + 1 < argc) o.seg_s = atof(argv[++i]); else ok = false; }
 			else if (a == "--end-s") { if (i + 1 < argc) o.end_s = atof(argv[++i]); else ok = false; }
 			else if (a == "--beam") ok = next_i(&o.beam);
@@ -1638,16 +1641,44 @@ namespace {
 				decks.push_back(d);
 			}
 			{
-				// STAMINA LADDER: jump presses at varied gaps, W held.
+				// STAMINA LADDER v2 (closed-loop): the v1 deck ran off the
+				// platform after two jumps (measured), leaving arm and
+				// jump-scale DEGENERATE (one hot jump = only the product
+				// pinned). v2 REVERSES direction after each landing and
+				// presses the next jump a staggered number of ticks after
+				// GROUNDING (core-detected), so 6 grounded jumps at
+				// distinct stamina residues land on the platform -
+				// separating arm, jump scale, and walk scale exactly.
 				BatteryDeck d;
 				d.name = "battery_stamina";
 				d.anchor = a_green;
-				DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, 40);
-				const int gaps[5] = { 20, 30, 45, 70, 100 };
-				for (int g = 0; g < 5; ++g) {
-					DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD | IN_JUMP, 1);
-					DeckFrame(d, 0.f, 450.f, 0.f, IN_FORWARD, gaps[g]);
+				PlayerState s;
+				s.pos = d.anchor.origin;
+				float yaw = 0.f;
+				const int waits[6] = { 40, 6, 14, 26, 44, 70 };
+				for (int j = 0; j < 6; ++j) {
+					int grounded = 0;
+					for (int t = 0; t < 400; ++t) {
+						const bool press = s.on_ground
+							&& grounded >= waits[j];
+						int btn = IN_FORWARD | (press ? IN_JUMP : 0);
+						DeckFrame(d, yaw, 450.f, 0.f, btn, 1);
+						TickEvents ev;
+						MoveTick(s, w, p, 0.f, yaw, 450.f, 0.f, 0.f, btn,
+							&ev);
+						if (ev.jumped)
+							break;
+						grounded = s.on_ground ? grounded + 1 : 0;
+					}
+					// Flight: coast to landing, then reverse heading.
+					for (int t = 0; t < 200 && !s.on_ground; ++t) {
+						DeckFrame(d, yaw, 0.f, 0.f, 0, 1);
+						MoveTick(s, w, p, 0.f, yaw, 0.f, 0.f, 0.f, 0,
+							nullptr);
+					}
+					yaw = yaw == 0.f ? 180.f : 0.f;
 				}
+				DeckFrame(d, yaw, 0.f, 0.f, 0, 60);
 				decks.push_back(d);
 			}
 			{

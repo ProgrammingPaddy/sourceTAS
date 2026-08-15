@@ -7873,6 +7873,22 @@ namespace {
 		out << line;
 		Sfmt(line, "air_speed_cap %g  # editor strafe model\n", g_air_cap);
 		out << line;
+		// LIVE server cvars (user directive 2026-08-14: read, never assume
+		// - "I am acceleration 10 ingame"): exported whenever readable so
+		// the solver runs the server's ACTUAL ground physics.
+		float v;
+		if (Cvars::GetFloat("sv_accelerate", &v)) {
+			Sfmt(line, "accelerate %g  # live server cvar\n", v);
+			out << line;
+		}
+		if (Cvars::GetFloat("sv_friction", &v)) {
+			Sfmt(line, "friction %g  # live server cvar\n", v);
+			out << line;
+		}
+		if (Cvars::GetFloat("sv_stopspeed", &v)) {
+			Sfmt(line, "stopspeed %g  # live server cvar\n", v);
+			out << line;
+		}
 		return static_cast<bool>(out);
 	}
 
