@@ -1994,6 +1994,70 @@ instruments reach on this map.
 - User calibration: ramp-4 endgame "off the side is best" — verified
   nothing in the machinery forbids it; the search must find it.
 
+## 2026-08-15 (later) — FUNCPROBE: per-function isolation replaces whole-tick fuzzing
+
+**The methodological correction.** User: *"These functions take values in, and
+spit values out. That is all... take millions of values with differing shapes
+and use their output to understand each function's structure to map it 1-to-1."*
+The whole-tick fuzzer composes ~25 functions, so a mismatch proves only that
+the COMPOSITION diverged. Every wrong turn that day came from inferring one
+function's behaviour from a composite's output: invented solidity (AABB, then
+BSP leaf), a "brush contact wins" heuristic, and a `CanUnduck` -18 test origin
+that broke five battery decks. All reverted.
+
+**Subfunctions ARE callable** — the research pass claimed inlining made them
+unreachable; the binary disagreed. `CategorizePosition` is a standalone body at
+client.dll `0x1174f0`, confirmed by reading it: `mov rax,[rcx+8]` (this->player
++0x08), `mov [rax+0x1868],0x3f800000` (m_surfaceFriction = 1.0), `mov
+rax,[rsi+0x10]` (this->mv +0x10), origin at +0x9c, the `-2.0` down probe, and
+`comiss xmm6,[140.0]`. Takes only `this` in RCX. So the harness writes the
+movedata, points the CGameMovement context at it, calls the function alone, and
+reads every observable back — no composition, no strata, no silencing.
+
+**Gates, because every harness this project built has lied at least once.**
+A context latch re-proves +0x08/+0x10 against pointers the live hook already
+knows (a game update fails closed). Control probes come from a certified
+capture — states the engine itself recorded as grounded — and are fed in with
+the ground flag CLEARED so the function must SET it. The first control block
+was fed grounded and "passed" 72/72 while proving nothing; strengthening it to
+the SET direction immediately returned **0/72** and voided the batch.
+
+**Three engine truths, each found by isolation:**
+1. **`startsolid` zeroes the plane for the WHOLE trace.** We skipped the
+   start-solid brush and returned the next hit's normal, so a hull embedded in
+   a wall still "found ground" on the floor below. 387 → 111.
+2. **Ground truth is `m_hGroundEntity`, not `FL_ONGROUND`.** The flag is a
+   server-driven shadow: an isolated call set it on 0 of 72 known-grounded
+   states while writing the handle correctly. The same lie had already fooled
+   the whole-tick fuzz twice (a probe JUMPED — which requires a ground entity —
+   from a state whose flag read airborne). The probe's ground INPUT was the
+   same no-op, so probes now enter ungrounded on both sides rather than
+   pretending an unsettable dimension varies. 240 → 13.
+3. **`TracePlayerBBoxForGround`** (client.dll `@0x117696`): when the full-box
+   probe finds no walkable plane, the engine re-probes with FOUR QUADRANT boxes
+   (half the hull in x and y) and grounds if any lands walkable, keeping the
+   original fraction. Never modelled. Added `World::TraceHullBox` (per-query
+   plane expansion, since quadrants are not player hulls). 13 → **5**.
+
+**Score: 40,067 / 40,072 (99.9875%)** on the first fully-validated function.
+Trace oracle unchanged at 6,624/6,624 including startsolid/allsolid.
+
+**OPEN — the last 5:** hulls buried inside wall brushes (x −2144.031 is 0.031
+past the west wall face; y −2030 sits in the south wall band). All four of our
+quadrant boxes overlap that wall, so we report startsolid and refuse to ground
+— the engine grounds anyway. So `startsolid` does NOT suppress the plane inside
+`TracePlayerBBoxForGround` the way it does for the primary trace. Answerable by
+pure I/O: extend the trace oracle's query format to carry arbitrary mins/maxs
+and ask the engine what a quadrant box returns from inside a wall.
+
+**Also open:** the hull top is a KNOWN constant (72/54) and is never the
+contacted surface, so the invented "post-unduck transient 62.5" was removed.
+`unduck_face` dropped to 14/15 as a result — that defect was always there and
+the invented hull was masking it. Next pins: `CheckJumpButton` (baked double
+301.99337741082996), duck family (1000.0 timer + the ±8.5 origin write).
+
+Spec + full function inventory: `Docs/FuncProbe.md`.
+
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
 - 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
