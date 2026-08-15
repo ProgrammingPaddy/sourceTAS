@@ -35,6 +35,10 @@ namespace Prediction {
 		float  hull_top = -1.f;
 		float  mspd_a = -1.f;      // movedata +0x3C
 		float  mspd_b = -1.f;      // movedata +0x40
+		// The engine's OWN m_flStamina after the tick (-1 if unresolved):
+		// makes the stamina laws per-tick observable instead of inferred -
+		// any model drift is caught at its birth tick with the true value.
+		float  stamina_ms = -1.f;
 	};
 
 	// Fills `out` with the input for `tick`, given the simulated state after the

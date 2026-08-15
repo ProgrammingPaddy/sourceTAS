@@ -2027,11 +2027,18 @@ namespace {
 				missing++;
 				continue;
 			}
-			// Extended DIRECT-READ columns (hulltop, mspd_a, mspd_b) when
-			// the capture carries them - the engine's own hull and movedata
-			// values, compared per tick instead of inferred.
-			std::vector<float> eng_hull, eng_ma, eng_mb;
+			// Extended DIRECT-READ columns (hulltop, mspd_a, mspd_b, and the
+			// engine's own per-tick m_flStamina) plus the SELF-DESCRIBING
+			// header: "# map" preconditions the world; "# param <key> <val>"
+			// lines carry the LIVE server settings that governed the capture
+			// and OVERRIDE the cfg for this deck's replay (user directive
+			// 2026-08-15: one click carries everything - a server setting
+			// change adapts with zero manual steps).
+			std::vector<float> eng_hull, eng_ma, eng_mb, eng_stam;
 			std::string cap_map;
+			MoveParams mp = o.params;
+			Hulls mh = o.hulls;
+			int nparam = 0;
 			{
 				FILE* xf = nullptr;
 				if (fopen_s(&xf, best_csv.c_str(), "r") == 0 && xf) {
@@ -2045,20 +2052,29 @@ namespace {
 								cap_map.pop_back();
 							continue;
 						}
-						if (strncmp(xline, "tick,", 5) != 0)
-							break;   // header found; data follows
-						break;
-					}
-					while (fgets(xline, sizeof(xline), xf)) {
+						if (strncmp(xline, "# param ", 8) == 0) {
+							char key[64] = "";
+							float val = 0.f;
+							if (sscanf_s(xline + 8, "%63s %f", key,
+								static_cast<unsigned>(sizeof(key)), &val) == 2
+								&& ApplyParamKey(mp, mh, key, val))
+								nparam++;
+							continue;
+						}
+						if (xline[0] == '#'
+							|| strncmp(xline, "tick,", 5) == 0)
+							continue;
 						int tk, g, dk, bt;
-						float x, y, z, vx, vy, vz, sp, yw, ht, ma, mb;
-						if (sscanf_s(xline,
-							"%d,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f",
+						float x, y, z, vx, vy, vz, sp, yw, ht, ma, mb, stm;
+						const int nf = sscanf_s(xline,
+							"%d,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f,%f",
 							&tk, &x, &y, &z, &vx, &vy, &vz, &sp, &g, &dk,
-							&bt, &yw, &ht, &ma, &mb) == 15) {
+							&bt, &yw, &ht, &ma, &mb, &stm);
+						if (nf >= 15) {
 							eng_hull.push_back(ht);
 							eng_ma.push_back(ma);
 							eng_mb.push_back(mb);
+							eng_stam.push_back(nf >= 16 ? stm : -1.f);
 						}
 					}
 					fclose(xf);
@@ -2090,7 +2106,7 @@ namespace {
 				const float gf = w.TraceHull(s.pos,
 					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
 				if (gf < 1.f && tr.brush >= 0
-					&& tr.normal.Z >= o.params.walkable_z) {
+					&& tr.normal.Z >= mp.walkable_z) {
 					s.on_ground = true;
 					s.ground_brush = tr.brush;
 				}
@@ -2101,28 +2117,28 @@ namespace {
 				: static_cast<int>(eng.size()) - first_row;
 			int first01 = -1;
 			float maxd = 0.f;
-			int hull_first = -1, hull_bad = 0;
+			// Per-tick STAMINA verification: the engine's own m_flStamina
+			// (a READ) vs the model's clock - drift is caught at its birth
+			// tick with both values on record.
+			int stam_first = -1, stam_bad = 0;
+			float stam_model_at = 0.f, stam_eng_at = 0.f;
 			for (int t = 0; t < n; ++t) {
 				const TapeFrame& f = tape.frames[t];
-				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+				MoveTick(s, w, mp, f.pitch, f.yaw, f.fmove, f.smove,
 					f.umove, f.buttons, nullptr);
 				const float dd = Len(s.pos - eng[first_row + t].pos);
 				if (dd > maxd)
 					maxd = dd;
 				if (first01 < 0 && dd > 0.1f)
 					first01 = t;
-				// Hull verification: the engine's carried hull top vs the
-				// model's hull_state, per tick (a READ, not an inference).
-				if (t < static_cast<int>(eng_hull.size())
-					&& eng_hull[t] >= 0.f) {
-					const float ours = s.hull_state == 1
-						? o.hulls.duck_max.Z
-						: s.hull_state == 2 ? o.hulls.unduck_max.Z
-						: o.hulls.stand_max.Z;
-					if (fabsf(ours - eng_hull[t]) > 0.1f) {
-						hull_bad++;
-						if (hull_first < 0)
-							hull_first = t;
+				if (t < static_cast<int>(eng_stam.size())
+					&& eng_stam[t] >= 0.f
+					&& fabsf(s.stamina - eng_stam[t]) > 0.1f) {
+					stam_bad++;
+					if (stam_first < 0) {
+						stam_first = t;
+						stam_model_at = s.stamina;
+						stam_eng_at = eng_stam[t];
 					}
 				}
 			}
@@ -2138,33 +2154,47 @@ namespace {
 			if (!eng_ma.empty()) {
 				// WEAPON GUARD (user question 2026-08-14): m_flMaxSpeed is
 				// weapon-dependent - flag any capture whose engine-read
-				// maxspeed disagrees with the model params.
+				// maxspeed disagrees with the params this replay USED (the
+				// capture's own "# param maxspeed" when present, else cfg).
 				bool mismatch = false;
 				for (float v : eng_ma)
-					if (fabsf(v - o.params.maxspeed) > 0.5f)
+					if (fabsf(v - mp.maxspeed) > 0.5f)
 						mismatch = true;
 				if (mismatch)
 					printf("battery:   WEAPON/MAXSPEED MISMATCH: engine "
-						"m_flMaxSpeed differs from params maxspeed %.0f - "
+						"m_flMaxSpeed differs from replay maxspeed %.0f - "
 						"capture taken with a different weapon; retake.\n",
-						o.params.maxspeed);
+						mp.maxspeed);
 			}
 			if (!eng_hull.empty()) {
-				// Distinct movedata values (field identification data).
-				std::vector<float> da, db;
+				// Distinct read values (identification data). The hulltop
+				// NETVAR is a known constant 62 in every state - proven NOT
+				// the movement hull (2026-08-14) - so it is reported as
+				// data, never compared.
+				std::vector<float> da, db, dh;
 				for (size_t k = 0; k < eng_ma.size(); ++k) {
-					bool fa = false, fb = false;
+					bool fa = false, fb = false, fh = false;
 					for (float v : da) if (fabsf(v - eng_ma[k]) < 0.01f) fa = true;
 					for (float v : db) if (fabsf(v - eng_mb[k]) < 0.01f) fb = true;
+					for (float v : dh) if (fabsf(v - eng_hull[k]) < 0.01f) fh = true;
 					if (!fa && da.size() < 4) da.push_back(eng_ma[k]);
 					if (!fb && db.size() < 4) db.push_back(eng_mb[k]);
+					if (!fh && dh.size() < 4) dh.push_back(eng_hull[k]);
 				}
-				printf("battery:   reads: hull %s",
-					hull_first < 0 ? "eng==model every tick" : "");
-				if (hull_first >= 0)
-					printf("MISMATCH first t%d (%d ticks; eng %.1f)",
-						hull_first, hull_bad, eng_hull[hull_first]);
-				printf(" | mspd_a {");
+				printf("battery:   reads: params %s | stam ",
+					nparam > 0 ? "capture" : "cfg");
+				const bool have_stam = !eng_stam.empty() && eng_stam[0] >= 0.f;
+				if (!have_stam)
+					printf("n/a");
+				else if (stam_first < 0)
+					printf("eng==model every tick");
+				else
+					printf("MISMATCH first t%d (%d ticks; model %.2f eng %.2f)",
+						stam_first, stam_bad, stam_model_at, stam_eng_at);
+				printf(" | hullnv {");
+				for (size_t k = 0; k < dh.size(); ++k)
+					printf("%s%.1f", k ? "," : "", dh[k]);
+				printf("} mspd_a {");
 				for (size_t k = 0; k < da.size(); ++k)
 					printf("%s%.1f", k ? "," : "", da[k]);
 				printf("} mspd_b {");

@@ -7896,13 +7896,34 @@ namespace {
 			out << line;
 		}
 		if (Cvars::GetFloat("sv_stopspeed", &v)) {
-			// MEASURED CONFLICT (2026-08-14 battery): this cvar reads 100
-			// client-side while the engine's own movement captures behave
-			// as 75 bit-exactly (six decks + three tapes). The read is not
-			// the movement truth here (non-replicated copy?) - export as a
-			// note only; the behavior-proven value stays authoritative.
-			Sfmt(line, "# sv_stopspeed cvar reads %g; engine BEHAVIOR "
-				"measures 75 - behavior wins\n", v);
+			// CONFLICT RESOLVED by disassembly (2026-08-15): the old "reads
+			// 100 while behaving 75" was OUR read skipping ConVar::m_pParent
+			// - the child keeps the registered default "100" while the
+			// game's own SetValue(75.0f) (server.dll @2f6f6c) updates the
+			// parent, and Friction (@20edb9) reads the PARENT live. Cvars::
+			// GetFloat now hops the parent, so this value IS the movement
+			// truth. Battery decks continue to arbitrate.
+			Sfmt(line, "stopspeed %g  # live server cvar (parent-hopped)\n", v);
+			out << line;
+		}
+		if (Cvars::GetFloat("sv_maxvelocity", &v)) {
+			Sfmt(line, "maxvelocity %g  # live server cvar\n", v);
+			out << line;
+		}
+		if (Cvars::GetFloat("sv_stepsize", &v)) {
+			Sfmt(line, "stepsize %g  # live server cvar\n", v);
+			out << line;
+		}
+		if (Cvars::GetFloat("sv_enablebunnyhopping", &v)) {
+			Sfmt(line, "enablebunnyhopping %g  # live server cvar\n", v);
+			out << line;
+		}
+		if (Cvars::GetFloat("sv_gravity", &v)) {
+			Sfmt(line, "gravity %g  # live server cvar (overrides model line)\n", v);
+			out << line;
+		}
+		if (Cvars::GetFloat("sv_airaccelerate", &v)) {
+			Sfmt(line, "airaccelerate %g  # live server cvar (overrides model line)\n", v);
 			out << line;
 		}
 		return static_cast<bool>(out);
@@ -8130,14 +8151,48 @@ namespace {
 			BspWorld::CurrentMapName(mapname, sizeof(mapname));
 			out << "# map " << mapname << "\n";
 		}
+		{
+			// SELF-DESCRIBING CAPTURE (user directive 2026-08-15: the one
+			// click carries everything - if server settings change, every
+			// consumer adapts). The LIVE params that governed this capture,
+			// as "# param <key> <value>" lines the scorer prefers over any
+			// cfg on disk. Same keys as server_params.cfg.
+			char pl[160];
+			const float itick = Prediction::LastDiag().interval_per_tick;
+			Sfmt(pl, "# param tickinterval %g\n", itick > 0.f ? itick : 0.015f);
+			out << pl;
+			float ms;
+			if (Prediction::LastRealMaxSpeed(&ms) && ms > 1.f) {
+				Sfmt(pl, "# param maxspeed %g\n", ms);
+				out << pl;
+			}
+			static const struct { const char* cvar; const char* key; }
+			kLive[] = {
+				{ "sv_gravity",            "gravity" },
+				{ "sv_accelerate",         "accelerate" },
+				{ "sv_airaccelerate",      "airaccelerate" },
+				{ "sv_friction",           "friction" },
+				{ "sv_stopspeed",          "stopspeed" },
+				{ "sv_maxvelocity",        "maxvelocity" },
+				{ "sv_stepsize",           "stepsize" },
+				{ "sv_enablebunnyhopping", "enablebunnyhopping" },
+			};
+			for (const auto& kv : kLive) {
+				float v;
+				if (Cvars::GetFloat(kv.cvar, &v)) {
+					Sfmt(pl, "# param %s %g\n", kv.key, v);
+					out << pl;
+				}
+			}
+		}
 		out << "tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw,"
-			"hulltop,mspd_a,mspd_b\n";
+			"hulltop,mspd_a,mspd_b,stamina\n";
 		char line[384];
 		for (size_t t = 0; t < st.size(); ++t) {
 			const Prediction::SimState& s = st[t];
 			const Frame& f = t < fr.size() ? fr[t] : fr.back();
 			Sfmt(line, "%d,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.2f,%d,%d,%d,"
-				"%.4f,%.3f,%.3f,%.3f\n",
+				"%.4f,%.3f,%.3f,%.3f,%.4f\n",
 				static_cast<int>(t), s.origin.X, s.origin.Y, s.origin.Z,
 				s.velocity.X, s.velocity.Y, s.velocity.Z,
 				sqrtf(s.velocity.X * s.velocity.X
@@ -8145,7 +8200,7 @@ namespace {
 				(s.flags & 1) ? 1 : 0,        // FL_ONGROUND
 				(s.flags & 2) ? 1 : 0,        // FL_DUCKING
 				f.buttons, f.viewangles[1],
-				s.hull_top, s.mspd_a, s.mspd_b);
+				s.hull_top, s.mspd_a, s.mspd_b, s.stamina_ms);
 			out << line;
 		}
 		AppendExportLog("enginesim", path, g_batsim_name.c_str(),

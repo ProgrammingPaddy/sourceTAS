@@ -159,6 +159,49 @@ namespace {
 		return true;
 	}
 
+	// BINARY-DECODED parent hop (x64 server.dll Friction @1bd4a7/@20edb9,
+	// disassembled 2026-08-15): the ENGINE reads cvar values through
+	// ConVar::m_pParent (+0x38) -> m_fValue (+0x54). The child object can
+	// keep its registered default forever - sv_stopspeed proved it: the
+	// registration default is "100", the game's own SetValue(75.0f)
+	// (@2f6f6c) lands on the PARENT, and Friction runs on 75 while a
+	// parent-skipping read still returns 100. Validation, not trust: a real
+	// parent is SELF-parented (+0x38 points to itself) and carries the SAME
+	// name string; anything else falls back to the child. The parent may
+	// legitimately live in ANOTHER module (server.dll on a listen server),
+	// so there is no image-bounds check - SafeRead gates every dereference.
+	const uint8_t* ParentOf(const uint8_t* obj, const char* name, int name_off) {
+		const uint8_t* parent = nullptr;
+		if (!SafeRead(obj + 0x38, &parent, sizeof(parent)) || !parent
+			|| parent == obj)
+			return obj;
+		const uint8_t* pp = nullptr;
+		if (!SafeRead(parent + 0x38, &pp, sizeof(pp)) || pp != parent)
+			return obj;
+		if (name && name_off >= 0) {
+			const char* pname = nullptr;
+			char buf[64] = {};
+			if (!SafeRead(parent + name_off, &pname, sizeof(pname)) || !pname)
+				return obj;
+			if (!SafeRead(pname, buf, sizeof(buf) - 1))
+				return obj;
+			if (_stricmp(buf, name) != 0)
+				return obj;
+		}
+		return parent;
+	}
+
+	// Live read = parent's value pair, child as fallback (a validated parent
+	// whose pair fails plausibility would be out-of-sync mid-write; retry on
+	// the child rather than failing the read).
+	bool ReadLive(const uint8_t* obj, const char* name, int name_off,
+	              int val_off, float* out) {
+		const uint8_t* par = ParentOf(obj, name, name_off);
+		if (ValuePairAt(par, val_off, -1e6f, 1e6f, out))
+			return true;
+		return par != obj && ValuePairAt(obj, val_off, -1e6f, 1e6f, out);
+	}
+
 	// Resolve one name from its CACHED slots with a given layout; returns
 	// the object (self or parent) whose fields hold the value.
 	const uint8_t* ResolveFromSlots(const Span& img, const SlotSet& set,
@@ -278,7 +321,7 @@ namespace Cvars {
 			return false;
 		for (int i = 0; i < g_found_count; ++i)
 			if (_stricmp(g_found[i].name, name) == 0)
-				return ValuePairAt(g_found[i].obj, g_val_off, -1e6f, 1e6f, out);
+				return ReadLive(g_found[i].obj, name, g_name_off, g_val_off, out);
 		// Not one of the probe cvars: resolve on demand with the validated
 		// layout (wide plausibility - the layout itself is already proven).
 		Span img = {};
@@ -294,7 +337,7 @@ namespace Cvars {
 			strncpy_s(fd.name, name, _TRUNCATE);
 			fd.obj = obj;
 		}
-		return ValuePairAt(obj, g_val_off, -1e6f, 1e6f, out);
+		return ReadLive(obj, name, g_name_off, g_val_off, out);
 	}
 
 	const char* Status() {

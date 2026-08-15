@@ -369,6 +369,10 @@ namespace {
 				// tick (CCollisionProperty m_vecMaxs.z, origin-relative).
 				st.hull_top = g_off.maxs
 					? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
+				// The engine's own stamina clock after the tick - per-tick
+				// observable, so stamina drift is caught at its birth tick.
+				st.stamina_ms = g_off.stamina
+					? *reinterpret_cast<float*>(pb + g_off.stamina) : -1.f;
 
 				// TRIGGERS: server-side entities the client prediction never
 				// runs - fire touched trigger_teleport / trigger_gravity here

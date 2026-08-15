@@ -24,6 +24,12 @@ namespace Solver {
 	bool LoadParamsFile(const std::string& path, MoveParams& p, Hulls& h,
 	                    bool* missing, std::string* report);
 
+	// The ONE key->field mapping, shared by the cfg loader above and the
+	// self-describing capture headers ("# param key value" lines). Returns
+	// false for unknown keys.
+	bool ApplyParamKey(MoveParams& p, Hulls& h, const std::string& key,
+	                   float val);
+
 	// Canonical location the DLL writes: Documents\sourceTAS\solver\
 	// server_params.cfg ("" if the Documents folder can't resolve).
 	std::string CanonicalParamsPath();

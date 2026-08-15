@@ -76,28 +76,9 @@ namespace Solver {
 			float val = 0.f;
 			if (!(ls >> key >> val))
 				continue;
-			bool known = true;
-			if (key == "tickinterval") p.dt = val;
-			else if (key == "gravity") p.gravity = val;
-			else if (key == "accelerate") p.accelerate = val;
-			else if (key == "airaccelerate") p.airaccelerate = val;
-			else if (key == "friction") p.friction = val;
-			else if (key == "stopspeed") p.stopspeed = val;
-			else if (key == "maxspeed") p.maxspeed = val;
-			else if (key == "maxvelocity") p.maxvelocity = val;
-			else if (key == "stepsize") p.stepsize = val;
-			else if (key == "air_speed_cap") p.air_speed_cap = val;
-			else if (key == "jump_impulse") p.jump_impulse_d = val;
-			else if (key == "enablebunnyhopping") p.enablebunnyhopping = val != 0.f;
-			else if (key == "duck_air_shift") p.duck_air_shift = val;
-			else if (key == "duck_speed_frac") p.duck_speed_frac = val;
-			else if (key == "time_to_duck_ms") p.time_to_duck_ms = val;
-			else if (key == "stamina_jump_ms") p.stamina_jump_ms = val;
-			else if (key == "stamina_scale_per_ms") p.stamina_scale_per_ms = val;
-			else if (key == "stamina_pow_rate") p.stamina_pow_rate = val;
-			else if (key == "hull_stand") h.stand_max.Z = val;
-			else if (key == "hull_duck") h.duck_max.Z = val;
-			else known = false;
+			const bool known = ApplyParamKey(p, h, key, val);
+			if (known)
+				applied++;
 			if (report) {
 				char buf[128];
 				if (known)
@@ -107,11 +88,39 @@ namespace Solver {
 						key.c_str());
 				*report += buf;
 			}
-			if (known) applied++;
 		}
-		if (report && applied == 0)
-			*report += "  (no keys applied)\n";
+		(void)applied;
 		return true;
+	}
+
+	// ONE key->field mapping shared by server_params.cfg and the capture
+	// headers ("# param key value" - user directive 2026-08-15: captures
+	// are self-describing so consumers adapt to any server setting change).
+	bool ApplyParamKey(MoveParams& p, Hulls& h, const std::string& key,
+	                   float val) {
+		bool known = true;
+		if (key == "tickinterval") p.dt = val;
+		else if (key == "gravity") p.gravity = val;
+		else if (key == "accelerate") p.accelerate = val;
+		else if (key == "airaccelerate") p.airaccelerate = val;
+		else if (key == "friction") p.friction = val;
+		else if (key == "stopspeed") p.stopspeed = val;
+		else if (key == "maxspeed") p.maxspeed = val;
+		else if (key == "maxvelocity") p.maxvelocity = val;
+		else if (key == "stepsize") p.stepsize = val;
+		else if (key == "air_speed_cap") p.air_speed_cap = val;
+		else if (key == "jump_impulse") p.jump_impulse_d = val;
+		else if (key == "enablebunnyhopping") p.enablebunnyhopping = val != 0.f;
+		else if (key == "duck_air_shift") p.duck_air_shift = val;
+		else if (key == "duck_speed_frac") p.duck_speed_frac = val;
+		else if (key == "time_to_duck_ms") p.time_to_duck_ms = val;
+		else if (key == "stamina_jump_ms") p.stamina_jump_ms = val;
+		else if (key == "stamina_scale_per_ms") p.stamina_scale_per_ms = val;
+		else if (key == "stamina_pow_rate") p.stamina_pow_rate = val;
+		else if (key == "hull_stand") h.stand_max.Z = val;
+		else if (key == "hull_duck") h.duck_max.Z = val;
+		else known = false;
+		return known;
 	}
 
 } // namespace Solver
