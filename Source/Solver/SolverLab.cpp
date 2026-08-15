@@ -1119,7 +1119,20 @@ namespace {
 			s.basevel = Vec3(p.bx, p.by, 0.f);
 			s.basevel_flag = (seed.flags & 0x800000) != 0;   // FL_BASEVELOCITY (1<<23)
 			if (o.fuzz_nobv) { s.basevel = Vec3(); s.basevel_flag = false; }
-			s.on_ground = (seed.flags & 1) != 0;
+			// Ground from GEOMETRY, not the flag: FL_ONGROUND lags the real
+			// m_hGroundEntity (probe 111 - the engine executed a stamina-
+			// taxed jump, vz 230.08, from a state whose flag read airborne).
+			// This is the engine's own grounding rule applied to the seed.
+			s.on_ground = false;
+			{
+				TraceResult gtr;
+				const int gh = seed.maxz < 60.f ? 1 : (seed.maxz < 70.f ? 2 : 0);
+				const float gfr = w.TraceHull3(Vec3(seed.ox, seed.oy, seed.oz),
+					Vec3(seed.ox, seed.oy, seed.oz - 2.f), gh, &gtr);
+				if (seed.vz <= o.params.non_jump_velocity && gfr < 1.f
+					&& gtr.brush >= 0 && gtr.normal.Z >= o.params.walkable_z)
+					s.on_ground = true;
+			}
 			s.ducked = seed.ducked != 0;
 			s.ducking = seed.ducking != 0;
 			s.duck_timer_ms = seed.ducktime;
