@@ -814,7 +814,9 @@ namespace {
 	// code branches on (sub-epsilon grazes, inside-solid starts, creases,
 	// every hull, every duck phase, every speed band) rather than to depict
 	// a plausible run. Deterministic LCG: the corpus regenerates identically.
-	constexpr int kFuzzTicks = 4;
+	// Tick 0 is the engine's SETTLE tick (its output seeds both sides);
+	// ticks 1..kFuzzTicks-1 are compared. See CmdFuzzDiff.
+	constexpr int kFuzzTicks = 5;
 
 	int CmdFuzzGen(const std::string& map_path, const ReplayOpts& o,
 	               int nprobes, unsigned seed, const std::string& out_path) {
@@ -999,7 +1001,8 @@ namespace {
 				int id = 0;
 				const int n = sscanf_s(line,
 					"%d,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f,%f,"
-					"%f,%f,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d",
+					"%f,%f,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,"
+					"%f,%f,%f,%d",
 					&id, &p.ox, &p.oy, &p.oz, &p.vx, &p.vy, &p.vz,
 					&p.bx, &p.by, &p.bz, &p.onground, &p.ducked, &p.ducking,
 					&p.ducktime, &p.stamina, &p.gravity, &p.sfric,
@@ -1007,8 +1010,9 @@ namespace {
 					&p.yaw[0], &p.fm[0], &p.sm[0], &p.btn[0],
 					&p.yaw[1], &p.fm[1], &p.sm[1], &p.btn[1],
 					&p.yaw[2], &p.fm[2], &p.sm[2], &p.btn[2],
-					&p.yaw[3], &p.fm[3], &p.sm[3], &p.btn[3]);
-				if (n == 36)
+					&p.yaw[3], &p.fm[3], &p.sm[3], &p.btn[3],
+					&p.yaw[4], &p.fm[4], &p.sm[4], &p.btn[4]);
+				if (n == 40)
 					probes.push_back(p);
 			}
 			fclose(f);
@@ -1079,19 +1083,25 @@ namespace {
 			}
 			cls_n[cls]++;
 
+			// SEED FROM THE ENGINE'S OWN SETTLE TICK (tick 0), never from
+			// what the probe asked for: writing FL_ONGROUND does not ground
+			// the player (ground is m_hGroundEntity) and the engine
+			// re-derives duck state, so asserting an initial state made the
+			// harness lie. Ticks 1..K-1 are the actual comparison.
+			const Res& seed = res[i * kFuzzTicks];
 			PlayerState s;
-			s.pos = Vec3(p.ox, p.oy, p.oz);
-			s.vel = Vec3(p.vx, p.vy, p.vz);
-			s.basevel = Vec3(p.bx, p.by, p.bz);
-			s.basevel_flag = (p.bx != 0.f || p.by != 0.f || p.bz != 0.f);
-			s.on_ground = p.onground != 0;
-			s.ducked = p.ducked != 0;
-			s.ducking = p.ducking != 0;
-			s.duck_timer_ms = p.ducktime;
-			s.stamina = p.stamina;
+			s.pos = Vec3(seed.ox, seed.oy, seed.oz);
+			s.vel = Vec3(seed.vx, seed.vy, seed.vz);
+			s.basevel = Vec3(seed.bx, seed.by, seed.bz);
+			s.basevel_flag = (seed.flags & 0x2000) != 0;   // FL_BASEVELOCITY
+			s.on_ground = (seed.flags & 1) != 0;
+			s.ducked = seed.ducked != 0;
+			s.ducking = seed.ducking != 0;
+			s.duck_timer_ms = seed.ducktime;
+			s.stamina = seed.stamina;
 			s.gravity_scale = p.gravity;
-			s.surface_friction = p.sfric;
-			s.hull_state = p.hmaxz < 60.f ? 1 : (p.hmaxz < 70.f ? 2 : 0);
+			s.surface_friction = seed.sfric;
+			s.hull_state = seed.maxz < 60.f ? 1 : (seed.maxz < 70.f ? 2 : 0);
 			if (s.on_ground) {
 				TraceResult tr;
 				const float gf = w.TraceHull3(s.pos,
@@ -1100,7 +1110,7 @@ namespace {
 					s.ground_brush = tr.brush;
 			}
 			bool bad = false;
-			for (int t = 0; t < kFuzzTicks; ++t) {
+			for (int t = 1; t < kFuzzTicks; ++t) {
 				const Res& r = res[i * kFuzzTicks + t];
 				if (!r.ok) { faulted++; bad = false; break; }
 				MoveTick(s, w, o.params, 0.f, p.yaw[t], p.fm[t], p.sm[t],

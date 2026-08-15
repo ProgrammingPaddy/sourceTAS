@@ -55,6 +55,22 @@ namespace Solver {
 				const Vec3 end = s.pos + Scale(s.vel, time_left);
 				TraceResult tr;
 				const float frac = w.TraceHull3(s.pos, end, s.hull_state, &tr);
+				// SDK TryPlayerMove: "entity is trapped in another solid" -
+				// velocity is ZEROED and the move aborts. This is the surf
+				// RAMP BUG, and it is deterministic: the engine then repeats
+				// it every tick until something frees the hull (measured 18
+				// straight ticks at v(0,0,-6) in the d34 tape, and in 32.7%
+				// of fuzz probes).
+				if (tr.allsolid) {
+					s.vel = Vec3();
+					if (ev && ev->ncontacts < 4) {
+						ev->contact_brush[ev->ncontacts] = tr.brush;
+						ev->contact_plane[ev->ncontacts] = tr.plane;
+						ev->contact_loss[ev->ncontacts] = Len(primal_v);
+						ev->ncontacts++;
+					}
+					break;
+				}
 				if (frac > 0.f) {
 					s.pos = s.pos + Scale(end - s.pos, frac);
 					original_v = s.vel;   // engine re-bases the clip set

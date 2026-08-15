@@ -298,7 +298,14 @@ namespace {
 	// an explicit fuzz input AND output so the friction rule is measured, not
 	// assumed.
 	constexpr int kSurfFricOff = 0x1868;
-	constexpr int kFuzzTicks = 4;
+	// Tick 0 is a SETTLE tick: its output is the engine's own fully-derived
+	// state (real ground entity, re-derived duck state, real surface
+	// friction) and becomes the seed BOTH sides start from. Measured
+	// 2026-08-15: writing FL_ONGROUND does NOT ground the player (ground is
+	// m_hGroundEntity, a handle - 96% of "grounded" probes were airborne),
+	// and the engine re-derives duck state on a third of probes. Asserting
+	// an initial state was the harness lying; ticks 1..K are the test.
+	constexpr int kFuzzTicks = 5;
 
 	struct FuzzProbeIn {
 		float ox, oy, oz, vx, vy, vz, bx, by, bz;
@@ -816,7 +823,7 @@ int Prediction::RunFuzz(const char* probe_path, const char* out_path) {
 			int id = 0;
 			const int n = sscanf_s(line,
 				"%d,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f,%f,%f,%f,"
-				"%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d",
+				"%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d",
 				&id, &p.ox, &p.oy, &p.oz, &p.vx, &p.vy, &p.vz,
 				&p.bx, &p.by, &p.bz, &p.onground, &p.ducked, &p.ducking,
 				&p.ducktime, &p.stamina, &p.gravity, &p.sfric,
@@ -824,8 +831,9 @@ int Prediction::RunFuzz(const char* probe_path, const char* out_path) {
 				&p.yaw[0], &p.fmove[0], &p.smove[0], &p.buttons[0],
 				&p.yaw[1], &p.fmove[1], &p.smove[1], &p.buttons[1],
 				&p.yaw[2], &p.fmove[2], &p.smove[2], &p.buttons[2],
-				&p.yaw[3], &p.fmove[3], &p.smove[3], &p.buttons[3]);
-			if (n == 36)
+				&p.yaw[3], &p.fmove[3], &p.smove[3], &p.buttons[3],
+				&p.yaw[4], &p.fmove[4], &p.smove[4], &p.buttons[4]);
+			if (n == 40)
 				probes.push_back(p);
 		}
 		fclose(f);

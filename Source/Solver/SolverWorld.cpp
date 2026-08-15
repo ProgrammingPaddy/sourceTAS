@@ -653,10 +653,13 @@ namespace Solver {
 				float tmin_t = -1.f, tmax_t = 1e9f;
 				int enter = -1;
 				bool outside = false, miss = false;
+				bool getout = false;   // any plane with the END point outside
 				const int np = static_cast<int>(bc.n.size());
 				for (int pi = 0; pi < np; ++pi) {
 					const float d0 = Dot(bc.n[pi], a) - pd[pi];
 					const float d1 = Dot(bc.n[pi], b) - pd[pi];
+					if (d1 > 0.f)
+						getout = true;   // engine: endpoint not in solid
 					if (d0 > 0.f) {
 						outside = true;
 						if (d1 > 0.f) { miss = true; break; }
@@ -689,6 +692,23 @@ namespace Solver {
 							if (tn < tmax_t) tmax_t = tn;
 						}
 					}
+				}
+				// ENGINE-EXACT solid reporting (CM_ClipBoxToBrush): a brush
+				// the sweep STARTS inside (no plane had d0 > 0) sets
+				// startsolid and returns WITHOUT touching the fraction; if
+				// no plane had d1 > 0 either, the box never gets out and
+				// allsolid is set - and TryPlayerMove zeroes velocity on
+				// allsolid. That zeroing IS the surf "ramp bug": measured
+				// in 32.7% of fuzz probes and in the d34 tape's t193, where
+				// the engine froze for 18 ticks at v(0,0,-6) while our
+				// model flew on at 880 u/s.
+				if (!miss && !outside) {
+					if (out) {
+						out->startsolid = true;
+						if (!getout)
+							out->allsolid = true;
+					}
+					continue;
 				}
 				if (miss || !outside || enter < 0 || tmin >= tmax)
 					continue;

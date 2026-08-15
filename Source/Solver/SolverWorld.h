@@ -73,6 +73,11 @@ namespace Solver {
 		int   brush = -1;        // index into World::brushes (NOT the BSP id)
 		int   plane = -1;        // plane index within that brush
 		Vec3  normal;
+		// CM_ClipBoxToBrush solid reporting: startsolid = the sweep began
+		// inside a brush; allsolid = it began inside and never got out.
+		// TryPlayerMove ZEROES VELOCITY on allsolid - the surf ramp bug.
+		bool  startsolid = false;
+		bool  allsolid = false;
 	};
 
 	class World {
