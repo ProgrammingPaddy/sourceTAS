@@ -43,6 +43,15 @@ namespace Solver {
 		// with a single rounding back to float (see CheckJumpButton).
 		double jump_impulse_d = 301.99337741082996;
 		float non_jump_velocity = 140.f; // CategorizePosition vz gate
+		// SURF AIR FRICTION (fuzz-measured 2026-08-15): CategorizePosition
+		// sets m_surfaceFriction = 0.25 when the ground probe finds NO
+		// walkable plane while the player is RISING (0 < vz <= 140), and
+		// every accelerate scales by it. Engine samples pinned the constant
+		// exactly - a ducked rising tick applied 47.8125 u/s of accel =
+		// 150 * 85 * 0.015 * 0.25, with the addspeed cap far above. The
+		// field is player+0x36C (confirmed: server.dll Friction @0020edac
+		// reads it and multiplies by sv_friction).
+		float air_friction_up = 0.25f;
 		float walkable_z = 0.7f;         // minimum ground plane normal.z
 		float duck_speed_frac = 0.34f;   // CSS fully-ducked maxspeed fraction
 		float time_to_duck_ms = 400.f;   // ground duck transition time
@@ -110,6 +119,9 @@ namespace Solver {
 		float duck_timer_ms = 0.f; // SDK m_flDucktime, counts DOWN from 1000
 		bool on_ground = false;
 		int  ground_brush = -1;    // index into World::brushes (-1 = none)
+		// m_surfaceFriction: 1 on ground / falling, 0.25 airborne-rising
+		// (see MoveParams::air_friction_up). Scales EVERY accelerate.
+		float surface_friction = 1.f;
 		int  old_buttons = 0;      // IN_JUMP release gate lives here
 		float stamina = 0.f;       // landing-stamina timer, ms (see MoveParams;
 		                           // the tape anchor's value seeds it)

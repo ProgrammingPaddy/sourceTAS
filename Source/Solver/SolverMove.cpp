@@ -121,10 +121,18 @@ namespace Solver {
 			const bool was_ground = s.on_ground;
 			s.on_ground = false;
 			s.ground_brush = -1;
+			// SDK: every CategorizePosition resets m_surfaceFriction to 1.
+			s.surface_friction = 1.f;
 			if (s.vel.Z <= p.non_jump_velocity) {
 				TraceResult tr;
 				const float gf = w.TraceHull3(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
 				                             s.hull_state, &tr);
+				if (!(gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= p.walkable_z) && s.vel.Z > 0.f) {
+					// No walkable plane under a RISING player: the engine's
+					// surf air-accel quirk (see MoveParams).
+					s.surface_friction = p.air_friction_up;
+				}
 				if (gf < 1.f && tr.brush >= 0 && tr.normal.Z >= p.walkable_z) {
 					// NO origin snap: engine ground truth (2026-08-13, t479)
 					// sets ground with the origin still 1.575u above the
@@ -160,7 +168,9 @@ namespace Solver {
 			if (speed < 0.1f)
 				return;
 			const float control = (speed < p.stopspeed) ? p.stopspeed : speed;
-			const float drop = control * p.friction * p.dt;   // surface friction 1
+			// SDK: friction = sv_friction * m_surfaceFriction (server.dll
+			// @0020edac reads player+0x36C and multiplies). 1.0 on ground.
+			const float drop = control * p.friction * s.surface_friction * p.dt;
 			float newspeed = speed - drop;
 			if (newspeed < 0.f) newspeed = 0.f;
 			if (newspeed != speed)
@@ -337,7 +347,8 @@ namespace Solver {
 			const float cur = Dot(s.vel, wishdir);
 			const float add = wishspeed - cur;
 			if (add > 0.f) {
-				float accelspeed = p.accelerate * p.dt * wishspeed;   // friction 1
+				float accelspeed = p.accelerate * p.dt * wishspeed
+					* s.surface_friction;
 				if (accelspeed > add) accelspeed = add;
 				s.vel = s.vel + Scale(wishdir, accelspeed);
 			}
@@ -383,7 +394,10 @@ namespace Solver {
 			const float cur = Dot(s.vel, wishdir);
 			const float add = wishspd - cur;
 			if (add > 0.f) {
-				float accelspeed = p.airaccelerate * wishspeed * p.dt;   // friction 1
+				// accelspeed scales with m_surfaceFriction - 0.25 while
+				// airborne and RISING (fuzz-measured; see MoveParams).
+				float accelspeed = p.airaccelerate * wishspeed * p.dt
+					* s.surface_friction;
 				if (accelspeed > add) accelspeed = add;
 				s.vel = s.vel + Scale(wishdir, accelspeed);
 			}
@@ -514,6 +528,15 @@ namespace Solver {
 			if (s.duck_timer_ms < 0.f)
 				s.duck_timer_ms = 0.f;
 		}
+
+		// SDK PlayerMove calls CategorizePosition() BEFORE Duck() and the
+		// movetype switch; the part that governs THIS tick's movement is
+		// m_surfaceFriction. Recomputed here from the tick-entry state (the
+		// same post-FinishGravity velocity the engine sees) without
+		// re-tracing: airborne already means the last probe found nothing
+		// walkable at this position.
+		s.surface_friction = (!s.on_ground && s.vel.Z > 0.f
+			&& s.vel.Z <= p.non_jump_velocity) ? p.air_friction_up : 1.f;
 
 		// PlayerMove: Duck() runs before the move itself, and the SDK
 		// re-categorizes position right after it - so a duck-state origin
