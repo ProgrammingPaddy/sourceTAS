@@ -396,58 +396,87 @@ namespace Solver {
 		// hull swaps after TIME_TO_DUCK. Unduck reverses the shift and must fit.
 		void HandleDuck(PlayerState& s, const World& w, const MoveParams& p,
 		                int buttons, TickEvents* ev) {
+			// SDK CGameMovement::Duck, ported with the DOWN-counting shared
+			// timer and ducking=true through BOTH transitions (fuzz-
+			// corrected 2026-08-15: a tapped-and-released ground duck keeps
+			// ducking for TIME_TO_UNDUCK, flipping the next jump to the SET
+			// path - engine 289.99 vs the instant-cancel model's 283.99).
 			const bool want = (buttons & IN_DUCK) != 0;
+			const bool was = (s.old_buttons & IN_DUCK) != 0;
+			const bool pressed = want && !was;
+			if (want)
+				s.old_buttons |= IN_DUCK;
+			else
+				s.old_buttons &= ~IN_DUCK;
 			// Engine-measured shift (see MoveParams), NOT the hull delta.
 			const float lift = p.duck_air_shift;
+
+			auto finish_duck = [&]() {
+				const bool already = s.ducked;
+				s.ducked = true;
+				s.hull_state = 1;          // duck: flag and hull together
+				s.ducking = false;
+				if (ev && !already) ev->duck_changed = true;
+				if (!s.on_ground && !already) {
+					s.pos.Z += lift;
+					// FixPlayerCrouchStuck: nudge up until the ducked hull
+					// fits (rare in open air; bounded).
+					for (int i = 0; i < 18 && w.OriginInSolid(s.pos, true); ++i)
+						s.pos.Z += 1.f;
+				}
+			};
+
+			if (!(s.ducking || s.ducked || want))
+				return;
+
 			if (want) {
-				if (s.ducked)
-					return;
-				if (!s.ducking) {
+				if (pressed && !s.ducked) {
+					s.duck_timer_ms = 1000.f;   // GAMEMOVEMENT_DUCK_TIME
 					s.ducking = true;
-					s.duck_elapsed_ms = 0.f;
 				}
-				s.duck_elapsed_ms += p.dt * 1000.f;
-				if (!s.on_ground || s.duck_elapsed_ms >= p.time_to_duck_ms) {
-					// FinishDuck.
-					s.ducked = true;
-					s.hull_state = 1;       // duck: flag and hull together
-					s.ducking = false;
-					if (ev) ev->duck_changed = true;
-					if (!s.on_ground) {
-						s.pos.Z += lift;
-						// FixPlayerCrouchStuck: nudge up until the ducked hull
-						// fits (rare in open air; bounded).
-						for (int i = 0; i < 18 && w.OriginInSolid(s.pos, true); ++i)
-							s.pos.Z += 1.f;
-					}
-				}
-			} else {
 				if (s.ducking) {
-					s.ducking = false;
-					s.duck_elapsed_ms = 0.f;
+					const float elapsed = 1000.f - s.duck_timer_ms > 0.f
+						? 1000.f - s.duck_timer_ms : 0.f;
+					if (elapsed >= p.time_to_duck_ms || !s.on_ground
+						|| s.ducked)
+						finish_duck();
 				}
-				if (s.ducked) {
-					if (!s.on_ground) {
-						const Vec3 cand(s.pos.X, s.pos.Y, s.pos.Z - lift);
-						if (!w.OriginInSolid(cand, false)) {
+			} else if (s.ducking || s.ducked) {
+				// Try to unduck. CanUnduck = the standing hull fits at the
+				// (air: dropped) candidate origin.
+				const Vec3 cand = s.on_ground
+					? s.pos : Vec3(s.pos.X, s.pos.Y, s.pos.Z - lift);
+				if (!w.OriginInSolid(cand, false)) {
+					// Release while FULLY ducked restarts the shared timer
+					// for the unduck transition; a mid-duck release keeps
+					// the press timer running (a 30ms tap stays "ducking"
+					// until TIME_TO_UNDUCK elapses - the fuzz_a t4 case).
+					if (was && !want && s.ducked) {
+						s.duck_timer_ms = 1000.f;
+						s.ducking = true;
+					}
+					const float elapsed = 1000.f - s.duck_timer_ms > 0.f
+						? 1000.f - s.duck_timer_ms : 0.f;
+					if (elapsed >= p.time_to_unduck_ms || !s.on_ground) {
+						// FinishUnDuck.
+						const bool was_ducked = s.ducked;
+						s.ducked = false;
+						s.ducking = false;
+						s.duck_timer_ms = 0.f;
+						if (ev) ev->duck_changed = true;
+						if (!s.on_ground && was_ducked) {
 							s.pos = cand;
-							s.ducked = false;
 							// AIR unduck: the flag clears and the origin
 							// shifts, but the COLLISION hull stays ducked
-							// until grounding (battery+oracle fitted - see
-							// PlayerState::hull_ducked).
-							s.hull_state = p.unduck_hull_defer
-								? 2 : 0;   // transient top 62.5
-							if (ev) ev->duck_changed = true;
-						}
-						// No room: stay ducked (engine behavior).
-					} else {
-						if (!w.OriginInSolid(s.pos, false)) {
-							s.ducked = false;
-							s.hull_state = 0;        // ground: stand now
-							if (ev) ev->duck_changed = true;
+							// until grounding (battery+oracle fitted).
+							s.hull_state = p.unduck_hull_defer ? 2 : 0;
+						} else {
+							s.hull_state = 0;    // ground: stand now
 						}
 					}
+				} else {
+					// Blocked under geometry: reset so we retry next tick.
+					s.duck_timer_ms = 1000.f;
 				}
 			}
 		}
@@ -467,11 +496,17 @@ namespace Solver {
 			s.basevel = Vec3();
 		s.basevel_flag = false;
 
-		// ReduceTimers: the stamina clock drains every tick, airborne too.
+		// ReduceTimers: the stamina clock drains every tick, airborne too;
+		// the SDK duck timer counts DOWN alongside it.
 		if (s.stamina > 0.f) {
 			s.stamina -= p.dt * 1000.f;
 			if (s.stamina < 0.f)
 				s.stamina = 0.f;
+		}
+		if (s.duck_timer_ms > 0.f) {
+			s.duck_timer_ms -= p.dt * 1000.f;
+			if (s.duck_timer_ms < 0.f)
+				s.duck_timer_ms = 0.f;
 		}
 
 		// PlayerMove: Duck() runs before the move itself, and the SDK

@@ -46,6 +46,9 @@ namespace Solver {
 		float walkable_z = 0.7f;         // minimum ground plane normal.z
 		float duck_speed_frac = 0.34f;   // CSS fully-ducked maxspeed fraction
 		float time_to_duck_ms = 400.f;   // ground duck transition time
+		float time_to_unduck_ms = 200.f; // SDK TIME_TO_UNDUCK (ducking stays
+		                                 // true through the unduck - fuzz-
+		                                 // measured via the SET-path jump)
 		// In-air duck/unduck origin shift. ENGINE-MEASURED 2026-08-13 from the
 		// basictest ground truth: duck tick +8.500 exactly, unduck −8.500
 		// exactly - NOT the SDK-theoretical hull delta (72-54=18). The duck
@@ -97,8 +100,14 @@ namespace Solver {
 		// grounding re-bases it (engine release bracketed to (56.7, 63.7);
 		// the engine's own 72-hull trace HITS where its movement flew).
 		unsigned char hull_state = 0;
-		bool ducking = false;      // ground transition in progress
-		float duck_elapsed_ms = 0.f;
+		// SDK duck state machine (fuzz-corrected 2026-08-15): m_bDucking is
+		// true during BOTH transitions - duck AND unduck - and the shared
+		// timer COUNTS DOWN from 1000 (drained in ReduceTimers). A ground
+		// duck tapped and released keeps ducking=true for TIME_TO_UNDUCK
+		// (200ms), which flips the jump to the SET path: fuzz_a's t4 jump
+		// measured 289.99 (SET) where the instant-cancel model gave 283.99.
+		bool ducking = false;      // transition in progress (either way)
+		float duck_timer_ms = 0.f; // SDK m_flDucktime, counts DOWN from 1000
 		bool on_ground = false;
 		int  ground_brush = -1;    // index into World::brushes (-1 = none)
 		int  old_buttons = 0;      // IN_JUMP release gate lives here
