@@ -660,9 +660,23 @@ namespace Solver {
 					if (d0 > 0.f) {
 						outside = true;
 						if (d1 > 0.f) { miss = true; break; }
-						// UNCLAMPED compare: started-touching corners pick the
-						// least-negative enterfrac (the engine's tie-break).
-						const float tt = (d0 - kDistEpsilon) / (d0 - d1);
+						// ENGINE-EXACT enter selection (oracle query 6654,
+						// 2026-08-15): CM_ClipBoxToBrush CLAMPS the padded
+						// enter fraction to 0 BEFORE the compare, so every
+						// started-touching plane ties at exactly 0 and the
+						// strict '>' keeps the FIRST in brushside (lump)
+						// order - SIDE ORDER is the tie-break, not least-
+						// negative. At ramp 2's base the wall (side 2,
+						// tt -0.029) beats the slope (side 5, tt exactly
+						// 0.000 = one DIST_EPSILON standoff); the unclamped
+						// H' rule picked the slope and manufactured a climb
+						// the engine never grants. H' survived its 3,555
+						// answers because two started-touching entries never
+						// competed there; the clamp rule reproduces all of
+						// those AND this seam.
+						float tt = (d0 - kDistEpsilon) / (d0 - d1);
+						if (tt < 0.f)
+							tt = 0.f;
 						if (tt > tmin) { tmin = tt; enter = pi; }
 						const float tn = d0 / (d0 - d1);
 						if (tn > tmin_t) tmin_t = tn;

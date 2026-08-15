@@ -804,6 +804,64 @@ namespace {
 		return 0;
 	}
 
+	// ---- traceone: per-plane arithmetic dump for ONE hull trace (seam
+	// forensics - shows every candidate brush's d0/d1/enterfracs so plane
+	// selection disagreements are decided by numbers, not conjecture). ----
+	int CmdTraceOne(const std::string& map_path, const ReplayOpts& o,
+	                const Vec3& a, const Vec3& b, int hull) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		printf("traceone a(%.6f,%.6f,%.6f) -> b(%.6f,%.6f,%.6f) hull %d\n",
+			a.X, a.Y, a.Z, b.X, b.Y, b.Z, hull);
+		const float kEps = 0.03125f;
+		for (const WorldBrush& bc : w.brushes) {
+			const std::vector<float>& pd = hull == 1 ? bc.d_duck
+				: hull == 2 ? bc.d_unduck : bc.d_stand;
+			// Quick AABB reject in origin space.
+			const Vec3& gmn = hull == 1 ? bc.gmin_duck
+				: hull == 2 ? bc.gmin_unduck : bc.gmin_stand;
+			const Vec3& gmx = hull == 1 ? bc.gmax_duck
+				: hull == 2 ? bc.gmax_unduck : bc.gmax_stand;
+			Vec3 lo(fminf(a.X, b.X), fminf(a.Y, b.Y), fminf(a.Z, b.Z));
+			Vec3 hi(fmaxf(a.X, b.X), fmaxf(a.Y, b.Y), fmaxf(a.Z, b.Z));
+			if (hi.X < gmn.X - 1.f || lo.X > gmx.X + 1.f
+				|| hi.Y < gmn.Y - 1.f || lo.Y > gmx.Y + 1.f
+				|| hi.Z < gmn.Z - 1.f || lo.Z > gmx.Z + 1.f)
+				continue;
+			printf(" brush id %d (%d planes, %d sides):\n", bc.id,
+				static_cast<int>(bc.n.size()), bc.nsides);
+			for (size_t pi = 0; pi < bc.n.size(); ++pi) {
+				const float d0 = Dot(bc.n[pi], a) - pd[pi];
+				const float d1 = Dot(bc.n[pi], b) - pd[pi];
+				const char* role = d0 > 0.f
+					? (d1 > 0.f ? "MISS(both out)" : "ENTER")
+					: (d1 > 0.f ? "LEAVE" : "inside");
+				float tt = 0.f, tn = 0.f;
+				if (d0 != d1) {
+					tt = (d0 - kEps) / (d0 - d1);
+					tn = d0 / (d0 - d1);
+				}
+				printf("  p%-2d pid%-3d n(% .4f,% .4f,% .4f) pd %.4f "
+					"d0 % .5f d1 % .5f %s tt % .5f tn % .5f\n",
+					static_cast<int>(pi), bc.pid[pi],
+					bc.n[pi].X, bc.n[pi].Y, bc.n[pi].Z, pd[pi],
+					d0, d1, role, tt, tn);
+			}
+		}
+		TraceResult tr;
+		const float fr = w.TraceHull3(a, b, hull, &tr);
+		printf("our answer: frac %.6f brush %d plane %d n(%.4f,%.4f,%.4f)\n",
+			fr, tr.brush >= 0 ? w.brushes[tr.brush].id : -1, tr.plane,
+			tr.normal.X, tr.normal.Y, tr.normal.Z);
+		fflush(stdout);
+		return 0;
+	}
+
 	// One row of the DLL's Map Solve ground-truth export (tick -1 = anchor).
 	struct EngineRow {
 		int tick = 0;
@@ -2647,6 +2705,18 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdBatteryGen(argv[2], o);
+	}
+	if (cmd == "traceone" && argc >= 10) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 10, o))
+			return 1;
+		const Vec3 a(static_cast<float>(atof(argv[3])),
+			static_cast<float>(atof(argv[4])),
+			static_cast<float>(atof(argv[5])));
+		const Vec3 b(static_cast<float>(atof(argv[6])),
+			static_cast<float>(atof(argv[7])),
+			static_cast<float>(atof(argv[8])));
+		return CmdTraceOne(argv[2], o, a, b, atoi(argv[9]));
 	}
 	if (cmd == "tracegen-map" && argc >= 3) {
 		ReplayOpts o;
