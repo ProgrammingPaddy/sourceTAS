@@ -113,6 +113,13 @@ namespace {
 		int stamina = 0, ducked = 0, ducking = 0, ducktime = 0;
 		int mins = 0, maxs = 0;
 		int gravity = 0, basevel = 0;
+		// THE ground truth, literally: SetGroundEntity writes this handle.
+		// FL_ONGROUND lags it on the client - measured twice now (the engine
+		// jumped from a state whose flag read airborne, and an isolated
+		// CategorizePosition set ground on 0 of 72 states the engine itself
+		// had recorded as grounded while the handle was the only thing it
+		// actually wrote).
+		int groundent = 0;
 		bool init = false;
 	} g_off;
 
@@ -140,6 +147,9 @@ namespace {
 		g_off.basevel    = NetVars::Offset("DT_CSPlayer", "m_vecBaseVelocity");
 		if (!g_off.basevel)
 			g_off.basevel = NetVars::Offset("DT_BasePlayer", "m_vecBaseVelocity");
+		g_off.groundent  = NetVars::Offset("DT_CSPlayer", "m_hGroundEntity");
+		if (!g_off.groundent)
+			g_off.groundent = NetVars::Offset("DT_BasePlayer", "m_hGroundEntity");
 		g_off.init = true;
 	}
 
@@ -447,6 +457,7 @@ namespace {
 		float ox, oy, oz, vx, vy, vz;
 		int   flags, ducked, ducking, ret;
 		float ducktime, stamina, sfric, maxz;
+		int   groundent;   // raw m_hGroundEntity handle: -1/0xFFFFFFFF = none
 		int   ok;
 	};
 
@@ -540,6 +551,8 @@ namespace {
 			out->stamina  = g_off.stamina ? *reinterpret_cast<float*>(pb + g_off.stamina) : 0.f;
 			out->sfric    = *reinterpret_cast<float*>(pb + kSurfFricOff);
 			out->maxz     = g_off.maxs ? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
+			out->groundent = g_off.groundent
+				? *reinterpret_cast<int*>(pb + g_off.groundent) : 0;
 			out->ret      = ret;
 			out->ok       = 1;
 			EndStateGuard();
@@ -558,18 +571,18 @@ namespace {
 			return;
 		fprintf(fo, "# funcprobe v1 ctxgate %d\n", g_gm_ctx_gate);
 		fprintf(fo, "id,fn,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,ducktime,"
-			"stamina,sfric,maxz,ret,ok\n");
+			"stamina,sfric,maxz,ret,ok,groundent\n");
 		for (size_t i = 0; i < s_fp_probes.size(); ++i) {
 			const FuncProbeOut& o = s_fp_outs[i];
 			const int pi = s_fp_probes[i].pin;
 			fprintf(fo, "%d,%s,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
-				"%.9g,%.9g,%.9g,%.9g,%d,%d\n",
+				"%.9g,%.9g,%.9g,%.9g,%d,%d,%d\n",
 				static_cast<int>(i),
 				(pi >= 0 && pi < static_cast<int>(s_fp_pins.size()))
 					? s_fp_pins[pi].name : "?",
 				o.ox, o.oy, o.oz, o.vx, o.vy, o.vz, o.flags, o.ducked,
 				o.ducking, o.ducktime, o.stamina, o.sfric, o.maxz,
-				o.ret, o.ok);
+				o.ret, o.ok, o.groundent);
 		}
 		fclose(fo);
 	}

@@ -888,7 +888,7 @@ namespace {
 			float ox, oy, oz, vx, vy, vz;
 			int flags, ducked, ducking;
 			float ducktime, stamina, sfric, maxz;
-			int ret, ok;
+			int ret, ok, groundent;
 		};
 		int nctrl = 0;
 		{
@@ -918,12 +918,14 @@ namespace {
 				if (l[0] == '#' || l[0] == 'i') continue;
 				R r = {};
 				int id = 0;
-				if (sscanf_s(l, "%d,%47[^,],%f,%f,%f,%f,%f,%f,%d,%d,%d,"
-					"%f,%f,%f,%f,%d,%d",
+				r.groundent = 0;
+				const int nf = sscanf_s(l, "%d,%47[^,],%f,%f,%f,%f,%f,%f,%d,%d,%d,"
+					"%f,%f,%f,%f,%d,%d,%d",
 					&id, r.fn, static_cast<unsigned>(sizeof(r.fn)),
 					&r.ox, &r.oy, &r.oz, &r.vx, &r.vy, &r.vz,
 					&r.flags, &r.ducked, &r.ducking, &r.ducktime, &r.stamina,
-					&r.sfric, &r.maxz, &r.ret, &r.ok) == 17)
+					&r.sfric, &r.maxz, &r.ret, &r.ok, &r.groundent);
+				if (nf >= 17)
 					rs.push_back(r);
 			}
 			fclose(f);
@@ -941,7 +943,10 @@ namespace {
 			int ok_g = 0, bad_g = 0;
 			for (int i = 0; i < nctrl && i < static_cast<int>(n); ++i) {
 				if (!rs[i].ok) continue;
-				if ((rs[i].flags & 1) != 0) ok_g++; else bad_g++;
+				// m_hGroundEntity: a valid handle means grounded. An unset
+				// EHANDLE reads 0xFFFFFFFF (-1); 0 also means none.
+				const bool eg = rs[i].groundent != -1 && rs[i].groundent != 0;
+				if (eg) ok_g++; else bad_g++;
 			}
 			printf("funcdiff: CONTROL %d states the engine recorded as "
 				"GROUNDED in a real run, fed in with the flag CLEARED -> "
@@ -976,7 +981,7 @@ namespace {
 			s.surface_friction = ps[i].sfric;
 			s.hull_state = ps[i].hullmaxz < 60.f ? 1 : 0;
 			Fn::CategorizePosition(s, w, o.params);
-			const bool eng_ground = (rs[i].flags & 1) != 0;
+			const bool eng_ground = rs[i].groundent != -1 && rs[i].groundent != 0;
 			const float dp = Len(s.pos - Vec3(rs[i].ox, rs[i].oy, rs[i].oz));
 			const float dv = Len(s.vel - Vec3(rs[i].vx, rs[i].vy, rs[i].vz));
 			const bool ok = dp <= 0.001f && dv <= 0.001f
@@ -3735,4 +3740,5 @@ int main(int argc, char** argv) {
 	PrintUsage();
 	return 1;
 }
+
 
