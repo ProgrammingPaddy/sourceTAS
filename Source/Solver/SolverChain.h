@@ -55,6 +55,9 @@ namespace Solver {
 		float wloss = 6.5f;
 		float mix_mu = 0.4f;
 		float w_tick = 500.f;
+		// v17: continuation-approach weight in segment fitness (overrides
+		// the SmoothConfig default for chain segments).
+		float w_fin_dmin = 250.f;
 		// Diagnosis: write every dead segment's best attempt as a
 		// replayable tape here (empty = off).
 		std::string dump_dir;
@@ -111,11 +114,13 @@ namespace Solver {
 			std::vector<TapeFrame> fin_frames;
 		};
 		// target_face < 0 = END landing attempt. [ty_lo, ty_hi] = board
-		// height band on the face (clause-3 enumeration).
+		// height band on the face (clause-3 enumeration). budget_scale
+		// multiplies the solve budget (near-miss END escalation).
 		SegOut SolveSegment(const PlayerState& root, float yaw,
 		                    int target_face, bool first_segment,
 		                    unsigned rng, long long* ticks,
-		                    float ty_lo = 0.f, float ty_hi = 1.f);
+		                    float ty_lo = 0.f, float ty_hi = 1.f,
+		                    double budget_scale = 1.0);
 		// Replay an assembled stream from the anchor: authoritative scored
 		// ticks / ending class for candidate ranking.
 		struct AsmStats {

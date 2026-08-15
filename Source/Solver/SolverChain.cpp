@@ -67,7 +67,8 @@ namespace Solver {
 	                                              bool first_segment,
 	                                              unsigned rng,
 	                                              long long* ticks,
-	                                              float ty_lo, float ty_hi) {
+	                                              float ty_lo, float ty_hi,
+	                                              double budget_scale) {
 		SmoothConfig sc;
 		sc.params = cfg_.params;
 		sc.end_brush_id = cfg_.end_brush_id;
@@ -96,6 +97,8 @@ namespace Solver {
 			sc.budget_seconds = cfg_.end_seconds > cfg_.seg_seconds
 				? cfg_.end_seconds : cfg_.seg_seconds;
 		}
+		sc.w_fin_dmin = cfg_.w_fin_dmin;
+		sc.budget_seconds *= budget_scale;
 
 		SmoothOpt opt(w_, sc, anchor_);
 		opt.SetRoot(root, yaw);
@@ -309,18 +312,31 @@ namespace Solver {
 					cfg_.rng_seed + 7919u * ++seg_counter,
 					&res.ticks_simulated);
 				res.segments_solved++;
-				// NEAR-MISS ESCALATION: a sub-100u endgame is often one rng
-				// arm from landing (the d31 plateau) - retry once before
-				// moving on.
+				// NEAR-MISS ESCALATION LADDER (v17): a sub-100u endgame is
+				// the money segment - re-arm with GROWING budgets (2x, then
+				// 3x if still sub-60) instead of one same-size retry. The
+				// v16 d49 corridor is exactly the class this feeds.
 				if (!endseg.finished && endseg.dmin < 100.f
 					&& elapsed() < cfg_.total_seconds - cfg_.final_seconds) {
 					SegOut retry = SolveSegment(node.st, node.yaw, -1, false,
 						cfg_.rng_seed + 7919u * ++seg_counter + 13u,
-						&res.ticks_simulated);
+						&res.ticks_simulated, 0.f, 1.f, 2.0);
 					res.segments_solved++;
-					line += " ->END retry";
+					line += " ->END retry2x";
 					if (retry.finished || retry.dmin < endseg.dmin)
 						endseg = retry;
+					if (!endseg.finished && endseg.dmin < 60.f
+						&& elapsed() < cfg_.total_seconds
+							- cfg_.final_seconds) {
+						SegOut r3 = SolveSegment(node.st, node.yaw, -1,
+							false,
+							cfg_.rng_seed + 7919u * ++seg_counter + 101u,
+							&res.ticks_simulated, 0.f, 1.f, 3.0);
+						res.segments_solved++;
+						line += " retry3x";
+						if (r3.finished || r3.dmin < endseg.dmin)
+							endseg = r3;
+					}
 				}
 				dend_here = endseg.finished ? 0.f
 					: (endseg.dmin < 1500.f ? endseg.dmin : 1500.f);
@@ -457,11 +473,16 @@ namespace Solver {
 						child.skel = node.skel;
 						child.skel.push_back(fi);
 						nodes.push_back(child);
-						// GOAL-FIRST ordering: children inherit this node's
-						// endgame distance as expansion priority; junction V
-						// only tie-breaks. The queue spends END budget where
-						// finishing is already nearly true.
-						pq.push({ -dend_here + seg.V * 1e-9f,
+						// GOAL-FIRST ordering v17: the child's OWN
+						// continuation approach (fd) is the primary prior -
+						// it correctly ranked every v16 child ([7>8] fd
+						// 1023-1053 vs [7>9] fd 485-665) where the V
+						// tie-break burned three expansions on the dead hot
+						// class. Parent endgame distance tie-breaks.
+						const float fdc = seg.fin_dmin < 1e8f
+							? (seg.fin_dmin < 2000.f ? seg.fin_dmin : 2000.f)
+							: dend_here;
+						pq.push({ -fdc - dend_here * 1e-4f,
 							static_cast<int>(nodes.size()) - 1 });
 						char b[128];
 						_snprintf_s(b, sizeof(b), _TRUNCATE,
