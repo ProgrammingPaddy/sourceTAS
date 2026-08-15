@@ -115,6 +115,16 @@ namespace Solver {
 		out.dmin = r.best_stats.dmin;
 		out.best_x = r.best_x;
 		if (!r.ok) {
+			if (target_face < 0 && !r.best_x.empty()) {
+				// Near-miss END attempts stay REVIEWABLE: build the best
+				// attempt's frames so the campaign can export its closest
+				// line for in-game inspection (user request 2026-08-15).
+				SmoothOpt om(w_, sc, anchor_);
+				om.SetRoot(root, yaw);
+				om.SetQuiet(true);
+				SmoothStats ms;
+				om.BuildFrames(r.best_x, out.frames, &ms);
+			}
 			if (!cfg_.dump_dir.empty() && !r.best_x.empty()) {
 				SmoothOpt od(w_, sc, anchor_);
 				od.SetRoot(root, yaw);
@@ -404,6 +414,16 @@ namespace Solver {
 						" [z%.0f spd%.0f hdg%.0f]",
 						node.st.pos.Z, spd2, hdg);
 					line += cb;
+				}
+				// Track the closest near-miss ASSEMBLY for in-game review
+				// (frames now built even for failed END solves).
+				if (!endseg.finished && !endseg.frames.empty()
+					&& endseg.dmin < res.miss_dend) {
+					res.miss_dend = endseg.dmin;
+					res.miss_frames = node.stream;
+					res.miss_frames.insert(res.miss_frames.end(),
+						endseg.frames.begin(), endseg.frames.end());
+					res.miss_skeleton = node.skel;
 				}
 				if (endseg.finished) {
 					std::vector<TapeFrame> full = node.stream;

@@ -74,6 +74,11 @@ namespace Solver {
 		int segments_solved = 0;
 		int finishes = 0;
 		int finisher_skels = 0;      // distinct skeletons among finishers
+		// Best NEAR-MISS assembly (user request 2026-08-15: the closest
+		// line must be REVIEWABLE in game even when nothing finishes).
+		float miss_dend = 1e9f;
+		std::vector<TapeFrame> miss_frames;
+		std::vector<int> miss_skeleton;
 		long long ticks_simulated = 0;
 		double seconds = 0.0;
 	};

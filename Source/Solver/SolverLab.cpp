@@ -1499,6 +1499,32 @@ namespace {
 		if (!r.ok) {
 			printf("chain: NO clean line assembled. More --budget-s, "
 				"another --rng, more --seg-s.\n");
+			if (!r.miss_frames.empty()) {
+				// Export the closest NEAR-MISS for in-game review (user
+				// request 2026-08-15: "I want to look at it in game to
+				// more clearly say what it is doing wrong").
+				std::string sk = "[";
+				for (size_t i = 0; i < r.miss_skeleton.size(); ++i) {
+					if (i) sk += ">";
+					sk += std::to_string(
+						cs.Faces()[r.miss_skeleton[i]].brush_id);
+				}
+				sk += "]";
+				char tag[48];
+				_snprintf_s(tag, sizeof(tag), _TRUNCATE, "chainMISSd%d",
+					static_cast<int>(r.miss_dend));
+				const std::string mp = LabeledOutPath(map_path, tag,
+					static_cast<int>(r.miss_frames.size()),
+					static_cast<int>(r.miss_frames.size()), true);
+				if (WriteTas(mp, anchor, MapStem(map_path), r.miss_frames,
+					&err)) {
+					printf("chain: NEAR-MISS %s d%.0f written -> %s\n",
+						sk.c_str(), r.miss_dend, mp.c_str());
+					QualityScan(w, cfg.params, anchor, r.miss_frames,
+						cfg.start_brush_id, cfg.end_brush_id, true);
+					fflush(stdout);
+				}
+			}
 			return 2;
 		}
 		std::string sk = "[";
