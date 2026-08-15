@@ -45,6 +45,20 @@ namespace Prediction {
 	// previous tick. Runs on the game thread inside the sim; must be pure math.
 	using SimFrameFn = void(*)(int tick, const SimState& prev, Frame* out);
 
+	// ---- FUNCTION-LEVEL DIFFERENTIAL FUZZ (user directive 2026-08-15:
+	// "we have literally hooked into the exact functions... Input and output
+	// values being in perfect parity matter, the cause of those values
+	// doesn't, because if we have a 1-to-1 system, any arbitrary input will
+	// be handled identically").
+	//
+	// Each probe is an ARBITRARY player state + K ticks of arbitrary input,
+	// driven straight through the real SetupMove -> ProcessMovement ->
+	// FinishMove with the whole player restored byte-for-byte afterward.
+	// Every field that can affect or record a tick is an explicit input or
+	// output - no scenario, no map authoring, no reachability assumptions.
+	// Returns probes completed, or -1 if the engine context is unavailable.
+	int RunFuzz(const char* probe_path, const char* out_path);
+
 	// Resolve interfaces and install the FinishMove hook (from basehook_init).
 	void Install();
 

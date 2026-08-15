@@ -4,6 +4,7 @@
 #include "../Menu/Breadcrumb.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -289,6 +290,127 @@ namespace {
 
 	// --- editor simulation (Phase 2) ------------------------------------------
 	// Same pipeline, but the start state is teleported to an absolute anchor and
+	// ---- FUNCTION-LEVEL DIFFERENTIAL FUZZ ---------------------------------
+	// m_surfaceFriction on the CLIENT player (binary-decoded 2026-08-15:
+	// client.dll @0011adb4 / @0011fb81 - movss [player+0x1868] then mulss by
+	// sv_friction's parent value, the same Friction signature that pinned the
+	// server's +0x36C). Not a netvar, so it needs the literal offset; it is
+	// an explicit fuzz input AND output so the friction rule is measured, not
+	// assumed.
+	constexpr int kSurfFricOff = 0x1868;
+	constexpr int kFuzzTicks = 4;
+
+	struct FuzzProbeIn {
+		float ox, oy, oz, vx, vy, vz, bx, by, bz;
+		int   onground, ducked, ducking;
+		float ducktime, stamina, gravity, sfric;
+		float hullmin_z, hullmax_z, hull_xy;
+		float yaw[kFuzzTicks], fmove[kFuzzTicks], smove[kFuzzTicks];
+		int   buttons[kFuzzTicks];
+	};
+	struct FuzzTickOut {
+		float ox, oy, oz, vx, vy, vz, bx, by, bz;
+		int   flags, ducked, ducking;
+		float ducktime, stamina, sfric, maxz;
+		int   ok;
+	};
+
+	// ONE probe, POD-only so SEH can wrap it: write the arbitrary state, run
+	// kFuzzTicks of engine movement, record every output field per tick, then
+	// restore the player. A faulting probe is marked and the batch continues.
+	int RunOneFuzzProbeSEH(void* player, const FuzzProbeIn* in,
+	                       FuzzTickOut* out) {
+		__try {
+			if (!BeginStateGuard(player))
+				return 0;
+			char* pb = reinterpret_cast<char*>(player);
+			if (g_off.origin)
+				*reinterpret_cast<Vector*>(pb + g_off.origin) =
+					Vector(in->ox, in->oy, in->oz);
+			if (g_off.velocity)
+				*reinterpret_cast<Vector*>(pb + g_off.velocity) =
+					Vector(in->vx, in->vy, in->vz);
+			if (g_off.basevel)
+				*reinterpret_cast<Vector*>(pb + g_off.basevel) =
+					Vector(in->bx, in->by, in->bz);
+			if (g_off.flags) {
+				int fl = *reinterpret_cast<int*>(pb + g_off.flags);
+				fl = in->onground ? (fl | FL_ONGROUND) : (fl & ~FL_ONGROUND);
+				fl = in->ducked ? (fl | FL_DUCKING) : (fl & ~FL_DUCKING);
+				if (in->bx != 0.f || in->by != 0.f || in->bz != 0.f)
+					fl |= FL_BASEVELOCITY;
+				else
+					fl &= ~FL_BASEVELOCITY;
+				*reinterpret_cast<int*>(pb + g_off.flags) = fl;
+			}
+			if (g_off.ducked)   *reinterpret_cast<bool*>(pb + g_off.ducked) = in->ducked != 0;
+			if (g_off.ducking)  *reinterpret_cast<bool*>(pb + g_off.ducking) = in->ducking != 0;
+			if (g_off.ducktime) *reinterpret_cast<float*>(pb + g_off.ducktime) = in->ducktime;
+			if (g_off.stamina)  *reinterpret_cast<float*>(pb + g_off.stamina) = in->stamina;
+			if (g_off.gravity)  *reinterpret_cast<float*>(pb + g_off.gravity) = in->gravity;
+			*reinterpret_cast<float*>(pb + kSurfFricOff) = in->sfric;
+			if (g_off.mins)
+				*reinterpret_cast<Vector*>(pb + g_off.mins) =
+					Vector(-in->hull_xy, -in->hull_xy, in->hullmin_z);
+			if (g_off.maxs)
+				*reinterpret_cast<Vector*>(pb + g_off.maxs) =
+					Vector(in->hull_xy, in->hull_xy, in->hullmax_z);
+
+			alignas(16) unsigned char cmdbuf[sizeof(CUserCmd)];
+			CUserCmd* cmd = reinterpret_cast<CUserCmd*>(cmdbuf);
+			unsigned char movebuf[kMoveDataBufSize];
+
+			for (int t = 0; t < kFuzzTicks; ++t) {
+				memset(cmdbuf, 0, sizeof(cmdbuf));
+				memset(movebuf, 0, sizeof(movebuf));
+				cmd->command_number = t + 1;
+				cmd->tick_count     = t + 1;
+				cmd->viewangles     = QAngle(0.f, in->yaw[t], 0.f);
+				cmd->forwardmove    = in->fmove[t];
+				cmd->sidemove       = in->smove[t];
+				cmd->upmove         = 0.f;
+				cmd->buttons        = in->buttons[t];
+
+				CallV<kSetupMoveIdx>(g_pred, player, cmd, g_helper, movebuf);
+				if (t == 0) {
+					// SetupMove copies ABS velocity/origin; seed the movedata
+					// directly so the probe's exact state is what moves.
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff) =
+						Vector(in->vx, in->vy, in->vz);
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff) =
+						Vector(in->ox, in->oy, in->oz);
+				}
+				CallV<kProcessMovementIdx>(g_gm, player, movebuf);
+				g_orig_finishmove(g_pred, player, cmd, movebuf);
+				*s_p_curtime += g_interval;
+
+				FuzzTickOut& o = out[t];
+				const Vector& mo = *reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff);
+				const Vector& mv = *reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff);
+				o.ox = mo.X; o.oy = mo.Y; o.oz = mo.Z;
+				o.vx = mv.X; o.vy = mv.Y; o.vz = mv.Z;
+				o.flags   = g_off.flags ? *reinterpret_cast<int*>(pb + g_off.flags) : 0;
+				o.ducked  = g_off.ducked ? (*reinterpret_cast<bool*>(pb + g_off.ducked) ? 1 : 0) : 0;
+				o.ducking = g_off.ducking ? (*reinterpret_cast<bool*>(pb + g_off.ducking) ? 1 : 0) : 0;
+				o.ducktime = g_off.ducktime ? *reinterpret_cast<float*>(pb + g_off.ducktime) : 0.f;
+				o.stamina  = g_off.stamina ? *reinterpret_cast<float*>(pb + g_off.stamina) : 0.f;
+				o.sfric    = *reinterpret_cast<float*>(pb + kSurfFricOff);
+				o.maxz     = g_off.maxs ? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
+				const Vector bvv = g_off.basevel
+					? *reinterpret_cast<Vector*>(pb + g_off.basevel) : Vector(0.f, 0.f, 0.f);
+				o.bx = bvv.X; o.by = bvv.Y; o.bz = bvv.Z;
+				o.ok = 1;
+			}
+			EndStateGuard();
+			return 1;
+		}
+		__except (FaultFilter(GetExceptionInformation())) {
+			if (s_restore_ready)
+				EndStateGuard();
+			return 0;
+		}
+	}
+
 	// each tick's input comes from the provider (closed loop: it sees the
 	// simulated state after the previous tick).
 	int RunEditorSimSEH(void* player) {
@@ -610,6 +732,77 @@ void Prediction::Install() {
 
 void Prediction::GetPath(std::vector<Vector>& out) {
 	out.assign(g_path, g_path + g_path_count);
+}
+
+// FUNCTION-LEVEL DIFFERENTIAL FUZZ: read arbitrary probe states, run each
+// through the real engine movement, write every output field. Must run on
+// the game thread with a valid player (called from the FinishMove hook).
+int Prediction::RunFuzz(const char* probe_path, const char* out_path) {
+	if (!g_pred || !g_gm || !g_helper || !probe_path || !out_path)
+		return -1;
+	void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
+	if (!player)
+		return -1;
+	ResolveOffsets();
+	if (!g_off.origin || !g_off.velocity)
+		return -1;
+
+	std::vector<FuzzProbeIn> probes;
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, probe_path, "r") != 0 || !f)
+			return -1;
+		char line[1024];
+		while (fgets(line, sizeof(line), f)) {
+			if (line[0] == '#' || line[0] == 'i')   // comment / header
+				continue;
+			FuzzProbeIn p = {};
+			int id = 0;
+			const int n = sscanf_s(line,
+				"%d,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f,%f,%f,%f,"
+				"%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d",
+				&id, &p.ox, &p.oy, &p.oz, &p.vx, &p.vy, &p.vz,
+				&p.bx, &p.by, &p.bz, &p.onground, &p.ducked, &p.ducking,
+				&p.ducktime, &p.stamina, &p.gravity, &p.sfric,
+				&p.hullmin_z, &p.hullmax_z, &p.hull_xy,
+				&p.yaw[0], &p.fmove[0], &p.smove[0], &p.buttons[0],
+				&p.yaw[1], &p.fmove[1], &p.smove[1], &p.buttons[1],
+				&p.yaw[2], &p.fmove[2], &p.smove[2], &p.buttons[2],
+				&p.yaw[3], &p.fmove[3], &p.smove[3], &p.buttons[3]);
+			if (n == 36)
+				probes.push_back(p);
+		}
+		fclose(f);
+	}
+	if (probes.empty())
+		return -1;
+
+	std::vector<FuzzTickOut> outs(probes.size() * kFuzzTicks);
+	int done = 0;
+	for (size_t i = 0; i < probes.size(); ++i) {
+		FuzzTickOut* o = &outs[i * kFuzzTicks];
+		for (int t = 0; t < kFuzzTicks; ++t)
+			o[t] = FuzzTickOut{};
+		done += RunOneFuzzProbeSEH(player, &probes[i], o);
+	}
+
+	FILE* fo = nullptr;
+	if (fopen_s(&fo, out_path, "w") != 0 || !fo)
+		return -1;
+	fprintf(fo, "id,tick,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,ducktime,"
+		"stamina,sfric,maxz,bx,by,bz,ok\n");
+	for (size_t i = 0; i < probes.size(); ++i) {
+		for (int t = 0; t < kFuzzTicks; ++t) {
+			const FuzzTickOut& o = outs[i * kFuzzTicks + t];
+			fprintf(fo, "%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
+				"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d\n",
+				static_cast<int>(i), t, o.ox, o.oy, o.oz, o.vx, o.vy, o.vz,
+				o.flags, o.ducked, o.ducking, o.ducktime, o.stamina,
+				o.sfric, o.maxz, o.bx, o.by, o.bz, o.ok);
+		}
+	}
+	fclose(fo);
+	return done;
 }
 
 bool Prediction::RequestSim(const StartState& anchor, int ticks, SimFrameFn provider) {

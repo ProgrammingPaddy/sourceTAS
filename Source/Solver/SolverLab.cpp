@@ -148,6 +148,7 @@ namespace {
 		bool zone_clock = true;     // score = ticks from startzone exit
 		                            // (--clock anchor for the old absolute)
 		bool edge_bevels = true;    // false = pre-fix clip set (control arm)
+		int  fuzz_n = 0;            // fuzzgen: probe count (0 = default)
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
 		// smooth (line-space CMA) options
 		int pop = 0;                // population (0 = auto)
@@ -230,6 +231,7 @@ namespace {
 			else if (a == "--rollouts") { if (i + 1 < argc) o.rollouts = atoll(argv[++i]); else ok = false; }
 			else if (a == "--flips") ok = next_f(&o.flips);
 			else if (a == "--rng") { if (i + 1 < argc) o.rng = static_cast<unsigned>(atoll(argv[++i])); else ok = false; }
+			else if (a == "--n") ok = next_i(&o.fuzz_n);   // fuzzgen probe count
 			else if (a == "--cell") ok = next_f(&o.cell);
 			else if (a == "--max-ticks") ok = next_i(&o.max_ticks);
 			else if (a == "--threads") ok = next_i(&o.threads);
@@ -802,6 +804,297 @@ namespace {
 			"  SolverLab tracediff \"%s\" <results.csv>\n", out_path.c_str());
 		fflush(stdout);
 		return 0;
+	}
+
+	// ---- FUNCTION-LEVEL DIFFERENTIAL FUZZ (user directive 2026-08-15) ----
+	// The unit under test is the TRANSITION FUNCTION, not a scenario: an
+	// arbitrary player state + arbitrary inputs go in, the engine's exact
+	// next states come out, and our MoveTick must reproduce every field.
+	// Probes are generated to COVER the interaction classes the movement
+	// code branches on (sub-epsilon grazes, inside-solid starts, creases,
+	// every hull, every duck phase, every speed band) rather than to depict
+	// a plausible run. Deterministic LCG: the corpus regenerates identically.
+	constexpr int kFuzzTicks = 4;
+
+	int CmdFuzzGen(const std::string& map_path, const ReplayOpts& o,
+	               int nprobes, unsigned seed, const std::string& out_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		FILE* f = nullptr;
+		if (fopen_s(&f, out_path.c_str(), "w") != 0 || !f) {
+			printf("fuzzgen: cannot open %s\n", out_path.c_str());
+			return 1;
+		}
+		unsigned rng = seed ? seed : 1u;
+		auto next = [&rng]() {
+			rng = rng * 1664525u + 1013904223u;
+			return (rng >> 8) & 0xFFFFu;
+		};
+		auto frand = [&next]() { return next() / 65535.f; };
+		auto span = [&frand](float lo, float hi) {
+			return lo + (hi - lo) * frand();
+		};
+		// Speed bands: still, walk, surf, launch, and past sv_maxvelocity.
+		const float kSpeeds[6] = { 0.f, 50.f, 250.f, 850.f, 1500.f, 3600.f };
+		// Offsets from a face: inside, on, sub-epsilon, epsilon, step, clear.
+		const float kOffs[9] = { -1.f, -0.05f, -0.03125f, 0.f, 0.005f,
+		                         0.03125f, 0.1f, 1.f, 18.f };
+		const float kHullTops[3] = { 72.f, 54.f, 62.5f };
+
+		fprintf(f, "# fuzz probes v1 ticks=%d seed=%u map=%s\n",
+			kFuzzTicks, seed, MapStem(map_path).c_str());
+		fprintf(f, "id,ox,oy,oz,vx,vy,vz,bx,by,bz,onground,ducked,ducking,"
+			"ducktime,stamina,gravity,sfric,hullminz,hullmaxz,hullxy");
+		for (int t = 0; t < kFuzzTicks; ++t)
+			fprintf(f, ",yaw%d,fmove%d,smove%d,buttons%d", t, t, t, t);
+		fprintf(f, "\n");
+
+		for (int i = 0; i < nprobes; ++i) {
+			Vec3 pos, vel;
+			const int cls = i % 10;
+			if (cls < 5 && !w.brushes.empty()) {
+				// GEOMETRY-RELATIVE: park the hull a chosen offset off a
+				// real face, so grazes/creases/embeds are all exercised.
+				const WorldBrush& b = w.brushes[next() % w.brushes.size()];
+				const int pi = static_cast<int>(next() % (b.nsides > 0
+					? static_cast<unsigned>(b.nsides) : 1u));
+				const Vec3 n = b.n[pi];
+				Vec3 q(span(b.bmin.X, b.bmax.X), span(b.bmin.Y, b.bmax.Y),
+					span(b.bmin.Z, b.bmax.Z));
+				const float d = Dot(n, q) - b.d[pi];
+				q = q - Scale(n, d);                       // onto the plane
+				const float off = kOffs[next() % 9];
+				pos = q + Scale(n, off);
+				// Aim mostly INTO the face (the interesting half).
+				Vec3 dir(span(-1.f, 1.f), span(-1.f, 1.f), span(-1.f, 1.f));
+				const float dl = Len(dir);
+				dir = dl > 1e-4f ? Scale(dir, 1.f / dl) : Vec3(1.f, 0.f, 0.f);
+				if (Dot(dir, n) > 0.f && (next() & 3u))
+					dir = dir - Scale(n, 2.f * Dot(dir, n));
+				vel = Scale(dir, kSpeeds[next() % 6]);
+			} else {
+				// OPEN STATE: anywhere in the world box, any direction.
+				pos = Vec3(span(-2100.f, 2100.f), span(-2000.f, 1200.f),
+					span(-1000.f, 1200.f));
+				Vec3 dir(span(-1.f, 1.f), span(-1.f, 1.f), span(-1.f, 1.f));
+				const float dl = Len(dir);
+				dir = dl > 1e-4f ? Scale(dir, 1.f / dl) : Vec3(0.f, 0.f, -1.f);
+				vel = Scale(dir, kSpeeds[next() % 6]);
+			}
+			const int ducked = (next() % 3u == 0u) ? 1 : 0;
+			const int ducking = (next() % 4u == 0u) ? 1 : 0;
+			const float hulltop = ducked ? 54.f : kHullTops[next() % 3];
+			// Base velocity on a minority of probes (trigger_push physics).
+			const bool push = (next() % 8u == 0u);
+			const Vec3 bv = push
+				? Vec3(span(-400.f, 400.f), span(-400.f, 400.f),
+					span(-200.f, 400.f))
+				: Vec3();
+			fprintf(f, "%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+				"%d,%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g",
+				i, pos.X, pos.Y, pos.Z, vel.X, vel.Y, vel.Z,
+				bv.X, bv.Y, bv.Z,
+				(next() % 2u) ? 1 : 0, ducked, ducking,
+				(next() % 3u == 0u) ? span(0.f, 1000.f) : 0.f,   // ducktime
+				(next() % 3u == 0u) ? span(0.f, 1400.f) : 0.f,   // stamina
+				(next() % 6u == 0u) ? span(0.2f, 2.f) : 1.f,     // gravity
+				(next() % 3u == 0u) ? 0.25f : 1.f,               // sfric
+				0.f, hulltop, 16.f);
+			for (int t = 0; t < kFuzzTicks; ++t) {
+				int btn = 0;
+				if (next() % 3u == 0u) btn |= IN_DUCK;
+				if (next() % 4u == 0u) btn |= IN_JUMP;
+				fprintf(f, ",%.9g,%.9g,%.9g,%d", span(-180.f, 180.f),
+					(static_cast<int>(next() % 3u) - 1) * 450.f,
+					(static_cast<int>(next() % 3u) - 1) * 450.f, btn);
+			}
+			fprintf(f, "\n");
+		}
+		fclose(f);
+		printf("fuzzgen: %d probes x %d ticks -> %s\n", nprobes, kFuzzTicks,
+			out_path.c_str());
+		printf("fuzzgen: in-game Map Solve tab -> 'Run FUNCTION FUZZ', then\n"
+			"  SolverLab fuzzdiff <map.bsp> \"%s\" <results.csv>\n",
+			out_path.c_str());
+		fflush(stdout);
+		return 0;
+	}
+
+	// Replays every probe through OUR MoveTick and compares each engine
+	// output field. Reports by INTERACTION CLASS so an all-green run is a
+	// coverage statement, not just a pass count.
+	int CmdFuzzDiff(const std::string& map_path, const ReplayOpts& o,
+	                const std::string& probe_path,
+	                const std::string& res_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		struct Probe {
+			float ox, oy, oz, vx, vy, vz, bx, by, bz;
+			int onground, ducked, ducking;
+			float ducktime, stamina, gravity, sfric, hminz, hmaxz, hxy;
+			float yaw[kFuzzTicks], fm[kFuzzTicks], sm[kFuzzTicks];
+			int btn[kFuzzTicks];
+		};
+		std::vector<Probe> probes;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, probe_path.c_str(), "r") != 0 || !f) {
+				printf("fuzzdiff: cannot read %s\n", probe_path.c_str());
+				return 1;
+			}
+			char line[1024];
+			while (fgets(line, sizeof(line), f)) {
+				if (line[0] == '#' || line[0] == 'i')
+					continue;
+				Probe p = {};
+				int id = 0;
+				const int n = sscanf_s(line,
+					"%d,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f,%f,"
+					"%f,%f,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d",
+					&id, &p.ox, &p.oy, &p.oz, &p.vx, &p.vy, &p.vz,
+					&p.bx, &p.by, &p.bz, &p.onground, &p.ducked, &p.ducking,
+					&p.ducktime, &p.stamina, &p.gravity, &p.sfric,
+					&p.hminz, &p.hmaxz, &p.hxy,
+					&p.yaw[0], &p.fm[0], &p.sm[0], &p.btn[0],
+					&p.yaw[1], &p.fm[1], &p.sm[1], &p.btn[1],
+					&p.yaw[2], &p.fm[2], &p.sm[2], &p.btn[2],
+					&p.yaw[3], &p.fm[3], &p.sm[3], &p.btn[3]);
+				if (n == 36)
+					probes.push_back(p);
+			}
+			fclose(f);
+		}
+		struct Res {
+			float ox, oy, oz, vx, vy, vz;
+			int flags, ducked, ducking;
+			float ducktime, stamina, sfric, maxz, bx, by, bz;
+			int ok;
+		};
+		std::vector<Res> res;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, res_path.c_str(), "r") != 0 || !f) {
+				printf("fuzzdiff: cannot read %s\n", res_path.c_str());
+				return 1;
+			}
+			char line[1024];
+			while (fgets(line, sizeof(line), f)) {
+				if (line[0] == '#' || line[0] == 'i')
+					continue;
+				Res r = {};
+				int id = 0, tk = 0;
+				const int n = sscanf_s(line,
+					"%d,%d,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f,%f,%f,%f,%d",
+					&id, &tk, &r.ox, &r.oy, &r.oz, &r.vx, &r.vy, &r.vz,
+					&r.flags, &r.ducked, &r.ducking, &r.ducktime, &r.stamina,
+					&r.sfric, &r.maxz, &r.bx, &r.by, &r.bz, &r.ok);
+				if (n == 19)
+					res.push_back(r);
+			}
+			fclose(f);
+		}
+		if (probes.empty() || res.size() < probes.size() * kFuzzTicks) {
+			printf("fuzzdiff: %d probes, %d result rows - incomplete\n",
+				static_cast<int>(probes.size()),
+				static_cast<int>(res.size()));
+			return 1;
+		}
+		// Interaction classes, assigned from the PROBE's own setup so the
+		// report says what was covered, not just what passed.
+		const char* kClassName[8] = {
+			"air-open", "air-contact", "ground", "ducked", "duck-transition",
+			"basevel", "gravity-scaled", "extreme-speed" };
+		int cls_n[8] = {}, cls_bad[8] = {};
+		int faulted = 0, mismatch = 0, exact = 0;
+		int first_bad = -1, first_bad_tick = -1;
+		float worst = 0.f;
+		int worst_probe = -1;
+		for (size_t i = 0; i < probes.size(); ++i) {
+			const Probe& p = probes[i];
+			int cls = 0;
+			const float spd = sqrtf(p.vx * p.vx + p.vy * p.vy + p.vz * p.vz);
+			if (spd > 3500.f) cls = 7;
+			else if (p.gravity != 1.f) cls = 6;
+			else if (p.bx != 0.f || p.by != 0.f || p.bz != 0.f) cls = 5;
+			else if (p.ducking) cls = 4;
+			else if (p.ducked) cls = 3;
+			else if (p.onground) cls = 2;
+			else {
+				// contact vs open: is anything within a tick's reach?
+				TraceResult tr;
+				const Vec3 a(p.ox, p.oy, p.oz);
+				const Vec3 b(p.ox + p.vx * o.params.dt,
+					p.oy + p.vy * o.params.dt, p.oz + p.vz * o.params.dt);
+				cls = (w.TraceHull3(a, b, p.hmaxz < 60.f ? 1
+					: (p.hmaxz < 70.f ? 2 : 0), &tr) < 1.f) ? 1 : 0;
+			}
+			cls_n[cls]++;
+
+			PlayerState s;
+			s.pos = Vec3(p.ox, p.oy, p.oz);
+			s.vel = Vec3(p.vx, p.vy, p.vz);
+			s.basevel = Vec3(p.bx, p.by, p.bz);
+			s.basevel_flag = (p.bx != 0.f || p.by != 0.f || p.bz != 0.f);
+			s.on_ground = p.onground != 0;
+			s.ducked = p.ducked != 0;
+			s.ducking = p.ducking != 0;
+			s.duck_timer_ms = p.ducktime;
+			s.stamina = p.stamina;
+			s.gravity_scale = p.gravity;
+			s.surface_friction = p.sfric;
+			s.hull_state = p.hmaxz < 60.f ? 1 : (p.hmaxz < 70.f ? 2 : 0);
+			if (s.on_ground) {
+				TraceResult tr;
+				const float gf = w.TraceHull3(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.hull_state, &tr);
+				if (gf < 1.f && tr.brush >= 0)
+					s.ground_brush = tr.brush;
+			}
+			bool bad = false;
+			for (int t = 0; t < kFuzzTicks; ++t) {
+				const Res& r = res[i * kFuzzTicks + t];
+				if (!r.ok) { faulted++; bad = false; break; }
+				MoveTick(s, w, o.params, 0.f, p.yaw[t], p.fm[t], p.sm[t],
+					0.f, p.btn[t], nullptr);
+				const float dp = Len(s.pos - Vec3(r.ox, r.oy, r.oz));
+				const float dv = Len(s.vel - Vec3(r.vx, r.vy, r.vz));
+				const bool eng_ground = (r.flags & 1) != 0;
+				if (dp > 0.03f || dv > 0.05f
+					|| eng_ground != s.on_ground
+					|| (r.ducked != 0) != s.ducked
+					|| fabsf(r.sfric - s.surface_friction) > 0.01f) {
+					bad = true;
+					if (dp > worst) { worst = dp; worst_probe = static_cast<int>(i); }
+					if (first_bad < 0) { first_bad = static_cast<int>(i); first_bad_tick = t; }
+					break;
+				}
+			}
+			if (bad) { mismatch++; cls_bad[cls]++; }
+			else exact++;
+		}
+		printf("fuzzdiff: %d probes x %d ticks | EXACT %d | MISMATCH %d | "
+			"engine-faulted %d\n", static_cast<int>(probes.size()),
+			kFuzzTicks, exact, mismatch, faulted);
+		printf("fuzzdiff: coverage by interaction class\n");
+		for (int c = 0; c < 8; ++c)
+			printf("  %-16s probes %6d   mismatches %6d%s\n", kClassName[c],
+				cls_n[c], cls_bad[c], cls_n[c] == 0 ? "   <- EMPTY CLASS" : "");
+		if (first_bad >= 0)
+			printf("fuzzdiff: first mismatch probe %d tick %d; worst |dpos| "
+				"%.3f u (probe %d)\n", first_bad, first_bad_tick, worst,
+				worst_probe);
+		fflush(stdout);
+		return mismatch > 0 ? 2 : 0;
 	}
 
 	// ---- traceone: per-plane arithmetic dump for ONE hull trace (seam
@@ -2705,6 +2998,25 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdBatteryGen(argv[2], o);
+	}
+	if (cmd == "fuzzgen" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		const int n = o.fuzz_n > 0 ? o.fuzz_n : 4000;
+		const unsigned seed = o.rng ? o.rng : 20260815u;
+		char documents[MAX_PATH];
+		std::string outp = "fuzz_probes.csv";
+		if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents)))
+			outp = std::string(documents) + "\\sourceTAS\\solver\\fuzz_probes.csv";
+		return CmdFuzzGen(argv[2], o, n, seed, outp);
+	}
+	if (cmd == "fuzzdiff" && argc >= 5) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 5, o))
+			return 1;
+		return CmdFuzzDiff(argv[2], o, argv[3], argv[4]);
 	}
 	if (cmd == "traceone" && argc >= 10) {
 		ReplayOpts o;

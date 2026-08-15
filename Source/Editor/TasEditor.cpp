@@ -8648,6 +8648,29 @@ namespace {
 					g_batsim_on = false;
 					g_batsim_own = false;
 				}
+			} else if (ImGui::Button("Run FUNCTION FUZZ (engine query)",
+				ImVec2(300, 0))) {
+				// FUNCTION-LEVEL DIFFERENTIAL FUZZ: drive thousands of
+				// ARBITRARY states + inputs through the real movement code
+				// and record every output field. No scenario, no map
+				// authoring - the transition function itself is under test.
+				const std::string fdir = SolverDir();
+				if (fdir.empty()) {
+					g_status = "Fuzz: couldn't resolve the solver directory.";
+				} else {
+					const std::string fin = fdir + "\\fuzz_probes.csv";
+					const std::string fout = fdir + "\\fuzz_results.csv";
+					const int fn = Prediction::RunFuzz(fin.c_str(), fout.c_str());
+					if (fn < 0) {
+						g_status = "Fuzz: no probe file (SolverLab fuzzgen) "
+							"or no player/engine context.";
+					} else {
+						char fbuf[192];
+						Sfmt(fbuf, "Fuzz: %d probes -> fuzz_results.csv", fn);
+						g_status = fbuf;
+						AppendExportLog("fuzz", fout, "function-fuzz", fn);
+					}
+				}
 			} else if (ImGui::Button(
 				"Run ALIGNMENT battery (engine query)", ImVec2(300, 0))) {
 				g_batsim_q.clear();
