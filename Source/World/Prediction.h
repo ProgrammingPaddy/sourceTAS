@@ -74,6 +74,10 @@ namespace Prediction {
 	// standing still - in motion they differ by one tick of movement).
 	bool LastRealMoveOrigin(Vector& out);
 
+	// m_flMaxSpeed of the newest real command (weapon-dependent: knife 250,
+	// NO weapon 260 - the surf standard). Read, never assumed.
+	bool LastRealMaxSpeed(float* out);
+
 	// The engine's live gpGlobals->curtime (pinned RVA; see Prediction.cpp).
 	// Frozen while the game is paused - overlay submission keys off it, since
 	// debug overlays expire against curtime and a frozen clock means nothing

@@ -71,6 +71,7 @@ namespace {
 	// Origin of the newest REAL command's movedata (basis diagnostic: lets the
 	// menu compare the movement pipeline's origin against the netvar origin).
 	Vector g_real_move_origin;
+	float  g_real_maxspeed = 0.f;
 	bool   g_real_move_valid = false;
 	int    g_pred_flags = 0;          // player m_fFlags after the newest
 	bool   g_pred_flags_valid = false;// first-time-predicted command
@@ -456,6 +457,10 @@ namespace {
 
 		if (movedata) {
 			g_real_move_origin = *reinterpret_cast<Vector*>(reinterpret_cast<char*>(movedata) + kMoveDataOriginOff);
+			// Live m_flMaxSpeed (+0x3C, identified by two weapon states:
+			// knife 250 / no weapon 260) - the weapon-dependent movement
+			// cap, READ from the real command so params never assume it.
+			g_real_maxspeed = *reinterpret_cast<float*>(reinterpret_cast<char*>(movedata) + 0x3C);
 			g_real_move_valid = true;
 		}
 
@@ -700,6 +705,13 @@ bool Prediction::LiveFlags(int* out) {
 	if (!g_off.flags)
 		return false;
 	*out = NetVars::Get<int>(player, g_off.flags);
+	return true;
+}
+
+bool Prediction::LastRealMaxSpeed(float* out) {
+	if (!g_real_move_valid)
+		return false;
+	if (out) *out = g_real_maxspeed;
 	return true;
 }
 

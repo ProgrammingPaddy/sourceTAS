@@ -7869,8 +7869,18 @@ namespace {
 		out << line;
 		Sfmt(line, "airaccelerate %g  # editor strafe model\n", g_air_accel);
 		out << line;
-		Sfmt(line, "maxspeed %g  # editor strafe model wishspeed\n", g_wishspeed);
-		out << line;
+		{
+			// Weapon-dependent movement cap, READ from the newest real
+			// command when available (knife 250, NO weapon 260 - the surf
+			// standard); the editor model value is only the fallback.
+			float ms;
+			if (Prediction::LastRealMaxSpeed(&ms) && ms > 1.f)
+				Sfmt(line, "maxspeed %g  # live m_flMaxSpeed (weapon)\n", ms);
+			else
+				Sfmt(line, "maxspeed %g  # editor strafe model wishspeed\n",
+					g_wishspeed);
+			out << line;
+		}
 		Sfmt(line, "air_speed_cap %g  # editor strafe model\n", g_air_cap);
 		out << line;
 		// LIVE server cvars (user directive 2026-08-14: read, never assume
@@ -8111,6 +8121,15 @@ namespace {
 		std::ofstream out(path, std::ios::trunc);
 		if (!out)
 			return;
+		{
+			// MAP PRECONDITION HEADER (user finding 2026-08-14: a battery
+			// run on the wrong map produced garbage that were still "real
+			// engine values" - of the wrong world). The scorer refuses
+			// captures whose map does not match the deck's.
+			char mapname[128] = "";
+			BspWorld::CurrentMapName(mapname, sizeof(mapname));
+			out << "# map " << mapname << "\n";
+		}
 		out << "tick,x,y,z,vx,vy,vz,speed2d,ground,ducked,buttons,yaw,"
 			"hulltop,mspd_a,mspd_b\n";
 		char line[384];
@@ -8557,19 +8576,39 @@ namespace {
 				g_batsim_q.clear();
 				g_batsim_next = 0;
 				g_batsim_done = 0;
+				// MAP PRECONDITION: decks anchor to coordinates in THEIR
+				// map; simulated in another world the engine answers a
+				// different question (measured: a wrong-map run pinned the
+				// player in solid). Queue only matching decks.
+				char cur[128] = "";
+				BspWorld::CurrentMapName(cur, sizeof(cur));
+				int wrong_map = 0;
 				const std::vector<Run>& blib = g_tas.Library();
-				for (int i = 0; i < static_cast<int>(blib.size()); ++i)
-					if (blib[i].name.rfind("battery_", 0) == 0
-						&& !blib[i].Empty() && blib[i].start.valid)
-						g_batsim_q.push_back(i);
+				for (int i = 0; i < static_cast<int>(blib.size()); ++i) {
+					if (blib[i].name.rfind("battery_", 0) != 0
+						|| blib[i].Empty() || !blib[i].start.valid)
+						continue;
+					if (!blib[i].map.empty() && cur[0]
+						&& blib[i].map != cur) {
+						wrong_map++;
+						continue;
+					}
+					g_batsim_q.push_back(i);
+				}
 				if (g_batsim_q.empty()) {
-					g_status = "Battery: no 'battery_*' recordings - run "
-						"SolverLab battery-gen <map.bsp>, then reinject "
-						"(fresh library scan).";
+					g_status = wrong_map > 0
+						? FmtStr("Battery: %d decks found but NONE are for "
+							"this map (%s) - load the decks' map first.",
+							wrong_map, cur[0] ? cur : "?")
+						: "Battery: no 'battery_*' recordings - run "
+						  "SolverLab battery-gen <map.bsp>, then reinject "
+						  "(fresh library scan).";
 				} else {
 					g_batsim_on = true;
-					g_status = FmtStr("Battery(query): %d decks queued.",
-						static_cast<int>(g_batsim_q.size()));
+					g_status = FmtStr("Battery(query): %d decks queued%s.",
+						static_cast<int>(g_batsim_q.size()),
+						wrong_map > 0 ? FmtStr(" (%d skipped: other map)",
+							wrong_map).c_str() : "");
 				}
 			}
 			Theme::Help("ONE CLICK: runs every battery_* deck through the "

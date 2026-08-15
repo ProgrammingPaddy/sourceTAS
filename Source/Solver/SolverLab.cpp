@@ -2031,11 +2031,24 @@ namespace {
 			// the capture carries them - the engine's own hull and movedata
 			// values, compared per tick instead of inferred.
 			std::vector<float> eng_hull, eng_ma, eng_mb;
+			std::string cap_map;
 			{
 				FILE* xf = nullptr;
 				if (fopen_s(&xf, best_csv.c_str(), "r") == 0 && xf) {
 					char xline[512];
-					fgets(xline, sizeof(xline), xf);
+					while (fgets(xline, sizeof(xline), xf)) {
+						if (strncmp(xline, "# map ", 6) == 0) {
+							cap_map = xline + 6;
+							while (!cap_map.empty()
+								&& (cap_map.back() == '\n'
+									|| cap_map.back() == '\r'))
+								cap_map.pop_back();
+							continue;
+						}
+						if (strncmp(xline, "tick,", 5) != 0)
+							break;   // header found; data follows
+						break;
+					}
 					while (fgets(xline, sizeof(xline), xf)) {
 						int tk, g, dk, bt;
 						float x, y, z, vx, vy, vz, sp, yw, ht, ma, mb;
@@ -2050,6 +2063,16 @@ namespace {
 					}
 					fclose(xf);
 				}
+			}
+			// MAP PRECONDITION: refuse captures from the wrong world (they
+			// are real engine values - of a different question).
+			if (!cap_map.empty() && !tape.map.empty() && cap_map != tape.map) {
+				printf("battery: %-22s %6d %11s %10s  WRONG-MAP capture "
+					"(%s) - retake on %s\n", name.c_str() + 8,
+					static_cast<int>(tape.frames.size()), "-", "-",
+					cap_map.c_str(), tape.map.c_str());
+				missing++;
+				continue;
 			}
 			int first_row = eng[0].tick == -1 ? 1 : 0;
 			PlayerState s;
