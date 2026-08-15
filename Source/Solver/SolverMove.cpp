@@ -618,6 +618,15 @@ namespace Solver {
 		                        const MoveParams& p) {
 			::Solver::CategorizePosition(s, w, p, nullptr);
 		}
+		bool CheckJumpButton(PlayerState& s, const World& w,
+		                     const MoveParams& p) {
+			TickEvents ev;
+			const bool was_ground = s.on_ground;
+			::Solver::CheckJumpButton(s, w, p, &ev);
+			// The engine returns true only when it actually jumped; our
+			// version signals that by leaving the ground it was on.
+			return was_ground && !s.on_ground;
+		}
 	}
 
 	void MoveTick(PlayerState& s, const World& w, const MoveParams& p,

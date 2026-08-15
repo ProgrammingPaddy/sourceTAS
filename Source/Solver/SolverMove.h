@@ -156,6 +156,9 @@ namespace Solver {
 	namespace Fn {
 		void CategorizePosition(PlayerState& s, const World& w,
 		                        const MoveParams& p);
+		// Returns true when the jump fired (engine returns bool).
+		bool CheckJumpButton(PlayerState& s, const World& w,
+		                     const MoveParams& p);
 	}
 
 } // namespace Solver

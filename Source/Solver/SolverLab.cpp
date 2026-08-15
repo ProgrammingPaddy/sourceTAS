@@ -822,19 +822,44 @@ namespace {
 					span(-1400.f, 1600.f));
 			}
 			const float vz = kVz[next() % 16];
+			const int ducked = (next() % 3u == 0u) ? 1 : 0;
+			// The hull FOLLOWS the duck flag: the engine's trace box comes
+			// from GetPlayerMins/Maxs (derived from m_bDucked), not from the
+			// collision-bounds netvar we write, so varying them separately
+			// would just make the two sides sweep different boxes.
+			const float hull = ducked ? 54.f : 72.f;
 			fprintf(f, "CategorizePosition,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
 				"0,0,0,%d,%d,%d,%d,%.9g,%.9g,%.9g,1,%.9g,%.9g,0,0\n",
 				pos.X, pos.Y, pos.Z,
 				span(-900.f, 900.f), span(-900.f, 900.f), vz,
 				(next() & 1) ? 1 : 0,                       // onground
-				(next() % 3u == 0u) ? 1 : 0,                // ducked
+				ducked,
 				(next() % 4u == 0u) ? 1 : 0,                // ducking
 				0,                                          // buttons
 				(next() % 3u == 0u) ? span(0.f, 1000.f) : 0.f,
 				(next() % 3u == 0u) ? span(0.f, 1400.f) : 0.f,
 				(next() & 1) ? 0.25f : 1.f,                 // sfric in
-				kHull[next() % 2],
-				span(-180.f, 180.f));
+				hull, span(-180.f, 180.f));
+			wrote++;
+
+			// CheckJumpButton, on the same state: IN_JUMP held, stamina swept
+			// across the ladder (the tax scales the WHOLE post-impulse vz),
+			// ducked and standing, speeds straddling the bunnyhop clamp. The
+			// pin declares a CategorizePosition prelude, so ground comes from
+			// geometry - which is why these reuse the same positions.
+			const float kStam[8] = { 0.f, 1.f, 100.f, 500.f,
+				25000.f / 19.f - 1.f, 25000.f / 19.f, 1400.f, 5000.f };
+			fprintf(f, "CheckJumpButton,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+				"0,0,0,1,%d,%d,%d,%.9g,%.9g,1,1,%.9g,%.9g,0,0\n",
+				pos.X, pos.Y, pos.Z,
+				span(-900.f, 900.f), span(-900.f, 900.f),
+				(next() & 1) ? 0.f : vz,
+				ducked,
+				(next() % 5u == 0u) ? 1 : 0,                // ducking
+				2,                                          // IN_JUMP
+				(next() % 3u == 0u) ? span(0.f, 1000.f) : 0.f,
+				kStam[next() % 8],
+				hull, span(-180.f, 180.f));
 			wrote++;
 		}
 		fclose(f);
@@ -967,8 +992,10 @@ namespace {
 				"unvalidated harness.\n");
 		}
 		int exact = 0, bad = 0, faulted = 0, shown = 0;
+		int jexact = 0, jbad = 0, jshown = 0;
 		for (size_t i = 0; i < n; ++i) {
 			if (!rs[i].ok) { faulted++; continue; }
+			const bool is_jump = strcmp(ps[i].fn, "CheckJumpButton") == 0;
 			PlayerState s;
 			s.pos = Vec3(ps[i].ox, ps[i].oy, ps[i].oz);
 			s.vel = Vec3(ps[i].vx, ps[i].vy, ps[i].vz);
@@ -982,8 +1009,37 @@ namespace {
 			s.stamina = ps[i].stamina;
 			s.gravity_scale = ps[i].gravity;
 			s.surface_friction = ps[i].sfric;
-			s.hull_state = ps[i].hullmaxz < 60.f ? 1 : 0;
+			// HULL FOLLOWS THE DUCK FLAG, not our m_vecMaxs write: the engine
+			// takes its trace box from GetPlayerMins/Maxs, which are derived
+			// from m_bDucked and ignore the collision-bounds netvar. Reading
+			// the hull from the probe's hullmaxz let the two sides disagree
+			// about the box being swept.
+			s.hull_state = ps[i].ducked ? 1 : 0;
+			// Same call sequence the pin declares: the prelude first, then
+			// the function under test.
 			Fn::CategorizePosition(s, w, o.params);
+			if (is_jump) {
+				const Vec3 pre_v = s.vel;
+				const bool jumped = Fn::CheckJumpButton(s, w, o.params);
+				const bool eng_jumped = rs[i].ret != 0;
+				const float dv = Len(s.vel - Vec3(rs[i].vx, rs[i].vy, rs[i].vz));
+				const bool jok = jumped == eng_jumped && dv <= 0.01f
+					&& fabsf(rs[i].stamina - s.stamina) <= 0.01f;
+				if (jok) { jexact++; continue; }
+				jbad++;
+				if (jshown < 8) {
+					jshown++;
+					printf("  JUMP probe %d  pre vz %.3f stam %.2f duck %d "
+						"ground %d\n", static_cast<int>(i), pre_v.Z,
+						ps[i].stamina, ps[i].ducked, s.on_ground ? 1 : 0);
+					printf("    eng  jumped %d vel(%.3f,%.3f,%.3f) stam %.2f\n",
+						eng_jumped ? 1 : 0, rs[i].vx, rs[i].vy, rs[i].vz,
+						rs[i].stamina);
+					printf("    ours jumped %d vel(%.3f,%.3f,%.3f) stam %.2f\n",
+						jumped ? 1 : 0, s.vel.X, s.vel.Y, s.vel.Z, s.stamina);
+				}
+				continue;
+			}
 			const bool eng_ground = rs[i].groundent != -1 && rs[i].groundent != 0;
 			const float dp = Len(s.pos - Vec3(rs[i].ox, rs[i].oy, rs[i].oz));
 			const float dv = Len(s.vel - Vec3(rs[i].vx, rs[i].vy, rs[i].vz));
@@ -1006,7 +1062,10 @@ namespace {
 		}
 		printf("funcdiff: CategorizePosition | %d probes | EXACT %d | "
 			"MISMATCH %d | engine-faulted %d\n",
-			static_cast<int>(n), exact, bad, faulted);
+			exact + bad, exact, bad, faulted);
+		if (jexact + jbad > 0)
+			printf("funcdiff: CheckJumpButton    | %d probes | EXACT %d | "
+				"MISMATCH %d\n", jexact + jbad, jexact, jbad);
 		// RULE EXTRACTION, not theory: bucket the engine's ground answer by
 		// our own down-probe fraction and by the plane it struck. Whatever
 		// separates ground from no-ground has to show up here.

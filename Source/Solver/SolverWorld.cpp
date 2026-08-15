@@ -883,6 +883,10 @@ namespace Solver {
 				}
 			}
 		}
+		// startsolid suppresses the quadrant result too. TRIED AND REVERTED:
+		// letting a start-solid quadrant still report its best hit took the
+		// isolated CategorizePosition score from 5 mismatches to 579, so the
+		// engine applies the same rule here as in the primary trace.
 		if (out && out->startsolid) {
 			out->frac = 0.f;
 			out->brush = -1;
