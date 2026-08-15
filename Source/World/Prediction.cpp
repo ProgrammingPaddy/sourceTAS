@@ -446,6 +446,14 @@ namespace {
 		char name[48];
 		unsigned rva;
 		int abi;
+		// Optional PRELUDE: a function called first, on the same context, to
+		// establish state we cannot write directly. CheckJumpButton returns
+		// immediately unless the player has a ground ENTITY, and a valid
+		// EHANDLE cannot be synthesised for an arbitrary probe - so
+		// CategorizePosition (already proven 99.99% in isolation) is called
+		// first to derive ground from geometry. The prelude is part of the
+		// declared input, not a hidden fixup.
+		unsigned prelude_rva;
 	};
 	struct FuncProbeIn {
 		int pin;                     // index into pins
@@ -540,6 +548,9 @@ namespace {
 			*reinterpret_cast<void**>(gm + kGmMvOff)     = movebuf;
 
 			int ret = 0;
+			if (pin->prelude_rva)
+				reinterpret_cast<void(*)(void*)>(
+					g_client_base + pin->prelude_rva)(g_gm);
 			const uintptr_t fn = g_client_base + pin->rva;
 			if (pin->abi == kAbiIntThis)
 				ret = reinterpret_cast<int(*)(void*)>(fn)(g_gm);
@@ -1089,12 +1100,14 @@ int Prediction::RunFuncProbe(const char* pin_path, const char* probe_path,
 			if (line[0] == '#' || line[0] == '\n')
 				continue;
 			FuncPin p = {};
-			unsigned rva = 0;
+			unsigned rva = 0, prel = 0;
 			int abi = 0;
-			if (sscanf_s(line, "%47[^,],%x,%d", p.name,
-				static_cast<unsigned>(sizeof(p.name)), &rva, &abi) == 3) {
+			const int nf = sscanf_s(line, "%47[^,],%x,%d,%x", p.name,
+				static_cast<unsigned>(sizeof(p.name)), &rva, &abi, &prel);
+			if (nf >= 3) {
 				p.rva = rva;
 				p.abi = abi;
+				p.prelude_rva = (nf >= 4) ? prel : 0u;
 				pins.push_back(p);
 			}
 		}
