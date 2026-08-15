@@ -1,4 +1,4 @@
-// SolverLab: console harness for the solver core. Runs the engine-independent
+﻿// SolverLab: console harness for the solver core. Runs the engine-independent
 // world + movement model without the game so search/physics work iterates at
 // full speed. Commands:
 //
@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -77,6 +78,25 @@ namespace {
 		printf("overrides the path, CLI flags override individual values.\n");
 	}
 
+	// Probe the BSP tree at telling points so solidity is data, not theory.
+	void ReportLeafProbes(const World& w) {
+		struct P { const char* what; Vec3 p; };
+		const P pts[] = {
+			{ "spawn",                 w.spawn_origin },
+			{ "inside floor slab",     Vec3(0.f, 0.f, -1070.f) },
+			{ "just above ceiling",    Vec3(0.f, 0.f, 1290.f) },
+			{ "far above map",         Vec3(0.f, 0.f, 4000.f) },
+			{ "behind north wall",     Vec3(0.f, 1300.f, 0.f) },
+			{ "far outside (y-3000)",  Vec3(0.f, -3000.f, 0.f) },
+			{ "mid-air in play space", Vec3(0.f, -500.f, 200.f) },
+		};
+		printf("BSP leaf probes (CONTENTS_SOLID?):\n");
+		for (const P& q : pts)
+			printf("  %-24s (%7.0f,%7.0f,%7.0f)  solid=%d\n", q.what,
+				q.p.X, q.p.Y, q.p.Z,
+				w.PointInSolidLeaf(q.p) ? 1 : 0);
+	}
+
 	int CmdMapInfo(const std::string& path) {
 		World w;
 		std::string err;
@@ -105,6 +125,7 @@ namespace {
 					b.bmin.X, b.bmin.Y, b.bmin.Z, b.bmax.X, b.bmax.Y, b.bmax.Z);
 			}
 		}
+		ReportLeafProbes(w);
 		return 0;
 	}
 
@@ -691,6 +712,83 @@ namespace {
 	// oracle answers them all with IEngineTrace; every disagreement with
 	// our TraceHull becomes a concrete fix case via `tracediff`, iterable
 	// OFFLINE against the same results file. ----
+	// Compare our trace's SOLID FLAGS against the engine's, over the oracle
+	// query file. These columns were captured all along and excluded from
+	// scoring as "startsolid noise" - they are in fact the engine's own
+	// definition of solidity, per input, and the only thing that can settle
+	// it without inventing rules.
+	int CmdSolidDiff(const std::string& map_path, const ReplayOpts& o,
+	                 const std::string& qpath, const std::string& rpath) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		struct Q { Vec3 a, b; int ducked; };
+		std::vector<Q> qs;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, qpath.c_str(), "r") != 0 || !f) return 1;
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				if (l[0] == 'i' || l[0] == '#') continue;
+				int id, tk, dk, br; float ax, ay, az, bx, by, bz, fr, nx, ny, nz;
+				if (sscanf_s(l, "%d,%d,%f,%f,%f,%f,%f,%f,%d,%f,%f,%f,%f,%d",
+					&id, &tk, &ax, &ay, &az, &bx, &by, &bz, &dk,
+					&fr, &nx, &ny, &nz, &br) == 14)
+					qs.push_back({ Vec3(ax, ay, az), Vec3(bx, by, bz), dk });
+			}
+			fclose(f);
+		}
+		struct R { float frac; int startsolid, allsolid; };
+		std::vector<R> rs;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, rpath.c_str(), "r") != 0 || !f) return 1;
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				if (l[0] == 'i' || l[0] == '#') continue;
+				int id, ss, as; float fr, ex, ey, ez, nx, ny, nz, pd;
+				if (sscanf_s(l, "%d,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d",
+					&id, &fr, &ex, &ey, &ez, &nx, &ny, &nz, &pd, &ss, &as) == 11)
+					rs.push_back({ fr, ss, as });
+			}
+			fclose(f);
+		}
+		const size_t n = qs.size() < rs.size() ? qs.size() : rs.size();
+		int ss_match = 0, ss_we_only = 0, ss_eng_only = 0;
+		int as_match = 0, as_we_only = 0, as_eng_only = 0;
+		int shown = 0;
+		for (size_t i = 0; i < n; ++i) {
+			TraceResult tr;
+			w.TraceHull3(qs[i].a, qs[i].b, qs[i].ducked ? 1 : 0, &tr);
+			const bool ess = rs[i].startsolid != 0, eas = rs[i].allsolid != 0;
+			if (tr.startsolid == ess) ss_match++;
+			else if (tr.startsolid) ss_we_only++;
+			else ss_eng_only++;
+			if (tr.allsolid == eas) as_match++;
+			else if (tr.allsolid) as_we_only++;
+			else as_eng_only++;
+			if ((tr.startsolid != ess || tr.allsolid != eas) && shown < 10) {
+				shown++;
+				printf("  q%-5d a(%9.2f,%9.2f,%9.2f) d%d  eng ss%d as%d  "
+					"ours ss%d as%d\n", static_cast<int>(i),
+					qs[i].a.X, qs[i].a.Y, qs[i].a.Z, qs[i].ducked,
+					ess ? 1 : 0, eas ? 1 : 0,
+					tr.startsolid ? 1 : 0, tr.allsolid ? 1 : 0);
+			}
+		}
+		printf("soliddiff: %d queries\n", static_cast<int>(n));
+		printf("  startsolid  match %6d | ours-only %5d | engine-only %5d\n",
+			ss_match, ss_we_only, ss_eng_only);
+		printf("  allsolid    match %6d | ours-only %5d | engine-only %5d\n",
+			as_match, as_we_only, as_eng_only);
+		fflush(stdout);
+		return (ss_we_only || ss_eng_only || as_we_only || as_eng_only) ? 2 : 0;
+	}
+
 	int CmdTraceGenMap(const std::string& map_path, const ReplayOpts& o,
 	                   const std::string& out_path) {
 		World w;
@@ -1079,6 +1177,7 @@ namespace {
 		int cls_n[8] = {}, cls_bad[8] = {};
 		int faulted = 0, mismatch = 0, exact = 0, dumped = 0;
 		int reach_n = 0, reach_bad = 0;
+		std::map<std::string, int> sig_count;
 		int first_bad = -1, first_bad_tick = -1;
 		float worst = 0.f;
 		int worst_probe = -1;
@@ -1194,6 +1293,33 @@ namespace {
 					|| (r.ducked != 0) != s.ducked
 					|| fabsf(r.sfric - s.surface_friction) > 0.01f) {
 					bad = true;
+					{
+						// Signature: WHO moved, and by how much, quantized.
+						const Vec3 epos(r.ox, r.oy, r.oz);
+						const Vec3 evel(r.vx, r.vy, r.vz);
+						const float eng_dp = Len(epos - s_at_fail.pos);
+						const float eng_dv = Len(evel - s_at_fail.vel);
+						const float our_dp = Len(s.pos - s_at_fail.pos);
+						const float our_dv = Len(s.vel - s_at_fail.vel);
+						char sg[64];
+						if (eng_dp < 1e-3f && eng_dv < 1e-3f)
+							_snprintf_s(sg, sizeof(sg), _TRUNCATE,
+								"engine INERT, we moved");
+						else if (our_dp < 1e-3f && our_dv < 1e-3f)
+							_snprintf_s(sg, sizeof(sg), _TRUNCATE,
+								"we INERT, engine moved");
+						else if (dp < 0.03f)
+							_snprintf_s(sg, sizeof(sg), _TRUNCATE,
+								"velocity only (dv %.1f)",
+								dv < 1.f ? dv : floorf(dv));
+						else if (dv < 0.05f)
+							_snprintf_s(sg, sizeof(sg), _TRUNCATE,
+								"position only (dp %.2f)", dp);
+						else
+							_snprintf_s(sg, sizeof(sg), _TRUNCATE,
+								"both (dp %.1f dv %.0f)", dp, dv);
+						sig_count[sg]++;
+					}
 					if (dp > worst) { worst = dp; worst_probe = static_cast<int>(i); }
 					if (first_bad < 0) { first_bad = static_cast<int>(i); first_bad_tick = t; }
 					if (dumping) {
@@ -1253,10 +1379,21 @@ namespace {
 		printf("fuzzdiff: %d probes x %d ticks | EXACT %d | MISMATCH %d | "
 			"engine-faulted %d\n", static_cast<int>(probes.size()),
 			kFuzzTicks, exact, mismatch, faulted);
-		printf("fuzzdiff: REACHABLE-SPACE (hull fits, inside the sealed "
-			"world): %d probes, %d mismatches (%.3f%% exact)\n",
-			reach_n, reach_bad, reach_n
-				? 100.0 * (reach_n - reach_bad) / reach_n : 0.0);
+		// DEFECT SIGNATURES, ranked by frequency. Every mismatch is a defect
+		// in a function; picking probes by eye picks stories instead of
+		// mass. This ranks what to fix next by how often it happens.
+		printf("fuzzdiff: defect signatures (most frequent first)\n");
+		{
+			std::vector<std::pair<std::string, int>> sigs(
+				sig_count.begin(), sig_count.end());
+			std::sort(sigs.begin(), sigs.end(),
+				[](const std::pair<std::string, int>& a,
+				   const std::pair<std::string, int>& b) {
+					return a.second > b.second;
+				});
+			for (size_t i = 0; i < sigs.size() && i < 14; ++i)
+				printf("  %-40s %6d\n", sigs[i].first.c_str(), sigs[i].second);
+		}
 		printf("fuzzdiff: coverage by interaction class\n");
 		for (int c = 0; c < 8; ++c)
 			printf("  %-16s probes %6d   mismatches %6d%s\n", kClassName[c],
@@ -3171,6 +3308,12 @@ int main(int argc, char** argv) {
 			return 1;
 		return CmdBatteryGen(argv[2], o);
 	}
+	if (cmd == "soliddiff" && argc >= 5) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 5, o))
+			return 1;
+		return CmdSolidDiff(argv[2], o, argv[3], argv[4]);
+	}
 	if (cmd == "fuzzgen" && argc >= 3) {
 		ReplayOpts o;
 		if (!ParseCommon(argc, argv, 3, o))
@@ -3242,3 +3385,4 @@ int main(int argc, char** argv) {
 	PrintUsage();
 	return 1;
 }
+

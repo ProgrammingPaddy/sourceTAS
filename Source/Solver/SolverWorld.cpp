@@ -655,20 +655,13 @@ namespace Solver {
 		}
 		if (nx_ == 0)
 			return 1.f;
-		// OUT OF WORLD = SOLID, decided by the BSP TREE (what the engine
-		// itself consults), not by a bounding box: basictest's finish
-		// platform reaches y -2336, far past the wall at -2048, so an AABB
-		// test declared the whole void behind that wall "in world" and let
-		// every probe there diverge. A hull corner in a CONTENTS_SOLID leaf
-		// traces startsolid+allsolid and TryPlayerMove freezes the player.
-		if (HullInSolidLeaf(a, hull)) {
-			if (out) {
-				out->startsolid = true;
-				out->allsolid = true;
-				out->frac = 0.f;
-			}
-			return 0.f;
-		}
+		// NO out-of-world solidity rule. Measured directly against the
+		// engine's own trace outputs (soliddiff over the oracle queries):
+		// for positions outside the map the engine returns startsolid 0,
+		// allsolid 0 - and across 6,624 queries there is NOT ONE input
+		// where the engine reports solid and we do not. Every rule I added
+		// here (AABB, then BSP leaf contents) only ever over-reported.
+		// Solidity comes from the brush clip below, nowhere else.
 		const Vec3 lo(fminf(a.X, b.X), fminf(a.Y, b.Y), fminf(a.Z, b.Z));
 		const Vec3 hi(fmaxf(a.X, b.X), fmaxf(a.Y, b.Y), fmaxf(a.Z, b.Z));
 		int x0, x1, y0, y1, z0, z1;
