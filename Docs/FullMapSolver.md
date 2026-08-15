@@ -1937,11 +1937,56 @@ One injection, two clicks, everything else offline:
   certification lands with the first triggered map's captures.
 - Offline revalidation: 11 PASS, 292/solved12/495-playback 0.000.
 
+### THE GREEN BOARD (2026-08-15, after the user's two clicks)
+Everything below was fixed OFFLINE against the captured truth - no
+relaunches, no reinjections. Four mechanisms fell:
+
+1. **Geometry: the CLAMP rule.** Sweep verdict: 4,675 real swept
+   traces, ONE disagreement (query 6654 = the seam). `traceone` per-
+   plane dump: wall side tt −0.029, slope side tt exactly 0.000 (one
+   DIST_EPSILON standoff). CM_ClipBoxToBrush CLAMPS the padded enter
+   fraction to 0 BEFORE comparing, so started-touching planes tie at 0
+   and strict `>` keeps the FIRST in brushside order — SIDE ORDER is
+   the tie-break, not H's least-negative. H' had survived 3,555
+   answers only because two started-touching entries never competed.
+   After the fix: 6,624/6,624 exact in fraction AND normal.
+2. **Duck state machine.** fuzz_a: a ground duck tapped at t2,
+   released t3, jumped t4 measured vz 289.99 (the SET path) vs our
+   283.99 — `ducking` stays TRUE through the unduck transition.
+   Ported the SDK machine (down-counting m_flDucktime from 1000,
+   press-edge start, release-while-ducked restart, TIME_TO_UNDUCK 200,
+   blocked-unduck retry), binary-verified against Duck() @2eea90+
+   (m_bDucking +0xa4d, m_flDucktime +0xa50).
+3. **Air FinishUnDuck shift is UNCONDITIONAL** (@2eec42→2eea20): a
+   never-completed duck released in the air still re-bases −8.5. The
+   62.5 transient hull still applies only to REAL unducks.
+4. **SURF AIR FRICTION — the big one.** Three fuzz ticks applied
+   EXACTLY 47.8125 u/s of air accel = 150 × 85 × 0.015 × **0.25**.
+   CategorizePosition sets m_surfaceFriction 0.25 when the ground
+   probe finds no walkable plane while RISING (0 < vz ≤ 140; above
+   that the probe is skipped entirely), 1.0 otherwise, and every
+   accelerate + the friction drop scale by it (field pinned at
+   player+0x36C by the Friction decode @0020edac). **Ownership rule
+   (fuzz_a t117):** the value is NOT recomputed at tick entry — a tick
+   accelerates on whatever the PREVIOUS tick's end-of-move categorize
+   left (it runs before FinishGravity), plus duck-transition
+   recategorizes. t116 ended its move at vz 143.5 (above the gate) →
+   probe skipped → friction 1.0 → t117 took the full 55.6 addspeed.
+   Why it hid for a month: with friction 1 the accel budget
+   (2.25·wishspeed) towers over addspeed in normal surf, so both
+   models clamp to addspeed and agree bit-for-bit. It separates only
+   when wishspeed is small (ducked 85) AND motion opposes the wish
+   direction — fuzz reaches that in 20 ticks; a clean line rarely
+   does. **Ducked air-strafing is now correct.**
+
+**FINAL: battery 15 PASS / 0 FAIL, every deck 0.000u** (incl. 3×370
+ticks of fuzz), **geometry 4,599 swept traces 0 mismatches**, **292 /
+solved12 / 495-playback max |dpos| 0.000u end to end.** Movement,
+geometry, and triggers are engine-exact over everything the
+instruments reach on this map.
+
 ### Open items (this era)
-- ONE-SESSION protocol pending: inject → "Run trace oracle" (6700
-  queries) → "Run ALIGNMENT battery" (13 decks). Then offline: fix the
-  seam class from tracediff, fit any fuzz gaps, seam deck to 0.000,
-  board 14/14.
+- ~~ONE-SESSION protocol~~ DONE: two clicks, then all-offline fixes.
 - Segment-handoff yaw snap (cosmetic; yaw-continuity seeding).
 - Trunk-budget reallocation campaign (approved direction, waiting on
   geometry truth first).
