@@ -99,6 +99,12 @@ namespace Solver {
 		// post-air-unduck transient (top 62.5 until grounding).
 		float TraceHull3(const Vec3& a, const Vec3& b, int hull, TraceResult* out) const;
 
+		// Arbitrary box sweep - planes expanded per query instead of from
+		// the three precomputed hulls. Needed by TracePlayerBBoxForGround,
+		// whose quadrant boxes are not any player hull.
+		float TraceHullBox(const Vec3& a, const Vec3& b, const Vec3& mins,
+		                   const Vec3& maxs, TraceResult* out) const;
+
 		// True when the hull at origin o overlaps any collidable brush (static
 		// containment against the expanded plane sets). Duck/unduck validation.
 		bool OriginInSolid(const Vec3& o, bool ducked) const;

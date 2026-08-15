@@ -807,6 +807,98 @@ namespace Solver {
 		return best;
 	}
 
+	// Arbitrary-box sweep. Same clip semantics as TraceHull3 (unclamped
+	// enterfrac start, engine clamp at the compare, corner release, solid
+	// reporting) but with the plane expansion computed per query, because
+	// TracePlayerBBoxForGround sweeps quadrant boxes that are not hulls.
+	float World::TraceHullBox(const Vec3& a, const Vec3& b, const Vec3& mins,
+	                          const Vec3& maxs, TraceResult* out) const {
+		if (out) {
+			out->frac = 1.f;
+			out->brush = -1;
+			out->plane = -1;
+			out->startsolid = false;
+			out->allsolid = false;
+		}
+		if (nx_ == 0)
+			return 1.f;
+		const Vec3 lo(fminf(a.X, b.X), fminf(a.Y, b.Y), fminf(a.Z, b.Z));
+		const Vec3 hi(fmaxf(a.X, b.X), fmaxf(a.Y, b.Y), fmaxf(a.Z, b.Z));
+		int x0, x1, y0, y1, z0, z1;
+		CellRange(lo + mins, hi + maxs, &x0, &x1, &y0, &y1, &z0, &z1);
+		float best = 1.f;
+		int best_brush = -1, best_plane = -1;
+		for (int z = z0; z <= z1; ++z)
+		for (int y = y0; y <= y1; ++y)
+		for (int x = x0; x <= x1; ++x) {
+			const std::vector<int>& cell =
+				cells_[(static_cast<size_t>(z) * ny_ + y) * nx_ + x];
+			for (int bi : cell) {
+				const WorldBrush& bc = brushes[bi];
+				float tmin = -1.f, tmax = 1.f;
+				float tmin_t = -1.f, tmax_t = 1e9f;
+				int enter = -1;
+				bool outside = false, miss = false, getout = false;
+				const int np = static_cast<int>(bc.n.size());
+				for (int pi = 0; pi < np; ++pi) {
+					const float pd = bc.d[pi] + HullExpand(bc.n[pi], mins, maxs);
+					const float d0 = Dot(bc.n[pi], a) - pd;
+					const float d1 = Dot(bc.n[pi], b) - pd;
+					if (d1 > 0.f)
+						getout = true;
+					if (d0 > 0.f) {
+						outside = true;
+						if (d1 > 0.f) { miss = true; break; }
+						float tt = (d0 - kDistEpsilon) / (d0 - d1);
+						if (tt < 0.f) tt = 0.f;
+						if (tt > tmin) { tmin = tt; enter = pi; }
+						const float tn = d0 / (d0 - d1);
+						if (tn > tmin_t) tmin_t = tn;
+					} else if (d1 > 0.f) {
+						float tt = (d0 + kDistEpsilon) / (d0 - d1);
+						if (tt > 1.f) tt = 1.f;
+						if (tt < tmax) tmax = tt;
+						if (bc.pid[pi] >= 0) {
+							const float tn = (d0 - kDistEpsilon) / (d0 - d1);
+							if (tn < tmax_t) tmax_t = tn;
+						}
+					}
+				}
+				if (!miss && !outside) {
+					if (out) {
+						out->startsolid = true;
+						if (!getout)
+							out->allsolid = true;
+					}
+					continue;
+				}
+				if (miss || !outside || enter < 0 || tmin >= tmax)
+					continue;
+				if (true_interval_corner && tmin_t >= tmax_t)
+					continue;
+				if (tmin < best) {
+					best = (tmin > 0.f) ? tmin : 0.f;
+					best_brush = bi;
+					best_plane = enter;
+				}
+			}
+		}
+		if (out && out->startsolid) {
+			out->frac = 0.f;
+			out->brush = -1;
+			out->plane = -1;
+			out->normal = Vec3();
+			return 0.f;
+		}
+		if (out && best_brush >= 0) {
+			out->frac = best;
+			out->brush = best_brush;
+			out->plane = best_plane;
+			out->normal = brushes[best_brush].n[best_plane];
+		}
+		return best;
+	}
+
 	bool World::PointInSolidLeaf(const Vec3& p) const {
 		if (nodes.empty() || leaf_contents.empty())
 			return false;

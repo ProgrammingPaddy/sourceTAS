@@ -170,13 +170,48 @@ namespace Solver {
 				TraceResult tr;
 				const float gf = w.TraceHull3(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
 				                             s.hull_state, &tr);
-				if (!(gf < 1.f && tr.brush >= 0
-					&& tr.normal.Z >= p.walkable_z) && s.vel.Z > 0.f) {
+				bool walk = gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= p.walkable_z;
+				if (!walk) {
+					// TracePlayerBBoxForGround (client.dll @0x117696): when
+					// the full-box probe finds no walkable plane, the engine
+					// re-probes with FOUR QUADRANT boxes - each half the hull
+					// in x and y - and grounds if any of them lands on a
+					// walkable plane, keeping the original fraction. This is
+					// how a hull overlapping a wall or hanging off an edge
+					// still stands. Measured: 13 of 40,072 isolated calls
+					// where the engine grounded and we did not, every one of
+					// them beside a wall or on a rim.
+					const Vec3 hmn = s.hull_state == 1 ? w.HullDims().duck_min
+						: s.hull_state == 2 ? w.HullDims().unduck_min
+						: w.HullDims().stand_min;
+					const Vec3 hmx = s.hull_state == 1 ? w.HullDims().duck_max
+						: s.hull_state == 2 ? w.HullDims().unduck_max
+						: w.HullDims().stand_max;
+					const Vec3 quads[4][2] = {
+						{ hmn, Vec3(fminf(0.f, hmx.X), fminf(0.f, hmx.Y), hmx.Z) },
+						{ Vec3(fmaxf(0.f, hmn.X), fmaxf(0.f, hmn.Y), hmn.Z), hmx },
+						{ Vec3(hmn.X, fmaxf(0.f, hmn.Y), hmn.Z),
+						  Vec3(fminf(0.f, hmx.X), hmx.Y, hmx.Z) },
+						{ Vec3(fmaxf(0.f, hmn.X), hmn.Y, hmn.Z),
+						  Vec3(hmx.X, fminf(0.f, hmx.Y), hmx.Z) },
+					};
+					for (int q = 0; q < 4 && !walk; ++q) {
+						TraceResult qt;
+						w.TraceHullBox(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
+							quads[q][0], quads[q][1], &qt);
+						if (qt.brush >= 0 && qt.normal.Z >= p.walkable_z) {
+							walk = true;
+							tr = qt;
+						}
+					}
+				}
+				if (!walk && s.vel.Z > 0.f) {
 					// No walkable plane under a RISING player: the engine's
 					// surf air-accel quirk (see MoveParams).
 					s.surface_friction = p.air_friction_up;
 				}
-				if (gf < 1.f && tr.brush >= 0 && tr.normal.Z >= p.walkable_z) {
+				if (walk) {
 					// NO origin snap: engine ground truth (2026-08-13, t479)
 					// sets ground with the origin still 1.575u above the
 					// surface; StayOnGround reaches it on the next WALK tick.
