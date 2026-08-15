@@ -403,6 +403,8 @@ namespace Solver {
 			// Straight attempt first; on a hit, the engine's FULL StepMove
 			// (slide vs step-up/slide/step-down, farther XY wins) - the
 			// former slide-only path was the last known movement gap.
+			// SDK WalkMove: base velocity rides through the move only.
+			s.vel = s.vel + s.basevel;
 			const Vec3 dest(s.pos.X + s.vel.X * p.dt,
 			                s.pos.Y + s.vel.Y * p.dt, s.pos.Z);
 			TraceResult tr;
@@ -412,6 +414,7 @@ namespace Solver {
 			} else {
 				StepMove(s, w, p, ev);
 			}
+			s.vel = s.vel - s.basevel;
 			StayOnGround(s, w, p);
 			s.vel.Z = 0.f;
 		}
@@ -444,7 +447,14 @@ namespace Solver {
 				if (accelspeed > add) accelspeed = add;
 				s.vel = s.vel + Scale(wishdir, accelspeed);
 			}
+			// SDK AirMove: base velocity is added AFTER AirAccelerate, rides
+			// through TryPlayerMove, and is pulled back out. Adding it before
+			// the accel (our old MoveTick did) poisons currentspeed and the
+			// whole air-accel budget - fuzz probe 5, dvel 55.6 with the
+			// engine and model at identical entry state.
+			s.vel = s.vel + s.basevel;
 			TryPlayerMove(s, w, p, ev);
+			s.vel = s.vel - s.basevel;
 		}
 
 		// Duck state machine (CGameMovement::Duck, CS hulls). In the air a duck
@@ -476,10 +486,25 @@ namespace Solver {
 				if (ev && !already) ev->duck_changed = true;
 				if (!s.on_ground && !already) {
 					s.pos.Z += lift;
-					// FixPlayerCrouchStuck: nudge up until the ducked hull
-					// fits (rare in open air; bounded).
-					for (int i = 0; i < 18 && w.OriginInSolid(s.pos, true); ++i)
-						s.pos.Z += 1.f;
+					// FixPlayerCrouchStuck, ENGINE-EXACT: probe upward for a
+					// free spot and RESTORE THE ORIGINAL ORIGIN when none is
+					// found. The old loop kept every partial nudge, so a hull
+					// that never fits ended 18 units high - the exact
+					// 18.0000 offset seen across fuzz probes 3, 4, 11 and 13
+					// while the engine had not moved at all.
+					if (w.OriginInSolid(s.pos, true)) {
+						const Vec3 save = s.pos;
+						bool freed = false;
+						for (int i = 0; i < 36; ++i) {
+							s.pos.Z += 1.f;
+							if (!w.OriginInSolid(s.pos, true)) {
+								freed = true;
+								break;
+							}
+						}
+						if (!freed)
+							s.pos = save;
+					}
 				}
 			};
 
@@ -616,14 +641,10 @@ namespace Solver {
 			Friction(s, p);
 		}
 		CheckVelocity(s, p);
-		// SDK Walk/AirMove: lateral base velocity rides along for the move
-		// only (added before, subtracted after).
-		s.vel = s.vel + s.basevel;
 		if (s.on_ground)
 			WalkMove(s, w, p, yaw, fmove, smove, cap_ducked, ev);
 		else
 			AirMove(s, w, p, yaw, fmove, smove, cap_ducked, ev);
-		s.vel = s.vel - s.basevel;
 		CategorizePosition(s, w, p, ev);
 		CheckVelocity(s, p);
 		s.vel.Z -= s.gravity_scale * p.gravity * 0.5f * p.dt;   // FinishGravity
