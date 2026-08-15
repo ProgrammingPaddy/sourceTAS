@@ -34,18 +34,16 @@ namespace Solver {
 		Vec3 duck_min = Vec3(-16.f, -16.f, 0.f);
 		Vec3 duck_max = Vec3(16.f, 16.f, 54.f);   // 72-54 = the measured ~18u
 		                                          // in-air FinishDuck origin lift
-		// POST-AIR-UNDUCK TRANSIENT (battery-fitted 2026-08-14; corrected
-		// after the user challenged a universal 62 against the VDC page):
-		// the engine's own 72-hull TRACE says HIT where its MOVEMENT flew
-		// free, so the post-unduck movement hull is effectively shorter -
-		// release bounded to (56.7, 63.7). Mechanism consistent with all
-		// measured constants: the unduck drops the ORIGIN 8.5 while the
-		// world-space bounds stay, leaving the top at 54 + 8.5 = 62.5
-		// relative to the new origin, until grounding re-bases it. The
-		// deck cannot distinguish 62.0 from 62.5 (release tick identical);
-		// 62.5 is the mechanistic value.
+		// The hull TOP is a KNOWN CONSTANT (72 standing / 54 ducked, VDC
+		// dimensions) and in practice is never the contacted surface, so
+		// fitting it from trajectory behaviour fits noise into a value we
+		// already know. A "post-unduck transient 62.5" was invented here
+		// on that basis and is REMOVED 2026-08-15: hull state 2 is now
+		// identical to standing. Whatever produced the release bracket
+		// (56.7, 63.7) is something other than hull height, and will be
+		// identified by isolating the function that owns it.
 		Vec3 unduck_min = Vec3(-16.f, -16.f, 0.f);
-		Vec3 unduck_max = Vec3(16.f, 16.f, 62.5f);
+		Vec3 unduck_max = Vec3(16.f, 16.f, 72.f);
 	};
 
 	struct WorldBrush {
