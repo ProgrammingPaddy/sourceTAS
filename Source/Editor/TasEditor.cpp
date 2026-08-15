@@ -8648,6 +8648,12 @@ namespace {
 					g_batsim_on = false;
 					g_batsim_own = false;
 				}
+			} else if (Prediction::FuzzBusy()) {
+				int ftot = 0, fok = 0;
+				const int fdone = Prediction::FuzzProgress(&ftot, &fok);
+				ImGui::TextColored(Theme::Warning,
+					"FUNCTION FUZZ: %d/%d probes (%d clean)...",
+					fdone, ftot, fok);
 			} else if (ImGui::Button("Run FUNCTION FUZZ (engine query)",
 				ImVec2(300, 0))) {
 				// FUNCTION-LEVEL DIFFERENTIAL FUZZ: drive thousands of
@@ -8666,7 +8672,8 @@ namespace {
 							"or no player/engine context.";
 					} else {
 						char fbuf[192];
-						Sfmt(fbuf, "Fuzz: %d probes -> fuzz_results.csv", fn);
+						Sfmt(fbuf, "Fuzz: %d probes queued - running in the "
+							"movement context...", fn);
 						g_status = fbuf;
 						AppendExportLog("fuzz", fout, "function-fuzz", fn);
 					}

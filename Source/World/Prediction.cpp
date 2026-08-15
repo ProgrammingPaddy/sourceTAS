@@ -411,6 +411,34 @@ namespace {
 		}
 	}
 
+	// Deferred fuzz job state (filled by RunFuzz, executed in OnFinishMove).
+	std::vector<FuzzProbeIn> s_fuzz_probes;
+	std::vector<FuzzTickOut> s_fuzz_outs;
+	std::string s_fuzz_out_path;
+	volatile int s_fuzz_pending = 0;
+	int s_fuzz_next = 0;
+	int s_fuzz_ok = 0;
+
+	void WriteFuzzResults() {
+		FILE* fo = nullptr;
+		if (fopen_s(&fo, s_fuzz_out_path.c_str(), "w") != 0 || !fo)
+			return;
+		fprintf(fo, "id,tick,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,"
+			"ducktime,stamina,sfric,maxz,bx,by,bz,ok\n");
+		for (size_t i = 0; i < s_fuzz_probes.size(); ++i) {
+			for (int t = 0; t < kFuzzTicks; ++t) {
+				const FuzzTickOut& o = s_fuzz_outs[i * kFuzzTicks + t];
+				fprintf(fo, "%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
+					"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d\n",
+					static_cast<int>(i), t, o.ox, o.oy, o.oz,
+					o.vx, o.vy, o.vz, o.flags, o.ducked, o.ducking,
+					o.ducktime, o.stamina, o.sfric, o.maxz,
+					o.bx, o.by, o.bz, o.ok);
+			}
+		}
+		fclose(fo);
+	}
+
 	// each tick's input comes from the provider (closed loop: it sees the
 	// simulated state after the previous tick).
 	int RunEditorSimSEH(void* player) {
@@ -614,6 +642,34 @@ namespace {
 			g_pred_flags_valid = true;
 		}
 
+		// FUNCTION FUZZ runs HERE, not from the UI thread: ProcessMovement is
+		// only valid inside this hook's context (the first attempt drove it
+		// from the ImGui button and every probe faulted). Chunked so a huge
+		// corpus costs a few frames instead of one long hitch.
+		if (s_fuzz_pending && player) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: fuzz chunk");
+			g_in_hook_work = true;
+			constexpr int kChunk = 400;
+			int did = 0;
+			while (s_fuzz_next < static_cast<int>(s_fuzz_probes.size())
+				&& did < kChunk) {
+				FuzzTickOut* o = &s_fuzz_outs[
+					static_cast<size_t>(s_fuzz_next) * kFuzzTicks];
+				s_restore_ready = false;
+				s_fuzz_ok += RunOneFuzzProbeSEH(player,
+					&s_fuzz_probes[s_fuzz_next], o);
+				s_fuzz_next++;
+				did++;
+			}
+			g_in_hook_work = false;
+			if (s_fuzz_next >= static_cast<int>(s_fuzz_probes.size())) {
+				WriteFuzzResults();
+				s_fuzz_pending = 0;
+			}
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: fuzz chunk done");
+			return;
+		}
+
 		if (s_sim_pending) {
 			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: editor sim");
 			LARGE_INTEGER freq, t0, t1;
@@ -777,32 +833,22 @@ int Prediction::RunFuzz(const char* probe_path, const char* out_path) {
 	if (probes.empty())
 		return -1;
 
-	std::vector<FuzzTickOut> outs(probes.size() * kFuzzTicks);
-	int done = 0;
-	for (size_t i = 0; i < probes.size(); ++i) {
-		FuzzTickOut* o = &outs[i * kFuzzTicks];
-		for (int t = 0; t < kFuzzTicks; ++t)
-			o[t] = FuzzTickOut{};
-		done += RunOneFuzzProbeSEH(player, &probes[i], o);
-	}
+	// QUEUE it: execution happens inside the FinishMove hook, chunked.
+	s_fuzz_probes.swap(probes);
+	s_fuzz_outs.assign(s_fuzz_probes.size() * kFuzzTicks, FuzzTickOut{});
+	s_fuzz_out_path = out_path;
+	s_fuzz_next = 0;
+	s_fuzz_ok = 0;
+	s_fuzz_pending = 1;
+	return static_cast<int>(s_fuzz_probes.size());
+}
 
-	FILE* fo = nullptr;
-	if (fopen_s(&fo, out_path, "w") != 0 || !fo)
-		return -1;
-	fprintf(fo, "id,tick,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,ducktime,"
-		"stamina,sfric,maxz,bx,by,bz,ok\n");
-	for (size_t i = 0; i < probes.size(); ++i) {
-		for (int t = 0; t < kFuzzTicks; ++t) {
-			const FuzzTickOut& o = outs[i * kFuzzTicks + t];
-			fprintf(fo, "%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
-				"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d\n",
-				static_cast<int>(i), t, o.ox, o.oy, o.oz, o.vx, o.vy, o.vz,
-				o.flags, o.ducked, o.ducking, o.ducktime, o.stamina,
-				o.sfric, o.maxz, o.bx, o.by, o.bz, o.ok);
-		}
-	}
-	fclose(fo);
-	return done;
+bool Prediction::FuzzBusy() { return s_fuzz_pending != 0; }
+
+int Prediction::FuzzProgress(int* total, int* ok) {
+	if (total) *total = static_cast<int>(s_fuzz_probes.size());
+	if (ok) *ok = s_fuzz_ok;
+	return s_fuzz_next;
 }
 
 bool Prediction::RequestSim(const StartState& anchor, int ticks, SimFrameFn provider) {

@@ -839,12 +839,26 @@ namespace {
 		auto span = [&frand](float lo, float hi) {
 			return lo + (hi - lo) * frand();
 		};
-		// Speed bands: still, walk, surf, launch, and past sv_maxvelocity.
-		const float kSpeeds[6] = { 0.f, 50.f, 250.f, 850.f, 1500.f, 3600.f };
-		// Offsets from a face: inside, on, sub-epsilon, epsilon, step, clear.
-		const float kOffs[9] = { -1.f, -0.05f, -0.03125f, 0.f, 0.005f,
-		                         0.03125f, 0.1f, 1.f, 18.f };
+		// PRECISION LADDER (user directive 2026-08-15: "Consider levels of
+		// precision... extremely precise, super small and super large
+		// numbers, negatives"). Speeds span denormal-scale through past
+		// sv_maxvelocity, and every engine THRESHOLD is sampled from both
+		// sides by one float ULP so any comparison that should be < vs <=
+		// is forced to declare itself.
+		const float kSpeeds[14] = {
+			0.f, 1e-30f, 1e-7f, 0.0078125f, 1.f, 29.999998f, 30.f,
+			30.000002f, 50.f, 250.f, 850.f, 1500.f, 3499.9998f, 3600.f };
+		// Offsets from a face: deep inside, inside, exactly -DIST_EPSILON,
+		// on, sub-epsilon, exactly DIST_EPSILON (and one ULP either side),
+		// step height, clear.
+		const float kOffs[15] = {
+			-64.f, -1.f, -0.05f, -0.03125f, -1e-6f, 0.f, 1e-6f, 0.005f,
+			0.031249998f, 0.03125f, 0.031250002f, 0.1f, 1.f, 18.f, 64.f };
 		const float kHullTops[3] = { 72.f, 54.f, 62.5f };
+		// Vertical velocities straddling NON_JUMP_VELOCITY (140) and zero -
+		// the gates that own grounding and the surf-friction rule.
+		const float kVz[10] = { -1e-7f, 0.f, 1e-7f, 139.999985f, 140.f,
+			140.000015f, -140.f, 300.f, -3600.f, 3600.f };
 
 		fprintf(f, "# fuzz probes v1 ticks=%d seed=%u map=%s\n",
 			kFuzzTicks, seed, MapStem(map_path).c_str());
@@ -857,7 +871,32 @@ namespace {
 		for (int i = 0; i < nprobes; ++i) {
 			Vec3 pos, vel;
 			const int cls = i % 10;
-			if (cls < 5 && !w.brushes.empty()) {
+			if (cls == 9) {
+				// PRECISION probes: land the hull on an exact engine
+				// threshold in one axis with a pathological velocity, and
+				// push coordinates out to the world extremes (negative and
+				// positive) where float resolution is coarsest.
+				const WorldBrush* b = w.brushes.empty() ? nullptr
+					: &w.brushes[next() % w.brushes.size()];
+				const float huge = (next() & 1u) ? 16384.f : -16384.f;
+				if (b && (next() & 1u)) {
+					const int pi = static_cast<int>(next()
+						% static_cast<unsigned>(b->nsides > 0 ? b->nsides : 1));
+					const Vec3 n = b->n[pi];
+					Vec3 q(span(b->bmin.X, b->bmax.X),
+						span(b->bmin.Y, b->bmax.Y),
+						span(b->bmin.Z, b->bmax.Z));
+					q = q - Scale(n, Dot(n, q) - b->d[pi]);
+					pos = q + Scale(n, kOffs[next() % 15]);
+				} else {
+					pos = Vec3(huge * frand(), huge * frand(),
+						span(-1000.f, 1200.f));
+				}
+				vel = Vec3(
+					(static_cast<int>(next() % 3u) - 1) * kSpeeds[next() % 14],
+					(static_cast<int>(next() % 3u) - 1) * kSpeeds[next() % 14],
+					kVz[next() % 10]);
+			} else if (cls < 5 && !w.brushes.empty()) {
 				// GEOMETRY-RELATIVE: park the hull a chosen offset off a
 				// real face, so grazes/creases/embeds are all exercised.
 				const WorldBrush& b = w.brushes[next() % w.brushes.size()];
@@ -868,7 +907,7 @@ namespace {
 					span(b.bmin.Z, b.bmax.Z));
 				const float d = Dot(n, q) - b.d[pi];
 				q = q - Scale(n, d);                       // onto the plane
-				const float off = kOffs[next() % 9];
+				const float off = kOffs[next() % 15];
 				pos = q + Scale(n, off);
 				// Aim mostly INTO the face (the interesting half).
 				Vec3 dir(span(-1.f, 1.f), span(-1.f, 1.f), span(-1.f, 1.f));
@@ -876,7 +915,7 @@ namespace {
 				dir = dl > 1e-4f ? Scale(dir, 1.f / dl) : Vec3(1.f, 0.f, 0.f);
 				if (Dot(dir, n) > 0.f && (next() & 3u))
 					dir = dir - Scale(n, 2.f * Dot(dir, n));
-				vel = Scale(dir, kSpeeds[next() % 6]);
+				vel = Scale(dir, kSpeeds[next() % 14]);
 			} else {
 				// OPEN STATE: anywhere in the world box, any direction.
 				pos = Vec3(span(-2100.f, 2100.f), span(-2000.f, 1200.f),
@@ -884,7 +923,7 @@ namespace {
 				Vec3 dir(span(-1.f, 1.f), span(-1.f, 1.f), span(-1.f, 1.f));
 				const float dl = Len(dir);
 				dir = dl > 1e-4f ? Scale(dir, 1.f / dl) : Vec3(0.f, 0.f, -1.f);
-				vel = Scale(dir, kSpeeds[next() % 6]);
+				vel = Scale(dir, kSpeeds[next() % 14]);
 			}
 			const int ducked = (next() % 3u == 0u) ? 1 : 0;
 			const int ducking = (next() % 4u == 0u) ? 1 : 0;

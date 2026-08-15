@@ -56,8 +56,14 @@ namespace Prediction {
 	// FinishMove with the whole player restored byte-for-byte afterward.
 	// Every field that can affect or record a tick is an explicit input or
 	// output - no scenario, no map authoring, no reachability assumptions.
-	// Returns probes completed, or -1 if the engine context is unavailable.
+	// QUEUES the batch (execution runs inside the FinishMove hook, where the
+	// movement context is valid - driving it from the UI thread faults every
+	// probe). Returns probes queued, or -1 if unavailable. Results are
+	// written when the last chunk completes.
 	int RunFuzz(const char* probe_path, const char* out_path);
+	bool FuzzBusy();
+	// Returns probes processed; fills total and the count that ran cleanly.
+	int FuzzProgress(int* total, int* ok);
 
 	// Resolve interfaces and install the FinishMove hook (from basehook_init).
 	void Install();
