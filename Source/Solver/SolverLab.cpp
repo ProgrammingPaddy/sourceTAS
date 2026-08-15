@@ -915,7 +915,12 @@ namespace {
 					span(b.bmin.Z, b.bmax.Z));
 				const float d = Dot(n, q) - b.d[pi];
 				q = q - Scale(n, d);                       // onto the plane
-				const float off = kOffs[next() % 15];
+				// Bias to the OUTSIDE of the face (where a player rides):
+				// negative offsets are embedded states, kept as a regression
+				// sample rather than a third of the corpus.
+				const float off = (next() % 5u == 0u)
+					? kOffs[next() % 15]
+					: kOffs[5 + next() % 10];
 				pos = q + Scale(n, off);
 				// Aim mostly INTO the face (the interesting half).
 				Vec3 dir(span(-1.f, 1.f), span(-1.f, 1.f), span(-1.f, 1.f));
@@ -925,9 +930,15 @@ namespace {
 					dir = dir - Scale(n, 2.f * Dot(dir, n));
 				vel = Scale(dir, kSpeeds[next() % 14]);
 			} else {
-				// OPEN STATE: anywhere in the world box, any direction.
-				pos = Vec3(span(-2100.f, 2100.f), span(-2000.f, 1200.f),
-					span(-1000.f, 1200.f));
+				// OPEN STATE inside the SEALED play volume. Out-of-world and
+				// wall-interior states are already covered by the geometry
+				// and precision classes above (and their rules are ported);
+				// spending a third of the corpus there starves the states a
+				// player can actually occupy.
+				const Vec3 lo = w.world_min, hi = w.world_max;
+				pos = Vec3(span(lo.X + 80.f, hi.X - 80.f),
+					span(lo.Y + 80.f, hi.Y - 80.f),
+					span(lo.Z + 80.f, hi.Z - 80.f));
 				Vec3 dir(span(-1.f, 1.f), span(-1.f, 1.f), span(-1.f, 1.f));
 				const float dl = Len(dir);
 				dir = dl > 1e-4f ? Scale(dir, 1.f / dl) : Vec3(0.f, 0.f, -1.f);
