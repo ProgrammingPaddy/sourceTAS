@@ -261,6 +261,8 @@ namespace {
 			else if (a == "--nobv") o.fuzz_nobv = true;
 			else if (a == "--dump") ok = next_i(&o.fuzz_dump);
 			else if (a == "--dump-reach") o.fuzz_dump_reach = true;
+			// funcgen: playback CSV whose grounded ticks become CONTROL probes
+			else if (a == "--control") { if (i + 1 < argc) o.anchor_tas = argv[++i]; else ok = false; }
 			else if (a == "--cell") ok = next_f(&o.cell);
 			else if (a == "--max-ticks") ok = next_i(&o.max_ticks);
 			else if (a == "--threads") ok = next_i(&o.threads);
@@ -752,12 +754,51 @@ namespace {
 			2.f, 2.001f, 8.f, 64.f };
 		const float kHull[2] = { 72.f, 54.f };
 
+		// CONTROL PROBES FIRST. Every harness this project has built lied at
+		// least once (FL_ONGROUND does not set ground; m_flGravity writes are
+		// ignored), and each lie looked exactly like a healthy run. So the
+		// batch opens with states the ENGINE ITSELF recorded as grounded
+		// during a real captured run: same position, same velocity, same
+		// duck state. If an isolated call says "not grounded" there, the
+		// harness is not installing what the function reads and EVERY
+		// verdict from the batch is void.
+		std::vector<std::string> ctrl;
+		if (!o.anchor_tas.empty()) {   // --control <playback csv>
+			FILE* cf = nullptr;
+			if (fopen_s(&cf, o.anchor_tas.c_str(), "r") == 0 && cf) {
+				char l[512];
+				while (fgets(l, sizeof(l), cf)) {
+					if (l[0] == '#' || l[0] == 't') continue;
+					int tk, g, dk, bt;
+					float x, y, z, vx, vy, vz, sp, yw;
+					if (sscanf_s(l, "%d,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f",
+						&tk, &x, &y, &z, &vx, &vy, &vz, &sp, &g, &dk, &bt,
+						&yw) < 12)
+						continue;
+					if (!g)            // only ticks the engine had GROUNDED
+						continue;
+					char buf[400];
+					_snprintf_s(buf, sizeof(buf), _TRUNCATE,
+						"CategorizePosition,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+						"0,0,0,1,%d,0,0,0,0,1,1,%.9g,%.9g,0,0",
+						x, y, z, vx, vy, vz, dk, dk ? 54.f : 72.f, yw);
+					ctrl.push_back(buf);
+					if (ctrl.size() >= 400)
+						break;
+				}
+				fclose(cf);
+			}
+		}
+
 		fprintf(f, "# funcprobe probes v1 seed %u map %s\n", seed,
 			MapStem(map_path).c_str());
+		fprintf(f, "# control %d\n", static_cast<int>(ctrl.size()));
 		fprintf(f, "fn,ox,oy,oz,vx,vy,vz,bx,by,bz,onground,ducked,ducking,"
 			"buttons,ducktime,stamina,sfric,gravity,hullmaxz,yaw,fmove,smove\n");
+		for (const std::string& c : ctrl)
+			fprintf(f, "%s\n", c.c_str());
 
-		int wrote = 0;
+		int wrote = static_cast<int>(ctrl.size());
 		for (int i = 0; i < nprobes; ++i) {
 			Vec3 pos;
 			// Half the probes sit a chosen distance above a real face (any
@@ -844,6 +885,17 @@ namespace {
 			float ducktime, stamina, sfric, maxz;
 			int ret, ok;
 		};
+		int nctrl = 0;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, ppath.c_str(), "r") == 0 && f) {
+				char l[256];
+				while (fgets(l, sizeof(l), f))
+					if (sscanf_s(l, "# control %d", &nctrl) == 1)
+						break;
+				fclose(f);
+			}
+		}
 		std::vector<R> rs;
 		int ctxgate = -1;
 		{
@@ -879,6 +931,29 @@ namespace {
 			return 1;
 		}
 		const size_t n = ps.size() < rs.size() ? ps.size() : rs.size();
+		// CONTROL VERDICT BEFORE ANY GRADING.
+		if (nctrl > 0) {
+			int ok_g = 0, bad_g = 0;
+			for (int i = 0; i < nctrl && i < static_cast<int>(n); ++i) {
+				if (!rs[i].ok) continue;
+				if ((rs[i].flags & 1) != 0) ok_g++; else bad_g++;
+			}
+			printf("funcdiff: CONTROL %d states the engine recorded as "
+				"GROUNDED in a real run -> isolated call says grounded %d, "
+				"NOT grounded %d\n", nctrl, ok_g, bad_g);
+			if (bad_g > ok_g) {
+				printf("funcdiff: HARNESS VOID - the isolated call disagrees "
+					"with the engine's own capture on states we KNOW were "
+					"grounded. The probe state is not reaching the function; "
+					"no verdict from this batch means anything.\n");
+				return 1;
+			}
+			printf("funcdiff: harness VALIDATED on controls.\n");
+		} else {
+			printf("funcdiff: WARNING - no control probes in this batch "
+				"(regenerate with --control <playback csv>); grading an "
+				"unvalidated harness.\n");
+		}
 		int exact = 0, bad = 0, faulted = 0, shown = 0;
 		for (size_t i = 0; i < n; ++i) {
 			if (!rs[i].ok) { faulted++; continue; }
@@ -917,6 +992,46 @@ namespace {
 		printf("funcdiff: CategorizePosition | %d probes | EXACT %d | "
 			"MISMATCH %d | engine-faulted %d\n",
 			static_cast<int>(n), exact, bad, faulted);
+		// RULE EXTRACTION, not theory: bucket the engine's ground answer by
+		// our own down-probe fraction and by the plane it struck. Whatever
+		// separates ground from no-ground has to show up here.
+		{
+			struct B { int eng_g, eng_ng; };
+			B by_frac[12] = {};
+			B by_norm[3] = {};
+			for (size_t i = 0; i < n; ++i) {
+				if (!rs[i].ok) continue;
+				TraceResult tr;
+				const Vec3 a(ps[i].ox, ps[i].oy, ps[i].oz);
+				const int hull = ps[i].hullmaxz < 60.f ? 1 : 0;
+				const float fr = w.TraceHull3(a, a - Vec3(0.f, 0.f, 2.f),
+					hull, &tr);
+				const bool eg = (rs[i].flags & 1) != 0;
+				int bi = static_cast<int>(fr * 10.f);
+				if (bi < 0) bi = 0;
+				if (bi > 10) bi = 10;
+				if (fr >= 1.f) bi = 11;
+				(eg ? by_frac[bi].eng_g : by_frac[bi].eng_ng)++;
+				const int ni = tr.brush < 0 ? 0
+					: (tr.normal.Z >= 0.7f ? 2 : 1);
+				(eg ? by_norm[ni].eng_g : by_norm[ni].eng_ng)++;
+			}
+			printf("  engine GROUND by our down-probe fraction:\n");
+			for (int b = 0; b <= 11; ++b) {
+				if (!by_frac[b].eng_g && !by_frac[b].eng_ng) continue;
+				char lbl[24];
+				if (b == 11) _snprintf_s(lbl, sizeof(lbl), _TRUNCATE, "frac=1 (clear)");
+				else _snprintf_s(lbl, sizeof(lbl), _TRUNCATE, "frac %.1f-%.1f",
+					b * 0.1f, b * 0.1f + 0.1f);
+				printf("    %-16s ground %6d  no-ground %6d\n", lbl,
+					by_frac[b].eng_g, by_frac[b].eng_ng);
+			}
+			const char* nn[3] = { "no brush hit", "steep plane", "walkable" };
+			printf("  engine GROUND by the plane we struck:\n");
+			for (int b = 0; b < 3; ++b)
+				printf("    %-16s ground %6d  no-ground %6d\n", nn[b],
+					by_norm[b].eng_g, by_norm[b].eng_ng);
+		}
 		fflush(stdout);
 		return bad > 0 ? 2 : 0;
 	}
