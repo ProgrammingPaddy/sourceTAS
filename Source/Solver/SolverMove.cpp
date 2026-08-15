@@ -133,6 +133,15 @@ namespace Solver {
 					// analysis with continuing simulation - do not restore it.)
 					s.on_ground = true;
 					s.ground_brush = tr.brush;
+					// SetGroundEntity zeroes vz whenever NEW ground is set
+					// (mv->m_vecVelocity.z = 0). Invisible on ordinary ticks
+					// (the tick-end grounded zero masks it) but LOAD-BEARING
+					// when ground is set mid-tick and left the same tick:
+					// spine495 t537 (capture 2026-08-14) - the air unduck's
+					// -8.5 origin drop grounds on the ramp via the mid-tick
+					// categorize, this zero eats vz +100.177, and the queued
+					// jump runs the exact cold chain -6+301.9934-6-6=283.9934.
+					s.vel.Z = 0.f;
 					// Grounding realigns the collision hull to the duck
 					// FLAG (the air-unduck's deferred hull ends here).
 					s.hull_state = s.ducked ? 1 : 0;
