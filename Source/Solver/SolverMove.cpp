@@ -650,6 +650,10 @@ namespace Solver {
 		s.vel.Z -= s.gravity_scale * p.gravity * 0.5f * p.dt;   // FinishGravity
 		if (s.on_ground)
 			s.vel.Z = 0.f;
+		// sv_maxvelocity clamp AFTER the final gravity: fuzz probe 818 fell
+		// at terminal speed and the engine reported exactly -3500 where we
+		// reported -3506, i.e. gravity added past the cap.
+		CheckVelocity(s, p);
 
 		// TRIGGERS (post-move, mirroring the engine's touch order and the
 		// DLL RequestSim application 1:1 - total-parity port 2026-08-15):

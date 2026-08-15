@@ -1174,7 +1174,21 @@ namespace {
 					0.f, p.btn[t], nullptr);
 				const float dp = Len(s.pos - Vec3(r.ox, r.oy, r.oz));
 				const float dv = Len(s.vel - Vec3(r.vx, r.vy, r.vz));
-				const bool eng_ground = (r.flags & 1) != 0;
+				// GROUND: compare PHYSICAL grounding, derived from the
+				// engine's own output position/velocity by the engine's own
+				// rule - not FL_ONGROUND, which lags the real ground entity
+				// (probe 111 jumped from a state whose flag read airborne;
+				// probes 282/340/689 sat still on the floor with the flag
+				// clear). Comparing the flag was comparing a stale netvar.
+				bool eng_ground = false;
+				if (r.vz <= o.params.non_jump_velocity) {
+					TraceResult etr;
+					const int eh = r.maxz < 60.f ? 1 : (r.maxz < 70.f ? 2 : 0);
+					const float ef = w.TraceHull3(Vec3(r.ox, r.oy, r.oz),
+						Vec3(r.ox, r.oy, r.oz - 2.f), eh, &etr);
+					eng_ground = ef < 1.f && etr.brush >= 0
+						&& etr.normal.Z >= o.params.walkable_z;
+				}
 				if (dp > 0.03f || dv > 0.05f
 					|| eng_ground != s.on_ground
 					|| (r.ducked != 0) != s.ducked
