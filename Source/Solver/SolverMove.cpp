@@ -49,6 +49,7 @@ namespace Solver {
 			int numplanes = 0;
 			Vec3 original_v = s.vel;
 			const Vec3 primal_v = s.vel;
+			float all_fraction = 0.f;   // SDK: sum of every bump's fraction
 			for (int bump = 0; bump < 4; ++bump) {
 				if (Len2(s.vel) == 0.f)
 					break;
@@ -71,7 +72,25 @@ namespace Solver {
 					}
 					break;
 				}
+				all_fraction += frac;
 				if (frac > 0.f) {
+					// SDK "Player will become stuck!!!" guard: on a FULL move
+					// the engine re-tests the destination with an UNSWEPT box
+					// and, if that lands in solid, ZEROES VELOCITY and stops.
+					// A swept trace can pass while its endpoint is embedded -
+					// which is precisely how a clean-looking flight ends in a
+					// frozen player (the d34 tape's t193).
+					if (frac >= 1.f) {
+						const Vec3 dest = s.pos + Scale(end - s.pos, frac);
+						TraceResult st;
+						const float sf = w.TraceHull3(dest, dest,
+							s.hull_state, &st);
+						if (st.startsolid || sf != 1.f) {
+							s.pos = dest;
+							s.vel = Vec3();
+							break;
+						}
+					}
 					s.pos = s.pos + Scale(end - s.pos, frac);
 					original_v = s.vel;   // engine re-bases the clip set
 					numplanes = 0;
@@ -92,7 +111,11 @@ namespace Solver {
 				}
 				planes[numplanes++] = n;
 				const float sp_before = Len(s.vel);
-				if (numplanes == 1) {
+				// SDK: the single-plane REFLECT path is gated on being
+				// AIRBORNE (MOVETYPE_WALK && GetGroundEntity() == NULL). A
+				// GROUNDED first impact takes the general path below - which
+				// carries the stop-dead guard our version was skipping.
+				if (numplanes == 1 && !s.on_ground) {
 					EngineClipVelocity(original_v, planes[0], s.vel);
 					original_v = s.vel;
 				} else {
@@ -127,6 +150,10 @@ namespace Solver {
 				if (ev && ev->ncontacts > 0)
 					ev->contact_loss[ev->ncontacts - 1] = sp_before - Len(s.vel);
 			}
+			// SDK tail: if nothing moved at all across every bump, the engine
+			// zeroes velocity outright.
+			if (all_fraction == 0.f)
+				s.vel = Vec3();
 		}
 
 		// CategorizePosition: the engine's ONLY grounding rule. Falling no
