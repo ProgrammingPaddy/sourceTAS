@@ -218,6 +218,13 @@ namespace Solver {
 		return true;
 	}
 
+	void SmoothOpt::SetSeedX(const std::vector<double>& x) {
+		if (static_cast<int>(x.size()) != Dims())
+			return;   // foreign domain - stay cold
+		seed_mean_ = x;
+		have_seed_mean_ = true;
+	}
+
 	float SmoothOpt::DistToEnd(const Vec3& p, float vz) const {
 		if (end_idx_ < 0)
 			return Len(p - end_center_);

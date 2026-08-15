@@ -68,7 +68,9 @@ namespace Solver {
 	                                              unsigned rng,
 	                                              long long* ticks,
 	                                              float ty_lo, float ty_hi,
-	                                              double budget_scale) {
+	                                              double budget_scale,
+	                                              const std::vector<double>*
+	                                                  seed_x) {
 		SmoothConfig sc;
 		sc.params = cfg_.params;
 		sc.end_brush_id = cfg_.end_brush_id;
@@ -103,12 +105,15 @@ namespace Solver {
 		SmoothOpt opt(w_, sc, anchor_);
 		opt.SetRoot(root, yaw);
 		opt.SetQuiet(true);
+		if (seed_x)
+			opt.SetSeedX(*seed_x);
 		SmoothResult r = opt.Run();
 		if (ticks)
 			*ticks += r.ticks_simulated;
 
 		SegOut out;
 		out.dmin = r.best_stats.dmin;
+		out.best_x = r.best_x;
 		if (!r.ok) {
 			if (!cfg_.dump_dir.empty() && !r.best_x.empty()) {
 				SmoothOpt od(w_, sc, anchor_);
@@ -360,9 +365,12 @@ namespace Solver {
 				// v16 d49 corridor is exactly the class this feeds.
 				if (!endseg.finished && endseg.dmin < 200.f
 					&& elapsed() < cfg_.total_seconds - cfg_.final_seconds) {
+					// v19: WARM-STARTED - continue the found basin at 2x
+					// budget (cold retries reproduced identical dmins).
 					SegOut retry = SolveSegment(node.st, node.yaw, -1, false,
 						cfg_.rng_seed + 7919u * ++seg_counter + 13u,
-						&res.ticks_simulated, 0.f, 1.f, 2.0);
+						&res.ticks_simulated, 0.f, 1.f, 2.0,
+						&endseg.best_x);
 					res.segments_solved++;
 					line += " ->END retry2x";
 					if (retry.finished || retry.dmin < endseg.dmin)
@@ -373,7 +381,8 @@ namespace Solver {
 						SegOut r3 = SolveSegment(node.st, node.yaw, -1,
 							false,
 							cfg_.rng_seed + 7919u * ++seg_counter + 101u,
-							&res.ticks_simulated, 0.f, 1.f, 3.0);
+							&res.ticks_simulated, 0.f, 1.f, 3.0,
+							&endseg.best_x);
 						res.segments_solved++;
 						line += " retry3x";
 						if (r3.finished || r3.dmin < endseg.dmin)
@@ -451,6 +460,24 @@ namespace Solver {
 						if (!seg.ok)
 							continue;
 						any = true;
+						// v19: MONEY-SEGMENT RE-ARM - a continuation that
+						// nearly approaches (fd < 600) earns a seeded 3x
+						// budget continuation of the SAME basin.
+						if (!seg.finished && seg.fin_dmin < 600.f
+							&& elapsed() < cfg_.total_seconds
+								- cfg_.final_seconds) {
+							SegOut re = SolveSegment(node.st, node.yaw, fi,
+								node.depth == 0,
+								cfg_.rng_seed + 7919u * ++seg_counter + 37u,
+								&res.ticks_simulated, kBands[bnd],
+								kBands[bnd + 1], 3.0, &seg.best_x);
+							res.segments_solved++;
+							if (re.ok && (re.finished
+								|| re.fin_dmin < seg.fin_dmin)) {
+								seg = re;
+								line += " re-arm+";
+							}
+						}
 						// v15: the segment's own CONTINUATION landed the end
 						// brush - record the finisher BEFORE beam admission
 						// (a beam-rejected junction can still be a finish).

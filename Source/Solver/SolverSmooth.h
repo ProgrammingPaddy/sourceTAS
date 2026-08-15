@@ -210,6 +210,12 @@ namespace Solver {
 		// prefix-follow mode.
 		bool SeedFromTape(const Tape& tape);
 
+		// v19: warm-start from a genome of the SAME domain (escalation
+		// retries CONTINUE the found basin instead of re-rolling cold -
+		// v18's 2x retries reproduced identical dmins from scratch).
+		// Foreign sizes are ignored (stays cold).
+		void SetSeedX(const std::vector<double>& x);
+
 		SmoothResult Run();
 
 		// Decode a genome into engine frames, truncated at the finish tick

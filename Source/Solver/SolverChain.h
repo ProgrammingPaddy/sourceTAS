@@ -112,15 +112,20 @@ namespace Solver {
 			// finished is true and fin_frames carries the full stream to the
 			// landing (frames still stops at the junction for the child).
 			std::vector<TapeFrame> fin_frames;
+			// v19: the solve's best genome - escalations warm-start from it.
+			std::vector<double> best_x;
 		};
 		// target_face < 0 = END landing attempt. [ty_lo, ty_hi] = board
 		// height band on the face (clause-3 enumeration). budget_scale
-		// multiplies the solve budget (near-miss END escalation).
+		// multiplies the solve budget (near-miss END escalation); seed_x
+		// warm-starts the CMA from a same-domain genome (v19: escalations
+		// continue the found basin instead of re-rolling cold).
 		SegOut SolveSegment(const PlayerState& root, float yaw,
 		                    int target_face, bool first_segment,
 		                    unsigned rng, long long* ticks,
 		                    float ty_lo = 0.f, float ty_hi = 1.f,
-		                    double budget_scale = 1.0);
+		                    double budget_scale = 1.0,
+		                    const std::vector<double>* seed_x = nullptr);
 		// Replay an assembled stream from the anchor: authoritative scored
 		// ticks / ending class for candidate ranking.
 		struct AsmStats {
