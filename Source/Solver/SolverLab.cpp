@@ -149,6 +149,9 @@ namespace {
 		                            // (--clock anchor for the old absolute)
 		bool edge_bevels = true;    // false = pre-fix clip set (control arm)
 		int  fuzz_n = 0;            // fuzzgen: probe count (0 = default)
+		bool fuzz_grav1 = false;    // fuzzdiff A/B: force gravity scale 1.0
+		bool fuzz_nobv = false;     // fuzzdiff A/B: drop the seeded basevel
+		int  fuzz_dump = 0;         // fuzzdiff: dump the first N mismatches
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
 		// smooth (line-space CMA) options
 		int pop = 0;                // population (0 = auto)
@@ -232,6 +235,9 @@ namespace {
 			else if (a == "--flips") ok = next_f(&o.flips);
 			else if (a == "--rng") { if (i + 1 < argc) o.rng = static_cast<unsigned>(atoll(argv[++i])); else ok = false; }
 			else if (a == "--n") ok = next_i(&o.fuzz_n);   // fuzzgen probe count
+			else if (a == "--grav1") o.fuzz_grav1 = true;
+			else if (a == "--nobv") o.fuzz_nobv = true;
+			else if (a == "--dump") ok = next_i(&o.fuzz_dump);
 			else if (a == "--cell") ok = next_f(&o.cell);
 			else if (a == "--max-ticks") ok = next_i(&o.max_ticks);
 			else if (a == "--threads") ok = next_i(&o.threads);
@@ -1058,7 +1064,7 @@ namespace {
 			"air-open", "air-contact", "ground", "ducked", "duck-transition",
 			"basevel", "gravity-scaled", "extreme-speed" };
 		int cls_n[8] = {}, cls_bad[8] = {};
-		int faulted = 0, mismatch = 0, exact = 0;
+		int faulted = 0, mismatch = 0, exact = 0, dumped = 0;
 		int first_bad = -1, first_bad_tick = -1;
 		float worst = 0.f;
 		int worst_probe = -1;
@@ -1093,13 +1099,15 @@ namespace {
 			s.pos = Vec3(seed.ox, seed.oy, seed.oz);
 			s.vel = Vec3(seed.vx, seed.vy, seed.vz);
 			s.basevel = Vec3(seed.bx, seed.by, seed.bz);
-			s.basevel_flag = (seed.flags & 0x2000) != 0;   // FL_BASEVELOCITY
+			s.basevel_flag = (seed.flags & 0x800000) != 0;   // FL_BASEVELOCITY (1<<23)
+			if (o.fuzz_nobv) { s.basevel = Vec3(); s.basevel_flag = false; }
 			s.on_ground = (seed.flags & 1) != 0;
 			s.ducked = seed.ducked != 0;
 			s.ducking = seed.ducking != 0;
 			s.duck_timer_ms = seed.ducktime;
 			s.stamina = seed.stamina;
-			s.gravity_scale = p.gravity;
+			// A/B: does the engine honour our m_flGravity write at all?
+			s.gravity_scale = o.fuzz_grav1 ? 1.f : p.gravity;
 			s.surface_friction = seed.sfric;
 			s.hull_state = seed.maxz < 60.f ? 1 : (seed.maxz < 70.f ? 2 : 0);
 			if (s.on_ground) {
@@ -1110,9 +1118,12 @@ namespace {
 					s.ground_brush = tr.brush;
 			}
 			bool bad = false;
+			const bool dumping = dumped < o.fuzz_dump;
+			PlayerState s_at_fail = s;
 			for (int t = 1; t < kFuzzTicks; ++t) {
 				const Res& r = res[i * kFuzzTicks + t];
 				if (!r.ok) { faulted++; bad = false; break; }
+				s_at_fail = s;
 				MoveTick(s, w, o.params, 0.f, p.yaw[t], p.fm[t], p.sm[t],
 					0.f, p.btn[t], nullptr);
 				const float dp = Len(s.pos - Vec3(r.ox, r.oy, r.oz));
@@ -1125,6 +1136,33 @@ namespace {
 					bad = true;
 					if (dp > worst) { worst = dp; worst_probe = static_cast<int>(i); }
 					if (first_bad < 0) { first_bad = static_cast<int>(i); first_bad_tick = t; }
+					if (dumping) {
+						dumped++;
+						printf("--- probe %d [%s] diverges at tick %d "
+							"(dpos %.4f dvel %.4f)\n", static_cast<int>(i),
+							kClassName[cls], t, dp, dv);
+						printf("    pre   pos(%.4f,%.4f,%.4f) vel(%.3f,%.3f,%.3f) "
+							"g%d d%d/%d hull%d sf%.2f stam%.1f dt%.1f\n",
+							s_at_fail.pos.X, s_at_fail.pos.Y, s_at_fail.pos.Z,
+							s_at_fail.vel.X, s_at_fail.vel.Y, s_at_fail.vel.Z,
+							s_at_fail.on_ground ? 1 : 0,
+							s_at_fail.ducked ? 1 : 0, s_at_fail.ducking ? 1 : 0,
+							s_at_fail.hull_state, s_at_fail.surface_friction,
+							s_at_fail.stamina, s_at_fail.duck_timer_ms);
+						printf("    input yaw %.2f fmove %.0f smove %.0f btn %d\n",
+							p.yaw[t], p.fm[t], p.sm[t], p.btn[t]);
+						printf("    eng   pos(%.4f,%.4f,%.4f) vel(%.3f,%.3f,%.3f) "
+							"g%d d%d/%d maxz%.1f sf%.2f\n",
+							r.ox, r.oy, r.oz, r.vx, r.vy, r.vz,
+							eng_ground ? 1 : 0, r.ducked, r.ducking,
+							r.maxz, r.sfric);
+						printf("    ours  pos(%.4f,%.4f,%.4f) vel(%.3f,%.3f,%.3f) "
+							"g%d d%d/%d hull%d sf%.2f\n",
+							s.pos.X, s.pos.Y, s.pos.Z,
+							s.vel.X, s.vel.Y, s.vel.Z, s.on_ground ? 1 : 0,
+							s.ducked ? 1 : 0, s.ducking ? 1 : 0,
+							s.hull_state, s.surface_friction);
+					}
 					break;
 				}
 			}

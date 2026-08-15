@@ -170,6 +170,13 @@ namespace Solver {
 
 		std::vector<WorldBrush> brushes;   // collidable set only
 
+		// The map's sealed extent (union of every collidable brush box).
+		// Beyond it there is no world: the engine's BSP has only solid out
+		// there, so a hull reaching past it traces as startsolid+allsolid
+		// and TryPlayerMove freezes. Fuzz-measured 2026-08-15: 6,317 probes
+		// parked outside the shell all came back frozen at v(0,0,-6).
+		Vec3 world_min, world_max;
+
 		// Corner-release semantics (engine-measured 2026-08-13, 604-tape
 		// capture): the hit test uses the TRUE un-padded crossing interval;
 		// DIST_EPSILON pads the reported position only. false = the legacy

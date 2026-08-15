@@ -555,6 +555,16 @@ namespace Solver {
 		nx_ = ny_ = nz_ = 0;
 		if (brushes.empty())
 			return;
+		world_min = brushes[0].bmin;
+		world_max = brushes[0].bmax;
+		for (const WorldBrush& b : brushes) {
+			world_min.X = fminf(world_min.X, b.bmin.X);
+			world_min.Y = fminf(world_min.Y, b.bmin.Y);
+			world_min.Z = fminf(world_min.Z, b.bmin.Z);
+			world_max.X = fmaxf(world_max.X, b.bmax.X);
+			world_max.Y = fmaxf(world_max.Y, b.bmax.Y);
+			world_max.Z = fmaxf(world_max.Z, b.bmax.Z);
+		}
 		gmin_ = brushes[0].gmin_stand;
 		gmax_ = brushes[0].gmax_stand;
 		for (const WorldBrush& b : brushes) {
@@ -613,6 +623,27 @@ namespace Solver {
 		}
 		if (nx_ == 0)
 			return 1.f;
+		// OUT OF WORLD = SOLID: past the sealed shell the BSP has nothing but
+		// solid, so the engine's trace starts (and stays) inside it and
+		// TryPlayerMove freezes the player. Checked on the hull, not the
+		// origin - feet resting exactly on the ceiling slab put the head
+		// through the roof (fuzz probe 3).
+		{
+			const Vec3& hmn = hull == 1 ? hulls_.duck_min
+				: hull == 2 ? hulls_.unduck_min : hulls_.stand_min;
+			const Vec3& hmx = hull == 1 ? hulls_.duck_max
+				: hull == 2 ? hulls_.unduck_max : hulls_.stand_max;
+			if (a.X + hmn.X < world_min.X || a.X + hmx.X > world_max.X
+				|| a.Y + hmn.Y < world_min.Y || a.Y + hmx.Y > world_max.Y
+				|| a.Z + hmn.Z < world_min.Z || a.Z + hmx.Z > world_max.Z) {
+				if (out) {
+					out->startsolid = true;
+					out->allsolid = true;
+					out->frac = 0.f;
+				}
+				return 0.f;
+			}
+		}
 		const Vec3 lo(fminf(a.X, b.X), fminf(a.Y, b.Y), fminf(a.Z, b.Z));
 		const Vec3 hi(fmaxf(a.X, b.X), fmaxf(a.Y, b.Y), fmaxf(a.Z, b.Z));
 		int x0, x1, y0, y1, z0, z1;
