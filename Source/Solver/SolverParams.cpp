@@ -87,14 +87,14 @@ namespace Solver {
 			else if (key == "maxvelocity") p.maxvelocity = val;
 			else if (key == "stepsize") p.stepsize = val;
 			else if (key == "air_speed_cap") p.air_speed_cap = val;
-			else if (key == "jump_height") p.jump_height = val;
+			else if (key == "jump_impulse") p.jump_impulse_d = val;
 			else if (key == "enablebunnyhopping") p.enablebunnyhopping = val != 0.f;
 			else if (key == "duck_air_shift") p.duck_air_shift = val;
 			else if (key == "duck_speed_frac") p.duck_speed_frac = val;
 			else if (key == "time_to_duck_ms") p.time_to_duck_ms = val;
 			else if (key == "stamina_jump_ms") p.stamina_jump_ms = val;
 			else if (key == "stamina_scale_per_ms") p.stamina_scale_per_ms = val;
-			else if (key == "stamina_jump_scale_per_ms") p.stamina_jump_scale_per_ms = val;
+			else if (key == "stamina_pow_rate") p.stamina_pow_rate = val;
 			else if (key == "hull_stand") h.stand_max.Z = val;
 			else if (key == "hull_duck") h.duck_max.Z = val;
 			else known = false;

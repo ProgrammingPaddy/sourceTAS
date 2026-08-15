@@ -185,30 +185,26 @@ namespace Solver {
 			}
 			s.on_ground = false;
 			s.ground_brush = -1;
-			// Engine-measured 2026-08-13 (basictest ground truth): standing
-			// jumps ADD sqrt(2g*57)=302 onto the post-StartGravity vz (-6),
-			// ducked/ducking jumps SET it - tick-end vz 284 vs 290, both exact.
-			// Hot-stamina jumps are taxed (REAL-playback fit, 4 jumps - see
-			// MoveParams). The earlier "no tax" conclusion came from pairing
-			// the wrong sim export with a rewritten tape file - retracted.
-			// FORMULA CORRECTED by 5-jump regression (2026-08-14): the
-			// stamina ratio applies to the WHOLE vz after the impulse
-			// (StartGravity's -6 included), not to the impulse alone - the
-			// regressed effective impulse-only scale 0.00018622 equals
-			// 0.00019*(296/302) exactly, unmasking the textbook scale
-			// under the whole-vz application. Line-fit residuals < 0.001.
-			const float impulse = sqrtf(2.f * p.gravity * p.jump_height);
+			// BINARY-MIRRORED (server.dll x64 @2eddab, disassembled
+			// 2026-08-15): the impulse is a baked DOUBLE constant (see
+			// MoveParams::jump_impulse_d), added in double with ONE rounding
+			// back to float. Standing jumps ADD onto the post-StartGravity
+			// vz; ducked/ducking jumps SET (@2eddc1 skips the add).
 			if (s.ducked || s.ducking)
-				s.vel.Z = impulse;
+				s.vel.Z = static_cast<float>(p.jump_impulse_d);
 			else
-				s.vel.Z += impulse;
+				s.vel.Z = static_cast<float>(
+					static_cast<double>(s.vel.Z) + p.jump_impulse_d);
+			// Stamina tax (@2eddfc): the WHOLE post-impulse vz scales by
+			// (1 - stamina*0.00019f) in float - the same shared constant the
+			// walk drag reads (.rdata 0056faf4).
 			if (s.stamina > 0.f)
-				s.vel.Z *= 1.f - s.stamina * p.stamina_jump_scale_per_ms;
+				s.vel.Z *= 1.f - s.stamina * p.stamina_scale_per_ms;
 			if (p.jump_finishgravity)
 				s.vel.Z -= p.gravity * 0.5f * p.dt;   // SDK's in-jump FinishGravity
 				                                      // (confirmed by the -6 -6 tail)
-			// The jump ARMS the stamina timer (see MoveParams: jump tax,
-			// drained in flight, residue drags the landing walk).
+			// The jump ARMS the timer: engine stores raw bits 0x44a47943 ==
+			// float(25000.f/19.f) exactly (@2ede47).
 			s.stamina = p.stamina_jump_ms;
 			s.old_buttons |= IN_JUMP;
 			if (ev) {
@@ -306,12 +302,16 @@ namespace Solver {
 		              TickEvents* ev) {
 			// Landing stamina drags WALK ticks only (a bhop tick jumps before
 			// reaching here - measured: t432 kept full speed, t480+ decayed).
-			// Applied after Friction, before Accelerate (fit order A).
+			// BINARY-MIRRORED (server.dll x64 @2f0160, CCSGameMovement::
+			// WalkMove prologue - after Friction, before the base
+			// accelerate+move):
+			//   ratio = powf(1 - m_flStamina*0.00019f, frametime*70.0f)
+			// The frametime exponent (0.015*70 = 1.05 at 66.67tps) is why
+			// every affine fit insisted on slope ~0.000198 > 0.00019 plus an
+			// intercept: the fitted line was a chord across this power curve.
 			if (s.stamina > 0.f) {
-				// Affine drag law (see MoveParams: regressed slope +
-				// measured intercept).
-				const float ratio = 1.f - (s.stamina * p.stamina_scale_per_ms
-					+ p.stamina_walk_offset);
+				const float base = 1.f - s.stamina * p.stamina_scale_per_ms;
+				const float ratio = powf(base, p.dt * p.stamina_pow_rate);
 				s.vel.X *= ratio;
 				s.vel.Y *= ratio;
 			}

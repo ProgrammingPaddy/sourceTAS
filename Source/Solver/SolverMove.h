@@ -37,7 +37,11 @@ namespace Solver {
 		float maxvelocity = 3500.f;      // sv_maxvelocity, clamped per component
 		float stepsize = 18.f;           // step height (StayOnGround reach)
 		float air_speed_cap = 30.f;      // CSS GetAirSpeedCap (the "30 cap")
-		float jump_height = 57.f;        // CSS: vz = sqrt(2*gravity*57) ~ 302
+		// Jump impulse: BINARY-DECODED (server.dll x64 @2eddab, 2026-08-15).
+		// The movement-optimizations build BAKES sqrt(2*800*57) as a DOUBLE
+		// constant - it does NOT track sv_gravity - and applies it in double
+		// with a single rounding back to float (see CheckJumpButton).
+		double jump_impulse_d = 301.99337741082996;
 		float non_jump_velocity = 140.f; // CategorizePosition vz gate
 		float walkable_z = 0.7f;         // minimum ground plane normal.z
 		float duck_speed_frac = 0.34f;   // CSS fully-ducked maxspeed fraction
@@ -47,46 +51,26 @@ namespace Solver {
 		// exactly - NOT the SDK-theoretical hull delta (72-54=18). The duck
 		// HULL height stays 54 for collision (only a ceiling map can test it).
 		float duck_air_shift = 8.5f;
-		// JUMP STAMINA (engine-fitted 2026-08-13, real-playback capture with
-		// FOUR jumps): the JUMP arms the timer (1317.5 ms ~ classic 25/19 s),
-		// it drains dt*1000 per tick everywhere, and the residue acts twice:
-		//  - WALK ticks scale v.xy by (1 - stamina*stamina_scale_per_ms)
-		//    after friction (fitted 0.00019833 from the t479-landing decay);
-		//  - a HOT JUMP scales its impulse by
-		//    (1 - stamina*stamina_jump_scale_per_ms), fitted 0.000186 from
-		//    taxed jumps at gaps 49/44/43 ticks (predicts all three within
-		//    0.05 u/s; zero-tax confirmed at gap 900). The two scales are
-		//    fitted independently per regime - do not unify without data.
-		// Landings arm NOTHING (jump-free -775 u/s landing: scale 1.00000).
-		// REFINED against the engine-sim battery capture (2026-08-14,
-		// sweep-converged): walk scale confirmed at its optimum; jump
-		// scale 0.000186 -> 0.00018565 takes the stamina deck from 0.118u
-		// to 0.008u over 310 ticks (a quarter of one 1/32 coordinate
-		// quantum). NOTE the current deck exercises ONE hot jump, so arm
-		// and jump-scale are degenerate (only the product is pinned) -
-		// the redesigned stay-on-platform ladder deck separates them.
-		// Textbook 25/19/100 constants tested and REJECTED by the capture.
-		// SEPARATED + CONVERGED on the six-jump ladder capture (2026-08-14):
-		// arm 1317.5 independently pinned (V-shaped minimum, +-3.5ms costs
-		// 1.7u); walk scale confirmed; jump scale converged to 0.0001855
-		// with the residual FLAT at 0.010u over 672 ticks (precision floor,
-		// ~1/3 of one 1/32 coordinate quantum).
-		// SOLVED by regression over the six-jump ladder (2026-08-14):
-		// arm = 25000/19 (the textbook value, CONFIRMED by measurement to
-		// 0.006 ms this time); jump scale = the textbook 0.00019 applied
-		// to the WHOLE post-impulse vz (see CheckJumpButton). Walk scale
-		// stays at its independently fitted value pending the same
-		// formula-shape check.
-		float stamina_jump_ms = 25000.f / 19.f;
-		// WALK drag law regressed over 84 dragged ticks (2026-08-14): the
-		// per-tick ratio is AFFINE in stamina, 1 - (stam*scale + offset):
-		// slope = 0.00019833 (the original fit, vindicated as the slope),
-		// intercept 0.000327 measured (mechanism unidentified - candidate:
-		// a constant term in the engine's formula). Reproduces every
-		// sampled tick's ratio to ~1e-5.
-		float stamina_scale_per_ms = 0.00019833f;
-		float stamina_walk_offset = 0.000327f;
-		float stamina_jump_scale_per_ms = 0.00019f;
+		// STAMINA - BINARY-DECODED from the shipped x64 server.dll
+		// (2026-08-15, capstone disassembly; constants read out of
+		// .text/.rdata, zero fitting):
+		//  - CheckJumpButton @2eddfc: the WHOLE post-impulse vz scales by
+		//    (1 - stamina*0.00019f) in float, then m_flStamina is stored as
+		//    raw bits 0x44a47943 == float(25000.f/19.f) exactly (@2ede47).
+		//  - WalkMove @2f0160: vel.xy *= powf(1 - stamina*0.00019f,
+		//    frametime*70.0f), after Friction, before accelerate. The pow
+		//    exponent scales with TICKRATE (1.05 at 66.67tps) - the engine
+		//    adapts to interval changes and so does this mirror.
+		//  - ONE shared scale constant (.rdata 0056faf4) serves both sites.
+		//  - Drain stays 1000*frametime ms per tick everywhere.
+		// History: the affine walk fit (slope 0.00019833, intercept
+		// 0.000327) was a chord across the 1.05-power curve, and the
+		// impulse-only jump scale 0.00018622 was 0.00019*(296/302); both
+		// retired by the disassembly. Landings arm NOTHING on this server
+		// (measured -775 u/s landing walked at scale 1.00000).
+		float stamina_jump_ms = 25000.f / 19.f;   // == engine bits 0x44a47943
+		float stamina_scale_per_ms = 0.00019f;    // shared walk+jump scale
+		float stamina_pow_rate = 70.f;            // walk exponent per second
 		// SDK CheckJumpButton calls FinishGravity() inside itself - an extra
 		// half-gravity on the jump tick on top of FullWalkMove's own pair.
 		// Kept as a toggle so replay parity data can arbitrate the quirk.

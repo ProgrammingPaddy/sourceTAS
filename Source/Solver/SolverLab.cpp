@@ -267,8 +267,8 @@ namespace {
 			else if (a == "--hull-duck") ok = next_f(&o.hulls.duck_max.Z);
 			else if (a == "--no-unduck-defer") o.params.unduck_hull_defer = false;
 			else if (a == "--stam-arm") ok = next_f(&o.params.stamina_jump_ms);
-			else if (a == "--stam-jump") ok = next_f(&o.params.stamina_jump_scale_per_ms);
-			else if (a == "--stam-walk") ok = next_f(&o.params.stamina_scale_per_ms);
+			else if (a == "--stam-scale") ok = next_f(&o.params.stamina_scale_per_ms);
+			else if (a == "--stam-pow") ok = next_f(&o.params.stamina_pow_rate);
 			else if (a == "--seg-s") { if (i + 1 < argc) o.seg_s = atof(argv[++i]); else ok = false; }
 			else if (a == "--end-s") { if (i + 1 < argc) o.end_s = atof(argv[++i]); else ok = false; }
 			else if (a == "--beam") ok = next_i(&o.beam);
