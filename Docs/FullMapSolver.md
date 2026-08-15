@@ -1628,15 +1628,23 @@ three fitted mechanisms (every step measured, zero guesses survived):
    tick's duck processing - press ticks AND unduck ticks both cap ducked
    (the observed 39.4 u/s delta = the 191.25 vs 230.6 accel budgets,
    exact). Implemented as cap_ducked in MoveTick.
-3. **STANDING HULL HEIGHT = 62, not 72** (the headline): the engine's
-   wall release at the ramp bottom edge bounded the effective hull top to
-   (56.7, 63.7); with 62 the unduck_face deck goes BIT-EXACT (0.000u) and
-   the "air-unduck hull defer" hypothesis dissolves (superseded, toggle
-   dormant). The month of 72-parity never contradicted 62 because NOTHING
-   else on this map is top-sensitive - the early hull_stand=62 netvar
-   read was right, the override to 72 was the error. Oracle rays updated
-   to 62; duck hull 54 stays (no top-discriminating deck yet - needs an
-   overhang; the +-8.5 air shift is independently measured).
+3. **POST-AIR-UNDUCK TRANSIENT HULL** (the headline - CORRECTED after the
+   user challenged a universal 62 against the VDC dimensions page, which
+   is right: standing = 72, eye 64): the engine's wall release at the
+   ramp bottom edge bounds the effective hull top to (56.7, 63.7) IN THE
+   POST-UNDUCK STATE - while the engine's own 72-hull TRACE (the oracle,
+   same ticks) says HIT where its MOVEMENT flew free. So 72 is the normal
+   standing hull AND the post-unduck movement hull is shorter: a STATE,
+   not a constant. Mechanism consistent with every measured constant: the
+   unduck drops the ORIGIN 8.5 while the world-space bounds stay, leaving
+   the top at 54 + 8.5 = 62.5 relative to the new origin until grounding
+   re-bases it. (The deck cannot distinguish 62.0 from 62.5; 62.5 is the
+   mechanistic value.) Implemented as a THIRD hull set (hull_state 0/1/2,
+   TraceHull3, per-brush d_unduck expansions); standing stays 72
+   everywhere; oracle rays back at 72. First shipped as universal 62 -
+   WRONG, reverted same session; the correction predicts a NEVER-DUCKED
+   fall past the same edge releases at the 72 boundary ->
+   battery_wall_stand deck generated as the discriminator.
 
 **Score at shipped defaults: 8/9 BIT-EXACT.** Regressions: 292 and
 solved12 replay 0.000u under 62. Remaining:
@@ -1648,10 +1656,13 @@ solved12 replay 0.000u under 62. Remaining:
 
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- ~~StepMove port~~ DONE 1:1. ~~Unduck gap~~ = hull 62 + cap rule, DONE.
-- **Next battery click** (user, after reinject): scores the 495-slice
-  deck (t537's own window) + rerun; then fit stamina's 0.118.
+- ~~StepMove port~~ DONE 1:1. ~~Unduck gap~~ = transient hull + cap rule.
+- **Next battery click** (user, after reinject): scores wall_stand (the
+  72-vs-transient discriminator), unduck_spine495 (t537's own window),
+  and the full rerun; then fit stamina's 0.118.
 - Duck-hull top height: undiscriminated (needs overhang geometry).
+- Transient end condition: grounding is fitted; re-duck/re-unduck
+  re-basing untested (a future deck if a tape ever exercises it).
 - **Chain endgame**: carve control BUILT (gene 5: into-face vs along-face
   wish blend, own yaw targeting under the same caps) but v13 MEASURED A
   REGRESSION (v12-live boards died; ENDs d313+ except one d54): the carve

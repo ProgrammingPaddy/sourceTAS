@@ -40,7 +40,7 @@ namespace Solver {
 		root_.pos = anchor.origin;
 		root_.vel = anchor.velocity;
 		root_.ducked = anchor.ducked;
-		root_.hull_ducked = anchor.ducked;
+		root_.hull_state = anchor.ducked ? 1 : 0;
 		root_.stamina = anchor.stamina;
 		root_yaw_ = anchor.yaw;
 		// Ground settle exactly like replay: 2u down-probe, no physics tick.

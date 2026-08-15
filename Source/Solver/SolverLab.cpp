@@ -377,7 +377,7 @@ namespace {
 		s.pos = anchor.origin;
 		s.vel = anchor.velocity;
 		s.ducked = anchor.ducked;
-		s.hull_ducked = anchor.ducked;
+		s.hull_state = anchor.ducked ? 1 : 0;
 		s.stamina = anchor.stamina;
 		{
 			TraceResult tr;
@@ -498,7 +498,7 @@ namespace {
 		s.pos = tape.start.valid ? tape.start.origin : w.spawn_origin;
 		s.vel = tape.start.valid ? tape.start.velocity : Vec3();
 		s.ducked = tape.start.valid ? tape.start.ducked : false;
-		s.hull_ducked = s.ducked;
+		s.hull_state = s.ducked ? 1 : 0;
 		s.stamina = tape.start.valid ? tape.start.stamina : 0.f;
 		printf("anchor (%.3f, %.3f, %.3f) vel (%.1f, %.1f, %.1f) ducked=%d stamina=%.1f\n",
 			s.pos.X, s.pos.Y, s.pos.Z, s.vel.X, s.vel.Y, s.vel.Z,
@@ -741,7 +741,7 @@ namespace {
 		s.pos = tape.start.origin;
 		s.vel = tape.start.velocity;
 		s.ducked = tape.start.ducked;
-		s.hull_ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
 		s.stamina = tape.start.stamina;
 		{
 			TraceResult tr;
@@ -1747,6 +1747,36 @@ namespace {
 			}
 		}
 		if (ok_edge) {
+			// NEVER-DUCKED wall slide (the hull-height DISCRIMINATOR): the
+			// same fall past ramp 1's bottom edge with no duck anywhere.
+			// Predicted release = the standing-72 boundary; a shorter
+			// release here would mean the hull is universally short, not a
+			// post-unduck transient.
+			BatteryDeck d;
+			d.name = "battery_wall_stand";
+			d.anchor = a_edge;
+			PlayerState s;
+			s.pos = d.anchor.origin;
+			const Vec3 target(-928.f, -440.f, 60.f);
+			DeckFrame(d, 25.f, 450.f, 0.f, IN_FORWARD, 8);
+			for (int i = 0; i < 8; ++i)
+				MoveTick(s, w, p, 0.f, 25.f, 450.f, 0.f, 0.f, IN_FORWARD,
+					nullptr);
+			DeckFrame(d, 25.f, 450.f, 0.f, IN_FORWARD | IN_JUMP, 1);
+			MoveTick(s, w, p, 0.f, 25.f, 450.f, 0.f, 0.f,
+				IN_FORWARD | IN_JUMP, nullptr);
+			for (int t = 0; t < 260; ++t) {
+				const float yaw = atan2f(target.Y - s.pos.Y,
+					target.X - s.pos.X) * (180.f / kPi);
+				DeckFrame(d, yaw, 450.f, 0.f, IN_FORWARD, 1);
+				MoveTick(s, w, p, 0.f, yaw, 450.f, 0.f, 0.f, IN_FORWARD,
+					nullptr);
+				if (s.pos.Z < -900.f)
+					break;
+			}
+			decks.push_back(d);
+		}
+		if (ok_edge) {
 			// UNDUCK ON A RAMP FACE - the tick-537 divergence scenario:
 			// jump toward ramp 1 ducked, ride the face, unduck ON it.
 			// Closed-loop synthesis via the core (aim at the face, hold).
@@ -1836,7 +1866,7 @@ namespace {
 		s.pos = tape.start.origin;
 		s.vel = tape.start.velocity;
 		s.ducked = tape.start.ducked;
-		s.hull_ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
 		s.stamina = tape.start.stamina;
 		{
 			TraceResult tr;
@@ -1950,7 +1980,7 @@ namespace {
 			s.pos = tape.start.origin;
 			s.vel = tape.start.velocity;
 			s.ducked = tape.start.ducked;
-			s.hull_ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
 			s.stamina = tape.start.stamina;
 			{
 				// Engine-sim start semantics: RequestSim begins at the RAW

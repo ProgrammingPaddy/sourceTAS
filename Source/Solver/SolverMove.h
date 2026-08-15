@@ -68,11 +68,10 @@ namespace Solver {
 		// sv_enablebunnyhopping 1 (surf setup) disables PreventBunnyJumping's
 		// 1.1*maxspeed pre-jump clamp (binary-scanned server behavior).
 		bool enablebunnyhopping = true;
-		// AIR-UNDUCK HULL DEFER - SUPERSEDED (2026-08-14): the apparent
-		// defer was the standing hull being 62, not 72 (see Hulls). With
-		// the true height the flag-coupled hull matches the engine
-		// bit-exact and this stays OFF; kept as an arbitration toggle only.
-		bool unduck_hull_defer = false;
+		// POST-AIR-UNDUCK TRANSIENT HULL (see PlayerState::hull_state):
+		// gates hull_state 2 on air unducks. Default ON (the measured
+		// behavior); off = flag-coupled hulls for arbitration.
+		bool unduck_hull_defer = true;
 	};
 
 	struct PlayerState {
@@ -81,13 +80,13 @@ namespace Solver {
 		bool ducked = false;       // FL_DUCKING: the duck FLAG (speed caps,
 		                           // eye offset semantics)
 		// The COLLISION hull state, decoupled from the flag (battery+oracle
-		// fitted 2026-08-14, unduck_face deck): an AIR unduck clears the
-		// flag and shifts the origin, but the engine keeps TRACING with the
-		// DUCKED hull until grounding - t146 walked through standing-solid
-		// space the oracle itself confirms is a hit, while a 54-tall hull
-		// clears it; the same hull still clips the wall at t142-145 exactly
-		// where the engine clipped. Restored to the flag on landing.
-		bool hull_ducked = false;
+		// fitted 2026-08-14; corrected vs the VDC dimensions after user
+		// challenge): 0 = standing (72), 1 = ducked (54), 2 = the POST-AIR-
+		// UNDUCK TRANSIENT - the unduck drops the origin 8.5 while the
+		// world-space bounds stay, leaving the top at 54+8.5 = 62.5 until
+		// grounding re-bases it (engine release bracketed to (56.7, 63.7);
+		// the engine's own 72-hull trace HITS where its movement flew).
+		unsigned char hull_state = 0;
 		bool ducking = false;      // ground transition in progress
 		float duck_elapsed_ms = 0.f;
 		bool on_ground = false;

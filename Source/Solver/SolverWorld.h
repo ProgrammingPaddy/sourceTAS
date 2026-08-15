@@ -29,18 +29,23 @@ namespace Solver {
 
 	struct Hulls {
 		Vec3 stand_min = Vec3(-16.f, -16.f, 0.f);
-		// STANDING HEIGHT 62 (battery-fitted 2026-08-14, unduck_face deck
-		// bit-exact 0.000u; engine release bounded to (56.7, 63.7) at the
-		// ramp bottom edge). The old 72 survived a month of parity because
-		// nothing else on this map is TOP-sensitive - the early netvar read
-		// of 62 was right all along. CS:S standing hull = 32x32x62.
-		Vec3 stand_max = Vec3(16.f, 16.f, 62.f);
+		Vec3 stand_max = Vec3(16.f, 16.f, 72.f);  // canonical CS:S standing
+		                                          // (VDC dimensions; eye 64)
 		Vec3 duck_min = Vec3(-16.f, -16.f, 0.f);
-		Vec3 duck_max = Vec3(16.f, 16.f, 54.f);   // NOT yet top-discriminated
-		                                          // by any deck (needs an
-		                                          // overhang); the ±8.5 air
-		                                          // duck shift is measured
-		                                          // independently
+		Vec3 duck_max = Vec3(16.f, 16.f, 54.f);   // 72-54 = the measured ~18u
+		                                          // in-air FinishDuck origin lift
+		// POST-AIR-UNDUCK TRANSIENT (battery-fitted 2026-08-14; corrected
+		// after the user challenged a universal 62 against the VDC page):
+		// the engine's own 72-hull TRACE says HIT where its MOVEMENT flew
+		// free, so the post-unduck movement hull is effectively shorter -
+		// release bounded to (56.7, 63.7). Mechanism consistent with all
+		// measured constants: the unduck drops the ORIGIN 8.5 while the
+		// world-space bounds stay, leaving the top at 54 + 8.5 = 62.5
+		// relative to the new origin, until grounding re-bases it. The
+		// deck cannot distinguish 62.0 from 62.5 (release tick identical);
+		// 62.5 is the mechanistic value.
+		Vec3 unduck_min = Vec3(-16.f, -16.f, 0.f);
+		Vec3 unduck_max = Vec3(16.f, 16.f, 62.5f);
 	};
 
 	struct WorldBrush {
@@ -53,11 +58,14 @@ namespace Solver {
 		std::vector<float> d;         // raw plane distances (unexpanded)
 		std::vector<float> d_stand;   // hull-expanded, standing
 		std::vector<float> d_duck;    // hull-expanded, ducked
+		std::vector<float> d_unduck;  // hull-expanded, post-air-unduck
+		                              // transient (top 62.5; see Hulls)
 		std::vector<int>   pid;       // BSP plane id (sides), -2 for bevels
 		int nsides = 0;
 		// Origin-space AABB gates (brush box minus hull), per hull.
 		Vec3 gmin_stand, gmax_stand;
 		Vec3 gmin_duck, gmax_duck;
+		Vec3 gmin_unduck, gmax_unduck;
 	};
 
 	struct TraceResult {
@@ -84,6 +92,9 @@ namespace Solver {
 		// `ducked` picks the distance set). Returns the earliest entry fraction
 		// in [0,1] (1 = clear) and fills out (out may be null).
 		float TraceHull(const Vec3& a, const Vec3& b, bool ducked, TraceResult* out) const;
+		// Three-state hull variant: 0 = standing, 1 = ducked, 2 = the
+		// post-air-unduck transient (top 62.5 until grounding).
+		float TraceHull3(const Vec3& a, const Vec3& b, int hull, TraceResult* out) const;
 
 		// True when the hull at origin o overlaps any collidable brush (static
 		// containment against the expanded plane sets). Duck/unduck validation.

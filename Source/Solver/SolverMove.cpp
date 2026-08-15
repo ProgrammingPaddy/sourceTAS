@@ -54,7 +54,7 @@ namespace Solver {
 					break;
 				const Vec3 end = s.pos + Scale(s.vel, time_left);
 				TraceResult tr;
-				const float frac = w.TraceHull(s.pos, end, s.hull_ducked, &tr);
+				const float frac = w.TraceHull3(s.pos, end, s.hull_state, &tr);
 				if (frac > 0.f) {
 					s.pos = s.pos + Scale(end - s.pos, frac);
 					original_v = s.vel;   // engine re-bases the clip set
@@ -123,8 +123,8 @@ namespace Solver {
 			s.ground_brush = -1;
 			if (s.vel.Z <= p.non_jump_velocity) {
 				TraceResult tr;
-				const float gf = w.TraceHull(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
-				                             s.hull_ducked, &tr);
+				const float gf = w.TraceHull3(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
+				                             s.hull_state, &tr);
 				if (gf < 1.f && tr.brush >= 0 && tr.normal.Z >= p.walkable_z) {
 					// NO origin snap: engine ground truth (2026-08-13, t479)
 					// sets ground with the origin still 1.575u above the
@@ -135,7 +135,7 @@ namespace Solver {
 					s.ground_brush = tr.brush;
 					// Grounding realigns the collision hull to the duck
 					// FLAG (the air-unduck's deferred hull ends here).
-					s.hull_ducked = s.ducked;
+					s.hull_state = s.ducked ? 1 : 0;
 				}
 			}
 			if (ev) {
@@ -233,7 +233,7 @@ namespace Solver {
 				const Vec3 up_to(pos0.X, pos0.Y,
 					pos0.Z + p.stepsize + kDistEpsilon);
 				TraceResult tr;
-				const float f = w.TraceHull(s.pos, up_to, s.hull_ducked, &tr);
+				const float f = w.TraceHull3(s.pos, up_to, s.hull_state, &tr);
 				s.pos = s.pos + Scale(up_to - s.pos, f);
 			}
 			// Slide move up (contacts already recorded by the down attempt;
@@ -243,7 +243,7 @@ namespace Solver {
 			const Vec3 down_to(s.pos.X, s.pos.Y,
 				s.pos.Z - (p.stepsize + kDistEpsilon));
 			TraceResult dn;
-			const float fd = w.TraceHull(s.pos, down_to, s.hull_ducked, &dn);
+			const float fd = w.TraceHull3(s.pos, down_to, s.hull_state, &dn);
 
 			// (3) Landed on a non-walkable plane (or nothing): slide wins.
 			if (dn.normal.Z < p.walkable_z) {
@@ -273,11 +273,11 @@ namespace Solver {
 			Vec3 end = s.pos;
 			end.Z -= p.stepsize;
 			TraceResult up;
-			const float fu = w.TraceHull(s.pos, start, s.hull_ducked, &up);
+			const float fu = w.TraceHull3(s.pos, start, s.hull_state, &up);
 			start = s.pos;
 			start.Z += 2.f * fu;
 			TraceResult dn;
-			const float fd = w.TraceHull(start, end, s.hull_ducked, &dn);
+			const float fd = w.TraceHull3(start, end, s.hull_state, &dn);
 			if (fd > 0.f && fd < 1.f && dn.brush >= 0
 				&& dn.normal.Z >= p.walkable_z) {
 				const Vec3 land = start + Scale(end - start, fd);
@@ -333,7 +333,7 @@ namespace Solver {
 			const Vec3 dest(s.pos.X + s.vel.X * p.dt,
 			                s.pos.Y + s.vel.Y * p.dt, s.pos.Z);
 			TraceResult tr;
-			const float frac = w.TraceHull(s.pos, dest, s.hull_ducked, &tr);
+			const float frac = w.TraceHull3(s.pos, dest, s.hull_state, &tr);
 			if (frac >= 1.f) {
 				s.pos = dest;
 			} else {
@@ -391,7 +391,7 @@ namespace Solver {
 				if (!s.on_ground || s.duck_elapsed_ms >= p.time_to_duck_ms) {
 					// FinishDuck.
 					s.ducked = true;
-					s.hull_ducked = true;   // duck: flag and hull together
+					s.hull_state = 1;       // duck: flag and hull together
 					s.ducking = false;
 					if (ev) ev->duck_changed = true;
 					if (!s.on_ground) {
@@ -417,15 +417,15 @@ namespace Solver {
 							// shifts, but the COLLISION hull stays ducked
 							// until grounding (battery+oracle fitted - see
 							// PlayerState::hull_ducked).
-							if (!p.unduck_hull_defer)
-								s.hull_ducked = false;
+							s.hull_state = p.unduck_hull_defer
+								? 2 : 0;   // transient top 62.5
 							if (ev) ev->duck_changed = true;
 						}
 						// No room: stay ducked (engine behavior).
 					} else {
 						if (!w.OriginInSolid(s.pos, false)) {
 							s.ducked = false;
-							s.hull_ducked = false;   // ground: stand now
+							s.hull_state = 0;        // ground: stand now
 							if (ev) ev->duck_changed = true;
 						}
 					}

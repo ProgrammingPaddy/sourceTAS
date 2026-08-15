@@ -8240,9 +8240,7 @@ namespace {
 		using namespace EngineTraceABI;
 		static WorldOnlyFilter s_filter;
 		const Vector mins(-16.f, -16.f, 0.f);
-		// Standing 62 (battery-fitted 2026-08-14; the old 72 was never
-		// top-discriminated - oracle rays must match the solver hulls).
-		const Vector maxs(16.f, 16.f, ducked ? 54.f : 62.f);
+		const Vector maxs(16.f, 16.f, ducked ? 54.f : 72.f);
 		RayBuf ray;
 		BuildRay(ray, a, b, mins, maxs);
 		TraceOut out;

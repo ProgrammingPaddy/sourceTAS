@@ -303,17 +303,21 @@ namespace Solver {
 				wb.bmax = Vec3(mx[0], mx[1], mx[2]);
 			}
 
-			// Hull expansions (both hulls) + origin-space AABB gates.
+			// Hull expansions (all three hulls) + origin-space AABB gates.
 			wb.d_stand.resize(wb.n.size());
 			wb.d_duck.resize(wb.n.size());
+			wb.d_unduck.resize(wb.n.size());
 			for (size_t i = 0; i < wb.n.size(); ++i) {
 				wb.d_stand[i] = wb.d[i] + HullExpand(wb.n[i], hulls_.stand_min, hulls_.stand_max);
 				wb.d_duck[i] = wb.d[i] + HullExpand(wb.n[i], hulls_.duck_min, hulls_.duck_max);
+				wb.d_unduck[i] = wb.d[i] + HullExpand(wb.n[i], hulls_.unduck_min, hulls_.unduck_max);
 			}
 			wb.gmin_stand = wb.bmin - hulls_.stand_max;
 			wb.gmax_stand = wb.bmax - hulls_.stand_min;
 			wb.gmin_duck = wb.bmin - hulls_.duck_max;
 			wb.gmax_duck = wb.bmax - hulls_.duck_min;
+			wb.gmin_unduck = wb.bmin - hulls_.unduck_max;
+			wb.gmax_unduck = wb.bmax - hulls_.unduck_min;
 
 			brushes.push_back(std::move(wb));
 		}
@@ -372,6 +376,12 @@ namespace Solver {
 
 	float World::TraceHull(const Vec3& a, const Vec3& b, bool ducked,
 	                       TraceResult* out) const {
+		return TraceHull3(a, b, ducked ? 1 : 0, out);
+	}
+
+	float World::TraceHull3(const Vec3& a, const Vec3& b, int hull,
+	                        TraceResult* out) const {
+		const bool ducked = hull == 1;   // trace-log row semantics
 		if (out) {
 			out->frac = 1.f;
 			out->brush = -1;
@@ -395,13 +405,16 @@ namespace Solver {
 				cells_[(static_cast<size_t>(z) * ny_ + y) * nx_ + x];
 			for (int bi : cell) {
 				const WorldBrush& bc = brushes[bi];
-				const Vec3& gmn = ducked ? bc.gmin_duck : bc.gmin_stand;
-				const Vec3& gmx = ducked ? bc.gmax_duck : bc.gmax_stand;
+				const Vec3& gmn = hull == 1 ? bc.gmin_duck
+					: hull == 2 ? bc.gmin_unduck : bc.gmin_stand;
+				const Vec3& gmx = hull == 1 ? bc.gmax_duck
+					: hull == 2 ? bc.gmax_unduck : bc.gmax_stand;
 				if (hi.X < gmn.X || lo.X > gmx.X ||
 				    hi.Y < gmn.Y || lo.Y > gmx.Y ||
 				    hi.Z < gmn.Z || lo.Z > gmx.Z)
 					continue;
-				const std::vector<float>& pd = ducked ? bc.d_duck : bc.d_stand;
+				const std::vector<float>& pd = hull == 1 ? bc.d_duck
+					: hull == 2 ? bc.d_unduck : bc.d_stand;
 				float tmin = -1.f, tmax = 1.f;   // engine: enterfrac -1, leavefrac 1
 				// CORNER RELEASE - ORACLE-PINNED (2026-08-13, 3,555 engine
 				// answers, zero disagreements): the brush is skipped iff the
