@@ -1687,9 +1687,10 @@ stamina 0.010u = precision floor.
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
 - ~~StepMove~~ ~~unduck hull/cap~~ ~~stamina separation~~ DONE.
-- **One battery click**: captures the free-air spine495 slice (t537's
-  own window) -> fit whatever it states -> board 11/11.
-- duck_air 0.064u birth analysis (same method as unduck_face).
+- ~~One battery click for spine495~~ DONE 2026-08-15 (t537 solved, see
+  the binary-decode section).
+- ~~duck_air 0.064u birth analysis~~ DONE 2026-08-14/15: it was the walk
+  drag law expressing itself; 0.000 under the decoded pow law.
 - Duck-hull top height: undiscriminated (needs overhang geometry).
 - Transient end condition: grounding fitted; re-duck re-basing untested.
 - **Chain endgame**: carve control BUILT (gene 5: into-face vs along-face
@@ -1744,6 +1745,135 @@ stamina 0.010u = precision floor.
   (the v5.4 warning stands: naive inclusion broke proven lines).
 - Cell-space audit, finish-tick display conventions, duck hull height / stamina
   fall-speed data, in-game archive viz in the Map Solve tab.
+
+## 2026-08-14/15 — THE BINARY DECODE: model = engine code, zero fitted constants
+
+The zero-drift campaign's endgame, in three acts. User directives driving
+it: "Any drift from the model is unacceptable"; "There should never be
+guessing, and it should be 1-to-1 exact every time"; "I don't want
+hardcoding... mirror the engine's code exactly, so if any settings change
+on the ingame server it will adapt perfectly."
+
+### Act 1 — stamina by regression (late 0814)
+The six-jump ladder capture gave regression enough points to expose
+FORMULA SHAPE, not just constants:
+- **Jump tax applies to the WHOLE post-impulse vz** (StartGravity's -6
+  included), scale = textbook 0.00019. Proof of the masquerade: the
+  impulse-only fitted scale 0.00018622 = 0.00019*(296/302) EXACTLY.
+  Arm = 25000/19 ms confirmed by measurement to 0.006 ms. All 8 ladder
+  jumps went to delta +0.0000.
+- **Walk drag fitted as AFFINE**: ratio = 1 - (stam*0.00019833 +
+  0.000327), reproducing every sampled tick to ~1e-5; the intercept's
+  mechanism stayed honestly "unidentified". duck_air's long-standing
+  0.064u fell to 0.000 as a free consequence (same mechanism in its
+  landings). Deck: 0.012u/742t.
+- **RequestSim velocity seeding NEVER worked** (netvar write doesn't
+  reach SetupMove's abs-velocity copy; every prior deck anchored at
+  rest so it was never exercised). Fixed: tick-0 movedata direct seed
+  through the pinned offsets (vel +0x44, origin +0x9C).
+
+### Act 2 — spine495 t537 falls to one mirrored line (0815)
+First valid velocity-seeded capture of the slice: FAIL at rel t55 =
+abs t537, and the row told the whole story. t54: airborne, ducked,
+vz +100.177 RISING (free flight over the spine). t55: duck released +
+jump pressed -> engine z DROPS 4.15 and vz becomes **283.993 = the
+exact cold standing-jump chain** (-6 on ZERO vz +301.9934 -6 -6).
+Mechanism: the air unduck's -8.5 origin drop lands within categorize
+range of the spine; FinishUnDuck's own CategorizePosition grounds the
+player mid-flight; **SetGroundEntity zeroes vz** (+100.177 eaten); the
+queued jump fires cold. Our core already re-categorized after duck
+changes but never zeroed vz - its jump added the impulse onto 94.177,
+the historic "+100.18 dvz" to the digit. ONE mirrored line in
+CategorizePosition's ground-set branch (`s.vel.Z = 0`), invisible on
+ordinary ticks (the tick-end grounded zero masks it), load-bearing
+exactly when ground is set and left within the same tick.
+**Battery went 11/11 for the first time.**
+
+### Act 3 — the binary itself (0815): capstone on the shipped x64 DLLs
+capstone 5.0.7 was already on the machine; scratchpad scripts
+(stamina_re*.py, re_disasm.py, convar_refs.py) do: PE parse ->
+constant-pool value-range sweep (aligned .rdata) + unaligned immediate
+sweep (.text) -> RIP-relative SSE/VEX reference scan -> capstone
+windows around each hit. Method notes: MSVC stores float constants as
+`mov [mem], imm32` (unaligned, alignment-filtered searches miss them);
+19.0/100.0/1000.0 do NOT exist in the binary - the engine ships FOLDED
+constants.
+
+**CCSGameMovement::WalkMove @2f0140 (server.dll x64), decoded:**
+```
+if (m_flStamina > 0) {
+    ratio = 1.0f - m_flStamina * 0.00019f        ; shared .rdata 0056faf4
+    ratio = powf(ratio, gpGlobals->frametime * 70.0f)
+    mv->m_vecVelocity.x *= ratio                  ; mv+0x44 (pin confirmed)
+    mv->m_vecVelocity.y *= ratio
+}
+BaseClass::WalkMove()
+```
+The pow exponent is frametime*70 = **1.05 at 66.67tps** - NOT the SDK
+comment's 0.4 - and it is why every affine fit insisted on slope
+~0.000198 > 0.00019 plus an intercept: the fitted line was a chord
+across this gentle power curve. Tickrate changes adapt BY CODE.
+
+**CheckJumpButton @2eddab, decoded:** impulse is a baked DOUBLE
+`301.99337741082996` (compile-time sqrt(2*800*57), movement
+optimizations - it does NOT track sv_gravity), applied in double with
+ONE rounding back to float; ducked/ducking SETs instead of adds. Tax:
+whole-vz float multiply by (1 - stam*0.00019f) - the SAME shared
+constant. Arm stored as raw bits 0x44a47943 == float(25000.f/19.f)
+exactly. Every prior conclusion confirmed instruction-by-instruction;
+the affine walk law and both historic jump scales retired.
+
+**Result: stamina deck 0.000u/742t. Board 11/11, EVERY deck 0.000u.**
+Full-tape regression: 292, solved12, and the 495's server-authoritative
+playback (t537 cold jump included) all diff 0.000.
+
+### The stopspeed "lie" resolved - it was OUR read
+- Registration (server.dll @1ba81): sv_stopspeed default string "100".
+- The game CODE calls SetValue(75.0f) on it (@2f6f6c, constant at
+  .rdata 004d66a0) - CS:S forces 75 at runtime over its own default.
+- Friction @20edb9, decoded: drop = m_surfaceFriction * sv_friction *
+  max(stopspeed, speed) * frametime, with BOTH cvars read LIVE each
+  tick through **ConVar::m_pParent (+0x38) -> m_fValue (+0x54)**.
+- Our Cvars::GetFloat read the CHILD object's value slot, which keeps
+  the registered default forever -> "reads 100 while behaving 75".
+  The engine never lied; the read skipped the parent hop.
+- Fixed: ParentOf() hop validated by the self-parent invariant
+  (*(parent+0x38) == parent) + name identity, SEH-gated (the parent
+  legitimately lives in server.dll's image on a listen server).
+  stopspeed is now a live, correctly-read, exported param. The
+  behavior-vs-read arbitration RULE stays (battery decides conflicts);
+  this round moved the fault from "engine lies" to "reads can be
+  incomplete".
+
+### One-click totality (user directive: the click carries EVERYTHING)
+- Captures are SELF-DESCRIBING: every enginesim CSV now opens with
+  `# map <name>` + `# param <key> <value>` lines carrying the LIVE
+  settings that governed it (tickinterval, weapon maxspeed, gravity,
+  accelerate, airaccelerate, friction, stopspeed, maxvelocity,
+  stepsize, enablebunnyhopping). The scorer applies them OVER the cfg
+  per deck - a capture from a reconfigured server scores against its
+  own truth with zero manual steps.
+- Per-tick **m_flStamina column**: the stamina clock is a READ,
+  verified tick-by-tick (drift caught at its birth tick with both
+  values on record). SimState.stamina_ms; scorer prints `stam
+  eng==model every tick` / first mismatch.
+- ApplyParamKey: ONE key->field mapping shared by cfg + headers.
+- Scorer noise retired: the hulltop NETVAR (constant 62, proven not
+  the movement hull) is reported as data (`hullnv {62.0}`), never
+  compared.
+- server_params.cfg now exports stopspeed/maxvelocity/stepsize/
+  enablebunnyhopping + live gravity/airaccelerate overrides.
+- NOTE: the DLL-side additions (# param header, stamina column) ship
+  in the rebuilt Basehook.dll - the NEXT reinjection's captures carry
+  them; current captures score via the 15-column fallback path.
+
+### Where this leaves the era
+Physics: **the model IS the engine's code** for every mechanism the
+battery exercises - no fitted constants remain in the movement core.
+The instrument stack (engine-query battery, slice decks, per-tick
+reads, self-describing captures, static RE toolkit) turns any future
+divergence into one capture + one decode. Solver search (chain
+endgame, task #28) is unblocked pending user sign-off.
 
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
