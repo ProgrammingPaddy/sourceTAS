@@ -64,6 +64,9 @@ namespace {
 		printf("          [--depth D] [--optimize-s S] [--rng N] [physics options]\n");
 		printf("          UNSEEDED two-layer solve: exhaustive skeleton search over\n");
 		printf("          surf-face sequences x chained segment CMA (no tape inputs)\n");
+		printf("  tracegen-map <map.bsp>  FULL-MAP geometry sweep queries (every\n");
+		printf("          brush face/edge/corner) -> solver\\trace_queries.csv;\n");
+		printf("          one in-game oracle click certifies the whole map\n");
 		printf("  battery-gen <map.bsp>   write battery_* mechanism decks to recordings\n");
 		printf("  battery <map.bsp>       score in-game battery captures vs the core\n");
 		printf("          (in-game: Map Solve tab -> 'Run ALIGNMENT battery' plays all\n");
@@ -666,6 +669,137 @@ namespace {
 				printf("trace log: cannot open %s\n", o.trace_log.c_str());
 			}
 		}
+		fflush(stdout);
+		return 0;
+	}
+
+	// ---- FULL-MAP GEOMETRY SWEEP (user directive 2026-08-15: perfect
+	// parity for world geometry under ANY inputs, certified in ONE oracle
+	// click). Generates hull-trace queries bracketing every brush face,
+	// edge, and corner on the map - normal crossings, tangential skims,
+	// seam-parallel passes - for both engine-traceable hulls. The in-game
+	// oracle answers them all with IEngineTrace; every disagreement with
+	// our TraceHull becomes a concrete fix case via `tracediff`, iterable
+	// OFFLINE against the same results file. ----
+	int CmdTraceGenMap(const std::string& map_path, const ReplayOpts& o,
+	                   const std::string& out_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		FILE* f = nullptr;
+		if (fopen_s(&f, out_path.c_str(), "w") != 0 || !f) {
+			printf("tracegen-map: cannot open %s\n", out_path.c_str());
+			return 1;
+		}
+		fprintf(f, "id,tick,ax,ay,az,bx,by,bz,ducked,frac,nx,ny,nz,brush\n");
+		int id = 0;
+		auto emit = [&](const Vec3& a, const Vec3& b, int ducked) {
+			// Our answer rides along (frac/n/brush) exactly like the replay
+			// trace log; the oracle overwrites with engine truth.
+			TraceResult tr;
+			const float fr = w.TraceHull(a, b, ducked != 0, &tr);
+			fprintf(f, "%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,"
+				"%.9g,%.6f,%.6f,%.6f,%d\n",
+				id++, 0, a.X, a.Y, a.Z, b.X, b.Y, b.Z, ducked, fr,
+				tr.normal.X, tr.normal.Y, tr.normal.Z,
+				tr.brush >= 0 ? w.brushes[tr.brush].id : -1);
+		};
+		// Deterministic jitter (no wall-clock anywhere).
+		unsigned rng = 0x5EED5EEDu;
+		auto frand = [&rng]() {
+			rng = rng * 1664525u + 1013904223u;
+			return static_cast<float>((rng >> 8) & 0xFFFF) / 65535.f;
+		};
+		for (const WorldBrush& wb : w.brushes) {
+			const Vec3 c(0.5f * (wb.bmin.X + wb.bmax.X),
+				0.5f * (wb.bmin.Y + wb.bmax.Y),
+				0.5f * (wb.bmin.Z + wb.bmax.Z));
+			// (a) FACE probes: for every real side, points spread across the
+			// brush AABB projected onto the face plane; traces crossing the
+			// plane inward along -n from outside, and skims parallel to the
+			// face just off the expanded surface.
+			for (int pi = 0; pi < wb.nsides; ++pi) {
+				const Vec3 n = wb.n[pi];
+				const float d = wb.d[pi];
+				for (int k = 0; k < 5; ++k) {
+					// Spread point in the AABB, projected onto the plane.
+					Vec3 q(wb.bmin.X + (wb.bmax.X - wb.bmin.X)
+						* (k == 0 ? 0.5f : frand()),
+						wb.bmin.Y + (wb.bmax.Y - wb.bmin.Y)
+						* (k == 0 ? 0.5f : frand()),
+						wb.bmin.Z + (wb.bmax.Z - wb.bmin.Z)
+						* (k == 0 ? 0.5f : frand()));
+					const float off = Dot(n, q) - d;
+					q = q - Scale(n, off);   // on the raw plane
+					for (int ducked = 0; ducked <= 1; ++ducked) {
+						// Normal crossing: from 96u out to 32u past.
+						emit(q + Scale(n, 96.f), q - Scale(n, 32.f), ducked);
+						// Shallow crossing (glancing 15-degree class).
+						Vec3 t(n.Y, n.Z, n.X);   // any non-parallel vector
+						t = t - Scale(n, Dot(t, n));
+						const float tl = Len(t);
+						if (tl > 1e-4f) {
+							t = Scale(t, 1.f / tl);
+							emit(q + Scale(n, 24.f) - Scale(t, 200.f),
+								q + Scale(t, 200.f), ducked);
+						}
+					}
+				}
+			}
+			// (b) EDGE/CORNER probes: the 12 AABB edges, traces passing
+			// PARALLEL to each edge just inside/outside the hull-expanded
+			// boundary (the seam class the ramp-2 base divergence lives in),
+			// plus diagonal corner crossings.
+			const Vec3 mn = wb.bmin, mx = wb.bmax;
+			const Vec3 corners[8] = {
+				{mn.X, mn.Y, mn.Z}, {mx.X, mn.Y, mn.Z},
+				{mn.X, mx.Y, mn.Z}, {mx.X, mx.Y, mn.Z},
+				{mn.X, mn.Y, mx.Z}, {mx.X, mn.Y, mx.Z},
+				{mn.X, mx.Y, mx.Z}, {mx.X, mx.Y, mx.Z} };
+			static const int edges[12][2] = {
+				{0,1},{2,3},{4,5},{6,7}, {0,2},{1,3},{4,6},{5,7},
+				{0,4},{1,5},{2,6},{3,7} };
+			for (int e = 0; e < 12; ++e) {
+				const Vec3 a = corners[edges[e][0]];
+				const Vec3 b = corners[edges[e][1]];
+				Vec3 dir = b - a;
+				const float el = Len(dir);
+				if (el < 1.f)
+					continue;
+				dir = Scale(dir, 1.f / el);
+				// Perpendicular offsets around the edge (8 clock positions
+				// at hull-scale distances: skim outside, graze, overlap).
+				Vec3 u(dir.Y, dir.Z, dir.X);
+				u = u - Scale(dir, Dot(u, dir));
+				u = Scale(u, 1.f / fmaxf(Len(u), 1e-4f));
+				const Vec3 v = Vec3(
+					dir.Y * u.Z - dir.Z * u.Y,
+					dir.Z * u.X - dir.X * u.Z,
+					dir.X * u.Y - dir.Y * u.X);
+				const float offs[3] = { 12.f, 17.f, 40.f };
+				for (int oi = 0; oi < 3; ++oi) {
+					for (int ci = 0; ci < 4; ++ci) {
+						const float ang = 0.7854f + 1.5708f * ci;
+						const Vec3 off = Scale(u, cosf(ang) * offs[oi])
+							+ Scale(v, sinf(ang) * offs[oi]);
+						const Vec3 mid = Scale(a + b, 0.5f);
+						for (int ducked = 0; ducked <= 1; ++ducked)
+							emit(a + off - Scale(dir, 48.f),
+								b + off + Scale(dir, 48.f), ducked);
+						// Crossing THROUGH the edge at this clock position.
+						emit(mid + Scale(off, 3.f), mid - off, 0);
+					}
+				}
+			}
+		}
+		fclose(f);
+		printf("tracegen-map: %d queries -> %s\n", id, out_path.c_str());
+		printf("tracegen-map: in-game 'Run trace oracle' answers them; then\n"
+			"  SolverLab tracediff \"%s\" <results.csv>\n", out_path.c_str());
 		fflush(stdout);
 		return 0;
 	}
@@ -1877,6 +2011,48 @@ namespace {
 			decks.push_back(d);
 		}
 
+		// ---- FUZZ DECKS (user directive 2026-08-15: parity must hold "no
+		// matter how insane the inputs"). Deterministic extreme inputs -
+		// yaw snaps to +-180, duck/jump spam, full-stick reversals, a wall
+		// ram - as OPEN-LOOP raw decks. Any core-vs-engine divergence here
+		// is a mechanism gap surfaced NOW instead of inside a solver line.
+		// LCG-seeded: decks regenerate bit-identically.
+		{
+			auto fuzz_deck = [&](const char* name, const TapeAnchor& anchor,
+			                     unsigned seed, float base_yaw) {
+				BatteryDeck d;
+				d.name = name;
+				d.anchor = anchor;
+				unsigned r = seed;
+				auto nxt = [&r]() {
+					r = r * 1664525u + 1013904223u;
+					return (r >> 8) & 0xFFFFu;
+				};
+				float yaw = base_yaw;
+				for (int t = 0; t < 340; ++t) {
+					if (nxt() % 7u == 0u)
+						yaw += (static_cast<int>(nxt() % 3600u) - 1800)
+							* 0.1f;   // snaps up to +-180
+					const float fm =
+						(static_cast<int>(nxt() % 3u) - 1) * 450.f;
+					const float sm =
+						(static_cast<int>(nxt() % 3u) - 1) * 450.f;
+					int btn = 0;
+					if (nxt() % 9u < 3u) btn |= IN_DUCK;
+					if (nxt() % 11u < 2u) btn |= IN_JUMP;
+					DeckFrame(d, yaw, fm, sm, btn, 1);
+				}
+				DeckFrame(d, base_yaw, 0.f, 0.f, 0, 30);
+				decks.push_back(d);
+			};
+			if (ok_green) {
+				fuzz_deck("battery_fuzz_a", a_green, 0x000F0221u, 0.f);
+				fuzz_deck("battery_fuzz_b", a_green, 0x000BEEF7u, 135.f);
+			}
+			if (ok_edge)
+				fuzz_deck("battery_fuzz_wall", a_edge, 0x00C0FFEEu, 25.f);
+		}
+
 		const std::string dir = RecordingsDir();
 		int wrote = 0;
 		for (const BatteryDeck& d : decks) {
@@ -2471,6 +2647,18 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdBatteryGen(argv[2], o);
+	}
+	if (cmd == "tracegen-map" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		char documents[MAX_PATH];
+		std::string outp = "trace_queries.csv";
+		if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_PERSONAL, nullptr,
+			SHGFP_TYPE_CURRENT, documents)))
+			outp = std::string(documents)
+				+ "\\sourceTAS\\solver\\trace_queries.csv";
+		return CmdTraceGenMap(argv[2], o, outp);
 	}
 	if (cmd == "battery-slice" && argc >= 7) {
 		ReplayOpts o;

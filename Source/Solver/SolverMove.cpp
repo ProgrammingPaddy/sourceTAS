@@ -201,8 +201,9 @@ namespace Solver {
 			if (s.stamina > 0.f)
 				s.vel.Z *= 1.f - s.stamina * p.stamina_scale_per_ms;
 			if (p.jump_finishgravity)
-				s.vel.Z -= p.gravity * 0.5f * p.dt;   // SDK's in-jump FinishGravity
-				                                      // (confirmed by the -6 -6 tail)
+				s.vel.Z -= s.gravity_scale * p.gravity * 0.5f * p.dt;
+				// SDK's in-jump FinishGravity (confirmed by the -6 -6 tail);
+				// ent_gravity scale applies here too.
 			// The jump ARMS the timer: engine stores raw bits 0x44a47943 ==
 			// float(25000.f/19.f) exactly (@2ede47).
 			s.stamina = p.stamina_jump_ms;
@@ -459,6 +460,13 @@ namespace Solver {
 		if (ev)
 			*ev = TickEvents();
 
+		// FL_BASEVELOCITY lifecycle (SDK PreThink): unless a trigger
+		// refreshed the flag since last tick, base velocity decays to zero;
+		// the flag always clears so triggers must re-touch every tick.
+		if (!s.basevel_flag)
+			s.basevel = Vec3();
+		s.basevel_flag = false;
+
 		// ReduceTimers: the stamina clock drains every tick, airborne too.
 		if (s.stamina > 0.f) {
 			s.stamina -= p.dt * 1000.f;
@@ -484,8 +492,11 @@ namespace Solver {
 		// AND unduck ticks both cap ducked - see WalkMove/battery notes).
 		const bool cap_ducked = cap_pre || s.ducked || s.ducking;
 
-		// FullWalkMove.
-		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // StartGravity
+		// FullWalkMove. StartGravity (SDK): ent_gravity scale applies, then
+		// base velocity's Z integrates ONCE into vz and clears.
+		s.vel.Z -= s.gravity_scale * p.gravity * 0.5f * p.dt;   // StartGravity
+		s.vel.Z += s.basevel.Z * p.dt;
+		s.basevel.Z = 0.f;
 		if (buttons & IN_JUMP)
 			CheckJumpButton(s, w, p, ev);
 		else
@@ -495,16 +506,50 @@ namespace Solver {
 			Friction(s, p);
 		}
 		CheckVelocity(s, p);
+		// SDK Walk/AirMove: lateral base velocity rides along for the move
+		// only (added before, subtracted after).
+		s.vel = s.vel + s.basevel;
 		if (s.on_ground)
 			WalkMove(s, w, p, yaw, fmove, smove, cap_ducked, ev);
 		else
 			AirMove(s, w, p, yaw, fmove, smove, cap_ducked, ev);
+		s.vel = s.vel - s.basevel;
 		CategorizePosition(s, w, p, ev);
 		CheckVelocity(s, p);
-		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // FinishGravity
+		s.vel.Z -= s.gravity_scale * p.gravity * 0.5f * p.dt;   // FinishGravity
 		if (s.on_ground)
 			s.vel.Z = 0.f;
 
+		// TRIGGERS (post-move, mirroring the engine's touch order and the
+		// DLL RequestSim application 1:1 - total-parity port 2026-08-15):
+		// gravity scale persists; push accumulates onto base velocity with
+		// the unground + 1u nudge for upward pushes; teleport sets origin
+		// and ALWAYS zeroes velocity.
+		if (w.HasTriggers()) {
+			World::TriggerHitS th;
+			if (w.CheckTriggers(s.pos, s.hull_state, &th)) {
+				if (th.grav_touched)
+					s.gravity_scale = th.gravity;
+				if (th.pushed) {
+					Vec3 push = th.push_vec;
+					if (s.basevel_flag)
+						push = push + s.basevel;
+					if (push.Z > 0.f && s.on_ground) {
+						s.on_ground = false;
+						s.ground_brush = -1;
+						s.pos.Z += 1.f;
+					}
+					s.basevel = push;
+					s.basevel_flag = true;
+				}
+				if (th.teleported) {
+					s.pos = th.tp_origin;
+					s.vel = Vec3();
+					if (ev)
+						ev->teleported = true;
+				}
+			}
+		}
 	}
 
 } // namespace Solver

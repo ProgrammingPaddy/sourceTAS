@@ -108,6 +108,49 @@ namespace Solver {
 
 		const Hulls& HullDims() const { return hulls_; }
 
+		// ---- TRIGGER VOLUMES (user directive 2026-08-15: total parity
+		// includes triggers - gravity, push, teleport). Parsed from the
+		// entity lump + brush models; the touch test is the same
+		// support-corner Minkowski math as the DLL's BspWorld::
+		// CheckTriggers (raw planes incl. ALL compiler bevels - with
+		// bevels this IS the exact hull-vs-brush sum). Trigger geometry
+		// NEVER collides; it only touches. ----
+		struct TrigBrush {
+			std::vector<Vec3>  n;
+			std::vector<float> d;
+		};
+		struct TriggerVol {
+			int  model = -1;
+			int  spawnflags = 0;
+			Vec3 ent_origin;
+			bool teleport = false, push = false;   // neither = gravity
+			bool dest_ok = false, landmark_ok = false;
+			Vec3 dest_origin, landmark_origin;
+			float dest_pitch = 0.f, dest_yaw = 0.f;
+			Vec3 push_dir;
+			float push_speed = 0.f;
+			float gravity = 1.f;
+			std::vector<int> tb;      // indices into trig_brushes
+		};
+		struct TriggerHitS {
+			bool  teleported = false;
+			Vec3  tp_origin;
+			bool  tp_set_angles = false;
+			float tp_pitch = 0.f, tp_yaw = 0.f;
+			bool  pushed = false;
+			Vec3  push_vec;
+			bool  grav_touched = false;
+			float gravity = 1.f;
+		};
+		std::vector<TriggerVol> triggers;
+		std::vector<TrigBrush>  trig_brushes;
+		bool HasTriggers() const { return !triggers.empty(); }
+		// Hull (by movement hull state 0/1/2) vs every trigger volume;
+		// mirrors BspWorld::CheckTriggers semantics exactly (client
+		// spawnflag gate, ent-origin local space, first teleport wins).
+		bool CheckTriggers(const Vec3& origin, int hull_state,
+		                   TriggerHitS* out) const;
+
 		// Map facts.
 		int version = 0;
 		int mapRevision = 0;

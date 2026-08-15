@@ -104,6 +104,11 @@ namespace Solver {
 		int  old_buttons = 0;      // IN_JUMP release gate lives here
 		float stamina = 0.f;       // landing-stamina timer, ms (see MoveParams;
 		                           // the tape anchor's value seeds it)
+		// TRIGGER STATE (total-parity port 2026-08-15, mirrors the DLL's
+		// RequestSim application + SDK movement consumption):
+		float gravity_scale = 1.f; // trigger_gravity player scale (persists)
+		Vec3 basevel;              // trigger_push base velocity
+		bool basevel_flag = false; // FL_BASEVELOCITY: decays unless refreshed
 	};
 
 	// Per-tick observations for tracing and diagnostics.
@@ -116,6 +121,7 @@ namespace Solver {
 		bool  landed = false;      // air -> ground this tick
 		bool  left_ground = false; // ground -> air this tick
 		bool  duck_changed = false;
+		bool  teleported = false;  // trigger_teleport fired this tick
 	};
 
 	void MoveTick(PlayerState& s, const World& w, const MoveParams& p,
