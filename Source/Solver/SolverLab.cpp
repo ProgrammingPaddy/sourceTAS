@@ -1655,8 +1655,12 @@ namespace {
 				PlayerState s;
 				s.pos = d.anchor.origin;
 				float yaw = 0.f;
-				const int waits[6] = { 40, 6, 14, 26, 44, 70 };
-				for (int j = 0; j < 6; ++j) {
+				// v3 waits: SHORT cycles keep stamina hot (a full hop cycle
+				// is ~55 ticks = 825ms of drain; v2's long waits produced
+				// only 2 hot jumps of 6). First and last stay cold as
+				// controls; the middle six sample distinct hot residues.
+				const int waits[8] = { 40, 2, 4, 7, 10, 14, 18, 90 };
+				for (int j = 0; j < 8; ++j) {
 					int grounded = 0;
 					for (int t = 0; t < 400; ++t) {
 						const bool press = s.on_ground
@@ -2108,6 +2112,20 @@ namespace {
 			printf("battery: %-22s %6d %11s %9.3fu  [%s] %s\n",
 				name.c_str() + 8, n, fbuf, maxd, src.c_str(),
 				okp ? "PASS" : "FAIL  <- engine truth on disk, fit it");
+			if (!eng_ma.empty()) {
+				// WEAPON GUARD (user question 2026-08-14): m_flMaxSpeed is
+				// weapon-dependent - flag any capture whose engine-read
+				// maxspeed disagrees with the model params.
+				bool mismatch = false;
+				for (float v : eng_ma)
+					if (fabsf(v - o.params.maxspeed) > 0.5f)
+						mismatch = true;
+				if (mismatch)
+					printf("battery:   WEAPON/MAXSPEED MISMATCH: engine "
+						"m_flMaxSpeed differs from params maxspeed %.0f - "
+						"capture taken with a different weapon; retake.\n",
+						o.params.maxspeed);
+			}
 			if (!eng_hull.empty()) {
 				// Distinct movedata values (field identification data).
 				std::vector<float> da, db;
