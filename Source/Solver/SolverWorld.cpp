@@ -770,6 +770,22 @@ namespace Solver {
 				}
 			}
 		}
+		// STARTSOLID DOMINATES THE WHOLE TRACE (funcprobe, 2026-08-15): if the
+		// sweep began inside any brush, the engine's aggregate trace reports
+		// fraction 0 with a ZEROED plane normal - it does not go on to report
+		// some other brush's surface. We were skipping the start-solid brush
+		// and returning the next hit's normal, so a hull embedded in a wall
+		// still "found ground" on the floor below. Measured on 387 of 20,000
+		// isolated CategorizePosition calls: engine ground 0, ours 1, every
+		// one of them embedded. A zeroed normal fails normal.z >= 0.7, which
+		// is exactly why the engine cannot ground there.
+		if (out && out->startsolid) {
+			out->frac = 0.f;
+			out->brush = -1;
+			out->plane = -1;
+			out->normal = Vec3();
+			return 0.f;
+		}
 		if (out && best_brush >= 0) {
 			out->frac = best;
 			out->brush = best_brush;
