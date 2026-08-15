@@ -68,6 +68,13 @@ namespace Solver {
 		// sv_enablebunnyhopping 1 (surf setup) disables PreventBunnyJumping's
 		// 1.1*maxspeed pre-jump clamp (binary-scanned server behavior).
 		bool enablebunnyhopping = true;
+		// AIR-UNDUCK HULL DEFER (battery-fitted 2026-08-14, unduck_face
+		// deck): the engine's unduck shifts the origin immediately but the
+		// tick's MOVE still traces with the DUCKED hull; the standing hull
+		// takes effect next tick. Without this, an unduck against a face's
+		// bottom edge resolved a different clip set (XY-only ~40 u/s, the
+		// 495's tick-537 breaker class). Toggle for parity arbitration.
+		bool unduck_hull_defer = true;
 	};
 
 	struct PlayerState {

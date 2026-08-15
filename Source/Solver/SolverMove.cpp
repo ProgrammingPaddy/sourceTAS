@@ -443,7 +443,15 @@ namespace Solver {
 		// while the end-categorize-only model ran it as an air tick.
 		const bool was_ducked = s.ducked;
 		HandleDuck(s, w, p, buttons, ev);
-		if (s.ducked != was_ducked)
+		// AIR-UNDUCK HULL DEFER (see MoveParams): the origin shift lands
+		// now, the re-categorize runs now (solved11 mechanism), but this
+		// tick's TRACES keep the ducked hull; the flag flips at tick end.
+		bool defer_unduck = false;
+		if (p.unduck_hull_defer && was_ducked && !s.ducked) {
+			defer_unduck = true;
+			s.ducked = true;
+		}
+		if (s.ducked != was_ducked || defer_unduck)
 			CategorizePosition(s, w, p, nullptr);
 
 		// FullWalkMove.
@@ -466,6 +474,8 @@ namespace Solver {
 		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // FinishGravity
 		if (s.on_ground)
 			s.vel.Z = 0.f;
+		if (defer_unduck)
+			s.ducked = false;   // standing hull from the NEXT tick
 
 	}
 

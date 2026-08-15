@@ -1874,12 +1874,15 @@ namespace {
 			s.ducked = tape.start.ducked;
 			s.stamina = tape.start.stamina;
 			{
+				// Engine-sim start semantics: RequestSim begins at the RAW
+				// anchor - categorize ground WITHOUT snapping the origin
+				// (the physical-playback settle snap belongs to teleports,
+				// not to sims; the snap read as a fake 0.5u tick-0 FAIL).
 				TraceResult tr;
 				const float gf = w.TraceHull(s.pos,
 					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
 				if (gf < 1.f && tr.brush >= 0
 					&& tr.normal.Z >= o.params.walkable_z) {
-					s.pos.Z -= 2.f * gf;
 					s.on_ground = true;
 					s.ground_brush = tr.brush;
 				}
