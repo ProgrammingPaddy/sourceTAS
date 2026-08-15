@@ -2397,6 +2397,11 @@ int main(int argc, char** argv) {
 		PrintUsage();
 		return 1;
 	}
+	// Long campaigns run on WALL-time budgets; a machine that sleeps mid-
+	// campaign silently eats them (measured 2026-08-15: a 900s chain run
+	// expired with ~30s of real compute). Hold a system-required request
+	// for the process lifetime - Windows clears it automatically on exit.
+	SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
 	const std::string cmd = argv[1];
 	if (cmd == "mapinfo" && argc >= 3)
 		return CmdMapInfo(argv[2]);
