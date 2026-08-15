@@ -170,12 +170,30 @@ namespace Solver {
 
 		std::vector<WorldBrush> brushes;   // collidable set only
 
-		// The map's sealed extent (union of every collidable brush box).
-		// Beyond it there is no world: the engine's BSP has only solid out
-		// there, so a hull reaching past it traces as startsolid+allsolid
-		// and TryPlayerMove freezes. Fuzz-measured 2026-08-15: 6,317 probes
-		// parked outside the shell all came back frozen at v(0,0,-6).
+		// The map's brush-box union. NOT the sealed volume - a protruding
+		// brush (basictest's finish platform reaches y -2336, past the wall
+		// at -2048) makes this far larger than the room, which is why an
+		// AABB test let every behind-the-wall probe through. Kept for the
+		// grid only; solidity comes from the BSP tree below.
 		Vec3 world_min, world_max;
+
+		// BSP TREE (model 0), the engine's own authority on what is solid:
+		// outside the sealed world every leaf is CONTENTS_SOLID, so a hull
+		// out there traces startsolid+allsolid and TryPlayerMove freezes
+		// the player. Walking the tree is what CM_PointLeafnum does.
+		struct BspNode { int plane = 0; int child[2] = { 0, 0 }; };
+		std::vector<BspNode> nodes;
+		std::vector<int>     leaf_contents;
+		std::vector<Vec3>    tree_n;   // plane normals, by BSP plane index
+		std::vector<float>   tree_d;
+		int headnode = 0;
+
+		// CONTENTS_SOLID of the leaf containing p (0 when the tree is
+		// absent). Mirrors CM_PointLeafnum's descent exactly.
+		bool PointInSolidLeaf(const Vec3& p) const;
+		// True when any corner of the hull at origin o lands in a solid
+		// leaf - the engine sweeps the BOX, not the point.
+		bool HullInSolidLeaf(const Vec3& o, int hull) const;
 
 		// Corner-release semantics (engine-measured 2026-08-13, 604-tape
 		// capture): the hit test uses the TRUE un-padded crossing interval;

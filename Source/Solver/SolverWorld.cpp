@@ -195,6 +195,38 @@ namespace Solver {
 			if (brush_model[b] == 0)
 				is_world[b] = 1;
 
+		// ---- BSP TREE for solid-leaf queries (engine's own authority) ----
+		{
+			int leaf_stride = (lumps[kLumpLeafs].ver == 0) ? 56 : 32;
+			if (lumps[kLumpLeafs].len % leaf_stride != 0) {
+				const int other = (leaf_stride == 56) ? 32 : 56;
+				if (lumps[kLumpLeafs].len % other == 0)
+					leaf_stride = other;
+			}
+			const int nleafs = lumps[kLumpLeafs].len / leaf_stride;
+			const int nnodes = lumps[kLumpNodes].len / 32;
+			nodes.resize(nnodes);
+			for (int i = 0; i < nnodes; ++i) {
+				const char* np = p + lumps[kLumpNodes].ofs + i * 32;
+				int32_t pl = 0, c0 = 0, c1 = 0;
+				std::memcpy(&pl, np, 4);
+				std::memcpy(&c0, np + 4, 4);
+				std::memcpy(&c1, np + 8, 4);
+				nodes[i].plane = pl;
+				nodes[i].child[0] = c0;
+				nodes[i].child[1] = c1;
+			}
+			leaf_contents.resize(nleafs);
+			for (int i = 0; i < nleafs; ++i) {
+				int32_t c = 0;
+				std::memcpy(&c, p + lumps[kLumpLeafs].ofs + i * leaf_stride, 4);
+				leaf_contents[i] = c;
+			}
+			tree_n = plane_n;
+			tree_d = plane_d;
+			std::memcpy(&headnode, p + lumps[kLumpModels].ofs + 36, 4);
+		}
+
 		// ---- brushes ---------------------------------------------------------
 		const int nsides_total = lumps[kLumpBrushSides].len / 8;
 		nbrushes_entity = 0;
@@ -623,26 +655,19 @@ namespace Solver {
 		}
 		if (nx_ == 0)
 			return 1.f;
-		// OUT OF WORLD = SOLID: past the sealed shell the BSP has nothing but
-		// solid, so the engine's trace starts (and stays) inside it and
-		// TryPlayerMove freezes the player. Checked on the hull, not the
-		// origin - feet resting exactly on the ceiling slab put the head
-		// through the roof (fuzz probe 3).
-		{
-			const Vec3& hmn = hull == 1 ? hulls_.duck_min
-				: hull == 2 ? hulls_.unduck_min : hulls_.stand_min;
-			const Vec3& hmx = hull == 1 ? hulls_.duck_max
-				: hull == 2 ? hulls_.unduck_max : hulls_.stand_max;
-			if (a.X + hmn.X < world_min.X || a.X + hmx.X > world_max.X
-				|| a.Y + hmn.Y < world_min.Y || a.Y + hmx.Y > world_max.Y
-				|| a.Z + hmn.Z < world_min.Z || a.Z + hmx.Z > world_max.Z) {
-				if (out) {
-					out->startsolid = true;
-					out->allsolid = true;
-					out->frac = 0.f;
-				}
-				return 0.f;
+		// OUT OF WORLD = SOLID, decided by the BSP TREE (what the engine
+		// itself consults), not by a bounding box: basictest's finish
+		// platform reaches y -2336, far past the wall at -2048, so an AABB
+		// test declared the whole void behind that wall "in world" and let
+		// every probe there diverge. A hull corner in a CONTENTS_SOLID leaf
+		// traces startsolid+allsolid and TryPlayerMove freezes the player.
+		if (HullInSolidLeaf(a, hull)) {
+			if (out) {
+				out->startsolid = true;
+				out->allsolid = true;
+				out->frac = 0.f;
 			}
+			return 0.f;
 		}
 		const Vec3 lo(fminf(a.X, b.X), fminf(a.Y, b.Y), fminf(a.Z, b.Z));
 		const Vec3 hi(fmaxf(a.X, b.X), fmaxf(a.Y, b.Y), fmaxf(a.Z, b.Z));
@@ -771,6 +796,43 @@ namespace Solver {
 			trace_log->push_back(row);
 		}
 		return best;
+	}
+
+	bool World::PointInSolidLeaf(const Vec3& p) const {
+		if (nodes.empty() || leaf_contents.empty())
+			return false;
+		int n = headnode;
+		int guard = 0;
+		while (n >= 0 && guard++ < 4096) {
+			if (n >= static_cast<int>(nodes.size()))
+				return false;
+			const BspNode& nd = nodes[n];
+			if (nd.plane < 0 || nd.plane >= static_cast<int>(tree_n.size()))
+				return false;
+			const float d = Dot(tree_n[nd.plane], p) - tree_d[nd.plane];
+			n = nd.child[d >= 0.f ? 0 : 1];
+		}
+		const int leaf = -1 - n;
+		if (leaf < 0 || leaf >= static_cast<int>(leaf_contents.size()))
+			return false;
+		return (leaf_contents[leaf] & 1) != 0;   // CONTENTS_SOLID
+	}
+
+	bool World::HullInSolidLeaf(const Vec3& o, int hull) const {
+		const Vec3& mn = hull == 1 ? hulls_.duck_min
+			: hull == 2 ? hulls_.unduck_min : hulls_.stand_min;
+		const Vec3& mx = hull == 1 ? hulls_.duck_max
+			: hull == 2 ? hulls_.unduck_max : hulls_.stand_max;
+		// Engine sweeps the BOX: the void behind a wall is reached by a
+		// corner long before the origin crosses.
+		for (int i = 0; i < 8; ++i) {
+			const Vec3 c(o.X + ((i & 1) ? mx.X : mn.X),
+			             o.Y + ((i & 2) ? mx.Y : mn.Y),
+			             o.Z + ((i & 4) ? mx.Z : mn.Z));
+			if (PointInSolidLeaf(c))
+				return true;
+		}
+		return PointInSolidLeaf(o);
 	}
 
 	bool World::OriginInSolid(const Vec3& o, bool ducked) const {
