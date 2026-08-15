@@ -1076,6 +1076,7 @@ namespace {
 			"basevel", "gravity-scaled", "extreme-speed" };
 		int cls_n[8] = {}, cls_bad[8] = {};
 		int faulted = 0, mismatch = 0, exact = 0, dumped = 0;
+		int reach_n = 0, reach_bad = 0;
 		int first_bad = -1, first_bad_tick = -1;
 		float worst = 0.f;
 		int worst_probe = -1;
@@ -1181,12 +1182,37 @@ namespace {
 					break;
 				}
 			}
-			if (bad) { mismatch++; cls_bad[cls]++; }
-			else exact++;
+			// Reachable-space split: a player can only ever occupy states
+			// inside the sealed world with a hull that fits. Out-of-world
+			// and embedded starts are still counted, never excused - but
+			// reported separately so the number that governs the solver is
+			// visible.
+			const Vec3 shmn = s_at_fail.hull_state == 1 ? o.hulls.duck_min
+				: s_at_fail.hull_state == 2 ? o.hulls.unduck_min
+				: o.hulls.stand_min;
+			const Vec3 shmx = s_at_fail.hull_state == 1 ? o.hulls.duck_max
+				: s_at_fail.hull_state == 2 ? o.hulls.unduck_max
+				: o.hulls.stand_max;
+			const Vec3 sp(seed.ox, seed.oy, seed.oz);
+			const bool in_world =
+				sp.X + shmn.X >= w.world_min.X && sp.X + shmx.X <= w.world_max.X
+				&& sp.Y + shmn.Y >= w.world_min.Y && sp.Y + shmx.Y <= w.world_max.Y
+				&& sp.Z + shmn.Z >= w.world_min.Z && sp.Z + shmx.Z <= w.world_max.Z
+				&& !w.OriginInSolid(sp, s_at_fail.hull_state == 1);
+			if (in_world) reach_n++;
+			if (bad) {
+				mismatch++;
+				cls_bad[cls]++;
+				if (in_world) reach_bad++;
+			} else exact++;
 		}
 		printf("fuzzdiff: %d probes x %d ticks | EXACT %d | MISMATCH %d | "
 			"engine-faulted %d\n", static_cast<int>(probes.size()),
 			kFuzzTicks, exact, mismatch, faulted);
+		printf("fuzzdiff: REACHABLE-SPACE (hull fits, inside the sealed "
+			"world): %d probes, %d mismatches (%.3f%% exact)\n",
+			reach_n, reach_bad, reach_n
+				? 100.0 * (reach_n - reach_bad) / reach_n : 0.0);
 		printf("fuzzdiff: coverage by interaction class\n");
 		for (int c = 0; c < 8; ++c)
 			printf("  %-16s probes %6d   mismatches %6d%s\n", kClassName[c],
