@@ -458,18 +458,24 @@ namespace Solver {
 					const float elapsed = 1000.f - s.duck_timer_ms > 0.f
 						? 1000.f - s.duck_timer_ms : 0.f;
 					if (elapsed >= p.time_to_unduck_ms || !s.on_ground) {
-						// FinishUnDuck.
+						// FinishUnDuck. Binary-decoded (server.dll Duck
+						// @2eec76/2eec88 -> FinishUnDuck @2eea20): the AIR
+						// origin shift is UNCONDITIONAL - no was-ducked gate
+						// in the SDK - so a never-completed duck released in
+						// the air still re-bases -8.5 (fuzz_b t4, measured).
 						const bool was_ducked = s.ducked;
 						s.ducked = false;
 						s.ducking = false;
 						s.duck_timer_ms = 0.f;
 						if (ev) ev->duck_changed = true;
-						if (!s.on_ground && was_ducked) {
+						if (!s.on_ground) {
 							s.pos = cand;
-							// AIR unduck: the flag clears and the origin
-							// shifts, but the COLLISION hull stays ducked
-							// until grounding (battery+oracle fitted).
-							s.hull_state = p.unduck_hull_defer ? 2 : 0;
+							// Hull: a REAL unduck leaves the world-space
+							// ducked bounds in place until grounding (the
+							// measured 62.5 transient); a never-ducked
+							// "unduck" had standing bounds all along.
+							s.hull_state = was_ducked
+								? (p.unduck_hull_defer ? 2 : 0) : 0;
 						} else {
 							s.hull_state = 0;    // ground: stand now
 						}
