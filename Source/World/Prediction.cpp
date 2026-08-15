@@ -499,6 +499,15 @@ namespace {
 			if (g_off.stamina)  *reinterpret_cast<float*>(pb + g_off.stamina) = in->stamina;
 			if (g_off.gravity)  *reinterpret_cast<float*>(pb + g_off.gravity) = in->gravity;
 			*reinterpret_cast<float*>(pb + kSurfFricOff) = in->sfric;
+			// GROUND INPUT: always cleared to "none". Writing FL_ONGROUND is
+			// a no-op (the flag is a shadow of m_hGroundEntity, measured: an
+			// isolated call set the flag on 0 of 72 known-grounded states),
+			// and there is no honest way to synthesise a VALID EHANDLE for
+			// an arbitrary probe. So every probe starts ungrounded and the
+			// function's job is to SET ground from geometry; the differ
+			// seeds our model the same way.
+			if (g_off.groundent)
+				*reinterpret_cast<int*>(pb + g_off.groundent) = -1;
 			if (g_off.mins)
 				*reinterpret_cast<Vector*>(pb + g_off.mins) = Vector(-16.f, -16.f, 0.f);
 			if (g_off.maxs)

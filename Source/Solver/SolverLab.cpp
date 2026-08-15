@@ -972,7 +972,10 @@ namespace {
 			PlayerState s;
 			s.pos = Vec3(ps[i].ox, ps[i].oy, ps[i].oz);
 			s.vel = Vec3(ps[i].vx, ps[i].vy, ps[i].vz);
-			s.on_ground = ps[i].onground != 0;
+			// Every probe enters ungrounded (see the runner: the ground input
+			// is unsettable, so it is not pretended to vary). The function
+			// under test must SET ground from geometry, and so must we.
+			s.on_ground = false;
 			s.ducked = ps[i].ducked != 0;
 			s.ducking = ps[i].ducking != 0;
 			s.duck_timer_ms = ps[i].ducktime;
