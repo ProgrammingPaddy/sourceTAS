@@ -152,6 +152,7 @@ namespace {
 		bool fuzz_grav1 = false;    // fuzzdiff A/B: force gravity scale 1.0
 		bool fuzz_nobv = false;     // fuzzdiff A/B: drop the seeded basevel
 		int  fuzz_dump = 0;         // fuzzdiff: dump the first N mismatches
+		bool fuzz_dump_reach = false;   // ...restricted to reachable states
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
 		// smooth (line-space CMA) options
 		int pop = 0;                // population (0 = auto)
@@ -238,6 +239,7 @@ namespace {
 			else if (a == "--grav1") o.fuzz_grav1 = true;
 			else if (a == "--nobv") o.fuzz_nobv = true;
 			else if (a == "--dump") ok = next_i(&o.fuzz_dump);
+			else if (a == "--dump-reach") o.fuzz_dump_reach = true;
 			else if (a == "--cell") ok = next_f(&o.cell);
 			else if (a == "--max-ticks") ok = next_i(&o.max_ticks);
 			else if (a == "--threads") ok = next_i(&o.threads);
@@ -1133,8 +1135,23 @@ namespace {
 				if (gf < 1.f && tr.brush >= 0)
 					s.ground_brush = tr.brush;
 			}
+			// Reachability is known before the replay: seed position, seed
+			// hull. --dump-reach restricts forensics to states a player can
+			// actually occupy.
+			const Vec3 seedp(seed.ox, seed.oy, seed.oz);
+			const int seedhull = seed.maxz < 60.f ? 1 : (seed.maxz < 70.f ? 2 : 0);
+			const Vec3 rhmn = seedhull == 1 ? o.hulls.duck_min
+				: seedhull == 2 ? o.hulls.unduck_min : o.hulls.stand_min;
+			const Vec3 rhmx = seedhull == 1 ? o.hulls.duck_max
+				: seedhull == 2 ? o.hulls.unduck_max : o.hulls.stand_max;
+			const bool reachable =
+				seedp.X + rhmn.X >= w.world_min.X && seedp.X + rhmx.X <= w.world_max.X
+				&& seedp.Y + rhmn.Y >= w.world_min.Y && seedp.Y + rhmx.Y <= w.world_max.Y
+				&& seedp.Z + rhmn.Z >= w.world_min.Z && seedp.Z + rhmx.Z <= w.world_max.Z
+				&& !w.OriginInSolid(seedp, seedhull == 1);
 			bool bad = false;
-			const bool dumping = dumped < o.fuzz_dump;
+			const bool dumping = dumped < o.fuzz_dump
+				&& (!o.fuzz_dump_reach || reachable);
 			PlayerState s_at_fail = s;
 			for (int t = 1; t < kFuzzTicks; ++t) {
 				const Res& r = res[i * kFuzzTicks + t];
