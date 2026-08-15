@@ -104,6 +104,7 @@ namespace Solver {
 		e.st.pos = a.origin;
 		e.st.vel = a.velocity;
 		e.st.ducked = a.ducked;
+		e.st.hull_ducked = a.ducked;
 		e.st.stamina = a.stamina;
 		// Establish ground exactly like the replay path does.
 		TraceResult tr;

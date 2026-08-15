@@ -29,10 +29,18 @@ namespace Solver {
 
 	struct Hulls {
 		Vec3 stand_min = Vec3(-16.f, -16.f, 0.f);
-		Vec3 stand_max = Vec3(16.f, 16.f, 72.f);
+		// STANDING HEIGHT 62 (battery-fitted 2026-08-14, unduck_face deck
+		// bit-exact 0.000u; engine release bounded to (56.7, 63.7) at the
+		// ramp bottom edge). The old 72 survived a month of parity because
+		// nothing else on this map is TOP-sensitive - the early netvar read
+		// of 62 was right all along. CS:S standing hull = 32x32x62.
+		Vec3 stand_max = Vec3(16.f, 16.f, 62.f);
 		Vec3 duck_min = Vec3(-16.f, -16.f, 0.f);
-		Vec3 duck_max = Vec3(16.f, 16.f, 54.f);   // 72-54 = the measured ~18u
-		                                          // in-air FinishDuck origin lift
+		Vec3 duck_max = Vec3(16.f, 16.f, 54.f);   // NOT yet top-discriminated
+		                                          // by any deck (needs an
+		                                          // overhang); the ±8.5 air
+		                                          // duck shift is measured
+		                                          // independently
 	};
 
 	struct WorldBrush {

@@ -54,7 +54,7 @@ namespace Solver {
 					break;
 				const Vec3 end = s.pos + Scale(s.vel, time_left);
 				TraceResult tr;
-				const float frac = w.TraceHull(s.pos, end, s.ducked, &tr);
+				const float frac = w.TraceHull(s.pos, end, s.hull_ducked, &tr);
 				if (frac > 0.f) {
 					s.pos = s.pos + Scale(end - s.pos, frac);
 					original_v = s.vel;   // engine re-bases the clip set
@@ -124,7 +124,7 @@ namespace Solver {
 			if (s.vel.Z <= p.non_jump_velocity) {
 				TraceResult tr;
 				const float gf = w.TraceHull(s.pos, s.pos - Vec3(0.f, 0.f, 2.f),
-				                             s.ducked, &tr);
+				                             s.hull_ducked, &tr);
 				if (gf < 1.f && tr.brush >= 0 && tr.normal.Z >= p.walkable_z) {
 					// NO origin snap: engine ground truth (2026-08-13, t479)
 					// sets ground with the origin still 1.575u above the
@@ -133,6 +133,9 @@ namespace Solver {
 					// analysis with continuing simulation - do not restore it.)
 					s.on_ground = true;
 					s.ground_brush = tr.brush;
+					// Grounding realigns the collision hull to the duck
+					// FLAG (the air-unduck's deferred hull ends here).
+					s.hull_ducked = s.ducked;
 				}
 			}
 			if (ev) {
@@ -230,7 +233,7 @@ namespace Solver {
 				const Vec3 up_to(pos0.X, pos0.Y,
 					pos0.Z + p.stepsize + kDistEpsilon);
 				TraceResult tr;
-				const float f = w.TraceHull(s.pos, up_to, s.ducked, &tr);
+				const float f = w.TraceHull(s.pos, up_to, s.hull_ducked, &tr);
 				s.pos = s.pos + Scale(up_to - s.pos, f);
 			}
 			// Slide move up (contacts already recorded by the down attempt;
@@ -240,7 +243,7 @@ namespace Solver {
 			const Vec3 down_to(s.pos.X, s.pos.Y,
 				s.pos.Z - (p.stepsize + kDistEpsilon));
 			TraceResult dn;
-			const float fd = w.TraceHull(s.pos, down_to, s.ducked, &dn);
+			const float fd = w.TraceHull(s.pos, down_to, s.hull_ducked, &dn);
 
 			// (3) Landed on a non-walkable plane (or nothing): slide wins.
 			if (dn.normal.Z < p.walkable_z) {
@@ -270,11 +273,11 @@ namespace Solver {
 			Vec3 end = s.pos;
 			end.Z -= p.stepsize;
 			TraceResult up;
-			const float fu = w.TraceHull(s.pos, start, s.ducked, &up);
+			const float fu = w.TraceHull(s.pos, start, s.hull_ducked, &up);
 			start = s.pos;
 			start.Z += 2.f * fu;
 			TraceResult dn;
-			const float fd = w.TraceHull(start, end, s.ducked, &dn);
+			const float fd = w.TraceHull(start, end, s.hull_ducked, &dn);
 			if (fd > 0.f && fd < 1.f && dn.brush >= 0
 				&& dn.normal.Z >= p.walkable_z) {
 				const Vec3 land = start + Scale(end - start, fd);
@@ -284,7 +287,8 @@ namespace Solver {
 		}
 
 		void WalkMove(PlayerState& s, const World& w, const MoveParams& p,
-		              float yaw, float fmove, float smove, TickEvents* ev) {
+		              float yaw, float fmove, float smove, bool cap_ducked,
+		              TickEvents* ev) {
 			// Landing stamina drags WALK ticks only (a bhop tick jumps before
 			// reaching here - measured: t432 kept full speed, t480+ decayed).
 			// Applied after Friction, before Accelerate (fit order A).
@@ -301,10 +305,12 @@ namespace Solver {
 				wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
 			// ENGINE-MEASURED 2026-08-13 (unseeded-tape ground truth, tick
 			// 204): the ducked speed cap applies the moment duck is PRESSED
-			// (m_bDucking), not when the transition finishes - the engine
-			// showed pure friction decay (-19.1 = 318*0.06) from the press
-			// tick while the old ducked-only model kept accelerating.
-			const float effmax = (s.ducked || s.ducking)
+			// (m_bDucking), not when the transition finishes. REFINED
+			// 2026-08-14 (unduck_face battery, t122 fitted to 0.1 u/s): the
+			// UNDUCK tick still uses the ducked cap too - the tick's cap is
+			// ducked if the duck state was ducked/ducking at ANY point in
+			// this tick's duck processing (cap_ducked from MoveTick).
+			const float effmax = cap_ducked
 				? p.maxspeed * p.duck_speed_frac : p.maxspeed;
 			if (wishspeed > effmax)
 				wishspeed = effmax;
@@ -327,7 +333,7 @@ namespace Solver {
 			const Vec3 dest(s.pos.X + s.vel.X * p.dt,
 			                s.pos.Y + s.vel.Y * p.dt, s.pos.Z);
 			TraceResult tr;
-			const float frac = w.TraceHull(s.pos, dest, s.ducked, &tr);
+			const float frac = w.TraceHull(s.pos, dest, s.hull_ducked, &tr);
 			if (frac >= 1.f) {
 				s.pos = dest;
 			} else {
@@ -338,14 +344,15 @@ namespace Solver {
 		}
 
 		void AirMove(PlayerState& s, const World& w, const MoveParams& p,
-		             float yaw, float fmove, float smove, TickEvents* ev) {
+		             float yaw, float fmove, float smove, bool cap_ducked,
+		             TickEvents* ev) {
 			float wx, wy;
 			WishFromInput(yaw, fmove, smove, &wx, &wy);
 			float wishspeed = sqrtf(wx * wx + wy * wy);
 			Vec3 wishdir(0.f, 0.f, 0.f);
 			if (wishspeed > 1e-6f)
 				wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
-			const float effmax = (s.ducked || s.ducking)
+			const float effmax = cap_ducked
 				? p.maxspeed * p.duck_speed_frac : p.maxspeed;
 			if (wishspeed > effmax)
 				wishspeed = effmax;
@@ -384,6 +391,7 @@ namespace Solver {
 				if (!s.on_ground || s.duck_elapsed_ms >= p.time_to_duck_ms) {
 					// FinishDuck.
 					s.ducked = true;
+					s.hull_ducked = true;   // duck: flag and hull together
 					s.ducking = false;
 					if (ev) ev->duck_changed = true;
 					if (!s.on_ground) {
@@ -405,12 +413,19 @@ namespace Solver {
 						if (!w.OriginInSolid(cand, false)) {
 							s.pos = cand;
 							s.ducked = false;
+							// AIR unduck: the flag clears and the origin
+							// shifts, but the COLLISION hull stays ducked
+							// until grounding (battery+oracle fitted - see
+							// PlayerState::hull_ducked).
+							if (!p.unduck_hull_defer)
+								s.hull_ducked = false;
 							if (ev) ev->duck_changed = true;
 						}
 						// No room: stay ducked (engine behavior).
 					} else {
 						if (!w.OriginInSolid(s.pos, false)) {
 							s.ducked = false;
+							s.hull_ducked = false;   // ground: stand now
 							if (ev) ev->duck_changed = true;
 						}
 					}
@@ -442,17 +457,14 @@ namespace Solver {
 		// ON the surface at 256.031 with one tick of friction, v 414->389)
 		// while the end-categorize-only model ran it as an air tick.
 		const bool was_ducked = s.ducked;
+		const bool cap_pre = s.ducked || s.ducking;
 		HandleDuck(s, w, p, buttons, ev);
-		// AIR-UNDUCK HULL DEFER (see MoveParams): the origin shift lands
-		// now, the re-categorize runs now (solved11 mechanism), but this
-		// tick's TRACES keep the ducked hull; the flag flips at tick end.
-		bool defer_unduck = false;
-		if (p.unduck_hull_defer && was_ducked && !s.ducked) {
-			defer_unduck = true;
-			s.ducked = true;
-		}
-		if (s.ducked != was_ducked || defer_unduck)
+		if (s.ducked != was_ducked)
 			CategorizePosition(s, w, p, nullptr);
+		// The tick's speed cap is ducked if the duck state was ducked or
+		// ducking at ANY point in this tick's duck processing (press ticks
+		// AND unduck ticks both cap ducked - see WalkMove/battery notes).
+		const bool cap_ducked = cap_pre || s.ducked || s.ducking;
 
 		// FullWalkMove.
 		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // StartGravity
@@ -466,16 +478,14 @@ namespace Solver {
 		}
 		CheckVelocity(s, p);
 		if (s.on_ground)
-			WalkMove(s, w, p, yaw, fmove, smove, ev);
+			WalkMove(s, w, p, yaw, fmove, smove, cap_ducked, ev);
 		else
-			AirMove(s, w, p, yaw, fmove, smove, ev);
+			AirMove(s, w, p, yaw, fmove, smove, cap_ducked, ev);
 		CategorizePosition(s, w, p, ev);
 		CheckVelocity(s, p);
 		s.vel.Z -= p.gravity * 0.5f * p.dt;                     // FinishGravity
 		if (s.on_ground)
 			s.vel.Z = 0.f;
-		if (defer_unduck)
-			s.ducked = false;   // standing hull from the NEXT tick
 
 	}
 

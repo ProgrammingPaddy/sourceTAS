@@ -263,6 +263,9 @@ namespace {
 			else if (a == "--wloss") ok = next_f(&o.wloss);
 			else if (a == "--seed-follow") ok = next_i(&o.seed_follow);
 			else if (a == "--no-seed-duck") o.seed_duck = false;
+			else if (a == "--hull-stand") ok = next_f(&o.hulls.stand_max.Z);
+			else if (a == "--hull-duck") ok = next_f(&o.hulls.duck_max.Z);
+			else if (a == "--no-unduck-defer") o.params.unduck_hull_defer = false;
 			else if (a == "--seg-s") { if (i + 1 < argc) o.seg_s = atof(argv[++i]); else ok = false; }
 			else if (a == "--end-s") { if (i + 1 < argc) o.end_s = atof(argv[++i]); else ok = false; }
 			else if (a == "--beam") ok = next_i(&o.beam);
@@ -374,6 +377,7 @@ namespace {
 		s.pos = anchor.origin;
 		s.vel = anchor.velocity;
 		s.ducked = anchor.ducked;
+		s.hull_ducked = anchor.ducked;
 		s.stamina = anchor.stamina;
 		{
 			TraceResult tr;
@@ -494,6 +498,7 @@ namespace {
 		s.pos = tape.start.valid ? tape.start.origin : w.spawn_origin;
 		s.vel = tape.start.valid ? tape.start.velocity : Vec3();
 		s.ducked = tape.start.valid ? tape.start.ducked : false;
+		s.hull_ducked = s.ducked;
 		s.stamina = tape.start.valid ? tape.start.stamina : 0.f;
 		printf("anchor (%.3f, %.3f, %.3f) vel (%.1f, %.1f, %.1f) ducked=%d stamina=%.1f\n",
 			s.pos.X, s.pos.Y, s.pos.Z, s.vel.X, s.vel.Y, s.vel.Z,
@@ -736,6 +741,7 @@ namespace {
 		s.pos = tape.start.origin;
 		s.vel = tape.start.velocity;
 		s.ducked = tape.start.ducked;
+		s.hull_ducked = tape.start.ducked;
 		s.stamina = tape.start.stamina;
 		{
 			TraceResult tr;
@@ -1800,6 +1806,78 @@ namespace {
 		return wrote > 0 ? 0 : 1;
 	}
 
+	// TAPE-SLICE deck: any divergence becomes a battery deck. Replays the
+	// tape to <start> through the core (valid only while the core matches
+	// the engine up to there - check the diff first), anchors a deck at
+	// that state, and carries frames [start, end). One battery click later
+	// the engine's truth for EXACTLY that window is on disk.
+	int CmdBatterySlice(const std::string& map_path, const std::string& tas,
+	                    int start, int end, const std::string& name,
+	                    const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tas, tape, &err)) {
+			printf("LOAD FAILED (tas): %s\n", err.c_str());
+			return 1;
+		}
+		if (start < 0 || end <= start
+			|| end > static_cast<int>(tape.frames.size())) {
+			printf("battery-slice: bad window [%d, %d) of %d frames\n",
+				start, end, static_cast<int>(tape.frames.size()));
+			return 1;
+		}
+		PlayerState s;
+		s.pos = tape.start.origin;
+		s.vel = tape.start.velocity;
+		s.ducked = tape.start.ducked;
+		s.hull_ducked = tape.start.ducked;
+		s.stamina = tape.start.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		for (int t = 0; t < start; ++t) {
+			const TapeFrame& f = tape.frames[t];
+			MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+				f.umove, f.buttons, nullptr);
+		}
+		TapeAnchor a;
+		a.valid = true;
+		a.origin = s.pos;
+		a.velocity = s.vel;
+		a.ducked = s.ducked;
+		a.stamina = s.stamina;
+		a.yaw = tape.frames[start].yaw;
+		a.pitch = 0.f;
+		std::vector<TapeFrame> fr(tape.frames.begin() + start,
+			tape.frames.begin() + end);
+		const std::string path = RecordingsDir() + "battery_" + name
+			+ ".tas";
+		if (!WriteTas(path, a, MapStem(map_path), fr, &err)) {
+			printf("battery-slice: write failed: %s\n", err.c_str());
+			return 1;
+		}
+		printf("battery-slice: %s [%d, %d) anchored at "
+			"(%.2f, %.2f, %.2f) v(%.0f, %.0f, %.0f) d%d -> %s\n",
+			tas.c_str(), start, end, a.origin.X, a.origin.Y, a.origin.Z,
+			a.velocity.X, a.velocity.Y, a.velocity.Z, a.ducked ? 1 : 0,
+			path.c_str());
+		return 0;
+	}
+
 	// Score every battery capture against the core, per mechanism.
 	int CmdBattery(const std::string& map_path, const ReplayOpts& o) {
 		World w;
@@ -1872,6 +1950,7 @@ namespace {
 			s.pos = tape.start.origin;
 			s.vel = tape.start.velocity;
 			s.ducked = tape.start.ducked;
+			s.hull_ducked = tape.start.ducked;
 			s.stamina = tape.start.stamina;
 			{
 				// Engine-sim start semantics: RequestSim begins at the RAW
@@ -2150,6 +2229,13 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdBatteryGen(argv[2], o);
+	}
+	if (cmd == "battery-slice" && argc >= 7) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 7, o))
+			return 1;
+		return CmdBatterySlice(argv[2], argv[3], atoi(argv[4]),
+			atoi(argv[5]), argv[6], o);
 	}
 	if (cmd == "battery" && argc >= 3) {
 		ReplayOpts o;

@@ -68,19 +68,26 @@ namespace Solver {
 		// sv_enablebunnyhopping 1 (surf setup) disables PreventBunnyJumping's
 		// 1.1*maxspeed pre-jump clamp (binary-scanned server behavior).
 		bool enablebunnyhopping = true;
-		// AIR-UNDUCK HULL DEFER (battery-fitted 2026-08-14, unduck_face
-		// deck): the engine's unduck shifts the origin immediately but the
-		// tick's MOVE still traces with the DUCKED hull; the standing hull
-		// takes effect next tick. Without this, an unduck against a face's
-		// bottom edge resolved a different clip set (XY-only ~40 u/s, the
-		// 495's tick-537 breaker class). Toggle for parity arbitration.
-		bool unduck_hull_defer = true;
+		// AIR-UNDUCK HULL DEFER - SUPERSEDED (2026-08-14): the apparent
+		// defer was the standing hull being 62, not 72 (see Hulls). With
+		// the true height the flag-coupled hull matches the engine
+		// bit-exact and this stays OFF; kept as an arbitration toggle only.
+		bool unduck_hull_defer = false;
 	};
 
 	struct PlayerState {
 		Vec3 pos;                  // feet origin
 		Vec3 vel;
-		bool ducked = false;       // FL_DUCKING: hull swapped
+		bool ducked = false;       // FL_DUCKING: the duck FLAG (speed caps,
+		                           // eye offset semantics)
+		// The COLLISION hull state, decoupled from the flag (battery+oracle
+		// fitted 2026-08-14, unduck_face deck): an AIR unduck clears the
+		// flag and shifts the origin, but the engine keeps TRACING with the
+		// DUCKED hull until grounding - t146 walked through standing-solid
+		// space the oracle itself confirms is a hit, while a 54-tall hull
+		// clears it; the same hull still clips the wall at t142-145 exactly
+		// where the engine clipped. Restored to the flag on landing.
+		bool hull_ducked = false;
 		bool ducking = false;      // ground transition in progress
 		float duck_elapsed_ms = 0.f;
 		bool on_ground = false;

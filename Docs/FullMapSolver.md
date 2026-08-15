@@ -1616,12 +1616,42 @@ Protocol going forward: battery PASSES = the core is engine-exact on every
 exercised mechanism; any future tape divergence means a MISSING DECK - add
 the scenario, rerun, fit. No more one-divergence-at-a-time archaeology.
 
+## 2026-08-14 — BATTERY ROUND 2: three engine truths from two clicks
+
+The user's second oracle run + battery run turned the last mystery into
+three fitted mechanisms (every step measured, zero guesses survived):
+
+1. **Trace rule vindicated**: all 107 traces in the unduck-corner window
+   BIT-EXACT - the divergence was never in collision.
+2. **Duck-cap rule refined** (t122 fitted to 0.1 u/s): the tick's speed
+   cap is ducked if the duck state was ducked/ducking at ANY point in the
+   tick's duck processing - press ticks AND unduck ticks both cap ducked
+   (the observed 39.4 u/s delta = the 191.25 vs 230.6 accel budgets,
+   exact). Implemented as cap_ducked in MoveTick.
+3. **STANDING HULL HEIGHT = 62, not 72** (the headline): the engine's
+   wall release at the ramp bottom edge bounded the effective hull top to
+   (56.7, 63.7); with 62 the unduck_face deck goes BIT-EXACT (0.000u) and
+   the "air-unduck hull defer" hypothesis dissolves (superseded, toggle
+   dormant). The month of 72-parity never contradicted 62 because NOTHING
+   else on this map is top-sensitive - the early hull_stand=62 netvar
+   read was right, the override to 72 was the error. Oracle rays updated
+   to 62; duck hull 54 stays (no top-discriminating deck yet - needs an
+   overhang; the +-8.5 air shift is independently measured).
+
+**Score at shipped defaults: 8/9 BIT-EXACT.** Regressions: 292 and
+solved12 replay 0.000u under 62. Remaining:
+- stamina deck: 0.118u drift from t235 (late-gap jumps) - truth on disk.
+- the 495's t537: STILL diverges (its spine-region unduck is a different
+  configuration than the bottom-edge deck) -> `battery-slice` built: any
+  divergence becomes a deck (replay-to-tick anchor + frame window).
+  battery_unduck_spine495.tas = the 495's own ticks 500-602, generated.
+
 ### Open items
 - ~~Worker-pool parallelism~~ SHIPPED v2b. NUMA/affinity untested.
-- ~~StepMove port~~ DONE 1:1, zero regression (bit-exact 292/solved12).
-- **AIR-UNDUCK vz gap** (the 495 breaker, +100.18 u/s at t537): awaiting
-  the user's battery run - fit from playback_battery_unduck_face.csv.
-- **Battery run** (user, one click after reinject) -> `SolverLab battery`.
+- ~~StepMove port~~ DONE 1:1. ~~Unduck gap~~ = hull 62 + cap rule, DONE.
+- **Next battery click** (user, after reinject): scores the 495-slice
+  deck (t537's own window) + rerun; then fit stamina's 0.118.
+- Duck-hull top height: undiscriminated (needs overhang geometry).
 - **Chain endgame**: carve control BUILT (gene 5: into-face vs along-face
   wish blend, own yaw targeting under the same caps) but v13 MEASURED A
   REGRESSION (v12-live boards died; ENDs d313+ except one d54): the carve
