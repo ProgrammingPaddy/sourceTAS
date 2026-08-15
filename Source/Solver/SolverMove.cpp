@@ -552,12 +552,14 @@ namespace Solver {
 		if (ev)
 			*ev = TickEvents();
 
-		// FL_BASEVELOCITY lifecycle (SDK PreThink): unless a trigger
-		// refreshed the flag since last tick, base velocity decays to zero;
-		// the flag always clears so triggers must re-touch every tick.
-		if (!s.basevel_flag)
-			s.basevel = Vec3();
-		s.basevel_flag = false;
+		// BASE VELOCITY PERSISTS (fuzz-measured 2026-08-15, probe 5): with no
+		// input at all the engine displaced the player 49x further in XY than
+		// velocity*dt, at IDENTICAL velocity and identical z - the delta over
+		// dt being exactly the probe's base velocity, still applied a full
+		// tick after it was set. The old per-tick decay was wrong. Only the Z
+		// component is consumed (StartGravity integrates it and clears it);
+		// XY rides along inside Walk/AirMove (added before the move,
+		// subtracted after) until a trigger changes it.
 
 		// ReduceTimers: the stamina clock drains every tick, airborne too;
 		// the SDK duck timer counts DOWN alongside it.

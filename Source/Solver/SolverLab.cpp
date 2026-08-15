@@ -1109,7 +1109,11 @@ namespace {
 			PlayerState s;
 			s.pos = Vec3(seed.ox, seed.oy, seed.oz);
 			s.vel = Vec3(seed.vx, seed.vy, seed.vz);
-			s.basevel = Vec3(seed.bx, seed.by, seed.bz);
+			// Base velocity comes from the PROBE, not the settle output: the
+			// netvar reads zero after the move while the movement plainly
+			// still used it (probe 5). Z is already consumed by tick 0's
+			// StartGravity.
+			s.basevel = Vec3(p.bx, p.by, 0.f);
 			s.basevel_flag = (seed.flags & 0x800000) != 0;   // FL_BASEVELOCITY (1<<23)
 			if (o.fuzz_nobv) { s.basevel = Vec3(); s.basevel_flag = false; }
 			s.on_ground = (seed.flags & 1) != 0;
