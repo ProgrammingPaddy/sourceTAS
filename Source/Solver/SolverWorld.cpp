@@ -1046,11 +1046,13 @@ namespace Solver {
 		// TraceHull3 (the movement-path trace), this function models the
 		// RAW IEngineTrace::TraceRay - the oracle's own mechanism and
 		// CanUnduck's (decoded @0x1f4ed6) - so the unswept leaf-contents
-		// law applies here: a zero-length box in a CONTENTS_SOLID leaf is
-		// startsolid+allsolid even with no brush overlap (measured: 1,089
-		// then 11,574-row box-oracle batches).
+		// law applies here, evaluated at the RAY START POINT, not the box
+		// extent: 49 ladder rungs whose origin sat in an empty leaf while
+		// the box straddled a solid one answered FREE, and the point form
+		// also explains every earlier batch (the 2,366 free-with-
+		// center-solid rows, the 212 ceiling-top blocks, the first 1,089).
 		if (a.X == b.X && a.Y == b.Y && a.Z == b.Z
-			&& BoxInSolidLeaf(a, mins, maxs)) {
+			&& PointInSolidLeaf(a)) {
 			if (out) {
 				out->startsolid = true;
 				out->allsolid = true;
