@@ -460,12 +460,18 @@ namespace {
 		float ox, oy, oz, vx, vy, vz, bx, by, bz;
 		int   onground, ducked, ducking, buttons;
 		float ducktime, stamina, sfric, gravity, hullmax_z, yaw, fmove, smove;
+		int   oldbuttons;            // v2: mv->m_nOldButtons is a REAL input
+		                             // (Duck's press/release edges live in
+		                             // old ^ new), so it is declared per
+		                             // probe, not blanket-zeroed.
 	};
 	struct FuncProbeOut {
 		float ox, oy, oz, vx, vy, vz;
 		int   flags, ducked, ducking, ret;
 		float ducktime, stamina, sfric, maxz;
 		int   groundent;   // raw m_hGroundEntity handle: -1/0xFFFFFFFF = none
+		float fwd, side;   // v2: mv fwd/side after the call - the 0.34
+		                   // HandleDuckingSpeedCrop is observable here
 		int   ok;
 	};
 
@@ -539,11 +545,19 @@ namespace {
 				Vector(in->ox, in->oy, in->oz);
 			*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff) =
 				Vector(in->vx, in->vy, in->vz);
-			// m_nOldButtons (+0x28, the CheckJumpButton release gate) comes
-			// from the LIVE player via SetupMove - not a probe input. Zero it
-			// so the gate state is declared, not inherited from whatever the
-			// user was pressing. The differ's model side starts at 0 too.
-			*reinterpret_cast<int*>(movebuf + 0x28) = 0;
+			// m_nOldButtons (+0x28) is a DECLARED probe input (v2): Duck's
+			// press/release edges are computed from old ^ new, so the value
+			// comes from the probe row instead of leaking in from whatever
+			// the live player was pressing via SetupMove.
+			*reinterpret_cast<int*>(movebuf + 0x28) = in->oldbuttons;
+			// GAME-MOVEMENT-OBJECT state the duck family consumes, zeroed
+			// per probe as declared inputs (both confirmed by disassembly):
+			//   gm+0xed8  Duck's curtime-gate timestamp (a stale value from
+			//             a previous probe could force-clear IN_DUCK);
+			//   gm+0xcc4  m_iSpeedCropped bit (set = HandleDuckingSpeedCrop
+			//             refuses to crop again this "tick").
+			*reinterpret_cast<float*>(gm + 0xED8) = 0.f;
+			*reinterpret_cast<int*>(gm + 0xCC4) = 0;
 
 			// Point the movement context at our player + movedata, call the
 			// isolated function, then put the context back exactly.
@@ -580,6 +594,8 @@ namespace {
 			out->maxz     = g_off.maxs ? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
 			out->groundent = g_off.groundent
 				? *reinterpret_cast<int*>(pb + g_off.groundent) : 0;
+			out->fwd  = *reinterpret_cast<float*>(movebuf + 0x2C);
+			out->side = *reinterpret_cast<float*>(movebuf + 0x34);
 			out->ret      = ret;
 			out->ok       = 1;
 			EndStateGuard();
@@ -596,20 +612,20 @@ namespace {
 		FILE* fo = nullptr;
 		if (fopen_s(&fo, s_fp_out_path.c_str(), "w") != 0 || !fo)
 			return;
-		fprintf(fo, "# funcprobe v1 ctxgate %d\n", g_gm_ctx_gate);
+		fprintf(fo, "# funcprobe v2 ctxgate %d\n", g_gm_ctx_gate);
 		fprintf(fo, "id,fn,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,ducktime,"
-			"stamina,sfric,maxz,ret,ok,groundent\n");
+			"stamina,sfric,maxz,ret,ok,fwd,side,groundent\n");
 		for (size_t i = 0; i < s_fp_probes.size(); ++i) {
 			const FuncProbeOut& o = s_fp_outs[i];
 			const int pi = s_fp_probes[i].pin;
 			fprintf(fo, "%d,%s,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
-				"%.9g,%.9g,%.9g,%.9g,%d,%d,%d\n",
+				"%.9g,%.9g,%.9g,%.9g,%d,%d,%.9g,%.9g,%d\n",
 				static_cast<int>(i),
 				(pi >= 0 && pi < static_cast<int>(s_fp_pins.size()))
 					? s_fp_pins[pi].name : "?",
 				o.ox, o.oy, o.oz, o.vx, o.vy, o.vz, o.flags, o.ducked,
 				o.ducking, o.ducktime, o.stamina, o.sfric, o.maxz,
-				o.ret, o.ok, o.groundent);
+				o.ret, o.ok, o.fwd, o.side, o.groundent);
 		}
 		fclose(fo);
 	}
@@ -1134,15 +1150,20 @@ int Prediction::RunFuncProbe(const char* pin_path, const char* probe_path,
 				continue;
 			FuncProbeIn q = {};
 			char fname[48] = "";
-			if (sscanf_s(line,
+			// v2 rows carry oldbuttons as the 23rd column; v1 rows (22)
+			// default it to 0 - both remain loadable.
+			const int nf = sscanf_s(line,
 				"%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%d,"
-				"%f,%f,%f,%f,%f,%f,%f,%f",
+				"%f,%f,%f,%f,%f,%f,%f,%f,%d",
 				fname, static_cast<unsigned>(sizeof(fname)),
 				&q.ox, &q.oy, &q.oz, &q.vx, &q.vy, &q.vz,
 				&q.bx, &q.by, &q.bz,
 				&q.onground, &q.ducked, &q.ducking, &q.buttons,
 				&q.ducktime, &q.stamina, &q.sfric, &q.gravity,
-				&q.hullmax_z, &q.yaw, &q.fmove, &q.smove) == 22) {
+				&q.hullmax_z, &q.yaw, &q.fmove, &q.smove, &q.oldbuttons);
+			if (nf == 22 || nf == 23) {
+				if (nf == 22)
+					q.oldbuttons = 0;
 				q.pin = -1;
 				for (size_t k = 0; k < pins.size(); ++k)
 					if (_stricmp(pins[k].name, fname) == 0) {

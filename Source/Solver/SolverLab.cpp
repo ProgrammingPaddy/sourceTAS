@@ -784,7 +784,7 @@ namespace {
 					char buf[400];
 					_snprintf_s(buf, sizeof(buf), _TRUNCATE,
 						"CategorizePosition,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
-						"0,0,0,0,%d,0,0,0,0,1,1,%.9g,%.9g,0,0",
+						"0,0,0,0,%d,0,0,0,0,1,1,%.9g,%.9g,0,0,0",
 						x, y, z, vx, vy, vz, dk, dk ? 54.f : 72.f, yw);
 					ctrl.push_back(buf);
 					if (ctrl.size() >= 400)
@@ -794,11 +794,12 @@ namespace {
 			}
 		}
 
-		fprintf(f, "# funcprobe probes v1 seed %u map %s\n", seed,
+		fprintf(f, "# funcprobe probes v2 seed %u map %s\n", seed,
 			MapStem(map_path).c_str());
 		fprintf(f, "# control %d\n", static_cast<int>(ctrl.size()));
 		fprintf(f, "fn,ox,oy,oz,vx,vy,vz,bx,by,bz,onground,ducked,ducking,"
-			"buttons,ducktime,stamina,sfric,gravity,hullmaxz,yaw,fmove,smove\n");
+			"buttons,ducktime,stamina,sfric,gravity,hullmaxz,yaw,fmove,smove,"
+			"oldbuttons\n");
 		for (const std::string& c : ctrl)
 			fprintf(f, "%s\n", c.c_str());
 
@@ -828,7 +829,7 @@ namespace {
 			// would just make the two sides sweep different boxes.
 			const float hull = ducked ? 54.f : 72.f;
 			fprintf(f, "CategorizePosition,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
-				"0,0,0,%d,%d,%d,%d,%.9g,%.9g,%.9g,1,%.9g,%.9g,0,0\n",
+				"0,0,0,%d,%d,%d,%d,%.9g,%.9g,%.9g,1,%.9g,%.9g,0,0,0\n",
 				pos.X, pos.Y, pos.Z,
 				span(-900.f, 900.f), span(-900.f, 900.f), vz,
 				(next() & 1) ? 1 : 0,                       // onground
@@ -849,7 +850,7 @@ namespace {
 			const float kStam[8] = { 0.f, 1.f, 100.f, 500.f,
 				25000.f / 19.f - 1.f, 25000.f / 19.f, 1400.f, 5000.f };
 			fprintf(f, "CheckJumpButton,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
-				"0,0,0,1,%d,%d,%d,%.9g,%.9g,1,1,%.9g,%.9g,0,0\n",
+				"0,0,0,1,%d,%d,%d,%.9g,%.9g,1,1,%.9g,%.9g,0,0,0\n",
 				pos.X, pos.Y, pos.Z,
 				span(-900.f, 900.f), span(-900.f, 900.f),
 				(next() & 1) ? 0.f : vz,
@@ -860,6 +861,48 @@ namespace {
 				kStam[next() % 8],
 				hull, span(-180.f, 180.f));
 			wrote++;
+
+			// Duck, on the same position: every press/hold/release EDGE
+			// (buttons x oldbuttons over IN_DUCK), every duck-state combo,
+			// the shared down-counter swept across both transition
+			// boundaries (400ms duck, 200ms unduck), grounded and airborne,
+			// with nonzero fmove/smove so the 0.34 HandleDuckingSpeedCrop is
+			// observable in the fwd/side readbacks. Prelude derives ground.
+			{
+				const float kDt[13] = { 0.f, 1.f, 100.f, 200.f, 399.f, 400.f,
+					401.f, 599.f, 600.f, 601.f, 800.f, 999.f, 1000.f };
+				const int db = (next() & 1) ? IN_DUCK : 0;
+				const int dob = (next() & 1) ? IN_DUCK : 0;
+				const int dducked = (next() & 1) ? 1 : 0;
+				const int dducking = (next() & 1) ? 1 : 0;
+				fprintf(f, "Duck,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,"
+					"0,0,0,1,%d,%d,%d,%.9g,0,1,1,%.9g,%.9g,%.9g,%.9g,%d\n",
+					pos.X, pos.Y, pos.Z,
+					span(-450.f, 450.f), span(-450.f, 450.f),
+					(next() & 1) ? 0.f : vz,
+					dducked, dducking, db,
+					kDt[next() % 13],
+					dducked ? 54.f : 72.f, span(-180.f, 180.f),
+					span(-450.f, 450.f), span(-450.f, 450.f), dob);
+				wrote++;
+			}
+
+			// CanUnduck: ducked states, grounded and embedded and airborne -
+			// the engine's shift comes from -0.5 * the hull delta and a real
+			// sweep; ours from the capture-fitted -8.5 point test. This
+			// grade arbitrates them (unduck_face 14/15 is the suspect).
+			if ((i & 3) == 0) {
+				fprintf(f, "CanUnduck,%.9g,%.9g,%.9g,0,0,%.9g,"
+					"0,0,0,1,1,%d,%d,%.9g,0,1,1,54,%.9g,0,0,%d\n",
+					pos.X, pos.Y, pos.Z,
+					(next() & 1) ? 0.f : vz,
+					(next() & 1) ? 1 : 0,                   // ducking
+					IN_DUCK,
+					(next() & 1) ? 600.f : 0.f,
+					span(-180.f, 180.f),
+					IN_DUCK);
+				wrote++;
+			}
 		}
 		fclose(f);
 		printf("funcgen: %d probes -> %s\n", wrote, out_path.c_str());
@@ -884,6 +927,7 @@ namespace {
 			float ox, oy, oz, vx, vy, vz, bx, by, bz;
 			int onground, ducked, ducking, buttons;
 			float ducktime, stamina, sfric, gravity, hullmaxz, yaw, fmove, smove;
+			int oldbuttons;
 		};
 		std::vector<P> ps;
 		{
@@ -896,14 +940,19 @@ namespace {
 			while (fgets(l, sizeof(l), f)) {
 				if (l[0] == '#' || l[0] == 'f') continue;
 				P q = {};
-				if (sscanf_s(l, "%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,"
-					"%d,%f,%f,%f,%f,%f,%f,%f,%f",
+				const int nf = sscanf_s(l,
+					"%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,"
+					"%d,%f,%f,%f,%f,%f,%f,%f,%f,%d",
 					q.fn, static_cast<unsigned>(sizeof(q.fn)),
 					&q.ox, &q.oy, &q.oz, &q.vx, &q.vy, &q.vz,
 					&q.bx, &q.by, &q.bz, &q.onground, &q.ducked, &q.ducking,
 					&q.buttons, &q.ducktime, &q.stamina, &q.sfric, &q.gravity,
-					&q.hullmaxz, &q.yaw, &q.fmove, &q.smove) == 22)
+					&q.hullmaxz, &q.yaw, &q.fmove, &q.smove, &q.oldbuttons);
+				if (nf == 22 || nf == 23) {
+					if (nf == 22)
+						q.oldbuttons = 0;
 					ps.push_back(q);
+				}
 			}
 			fclose(f);
 		}
@@ -913,6 +962,7 @@ namespace {
 			int flags, ducked, ducking;
 			float ducktime, stamina, sfric, maxz;
 			int ret, ok, groundent;
+			float fwd, side;   // v2: post-call mv fwd/side (the 0.34 crop)
 		};
 		int nctrl = 0;
 		{
@@ -934,21 +984,31 @@ namespace {
 				return 1;
 			}
 			char l[512];
+			int ver = 1;
 			while (fgets(l, sizeof(l), f)) {
 				if (strncmp(l, "# funcprobe", 11) == 0) {
-					sscanf_s(l, "# funcprobe v1 ctxgate %d", &ctxgate);
+					sscanf_s(l, "# funcprobe v%d ctxgate %d", &ver, &ctxgate);
 					continue;
 				}
 				if (l[0] == '#' || l[0] == 'i') continue;
 				R r = {};
 				int id = 0;
 				r.groundent = 0;
-				const int nf = sscanf_s(l, "%d,%47[^,],%f,%f,%f,%f,%f,%f,%d,%d,%d,"
-					"%f,%f,%f,%f,%d,%d,%d",
-					&id, r.fn, static_cast<unsigned>(sizeof(r.fn)),
-					&r.ox, &r.oy, &r.oz, &r.vx, &r.vy, &r.vz,
-					&r.flags, &r.ducked, &r.ducking, &r.ducktime, &r.stamina,
-					&r.sfric, &r.maxz, &r.ret, &r.ok, &r.groundent);
+				// v2 rows: ...,ret,ok,fwd,side,groundent. v1: ...,ret,ok,groundent.
+				const int nf = (ver >= 2)
+					? sscanf_s(l, "%d,%47[^,],%f,%f,%f,%f,%f,%f,%d,%d,%d,"
+						"%f,%f,%f,%f,%d,%d,%f,%f,%d",
+						&id, r.fn, static_cast<unsigned>(sizeof(r.fn)),
+						&r.ox, &r.oy, &r.oz, &r.vx, &r.vy, &r.vz,
+						&r.flags, &r.ducked, &r.ducking, &r.ducktime, &r.stamina,
+						&r.sfric, &r.maxz, &r.ret, &r.ok, &r.fwd, &r.side,
+						&r.groundent)
+					: sscanf_s(l, "%d,%47[^,],%f,%f,%f,%f,%f,%f,%d,%d,%d,"
+						"%f,%f,%f,%f,%d,%d,%d",
+						&id, r.fn, static_cast<unsigned>(sizeof(r.fn)),
+						&r.ox, &r.oy, &r.oz, &r.vx, &r.vy, &r.vz,
+						&r.flags, &r.ducked, &r.ducking, &r.ducktime, &r.stamina,
+						&r.sfric, &r.maxz, &r.ret, &r.ok, &r.groundent);
 				if (nf >= 17)
 					rs.push_back(r);
 			}
@@ -992,9 +1052,14 @@ namespace {
 		}
 		int exact = 0, bad = 0, faulted = 0, shown = 0;
 		int jexact = 0, jbad = 0, jshown = 0;
+		int dexact = 0, dbad = 0, dshown = 0;
+		int uexact = 0, ubad = 0, ushown = 0;
+		int crop_match = 0, crop_bad = 0;
 		for (size_t i = 0; i < n; ++i) {
 			if (!rs[i].ok) { faulted++; continue; }
 			const bool is_jump = strcmp(ps[i].fn, "CheckJumpButton") == 0;
+			const bool is_duck = strcmp(ps[i].fn, "Duck") == 0;
+			const bool is_unduck = strcmp(ps[i].fn, "CanUnduck") == 0;
 			PlayerState s;
 			s.pos = Vec3(ps[i].ox, ps[i].oy, ps[i].oz);
 			s.vel = Vec3(ps[i].vx, ps[i].vy, ps[i].vz);
@@ -1008,6 +1073,7 @@ namespace {
 			s.stamina = ps[i].stamina;
 			s.gravity_scale = ps[i].gravity;
 			s.surface_friction = ps[i].sfric;
+			s.old_buttons = ps[i].oldbuttons;
 			// HULL FOLLOWS THE DUCK FLAG, not our m_vecMaxs write: the engine
 			// takes its trace box from GetPlayerMins/Maxs, which are derived
 			// from m_bDucked and ignore the collision-bounds netvar. Reading
@@ -1017,6 +1083,53 @@ namespace {
 			// Same call sequence the pin declares: the prelude first, then
 			// the function under test.
 			Fn::CategorizePosition(s, w, o.params);
+			if (is_duck) {
+				Fn::Duck(s, w, o.params, ps[i].buttons);
+				const bool eng_flduck = (rs[i].flags & 2) != 0;
+				const float dp = Len(s.pos - Vec3(rs[i].ox, rs[i].oy, rs[i].oz));
+				const bool dok = (rs[i].ducked != 0) == s.ducked
+					&& (rs[i].ducking != 0) == s.ducking
+					&& fabsf(rs[i].ducktime - s.duck_timer_ms) <= 0.01f
+					&& eng_flduck == s.ducked
+					&& dp <= 0.001f;
+				// The 0.34 speed crop is DIAGNOSTIC this round: whether Duck
+				// itself crops (vs a later PlayerMove call site) is exactly
+				// what the engine's own fwd/side outputs are about to state.
+				const bool crop = (ps[i].buttons & 4) || s.ducking || s.ducked;
+				const float exp_fwd = ps[i].fmove * (crop ? 0.34f : 1.f);
+				if (fabsf(rs[i].fwd - exp_fwd) <= 0.01f) crop_match++;
+				else crop_bad++;
+				if (dok) { dexact++; continue; }
+				dbad++;
+				if (dshown < 8) {
+					dshown++;
+					printf("  DUCK probe %d  btn %d old %d in d%d k%d t%.0f "
+						"ground %d\n", static_cast<int>(i), ps[i].buttons,
+						ps[i].oldbuttons, ps[i].ducked, ps[i].ducking,
+						ps[i].ducktime, s.on_ground ? 1 : 0);
+					printf("    eng  d%d k%d t%.1f fl%d pos(%.3f,%.3f,%.3f)\n",
+						rs[i].ducked, rs[i].ducking, rs[i].ducktime,
+						eng_flduck ? 1 : 0, rs[i].ox, rs[i].oy, rs[i].oz);
+					printf("    ours d%d k%d t%.1f fl%d pos(%.3f,%.3f,%.3f)\n",
+						s.ducked ? 1 : 0, s.ducking ? 1 : 0, s.duck_timer_ms,
+						s.ducked ? 1 : 0, s.pos.X, s.pos.Y, s.pos.Z);
+				}
+				continue;
+			}
+			if (is_unduck) {
+				const bool ours = Fn::CanUnduck(s, w, o.params);
+				const bool eng = (rs[i].ret & 0xff) != 0;
+				if (ours == eng) { uexact++; continue; }
+				ubad++;
+				if (ushown < 8) {
+					ushown++;
+					printf("  CANUNDUCK probe %d  pos(%.3f,%.3f,%.3f) ground %d"
+						"  eng %d ours %d\n", static_cast<int>(i), ps[i].ox,
+						ps[i].oy, ps[i].oz, s.on_ground ? 1 : 0,
+						eng ? 1 : 0, ours ? 1 : 0);
+				}
+				continue;
+			}
 			if (is_jump) {
 				const Vec3 pre_v = s.vel;
 				const bool jumped = Fn::CheckJumpButton(s, w, o.params);
@@ -1068,6 +1181,15 @@ namespace {
 		if (jexact + jbad > 0)
 			printf("funcdiff: CheckJumpButton    | %d probes | EXACT %d | "
 				"MISMATCH %d\n", jexact + jbad, jexact, jbad);
+		if (dexact + dbad > 0) {
+			printf("funcdiff: Duck               | %d probes | EXACT %d | "
+				"MISMATCH %d\n", dexact + dbad, dexact, dbad);
+			printf("  speed-crop diagnostic (Duck crops fwd by 0.34 itself?): "
+				"consistent %d, inconsistent %d\n", crop_match, crop_bad);
+		}
+		if (uexact + ubad > 0)
+			printf("funcdiff: CanUnduck          | %d probes | EXACT %d | "
+				"MISMATCH %d\n", uexact + ubad, uexact, ubad);
 		// RULE EXTRACTION, not theory: bucket the engine's ground answer by
 		// our own down-probe fraction and by the plane it struck. Whatever
 		// separates ground from no-ground has to show up here.

@@ -165,6 +165,11 @@ namespace Solver {
 		// Returns true when the jump fired (engine returns bool).
 		bool CheckJumpButton(PlayerState& s, const World& w,
 		                     const MoveParams& p);
+		// Duck family (pinned via the CCSGameMovement vtable 2026-08-15).
+		void Duck(PlayerState& s, const World& w, const MoveParams& p,
+		          int buttons);
+		bool CanUnduck(const PlayerState& s, const World& w,
+		               const MoveParams& p);
 	}
 
 } // namespace Solver

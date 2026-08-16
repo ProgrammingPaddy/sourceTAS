@@ -694,6 +694,22 @@ namespace Solver {
 			// The mirror returns the engine's own bool now.
 			return ::Solver::CheckJumpButton(s, w, p, &ev);
 		}
+		void Duck(PlayerState& s, const World& w, const MoveParams& p,
+		          int buttons) {
+			HandleDuck(s, w, p, buttons, nullptr);
+		}
+		bool CanUnduck(const PlayerState& s, const World& w,
+		               const MoveParams& p) {
+			// Our current rule (capture-fitted): the standing hull fits at
+			// the (air: -8.5) candidate origin. The engine's own body
+			// (client.dll 0x1f4b20) computes its shift from -0.5 * the
+			// GetViewVectors hull delta and runs a real sweep - the isolated
+			// grade arbitrates the two directly.
+			const Vec3 cand = s.on_ground
+				? s.pos
+				: Vec3(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
+			return !w.OriginInSolid(cand, false);
+		}
 	}
 
 	void MoveTick(PlayerState& s, const World& w, const MoveParams& p,
