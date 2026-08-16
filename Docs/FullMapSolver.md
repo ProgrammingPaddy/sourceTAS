@@ -2194,6 +2194,41 @@ ZERO static props, and the ceiling slab (brush 0, z 1248–1280) explains
 every "impossible" solid — the disputed sites were inside or atop the
 map's shell, not in play space.
 
+## 2026-08-15 (close) — TOTAL trace parity; the last anomaly cornered inside TraceRay
+
+**The world/trace model is now PERFECT against every engine answer ever
+collected: 75,003/75,003** on the third box-oracle batch (which included
+the air unduck's actual swept rays and the crouch-stuck ladder rungs),
+after the final unswept law landed: **the leaf-contents check is
+evaluated at the RAY START POINT, not the box extent** (49 ladder rungs
+with origin-in-empty-leaf but box-straddling-solid answered FREE; the
+point form also explains every earlier batch retroactively).
+
+Engine self-consistency proofs from joined data:
+- GROUNDED CanUnduck: verdict == !ray_startsolid on 3,599 joined rows,
+  ZERO contradictions - grounded is CLOSED, exactly the decoded body.
+- AIR CanUnduck AT TORTURE SITES: 582 joined rows where the verdict
+  CONTRADICTS the decoded test applied to the engine's own measured ray
+  (verdict=free with ray ss=1), and verdict-0/verdict-1 rows sharing
+  identical ray signatures. The distinguishing variable is not the ray,
+  the mask (MASK_PLAYERSOLID confirmed both sides), brush contents (all
+  plain 0x1), or leaf class alone - it lives in TraceRay's own
+  startsolid/fractionleftsolid POST-PROCESSING, the next disassembly
+  target. Every one of these rows is INSIDE solid matter or OUTSIDE the
+  sealed map - unreachable by any legal player state.
+- ReduceTimers pinned and PERFECT first probe (100/100).
+- Bonus: 0x1f7790 = the WalkMove stamina-drag body (1 - s*0.00019,
+  powf(x, frametime*70), scales mv->vel.xy at +0x44/+0x48) - the walk
+  era's first pin, found while chasing the mask theory.
+
+Standing config: Cat/Jump/HDSC/ReduceTimers perfect, FinishUnDuck 4,
+tapes 0.000u, battery 14/15, corpus 33,382, map sweep + all box oracles
+at TOTAL parity. The duck residuals (Duck 1,716 / CanUnduck 1,685 /
+FinishDuck 2,549) are torture-site-concentrated function-level rows
+gated on the TraceRay post-processing question. The user's ramp law
+(can't unduck mid-ride until the feet clear) is confirmed as the swept
+fraction<1 test, decoded and mirrored.
+
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
 - 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
