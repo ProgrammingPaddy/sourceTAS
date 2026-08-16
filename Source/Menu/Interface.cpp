@@ -492,6 +492,13 @@ void BasehookInterface::MenuHudBody() {
 
 bool BasehookInterface::OnInputMessage(UINT type, WPARAM w_param, LPARAM l_param) {
 
+	// Engine-command marshal drain #2: the message pump lives on the MAIN
+	// thread and runs in EVERY app state - including the main menu, where
+	// CreateMove (drain #1) never fires. Without this, queued transitions
+	// sat until the next map load and then fired late ("changed map and it
+	// immediately put me in a demo"). Empty-queue cost: one mutex peek.
+	TasEditor::DrainEngineCmds();
+
 	// Key + mouse-button breadcrumb (console typing and clicks flow through
 	// this hook too, so a death right after one names the exact message that
 	// preceded it - the 2026-08-05 freeze followed a single click).

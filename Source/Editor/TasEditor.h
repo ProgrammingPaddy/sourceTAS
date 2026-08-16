@@ -118,5 +118,6 @@ namespace TasEditor {
 	// engine - the whole "frozen game, no crash report" family. Rule: hooks
 	// and UI PUSH commands; the CreateMove hook (game thread) DRAINS them.
 	void PushEngineCmd(const char* cmd);
-	void DrainEngineCmds();   // call ONLY from the game thread
+	void DrainEngineCmds();   // call ONLY from the main/game thread
+	void ClearEngineCmds();   // drop pending commands (abort paths)
 }

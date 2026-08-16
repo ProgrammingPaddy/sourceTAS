@@ -8689,6 +8689,7 @@ namespace {
 						"capturing %d/%d", g_idx + 1,
 						static_cast<int>(g_queue.size()));
 				} else if (g_frames > 5400) {   // ~90s load timeout
+					TasEditor::ClearEngineCmds();   // never fire late
 					Advance();
 				}
 				return;
@@ -8767,6 +8768,7 @@ namespace {
 				DemoCap::Flush();
 				DemoCap::g_phase = 0;
 				DemoCap::g_idx = -1;
+				TasEditor::ClearEngineCmds();   // drop queued transitions
 			}
 		}
 		ImGui::SameLine();
@@ -9686,8 +9688,13 @@ void TasEditor::PushEngineCmd(const char* cmd) {
 }
 
 void TasEditor::DrainEngineCmds() {
-	// GAME THREAD ONLY (the CreateMove hook). Connection transitions are
-	// only safe from here - see TasEditor.h.
+	// MAIN/GAME THREAD ONLY. Two drain points cover every app state
+	// (marshal fix round 2, 2026-08-16): the CreateMove hook (in-game)
+	// and the WndProc message path (always - the pump lives on the main
+	// thread). The first round drained ONLY in CreateMove, which never
+	// fires in the MENU: queued playdemos sat undrained through the whole
+	// capture session, then fired the moment a map load started CreateMove
+	// - the user's "changed map and it put me in a demo".
 	std::vector<std::string> cmds;
 	{
 		std::lock_guard<std::mutex> lk(g_cmdq_mu);
@@ -9696,6 +9703,11 @@ void TasEditor::DrainEngineCmds() {
 	for (const std::string& c : cmds)
 		if (engine)
 			engine->ClientCmd_Unrestricted(c.c_str());
+}
+
+void TasEditor::ClearEngineCmds() {
+	std::lock_guard<std::mutex> lk(g_cmdq_mu);
+	g_cmdq.clear();
 }
 
 bool TasEditor::FreecamEye(Vector* eye) {
