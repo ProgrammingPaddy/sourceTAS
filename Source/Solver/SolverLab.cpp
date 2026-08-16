@@ -1687,7 +1687,23 @@ namespace {
 		int id = 0;
 		const float jit[5] = { 0.f, -0.5f, 0.5f, -2.f, 2.f };
 		const float jz[3] = { 0.f, -0.5f, 0.5f };
+		// One battery per unique SITE - the manifest carries a row per
+		// probe and the same position repeats across a battery fan.
+		std::vector<long long> seen_sites;
+		auto site_seen = [&](const M& m) {
+			const long long key =
+				(static_cast<long long>(lroundf(m.ox * 2.f)) << 32)
+				^ (static_cast<long long>(lroundf(m.oy * 2.f)) << 12)
+				^ static_cast<long long>(lroundf(m.oz * 2.f));
+			for (long long s : seen_sites)
+				if (s == key)
+					return true;
+			seen_sites.push_back(key);
+			return false;
+		};
 		for (const M& m : ms) {
+			if (site_seen(m))
+				continue;
 			const bool ground_site =
 				strcmp(m.fn, "CategorizePosition") == 0
 				|| strcmp(m.fn, "CheckJumpButton") == 0;
@@ -1713,7 +1729,12 @@ namespace {
 							boxes[bi][1].X, boxes[bi][1].Y, boxes[bi][1].Z);
 				}
 			} else {
-				// Duck-family site: the two disputed zero-length tests.
+				// Duck-family site: the disputed tests, now including the
+				// SWEPT ray the air rows actually run (CanUnduck decoded:
+				// Ray pos -> cand with the standing hull - the engine's
+				// swept startsolid behavior from inside a brush is the one
+				// unmeasured law) and the ducked-box LADDER steps the
+				// grounded FinishDuck rows dispute.
 				for (int jx = 0; jx < 3; ++jx)
 				for (int jy = 0; jy < 3; ++jy)
 				for (int jzz = 0; jzz < 3; ++jzz) {
@@ -1729,6 +1750,24 @@ namespace {
 						id++, m.ox + dx, m.oy + dy, m.oz + dz,
 						m.ox + dx, m.oy + dy, m.oz + dz);
 				}
+				// The air unduck's ACTUAL swept ray: pos -> pos-8.5,
+				// standing hull, small xy fan.
+				for (int jx = 0; jx < 3; ++jx)
+				for (int jy = 0; jy < 3; ++jy) {
+					const float dx = jz[jx], dy = jz[jy];
+					fprintf(f, "%d,0,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,0,"
+						"-16,-16,0,16,16,72\n",
+						id++, m.ox + dx, m.oy + dy, m.oz,
+						m.ox + dx, m.oy + dy, m.oz - 8.5f);
+				}
+				// The crouch-stuck LADDER: ducked box at origin + k for
+				// k = 1..6 (engine dz ladders measured up to +35; six
+				// steps bracket every disputed site's first free rung).
+				for (int k = 1; k <= 6; ++k)
+					fprintf(f, "%d,0,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,1,"
+						"-16,-16,0,16,16,54\n",
+						id++, m.ox, m.oy, m.oz + k,
+						m.ox, m.oy, m.oz + k);
 			}
 		}
 		fclose(f);

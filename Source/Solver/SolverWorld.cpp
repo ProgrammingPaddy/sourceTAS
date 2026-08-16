@@ -1042,8 +1042,22 @@ namespace Solver {
 		CellRange(lo + mins, hi + maxs, &x0, &x1, &y0, &y1, &z0, &z1);
 		float best = 1.f;
 		int best_brush = -1, best_plane = -1;
-		// Same start-solid law and ENGINE ORDER as TraceHull3 (see the
-		// comments there, including the open unswept leaf question).
+		// Same start-solid law and ENGINE ORDER as TraceHull3. UNLIKE
+		// TraceHull3 (the movement-path trace), this function models the
+		// RAW IEngineTrace::TraceRay - the oracle's own mechanism and
+		// CanUnduck's (decoded @0x1f4ed6) - so the unswept leaf-contents
+		// law applies here: a zero-length box in a CONTENTS_SOLID leaf is
+		// startsolid+allsolid even with no brush overlap (measured: 1,089
+		// then 11,574-row box-oracle batches).
+		if (a.X == b.X && a.Y == b.Y && a.Z == b.Z
+			&& BoxInSolidLeaf(a, mins, maxs)) {
+			if (out) {
+				out->startsolid = true;
+				out->allsolid = true;
+				out->frac = 0.f;
+			}
+			return 0.f;
+		}
 		bool l_ss = false, l_as = false;
 		int order[1024];
 		const int norder = OrderedLeafBrushes(a, b, mins, maxs, order, 1024);

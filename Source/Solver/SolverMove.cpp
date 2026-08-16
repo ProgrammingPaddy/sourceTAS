@@ -582,6 +582,10 @@ namespace Solver {
 		// RESTORE the origin when none is found (the keep-partial-nudge
 		// variant ended 18u high).
 		void FixPlayerCrouchStuck(PlayerState& s, const World& w) {
+			// The stuck test is BRUSHES-ONLY - measured twice: routing it
+			// through the leaf-aware raw ray took FinishDuck 2,549 -> 3,243
+			// and the corpus down 432. Whatever trace TestPlayerPosition
+			// wraps, it does not see leaf contents at these sites.
 			auto stuck = [&](const Vec3& at) {
 				TraceResult st;
 				w.TraceHull3(at, at, 1, &st);
@@ -644,15 +648,15 @@ namespace Solver {
 			const Vec3 cand = s.on_ground
 				? s.pos
 				: Vec3(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
+			// The decoded body calls raw TraceRay - our raw-ray model is
+			// TraceHullBox (38,286/38,286 against the oracle at these very
+			// sites), so the mirror calls it too. No call-site special
+			// cases: the unswept leaf law lives inside the raw ray, where
+			// the engine keeps it.
 			TraceResult ut;
-			const float uf = w.TraceHull3(s.pos, cand, 0, &ut);
-			if (ut.startsolid || uf < 1.f)
-				return false;
-			if (s.on_ground
-				&& w.BoxInSolidLeaf(s.pos, w.HullDims().stand_min,
-					w.HullDims().stand_max))
-				return false;   // unswept raw ray: leaf contents count
-			return true;
+			const float uf = w.TraceHullBox(s.pos, cand,
+				w.HullDims().stand_min, w.HullDims().stand_max, &ut);
+			return !ut.startsolid && uf >= 1.f;
 		}
 
 		// CCSGameMovement::FinishUnDuck (0x1f6840): derives the same
