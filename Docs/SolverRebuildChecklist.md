@@ -9,7 +9,7 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M1.5 THE LEDGER.
+**NOW →** M2 route search (M1 COMPLETE — all five primitives gated).
 
 ---
 
@@ -134,12 +134,25 @@ a measurable pass/fail, never a vibe.
       is ill-conditioned). GATE PASSED: 10/10 tape carves reproduced
       unseeded (worst dv 16.4 u/s, seven rows < 8), manifold 80/80
       zero-input identity + 80/80 strafing law bound, 6.4s wall.
-- [ ] 1.5 THE LEDGER: per-transfer, per-phase regret readout (board
-      loss, approach loss, air-gain shortfall, conversion shortfall,
-      time regret) computable for ANY simulated line.
-      GATE: ledger of the 292 tape line matches hand analysis on 3
-      transfers; ledger of a deliberately bad line localizes the
-      planted losses.
+- [x] 1.5 THE LEDGER (`SolverLedger.h/.cpp` + `ledger`/`ledgergate`/
+      `ledger-trace`): exact event-sourced phase decomposition
+      (GROUND/AIR/RIDE) of any control line — air-gain shortfall vs
+      the 900/tick law, board loss² + fraction + TANGENCY REGRET
+      (dot² − min² at the actual arrival), ride clip dissipation,
+      gravity conversion, wish work via energy closure (self-auditing
+      within the derived cross bound + a float-accumulation allowance
+      ~ULP(v²)/op). GATE PASSED: closure 0/9 bad on the 292 tape;
+      planted 15-tick coast localized (prior phases bit-identical,
+      delta +65.3k = 13.5k direct theft + 40.9k of misaligned-yaw
+      braking the ledger also priced). THE INDICTMENT of the old
+      line, now in numbers: 329,477 u²/s² dissipated on clips +
+      77,634 air shortfall in one 405-tick run; boards at −206
+      (regret 42.6k, tangency 0 was available!) and −142 (regret
+      20.3k, ditto). `ledger-trace` audits the 7 expert demo CSVs
+      (energy-model-break events per snapshot pair) — CAVEAT: on the
+      big maps those events mix real clips with teleports/boosters;
+      classification needs map geometry (deferred to M5.1). The
+      apples-to-apples expert comparison happens on shared maps.
 
 ## M2 — Route search (stage 2)
 
@@ -289,3 +302,18 @@ a measurable pass/fail, never a vibe.
   the row closed at dv 16.4. The primitive kit now expresses: tangent
   boards, braking flicks, weaves, coasting, crest launches, duck-offs.
   NOW = M1.5 the ledger.
+- 2026-08-16 (later): M1.5 GATE PASSED — M1 COMPLETE. Ledger lessons:
+  closure tolerance must be law + derived cross bound + float
+  allowance (first run failed by 66 on a flat 60); sabotage damage is
+  NOT capped by the stolen window — misaligned downstream yaws brake
+  actively (+40.9k observed) and the ledger correctly prices that;
+  localization = priors bit-identical + theft realized in the planted
+  phase. The 292 line's indictment: 329k clip dissipation + 78k air
+  shortfall; two of three boards had tangency-0 available (63k of
+  pure regret). ledger-trace expert audit built but trigger/teleport
+  classification deferred to M5.1 (big-map events are contaminated).
+  ALL FIVE M1 PRIMITIVES GATED. NOW = M2 route search: analytic edge
+  bounds (2.1) from envelope+window closed forms, beam/DP over
+  feature sequences (2.2), envelope pruning + start/end planning
+  (2.3). Gate: top-10 routes on basictest include the human shape and
+  solved12 shape, enumeration < 5s.

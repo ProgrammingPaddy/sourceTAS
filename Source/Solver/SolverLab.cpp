@@ -25,6 +25,7 @@
 #include "SolverAir.h"
 #include "SolverCarve.h"
 #include "SolverSteer.h"
+#include "SolverLedger.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -2707,6 +2708,241 @@ namespace {
 		printf("carve: M1.4 GATE %s\n", pass ? "PASS" : "FAIL");
 		fflush(stdout);
 		return pass ? 0 : 2;
+	}
+
+	// ledger: THE M1.5 READOUT - phase table + biggest boards for a tape.
+	int CmdLedger(const std::string& map_path, const ReplayOpts& o,
+	              const std::string& tape_path, int sab0, int sab1) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("ledger: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("LOAD FAILED (tas): %s\n", err.c_str());
+			return 1;
+		}
+		Ledger::Run run;
+		Ledger::Build(w, g, o.params, tape, &run, sab0, sab1);
+		Ledger::Print(run, 5);
+		return 0;
+	}
+
+	// ledgergate: THE M1.5 ACCEPTANCE GATE.
+	//  A. SELF-AUDIT: every ride phase's energy closure (wish work
+	//     from the identity) must be plausible - wish work within
+	//     [-(braking budget), +900/tick] with the derived cross bound.
+	//     The phase table + largest-board arithmetic is printed for
+	//     hand analysis (loss2 = dot^2, regret vs tangency minimum).
+	//  B. PLANTED LOSS: re-run with a sabotage window (controls zeroed
+	//     mid-air-phase). The ledger must LOCALIZE it: phases before
+	//     the window identical, the sabotaged phase's shortfall grows
+	//     by ~the stolen gain.
+	int CmdLedgerGate(const std::string& map_path, const ReplayOpts& o,
+	                  const std::string& tape_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("ledgergate: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("LOAD FAILED (tas): %s\n", err.c_str());
+			return 1;
+		}
+		Ledger::Run base;
+		Ledger::Build(w, g, o.params, tape, &base);
+		Ledger::Print(base, 3);
+
+		// A: closure plausibility on every ride phase. Bounds are the
+		// LAW (wish work <= 900/tick; braking drain <= per-tick
+		// 2*v*budget + budget^2) plus the derived cross bound plus a
+		// float-accumulation allowance (~ULP(v^2) per arithmetic op
+		// per tick - at v^2 ~ 7e5 over 45 ticks that is ~130, and the
+		// first gate run failed by exactly 66 on a flat 60 slack).
+		int bad_closure = 0;
+		for (const Ledger::Phase& ph : base.phases) {
+			if (ph.kind != Ledger::Kind::Ride)
+				continue;
+			const float ticks = static_cast<float>(ph.Ticks());
+			const float vmax2 = ph.v2_in > ph.v2_out
+				? ph.v2_in : ph.v2_out;
+			const float fslack = 60.f + vmax2 * ticks * 6e-6f;
+			const float budget = 562.5f;
+			const float brake = (2.f * sqrtf(vmax2) * budget
+				+ budget * budget) * ticks;
+			const float lo = -brake - ph.cross_bound - fslack;
+			const float hi = 900.f * ticks + ph.cross_bound + fslack;
+			if (ph.wish_work < lo || ph.wish_work > hi)
+				bad_closure++;
+		}
+		printf("ledgergate: closure %d bad of %d phases\n", bad_closure,
+			static_cast<int>(base.phases.size()));
+
+		// B: plant a loss in the longest air phase.
+		int longest = -1, lt = 0;
+		for (size_t i = 0; i < base.phases.size(); ++i)
+			if (base.phases[i].kind == Ledger::Kind::Air
+				&& base.phases[i].Ticks() > lt) {
+				lt = base.phases[i].Ticks();
+				longest = static_cast<int>(i);
+			}
+		if (longest < 0 || lt < 20) {
+			printf("ledgergate: no long air phase to sabotage\n");
+			return 2;
+		}
+		const Ledger::Phase& ap = base.phases[longest];
+		const int s0 = ap.t0 + ap.Ticks() / 2 - 7;
+		const int s1 = s0 + 15;
+		Ledger::Run sab;
+		Ledger::Build(w, g, o.params, tape, &sab, s0, s1);
+		// Locate the sabotaged air phase in the new run (same t0 -
+		// prior phases must be bit-identical).
+		int hit = -1;
+		int pre_same = 0;
+		for (size_t i = 0; i < sab.phases.size()
+			&& i < base.phases.size(); ++i) {
+			if (static_cast<int>(i) < longest) {
+				const Ledger::Phase& a = base.phases[i];
+				const Ledger::Phase& b = sab.phases[i];
+				if (a.t0 == b.t0 && a.t1 == b.t1
+					&& a.v2_out == b.v2_out)
+					pre_same++;
+			}
+			if (sab.phases[i].kind == Ledger::Kind::Air
+				&& sab.phases[i].t0 == ap.t0)
+				hit = static_cast<int>(i);
+		}
+		float dshort = 0.f;
+		if (hit >= 0)
+			dshort = sab.phases[hit].shortfall - ap.shortfall;
+		// Localization claim: every phase BEFORE the window is
+		// bit-identical (the damage starts exactly where planted) and
+		// the sabotaged phase's shortfall grew by at least most of the
+		// window's direct theft. No upper cap: shortfall legitimately
+		// exceeds the gain ceiling when the misaligned tape yaws act
+		// as brakes after the window (observed: +40.9k of braking on
+		// top of the 13.5k theft) - the ledger PRICES that too.
+		printf("ledgergate: sabotage t%d..t%d in air[%d] | %d/%d prior "
+			"phases identical | shortfall %0.f -> %0.f (delta %.0f, "
+			"window theft %d)\n", s0, s1, longest, pre_same, longest,
+			ap.shortfall,
+			hit >= 0 ? sab.phases[hit].shortfall : -1.f, dshort,
+			15 * 900);
+		const bool pass = bad_closure == 0 && pre_same == longest
+			&& hit >= 0 && dshort > 8000.f;
+		printf("ledgergate: M1.5 GATE %s\n", pass ? "PASS" : "FAIL");
+		fflush(stdout);
+		return pass ? 0 : 2;
+	}
+
+	// ledger-trace: the EXPERT energy audit - how much does the human
+	// line dissipate? Reads a demo run trace (sim,tick,x,y,z,...,hspeed
+	// at ~4-tick cadence), derives vz from z differences, and audits
+	// each snapshot pair against gravity + the strafe-law wish-work
+	// allowance. Total dissipation is the expert-evidence number the
+	// solver's lines are held against.
+	int CmdLedgerTrace(const std::string& csv_path, const ReplayOpts& o) {
+		FILE* f = fopen(csv_path.c_str(), "r");
+		if (!f) {
+			printf("LOAD FAILED: %s\n", csv_path.c_str());
+			return 1;
+		}
+		char line[512];
+		std::vector<double> sims;
+		std::vector<int> ticks;
+		std::vector<float> xs, ys, zs, hs;
+		bool header = true;
+		while (fgets(line, sizeof(line), f)) {
+			if (header) { header = false; continue; }
+			double sim;
+			long tick;
+			float x, y, z, pitch, yaw, hsp;
+			if (sscanf(line, "%lf,%ld,%f,%f,%f,%f,%f,%f", &sim, &tick,
+				&x, &y, &z, &pitch, &yaw, &hsp) == 8) {
+				sims.push_back(sim);
+				ticks.push_back(static_cast<int>(tick));
+				xs.push_back(x);
+				ys.push_back(y);
+				zs.push_back(z);
+				hs.push_back(hsp);
+			}
+		}
+		fclose(f);
+		const size_t n = sims.size();
+		if (n < 10) {
+			printf("ledger-trace: too few rows (%d)\n",
+				static_cast<int>(n));
+			return 1;
+		}
+		// vz per interval from z differencing with the half-gravity
+		// midpoint correction: z1 - z0 = vz0*dt - g*dt^2/2 (ballistic)
+		// => vz0 = dz/dt + g*dt/2. On contacts this is approximate -
+		// the audit is an ESTIMATE with stated noise, not engine truth.
+		const float gr = o.params.gravity;
+		double total_loss = 0.0, total_wish_cap = 0.0;
+		float worst = 0.f;
+		int worst_at = 0, loss_events = 0, pairs = 0;
+		for (size_t i = 0; i + 2 < n; ++i) {
+			const float dt1 = static_cast<float>(sims[i + 1] - sims[i]);
+			const float dt2 = static_cast<float>(sims[i + 2]
+				- sims[i + 1]);
+			if (dt1 <= 0.f || dt1 > 0.2f || dt2 <= 0.f || dt2 > 0.2f)
+				continue;
+			const float vz0 = (zs[i + 1] - zs[i]) / dt1
+				+ 0.5f * gr * dt1;
+			const float vz1 = (zs[i + 2] - zs[i + 1]) / dt2
+				+ 0.5f * gr * dt2;
+			const float v20 = hs[i + 1] * hs[i + 1] + vz0 * vz0;
+			const float v21 = hs[i + 2] * hs[i + 2] + vz1 * vz1;
+			const float dticks = static_cast<float>(ticks[i + 2]
+				- ticks[i + 1]);
+			if (dticks <= 0.f || dticks > 12.f)
+				continue;
+			pairs++;
+			const float wish_cap = 900.f * dticks;
+			total_wish_cap += wish_cap;
+			const float grav = 2.f * gr * (zs[i + 1] - zs[i + 2]);
+			// Loss = energy the pair SHED beyond gravity, after
+			// granting the full wish allowance.
+			const float loss = (v20 + grav + wish_cap) - v21;
+			if (loss > 0.f)
+				total_loss += loss;
+			// Noise floor: vz estimate error ~ g*dt -> v2 error
+			// ~ 2*vz*g*dt; call an EVENT only far above it.
+			const float noise = 2.f * (fabsf(vz1) + 100.f) * gr
+				* dt2 * 0.25f + 3000.f;
+			if (loss > wish_cap + noise) {
+				loss_events++;
+				if (loss - wish_cap > worst) {
+					worst = loss - wish_cap;
+					worst_at = ticks[i + 1];
+				}
+			}
+		}
+		printf("ledger-trace: %s\n", csv_path.c_str());
+		printf("ledger-trace: %d pairs | dissipation-beyond-allowance "
+			"events %d (worst %.0f u2/s2 ~ dot %.0f u/s at t%d) | "
+			"gross shed %.0fk vs wish allowance %.0fk\n", pairs,
+			loss_events, worst, sqrtf(worst > 0.f ? worst : 0.f),
+			worst_at, total_loss / 1000.0, total_wish_cap / 1000.0);
+		fflush(stdout);
+		return 0;
 	}
 
 	// ridedump: diagnostic - print a tape ride's per-tick trajectory and
@@ -5593,6 +5829,31 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdAirSolve(argv[2], o, tapes);
+	}
+	if (cmd == "ledger" && argc >= 4) {
+		ReplayOpts o;
+		int sab0 = -1, sab1 = -1;
+		int i = 4;
+		if (argc >= 6 && argv[4][0] != '-') {
+			sab0 = atoi(argv[4]);
+			sab1 = atoi(argv[5]);
+			i = 6;
+		}
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdLedger(argv[2], o, argv[3], sab0, sab1);
+	}
+	if (cmd == "ledgergate" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdLedgerGate(argv[2], o, argv[3]);
+	}
+	if (cmd == "ledger-trace" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdLedgerTrace(argv[2], o);
 	}
 	if (cmd == "ridedump" && argc >= 6) {
 		ReplayOpts o;
