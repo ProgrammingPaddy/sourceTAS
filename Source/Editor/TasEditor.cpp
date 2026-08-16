@@ -7940,6 +7940,10 @@ namespace {
 			Sfmt(line, "enablebunnyhopping %g  # live server cvar\n", v);
 			out << line;
 		}
+		if (Cvars::GetFloat("sv_autobunnyhopping", &v)) {
+			Sfmt(line, "autobunnyhopping %g  # live server cvar\n", v);
+			out << line;
+		}
 		if (Cvars::GetFloat("sv_gravity", &v)) {
 			Sfmt(line, "gravity %g  # live server cvar (overrides model line)\n", v);
 			out << line;
@@ -8198,6 +8202,7 @@ namespace {
 				{ "sv_maxvelocity",        "maxvelocity" },
 				{ "sv_stepsize",           "stepsize" },
 				{ "sv_enablebunnyhopping", "enablebunnyhopping" },
+				{ "sv_autobunnyhopping",   "autobunnyhopping" },
 			};
 			for (const auto& kv : kLive) {
 				float v;
@@ -8355,13 +8360,15 @@ namespace {
 	}
 
 	// One engine trace with the ACTIVE (index, layout) pin. False on fault.
-	bool OracleTrace(const Vector& a, const Vector& b, bool ducked,
-	                 float* frac, Vector* end, Vector* nrm, float* pdist,
-	                 bool* startsolid, bool* allsolid) {
+	// Core: sweep an ARBITRARY box. TracePlayerBBoxForGround's quadrant
+	// sub-boxes are not player hulls, so the oracle must be able to ask the
+	// engine about any box, not just the two hulls.
+	bool OracleTraceBox(const Vector& a, const Vector& b,
+	                    const Vector& mins, const Vector& maxs,
+	                    float* frac, Vector* end, Vector* nrm, float* pdist,
+	                    bool* startsolid, bool* allsolid) {
 		using namespace EngineTraceABI;
 		static WorldOnlyFilter s_filter;
-		const Vector mins(-16.f, -16.f, 0.f);
-		const Vector maxs(16.f, 16.f, ducked ? 54.f : 72.f);
 		RayBuf ray;
 		BuildRay(ray, a, b, mins, maxs);
 		TraceOut out;
@@ -8376,6 +8383,14 @@ namespace {
 		if (startsolid) *startsolid = out.StartSolid();
 		if (allsolid) *allsolid = out.AllSolid();
 		return true;
+	}
+
+	bool OracleTrace(const Vector& a, const Vector& b, bool ducked,
+	                 float* frac, Vector* end, Vector* nrm, float* pdist,
+	                 bool* startsolid, bool* allsolid) {
+		return OracleTraceBox(a, b, Vector(-16.f, -16.f, 0.f),
+			Vector(16.f, 16.f, ducked ? 54.f : 72.f),
+			frac, end, nrm, pdist, startsolid, allsolid);
 	}
 
 	// Known-answer validation battery from the solve anchor (on the start
@@ -8463,14 +8478,25 @@ namespace {
 		while (fgets(line, sizeof(line), q)) {
 			int id = 0, tick = 0, ducked = 0;
 			float ax, ay, az2, bx, by, bz;
-			if (sscanf_s(line, "%d,%d,%f,%f,%f,%f,%f,%f,%d", &id, &tick,
-				&ax, &ay, &az2, &bx, &by, &bz, &ducked) != 9)
+			float mnx, mny, mnz, mxx, mxy, mxz;
+			// 15-field row carries an EXPLICIT box (quadrant probes etc.);
+			// the 9-field row keeps the original hull-by-duck-flag form.
+			const int nf = sscanf_s(line,
+				"%d,%d,%f,%f,%f,%f,%f,%f,%d,%f,%f,%f,%f,%f,%f", &id, &tick,
+				&ax, &ay, &az2, &bx, &by, &bz, &ducked,
+				&mnx, &mny, &mnz, &mxx, &mxy, &mxz);
+			if (nf != 9 && nf != 15)
 				continue;   // header / malformed
 			float frac = 1.f, pdist = 0.f;
 			Vector end, nrm;
 			bool ss = false, as = false;
-			if (!OracleTrace(Vector(ax, ay, az2), Vector(bx, by, bz),
-				ducked != 0, &frac, &end, &nrm, &pdist, &ss, &as)) {
+			const bool ok = (nf == 15)
+				? OracleTraceBox(Vector(ax, ay, az2), Vector(bx, by, bz),
+					Vector(mnx, mny, mnz), Vector(mxx, mxy, mxz),
+					&frac, &end, &nrm, &pdist, &ss, &as)
+				: OracleTrace(Vector(ax, ay, az2), Vector(bx, by, bz),
+					ducked != 0, &frac, &end, &nrm, &pdist, &ss, &as);
+			if (!ok) {
 				faults++;
 				continue;
 			}

@@ -83,13 +83,13 @@ namespace Solver {
 		float stamina_jump_ms = 25000.f / 19.f;   // == engine bits 0x44a47943
 		float stamina_scale_per_ms = 0.00019f;    // shared walk+jump scale
 		float stamina_pow_rate = 70.f;            // walk exponent per second
-		// SDK CheckJumpButton calls FinishGravity() inside itself - an extra
-		// half-gravity on the jump tick on top of FullWalkMove's own pair.
-		// Kept as a toggle so replay parity data can arbitrate the quirk.
-		bool jump_finishgravity = true;
 		// sv_enablebunnyhopping 1 (surf setup) disables PreventBunnyJumping's
 		// 1.1*maxspeed pre-jump clamp (binary-scanned server behavior).
 		bool enablebunnyhopping = true;
+		// sv_autobunnyhopping != 0 BYPASSES CheckJumpButton's jump-release
+		// gate entirely (client.dll @1f546c reads the cvar before testing
+		// oldbuttons & IN_JUMP). Live server cvar, exported like the rest.
+		bool autobunnyhopping = false;
 		// POST-AIR-UNDUCK TRANSIENT HULL (see PlayerState::hull_state):
 		// gates hull_state 2 on air unducks. Default ON (the measured
 		// behavior); off = flag-coupled hulls for arbitration.
@@ -130,6 +130,12 @@ namespace Solver {
 		float gravity_scale = 1.f; // trigger_gravity player scale (persists)
 		Vec3 basevel;              // trigger_push base velocity
 		bool basevel_flag = false; // FL_BASEVELOCITY: decays unless refreshed
+		// ENGINE-SHAPE FIELDS (client.dll CheckJumpButton/FinishGravity read
+		// them; the current world model can never set them, but the mirrored
+		// functions branch on them exactly as the engine does):
+		float water_jump_time = 0.f; // m_flWaterJumpTime (+0x1684)
+		int   water_level = 0;       // 0 = dry; >= 2 (WL_Waist) refuses jumps
+		bool  duck_until_ground = false; // +0x1a5c, third SET-path condition
 	};
 
 	// Per-tick observations for tracing and diagnostics.

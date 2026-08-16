@@ -539,6 +539,11 @@ namespace {
 				Vector(in->ox, in->oy, in->oz);
 			*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff) =
 				Vector(in->vx, in->vy, in->vz);
+			// m_nOldButtons (+0x28, the CheckJumpButton release gate) comes
+			// from the LIVE player via SetupMove - not a probe input. Zero it
+			// so the gate state is declared, not inherited from whatever the
+			// user was pressing. The differ's model side starts at 0 too.
+			*reinterpret_cast<int*>(movebuf + 0x28) = 0;
 
 			// Point the movement context at our player + movedata, call the
 			// isolated function, then put the context back exactly.
@@ -553,7 +558,9 @@ namespace {
 					g_client_base + pin->prelude_rva)(g_gm);
 			const uintptr_t fn = g_client_base + pin->rva;
 			if (pin->abi == kAbiIntThis)
-				ret = reinterpret_cast<int(*)(void*)>(fn)(g_gm);
+				// bool returns set AL only (xor al,al / mov al,1); the rest
+				// of EAX is garbage. Keep the exact byte.
+				ret = reinterpret_cast<int(*)(void*)>(fn)(g_gm) & 0xff;
 			else
 				reinterpret_cast<void(*)(void*)>(fn)(g_gm);
 

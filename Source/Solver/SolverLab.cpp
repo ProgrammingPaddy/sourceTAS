@@ -239,7 +239,6 @@ namespace {
 			else if (a == "--airaccel") ok = next_f(&o.params.airaccelerate);
 			else if (a == "--friction") ok = next_f(&o.params.friction);
 			else if (a == "--stopspeed") ok = next_f(&o.params.stopspeed);
-			else if (a == "--no-jump-fg") o.params.jump_finishgravity = false;
 			else if (a == "--seed-tas") { if (i + 1 < argc) o.seed_tas = argv[++i]; else ok = false; }
 			else if (a == "--seed-ticks") ok = next_i(&o.seed_ticks);
 			else if (a == "--out-eloss") { if (i + 1 < argc) o.out_eloss = argv[++i]; else ok = false; }
@@ -1021,7 +1020,10 @@ namespace {
 			if (is_jump) {
 				const Vec3 pre_v = s.vel;
 				const bool jumped = Fn::CheckJumpButton(s, w, o.params);
-				const bool eng_jumped = rs[i].ret != 0;
+				// The engine function returns bool in AL and never clears the
+				// rest of EAX (xor al,al / mov al,1 in the body) - the upper
+				// 24 bits of the captured int are stack garbage. AL is exact.
+				const bool eng_jumped = (rs[i].ret & 0xff) != 0;
 				const float dv = Len(s.vel - Vec3(rs[i].vx, rs[i].vy, rs[i].vz));
 				const bool jok = jumped == eng_jumped && dv <= 0.01f
 					&& fabsf(rs[i].stamina - s.stamina) <= 0.01f;
@@ -1308,6 +1310,202 @@ namespace {
 			"  SolverLab tracediff \"%s\" <results.csv>\n", out_path.c_str());
 		fflush(stdout);
 		return 0;
+	}
+
+	// tracegen-quads: for every FUNCPROBE position where the engine and our
+	// CategorizePosition disagree about ground, emit EXPLICIT-BOX oracle
+	// queries (15-field rows): the full hull and the four
+	// TracePlayerBBoxForGround quadrant boxes, on an xy jitter fan around the
+	// mismatch. The in-game oracle answers what the engine's trace ACTUALLY
+	// returns for a quadrant box starting inside a wall - the question the
+	// wall-embedded residual family hinges on. No meaning assigned: box in,
+	// frac/normal/startsolid out.
+	int CmdTraceGenQuads(const std::string& map_path, const ReplayOpts& o,
+	                     const std::string& ppath, const std::string& rpath,
+	                     const std::string& out_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		struct P { char fn[48]; float ox, oy, oz, vx, vy, vz; int ducked; };
+		std::vector<P> ps;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, ppath.c_str(), "r") != 0 || !f) {
+				printf("tracegen-quads: cannot read %s\n", ppath.c_str());
+				return 1;
+			}
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				if (l[0] == '#' || l[0] == 'f') continue;
+				P q = {};
+				float bx, by, bz, ducktime, stamina, sfric, gravity, maxz, yaw,
+					fmove, smove;
+				int onground, ducking, buttons;
+				if (sscanf_s(l, "%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,"
+					"%d,%f,%f,%f,%f,%f,%f,%f,%f",
+					q.fn, static_cast<unsigned>(sizeof(q.fn)),
+					&q.ox, &q.oy, &q.oz, &q.vx, &q.vy, &q.vz,
+					&bx, &by, &bz, &onground, &q.ducked, &ducking,
+					&buttons, &ducktime, &stamina, &sfric, &gravity,
+					&maxz, &yaw, &fmove, &smove) == 22)
+					ps.push_back(q);
+			}
+			fclose(f);
+		}
+		std::vector<int> ground;   // engine groundent per row, parallel to ps
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, rpath.c_str(), "r") != 0 || !f) {
+				printf("tracegen-quads: cannot read %s\n", rpath.c_str());
+				return 1;
+			}
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				// Data rows start with the numeric id; everything else
+				// (comment, header) is not a row. The first version filtered
+				// only '#'/'f' and swallowed the "id,fn,..." header, shifting
+				// every result one row off its probe - 207 phantom mismatch
+				// sites from one lazy filter.
+				if (l[0] < '0' || l[0] > '9') continue;
+				// groundent is the LAST column of the results row.
+				const char* p = strrchr(l, ',');
+				if (!p) continue;
+				ground.push_back(atoi(p + 1));
+			}
+			fclose(f);
+		}
+		FILE* f = nullptr;
+		if (fopen_s(&f, out_path.c_str(), "w") != 0 || !f) {
+			printf("tracegen-quads: cannot open %s\n", out_path.c_str());
+			return 1;
+		}
+		fprintf(f, "id,tick,ax,ay,az,bx,by,bz,ducked,mnx,mny,mnz,mxx,mxy,mxz\n");
+		const size_t n = ps.size() < ground.size() ? ps.size() : ground.size();
+		int id = 0, sites = 0;
+		const float jit[5] = { 0.f, -0.5f, 0.5f, -2.f, 2.f };
+		for (size_t i = 0; i < n; ++i) {
+			if (strcmp(ps[i].fn, "CategorizePosition") != 0)
+				continue;
+			// Rebuild our verdict exactly as funcdiff does.
+			PlayerState s;
+			s.pos = Vec3(ps[i].ox, ps[i].oy, ps[i].oz);
+			s.vel = Vec3(ps[i].vx, ps[i].vy, ps[i].vz);
+			s.on_ground = false;
+			s.ducked = ps[i].ducked != 0;
+			s.hull_state = ps[i].ducked ? 1 : 0;
+			ReplayOpts oo = o;
+			Fn::CategorizePosition(s, w, oo.params);
+			const bool eng_g = ground[i] != -1 && ground[i] != 0;
+			if (s.on_ground == eng_g)
+				continue;
+			sites++;
+			const float top = ps[i].ducked ? 54.f : 72.f;
+			const Vec3 hmn(-16.f, -16.f, 0.f), hmx(16.f, 16.f, top);
+			const Vec3 boxes[5][2] = {
+				{ hmn, hmx },                                        // full
+				{ hmn, Vec3(0.f, 0.f, hmx.Z) },                      // -x-y
+				{ Vec3(0.f, 0.f, 0.f), hmx },                        // +x+y
+				{ Vec3(hmn.X, 0.f, 0.f), Vec3(0.f, hmx.Y, hmx.Z) },  // -x+y
+				{ Vec3(0.f, hmn.Y, 0.f), Vec3(hmx.X, 0.f, hmx.Z) },  // +x-y
+			};
+			for (int jx = 0; jx < 5; ++jx)
+			for (int jy = 0; jy < 5; ++jy) {
+				const Vec3 a(ps[i].ox + jit[jx], ps[i].oy + jit[jy], ps[i].oz);
+				const Vec3 b = a - Vec3(0.f, 0.f, 2.f);
+				for (int bi = 0; bi < 5; ++bi)
+					fprintf(f, "%d,0,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,"
+						"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+						id++, a.X, a.Y, a.Z, b.X, b.Y, b.Z, ps[i].ducked,
+						boxes[bi][0].X, boxes[bi][0].Y, boxes[bi][0].Z,
+						boxes[bi][1].X, boxes[bi][1].Y, boxes[bi][1].Z);
+			}
+		}
+		fclose(f);
+		printf("tracegen-quads: %d ground-mismatch site(s) -> %d box queries -> %s\n",
+			sites, id, out_path.c_str());
+		printf("tracegen-quads: in-game 'Run trace oracle' answers them; then\n"
+			"  SolverLab quaddiff <map.bsp> \"%s\" <results.csv>\n",
+			out_path.c_str());
+		fflush(stdout);
+		return 0;
+	}
+
+	// quaddiff: grade World::TraceHullBox against the engine's own answers
+	// for explicit-box queries. Prints every disagreement (frac / normal.z /
+	// startsolid / allsolid) - this is the instrument that settles quadrant
+	// startsolid semantics by measurement.
+	int CmdQuadDiff(const std::string& map_path, const ReplayOpts& o,
+	                const std::string& qpath, const std::string& rpath) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		struct Q { Vec3 a, b, mn, mx; };
+		std::vector<Q> qs;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, qpath.c_str(), "r") != 0 || !f) return 1;
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				if (l[0] == 'i' || l[0] == '#') continue;
+				int id, tk, dk;
+				float ax, ay, az, bx, by, bz, mnx, mny, mnz, mxx, mxy, mxz;
+				if (sscanf_s(l, "%d,%d,%f,%f,%f,%f,%f,%f,%d,%f,%f,%f,%f,%f,%f",
+					&id, &tk, &ax, &ay, &az, &bx, &by, &bz, &dk,
+					&mnx, &mny, &mnz, &mxx, &mxy, &mxz) == 15)
+					qs.push_back({ Vec3(ax, ay, az), Vec3(bx, by, bz),
+						Vec3(mnx, mny, mnz), Vec3(mxx, mxy, mxz) });
+			}
+			fclose(f);
+		}
+		struct R { float frac, nz; int startsolid, allsolid; };
+		std::vector<R> rs;
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, rpath.c_str(), "r") != 0 || !f) return 1;
+			char l[512];
+			while (fgets(l, sizeof(l), f)) {
+				if (l[0] == 'i' || l[0] == '#') continue;
+				int id, ss, as; float fr, ex, ey, ez, nx, ny, nz, pd;
+				if (sscanf_s(l, "%d,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d",
+					&id, &fr, &ex, &ey, &ez, &nx, &ny, &nz, &pd, &ss, &as) == 11)
+					rs.push_back({ fr, nz, ss, as });
+			}
+			fclose(f);
+		}
+		const size_t n = qs.size() < rs.size() ? qs.size() : rs.size();
+		int exact = 0, bad = 0;
+		for (size_t i = 0; i < n; ++i) {
+			TraceResult tr;
+			const float frac = w.TraceHullBox(qs[i].a, qs[i].b, qs[i].mn,
+				qs[i].mx, &tr);
+			const bool ok = fabsf(frac - rs[i].frac) <= 1e-4f
+				&& fabsf(tr.normal.Z - rs[i].nz) <= 1e-4f
+				&& (tr.startsolid ? 1 : 0) == rs[i].startsolid
+				&& (tr.allsolid ? 1 : 0) == rs[i].allsolid;
+			if (ok) { exact++; continue; }
+			bad++;
+			if (bad <= 40)
+				printf("  q%-5d a(%9.3f,%9.3f,%9.3f) box(%6.1f,%6.1f)..(%5.1f,%5.1f)"
+					"  eng f%.4f nz%+.3f ss%d as%d | ours f%.4f nz%+.3f ss%d as%d\n",
+					static_cast<int>(i),
+					qs[i].a.X, qs[i].a.Y, qs[i].a.Z,
+					qs[i].mn.X, qs[i].mn.Y, qs[i].mx.X, qs[i].mx.Y,
+					rs[i].frac, rs[i].nz, rs[i].startsolid, rs[i].allsolid,
+					frac, tr.normal.Z, tr.startsolid ? 1 : 0,
+					tr.allsolid ? 1 : 0);
+		}
+		printf("quaddiff: %d box queries | EXACT %d | MISMATCH %d\n",
+			static_cast<int>(n), exact, bad);
+		fflush(stdout);
+		return bad ? 2 : 0;
 	}
 
 	// ---- FUNCTION-LEVEL DIFFERENTIAL FUZZ (user directive 2026-08-15) ----
@@ -3761,6 +3959,18 @@ int main(int argc, char** argv) {
 			static_cast<float>(atof(argv[7])),
 			static_cast<float>(atof(argv[8])));
 		return CmdTraceOne(argv[2], o, a, b, atoi(argv[9]));
+	}
+	if (cmd == "tracegen-quads" && argc >= 6) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 6, o))
+			return 1;
+		return CmdTraceGenQuads(argv[2], o, argv[3], argv[4], argv[5]);
+	}
+	if (cmd == "quaddiff" && argc >= 5) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 5, o))
+			return 1;
+		return CmdQuadDiff(argv[2], o, argv[3], argv[4]);
 	}
 	if (cmd == "tracegen-map" && argc >= 3) {
 		ReplayOpts o;

@@ -15,14 +15,24 @@ namespace Solver {
 				out = out - Scale(n, adjust);
 		}
 
+		// CGameMovement::CheckVelocity - client.dll @0x1182e0, re-coded 1-to-1.
+		// Per component: a velocity whose exponent bits are all-ones (NaN/Inf,
+		// mask 0x7f800000 @118333) is warned about and ZEROED, the origin gets
+		// the same check, then the +/- sv_maxvelocity clamp (function tail).
 		void CheckVelocity(PlayerState& s, const MoveParams& p) {
-			auto clampc = [&](float& c) {
-				if (c > p.maxvelocity) c = p.maxvelocity;
-				else if (c < -p.maxvelocity) c = -p.maxvelocity;
-			};
-			clampc(s.vel.X);
-			clampc(s.vel.Y);
-			clampc(s.vel.Z);
+			float* v[3] = { &s.vel.X, &s.vel.Y, &s.vel.Z };
+			for (int i = 0; i < 3; ++i) {
+				unsigned bits;
+				memcpy(&bits, v[i], 4);
+				if ((bits & 0x7f800000u) == 0x7f800000u)   // @118333 IS_NAN
+					*v[i] = 0.f;                            // @11838a
+				// (origin NaN check @118395 - unreachable in this model's
+				// arithmetic; the velocity clamp below is the live tail)
+				if (*v[i] > p.maxvelocity)
+					*v[i] = p.maxvelocity;
+				else if (*v[i] < -p.maxvelocity)
+					*v[i] = -p.maxvelocity;
+			}
 		}
 
 		// Move directions from the view yaw with z zeroed and normalized -
@@ -255,51 +265,111 @@ namespace Solver {
 				s.vel = Scale(s.vel, newspeed / speed);
 		}
 
-		void CheckJumpButton(PlayerState& s, const World& /*w*/, const MoveParams& p,
-		                     TickEvents* ev) {
-			if (!s.on_ground) {
-				s.old_buttons |= IN_JUMP;
+		// CGameMovement::FinishGravity - client.dll @0x11a0c0, re-coded 1-to-1.
+		void FinishGravity(PlayerState& s, const MoveParams& p) {
+			// @11a0d0  if (m_flWaterJumpTime) return;
+			if (s.water_jump_time != 0.f)
 				return;
+			// @11a0e3  ent_gravity = player->m_flGravity, 0 -> 1.0 (@11a0f0)
+			float ent_gravity = s.gravity_scale;
+			if (ent_gravity == 0.f)
+				ent_gravity = 1.f;
+			// @11a10b..11a129  vz -= (gravity * ent_gravity) * (frametime * 0.5)
+			// The PAIRING is the engine's: float multiply is not associative,
+			// so (g*e)*(dt*0.5) is mirrored literally, not rewritten.
+			s.vel.Z -= (p.gravity * ent_gravity) * (p.dt * 0.5f);
+			// @11a12e  CheckVelocity()
+			CheckVelocity(s, p);
+		}
+
+		// CCSGameMovement::CheckJumpButton - client.dll @0x1f5330, re-coded
+		// 1-to-1 from the x64 disassembly (2026-08-15): same branches, same
+		// ORDER, same arithmetic and rounding. Each block cites the
+		// instruction it mirrors. Returns the engine's bool (true = jumped).
+		bool CheckJumpButton(PlayerState& s, const World& /*w*/, const MoveParams& p,
+		                     TickEvents* ev) {
+			// @1f5340  if (player->pl.deadflag) { oldbuttons |= IN_JUMP;
+			//          return false; }  - no death in this world model.
+			// @1f5359  water-jump timer: drain and refuse. (The binary
+			//          subtracts RAW gpGlobals->frametime @1f537d - NOT the
+			//          SDK's 1000*frametime.)
+			if (s.water_jump_time != 0.f) {
+				s.water_jump_time -= p.dt;
+				if (s.water_jump_time < 0.f)
+					s.water_jump_time = 0.f;
+				return false;
 			}
-			if (s.old_buttons & IN_JUMP)
-				return;   // must release jump before jumping again
-			// PreventBunnyJumping (server, binary-scanned): clamp velocity to
-			// 1.1*maxspeed before the impulse - OFF under sv_enablebunnyhopping.
+			// @1f53bd  waterlevel >= WL_Waist(2): swim-shove and refuse.
+			//          Unreachable until the world model carries water.
+			if (s.water_level >= 2) {
+				s.on_ground = false;              // @1f53ce SetGroundEntity(0)
+				s.ground_brush = -1;
+				s.vel.Z = 100.f;                  // @1f53e9 CONTENTS_WATER
+				                                  // (@1f5407: SLIME -> 80)
+				return false;
+			}
+			// @1f5445  the ground gate is the ENTITY - GetGroundEntity() ==
+			//          NULL - not FL_ONGROUND (FUNCPROBE control: the flag
+			//          was set on 0 of 72 known-grounded isolated calls).
+			if (!s.on_ground) {
+				s.old_buttons |= IN_JUMP;         // @1f5453
+				return false;
+			}
+			// @1f546c  sv_autobunnyhopping != 0 BYPASSES the release gate.
+			if (!p.autobunnyhopping) {
+				if (s.old_buttons & IN_JUMP)      // @1f5480
+					return false;
+			}
+			// @1f5486  if (!sv_enablebunnyhopping) PreventBunnyJumping()
+			//          (vtable+0x1b8): clamp speed to 1.1*maxspeed.
 			if (!p.enablebunnyhopping) {
 				const float maxscaled = p.maxspeed * 1.1f;
 				const float spd = Len(s.vel);
 				if (spd > maxscaled && spd > 0.f)
 					s.vel = Scale(s.vel, maxscaled / spd);
 			}
+			// @1f54c8  SetGroundEntity(NULL) - leaving ground zeroes nothing.
 			s.on_ground = false;
 			s.ground_brush = -1;
-			// BINARY-MIRRORED (server.dll x64 @2eddab, disassembled
-			// 2026-08-15): the impulse is a baked DOUBLE constant (see
-			// MoveParams::jump_impulse_d), added in double with ONE rounding
-			// back to float. Standing jumps ADD onto the post-StartGravity
-			// vz; ducked/ducking jumps SET (@2eddc1 skips the add).
-			if (s.ducked || s.ducking)
-				s.vel.Z = static_cast<float>(p.jump_impulse_d);
+			// @1f54fd  PlayStepSound / @1f5511 jump animation: no physics.
+			// @1f5521  flGroundFactor = surfacedata ? jumpFactor(+0x44) : 1.0.
+			//          No surfaceprops in the world model; every surface in
+			//          the corpus is default (factor 1.0).
+			const float ground_factor = 1.f;
+			// @1f557e  startz = mv->m_vecVelocity[2]
+			const float startz = s.vel.Z;
+			// @1f5577/1f5586/1f558f  SET if (m_duckUntilOnGround || m_bDucking
+			//          || (m_fFlags & FL_DUCKING)), else ADD. The multiply is
+			//          DOUBLE against the baked constant (@1f55a0), the add is
+			//          double (@1f55a8), ONE rounding at the store (@1f55ba).
+			if (s.duck_until_ground || s.ducking || s.ducked)
+				s.vel.Z = static_cast<float>(
+					static_cast<double>(ground_factor) * p.jump_impulse_d);
 			else
 				s.vel.Z = static_cast<float>(
-					static_cast<double>(s.vel.Z) + p.jump_impulse_d);
-			// Stamina tax (@2eddfc): the WHOLE post-impulse vz scales by
-			// (1 - stamina*0.00019f) in float - the same shared constant the
-			// walk drag reads (.rdata 0056faf4).
-			if (s.stamina > 0.f)
-				s.vel.Z *= 1.f - s.stamina * p.stamina_scale_per_ms;
-			if (p.jump_finishgravity)
-				s.vel.Z -= s.gravity_scale * p.gravity * 0.5f * p.dt;
-				// SDK's in-jump FinishGravity (confirmed by the -6 -6 tail);
-				// ent_gravity scale applies here too.
-			// The jump ARMS the timer: engine stores raw bits 0x44a47943 ==
-			// float(25000.f/19.f) exactly (@2ede47).
+					static_cast<double>(ground_factor) * p.jump_impulse_d
+					+ static_cast<double>(startz));
+			// @1f55dd  stamina tax: the whole post-impulse vz scales by
+			//          (1 - stamina * 0.00019f), in float.
+			if (s.stamina > 0.f) {
+				const float ratio = 1.f - s.stamina * p.stamina_scale_per_ms;
+				s.vel.Z *= ratio;
+			}
+			// @1f5629  m_flStamina = raw bits 0x44a47943 (== 25000.f/19.f),
+			//          armed BEFORE FinishGravity - engine order.
 			s.stamina = p.stamina_jump_ms;
+			// @1f5633  FinishGravity() - unconditional, inside the jump.
+			FinishGravity(s, p);
+			// @1f5646  m_outJumpVel.z += vel.z - startz; @1f565d
+			//          m_outStepHeight += 0.1f; @1f5675 OnJump(): MoveData
+			//          outputs the solver does not consume.
+			// @1f5694  oldbuttons |= IN_JUMP; return true.
 			s.old_buttons |= IN_JUMP;
 			if (ev) {
 				ev->jumped = true;
 				ev->left_ground = true;
 			}
+			return true;
 		}
 
 		// CGameMovement::StepMove, 1:1 (user directive 2026-08-14: perfect
@@ -621,11 +691,8 @@ namespace Solver {
 		bool CheckJumpButton(PlayerState& s, const World& w,
 		                     const MoveParams& p) {
 			TickEvents ev;
-			const bool was_ground = s.on_ground;
-			::Solver::CheckJumpButton(s, w, p, &ev);
-			// The engine returns true only when it actually jumped; our
-			// version signals that by leaving the ground it was on.
-			return was_ground && !s.on_ground;
+			// The mirror returns the engine's own bool now.
+			return ::Solver::CheckJumpButton(s, w, p, &ev);
 		}
 	}
 
