@@ -1,187 +1,278 @@
-# Solver Rebuild — Design of Record
+# Solver Rebuild — Design of Record & Surfing Knowledge Base
 
-Opened 2026-08-15. Mission: **minimum time from start zone to end zone,
-beating a strong human line consistently, unseeded, no route knowledge,
-on every map** — starting with linear maps (staged = linear chained by
-teleport resets). The certified engine model (Docs/
-EngineParityReference.md) is the trusted simulation substrate.
+Opened 2026-08-15, expanded 2026-08-16 with the expert's full testimony.
+**This file is deliberately uncompressed.** It exists so that no context
+loss can destroy the priorities and intuitive decisions that drive
+surfing and routing. When resuming work in a fresh context: read this
+WHOLE file before writing solver code. The certified engine model
+(Docs/EngineParityReference.md) is the trusted simulation substrate.
 
-The prior solver's diagnosis (user, near-verbatim): fundamentally too
-disjointed — billions of options searched, needless energy lost on
-boards and transitions, because per-tick choices were never scored in
-the context of the segment, ramp, and run. The human line wins on
-smooth air, clean boards, and positioning for the *next* feature.
+Mission: **minimum time from start zone to end zone, beating a strong
+human line consistently, unseeded, no route knowledge, on every map** —
+linear maps first (staged maps are linear maps chained by teleport
+resets that re-baseline energy and force a fresh prestrafe; solvable
+per-stage or whole, per-stage likely more efficient).
+
+Why the old solver died (user's diagnosis, near-verbatim): it was
+fundamentally too disjointed. The value proposition — low-loss energy
+conversion to the finish at high speed — is solid. The execution was
+not: despite billions of options, a ton of energy was needlessly lost
+on boards and transitions, because the solver was not context-aware
+enough to make the right choices — or even to SEARCH IN THE REALM of
+the right choices — at any scale: individual tick, segment, ramp, run.
+The human line is miles better, and it is only a decent human run.
 
 ---
 
-## 1. Objective and legality
+## 1. Rules of the game (complete, from the user)
 
-- Objective: **ticks between start-zone exit and end-zone entry.
-  Nothing else.** Finish speed has zero terminal value.
-- Start zone: exactly ONE jump per run; no bhop in zone; prestrafe is
-  legal and expected. Exit as late as possible is *subordinate* to a
-  clean first board — the first board's quality dominates the few extra
-  falling ticks.
-- No bhopping ramp spines. (Exact legality rule for mid-run jumps:
-  OPEN QUESTION #3 below.)
-- Most banned-styles are slower anyway; the design filters them by
-  routing value, with hard rules only where value doesn't (spine bhop).
+- **Objective: ticks between start-zone exit and end-zone entry.
+  Nothing else.** Finish speed is completely irrelevant as a goal.
+- **Start zone:** exactly ONE jump per run is taken in/from the start
+  zone. No bhopping inside the zone. Prestrafing to maximize speed
+  before leaving off that single jump is legal and expected.
+- **Mid-run jumps ARE legal but only in very limited circumstances.**
+  Ramp-spine bhops are NEVER allowed. (The precise circumstances are
+  case-by-case; the router should treat jumps as exceptional tools, not
+  a default move. Most banned styles are slower anyway and should be
+  filtered out by better routing valuing them poorly — e.g., slowly
+  climbing up a ramp to get on the spine. Hard rule only where value
+  won't filter it: spine bhop.)
+- **The ONE aesthetic constraint: a rate limit on back-and-forth
+  strafes.** Tick-perfect yaw is fine and smoothness should EMERGE, but
+  1-tick auto-strafe oscillation is ugly — these TAS runs are meant to
+  SHOWCASE surfing on the maps. The rate limit is the only "beauty"
+  rule, and it also has practical search value (it bounds control
+  oscillation frequency, i.e., yaw-spline knot density).
 
-## 2. The human model (distilled from expert testimony, 2026-08-15)
+## 2. EXPERT TESTIMONY — the surfing model (preserve; do not compress)
 
-**The board.** A good entry lands with velocity tangent to the ramp
-plane — minimal normal component in the approach direction — and the
-*entire approach* is part of the interaction: the turn into the board
-is taken at the best turning rate for strafe gain given height and
-landing options. Never fly fast at a face and crank a late, lossy turn.
-With excess speed, dissipate the minimum inside the turn and still
-board clean. Limit cases: pure vertical fall → look straight down-ramp
-(yaw 90° to the face) and let the board turn the fall into the plane;
-head-on approach → a ~90°+ arc (more when board velocity is downward).
-**Bad boards kill runs.**
+### 2.1 The board (ramp entry)
+For an average ramp (99%+ of cases) a good entry **boards with a clean
+approach that lands with minimal energy loss: velocity tangent to the
+ramp face normal IN THE APPROACH DIRECTION.**
+- Falling vertically onto a ramp with zero horizontal speed: look
+  straight DOWN the ramp — yaw at 90° to the face — so the board
+  smoothly turns the fall into the ramp plane, converting potential
+  energy in the most lossless manner possible.
+- Approaching from the side, already aligned, with speed: angle again
+  so the board across the ramp normal is as lossless as possible —
+  closer to parallel with the ramp.
+- Upward boards are somewhat strange but the idea is identical:
+  maximize energy through the board. Facing directly at the ramp on
+  approach → roughly a 90° turn, often slightly MORE than 90°
+  considering the downward board velocity, to board tangent again.
+- **The ENTIRE interaction is energy-maximizing, not just the touching
+  part.** Take the approach curve at the best turning rate to maximize
+  strafe speed gain in the air given height and landing options. NEVER
+  fly at a face at high speed and crank a sharp, energy-losing turn in
+  the last few moments — that loses a ton of energy before the ramp is
+  even touched. With too much speed to turn cleanly, eat that energy
+  up IN the turn — spread it through the arc — and still take the
+  clean board at the absolute minimum loss.
+- **Bad boards kill runs.** Every consideration serves good, smooth,
+  clean, energy-preserving boards on every ramp.
 
-**The carve.** Three simultaneous jobs: preserve the boarded energy;
-gain the (mostly negligible, strafe-rate-setting) ramp-strafe energy;
-convert height to kinetic energy where possible; and above all SET UP
-THE FLICK. The exit point on the face is fully determined by current
-speed/energy and the next ramp's position.
+### 2.2 The carve (on the ramp)
+Three simultaneous jobs:
+1. Preserve the energy carried through the board, plus the small
+   free-energy gain from strafing into the ramp (Source is not a
+   perfect energy system; mostly negligible, but it sets the strafe
+   rate somewhat).
+2. Maximize kinetic energy — convert height to speed where possible.
+3. **Crucially: set up the flick** (the launch to the next ramp).
+The exit point on the face is COMPLETELY determined by current speed,
+energy, and the position of the next ramp.
 
-**The flick (exit).** Yaw chooses the exit angle. Leaving before the
-edge = turn into the ramp, then strafe away toward the target. The best
-transitions lose nothing or GAIN; when height must be bought, buy the
-minimum. On fast runs the flick also minimizes air time to the next
-board — subject to boarding high/far enough to repeat the process.
+### 2.3 The flick (ramp exit)
+"Flick" = the general term for exiting the ramp; it does NOT always
+involve a lossy jerking motion. The flick launches at the best angle to
+get a clean, efficient board on the NEXT ramp; on a fast run it also
+minimizes air time to the next ramp while still boarding high enough or
+far enough forward to repeat the process. The best transitions lose
+nothing — and in fact GAIN energy. When that's impossible, energy is
+sacrificed in the exit to gain height — extremely case-specific, no
+concrete rule; in general sacrifice the minimum, avoid it if possible.
+The exit angle is entirely caused by yaw for that transition decision.
+Turning away from the ramp leaves the ramp; flicks that leave before
+the edge generally turn INTO the ramp and then strafe away from it,
+toward the next target.
 
-**Height vs speed.** Fast runs repeatedly convert height into speed;
-flatter transfers of equal energy win (more direct). Prioritize
-horizontal speed anywhere you can get away with it; buy height only
-when overshoot or a bad board forces it. Side boards and mid-face
-boards exist; skipping a ramp entirely is a real routing decision.
+### 2.4 Height vs speed
+A fast run repetitively converts height into speed. Flatter approaches
+preserving the same energy come out FASTER — they are a more direct
+path to the next ramp. Provided the next ramp still boards cleanly and
+preserves the energy, **fast runs prioritize horizontal speed over
+vertical height anywhere they can get away with it.** Exceptions: a
+ramp that would be overshot or badly boarded with too much horizontal
+speed — vertical height is sometimes better there. Some ramps must be
+boarded on the side instead of across the top, or halfway up the face
+instead of on an edge. All of that is tied into the approach and exit.
 
-**Lookahead.** A rolling plan over the next 2→3→4 ramps: choose the
-current exit so the next board sets up the ramp after it. Ramps chain:
-in isolation a ride cares about the previous and next feature only,
-but the chain couples the whole run.
+### 2.5 The chain and the plan
+Most surf maps are ramp→air→ramp→air→ramp. In isolation a ramp ride
+cares only about the ramp before and after it — but because ramps come
+in order, they chain in the context of the full run. **Sometimes
+skipping a ramp entirely is far easier, more energy-preserving, or
+time-saving — ramp selection is a real routing decision.**
+The concrete plan while surfing extends over the next 2→3→4 ramps:
+where am I on the current ramp, how must I flick to reach the next
+ramp SUCH THAT the next ramp sets up the ramp after it. Not thinking
+about the final ramp of a minute-long map at the start — but definitely
+thinking about the overall route across the next several ramps: fast,
+efficient, AND possible.
 
-**Air between features.** On long straight transfers, weave — strafe
-side-to-side for energy gain while holding net heading. Air gain and
-heading change share one budget (the strafe-gain curve); spending it
-is a real optimization, not a straight line.
+### 2.6 Air between features
+High-level players absolutely strafe-gain during aerial maneuvers: on a
+far ramp reachable in basically a straight line, weave — strafe back
+and forth quickly — to maximize energy gained in the air while keeping
+a relatively straight net heading to the target. Ramps at a different
+angle than the exit direction have different exit/board position
+considerations based on what energy can be gained in the air and how
+it converts. (The weave frequency is bounded by the aesthetic rate
+limit in §1.)
 
-**Start.** Prestrafe: maximize ground speed → the single jump →
-maximize air-strafe gain → leave the zone late — but sacrifice
-late-exit ticks whenever it buys a better first board.
+### 2.7 The start (prestrafe)
+Its own animal; techniques differ slightly from normal surfing. The
+shape: get maximum ground speed → jump (the one) → maximize air-strafe
+gain from side-to-side strafing → exit the start zone as LATE as
+possible before touching the ground — **but a good clean board on the
+first ramp that maximizes energy through the rest of the map is MORE
+important than a few extra ticks of falling speed-gain in the zone.**
+The free energy of the start jump must always be taken.
 
-**Skill tells** (= our loss patterns to kill): snappy yaw spikes (no
-plan; late compensation), hard boards, routes that walk into bad
-positions. Smooth air + clean boards + next-ramp positioning is the
-whole skill hierarchy.
+### 2.8 Skill tells / the loss patterns to kill
+The user can tell a player's skill level immediately from: (1) how
+smoothly they move in the air, (2) how cleanly and efficiently they
+board, (3) beyond that, how they position for the NEXT ramp. The old
+solver's tells, verbatim targets to eliminate:
+- snappy random direction changes with hard yaw spikes — they indicate
+  NO PLAN to reach the ramp, late compensation;
+- hard boards that lose energy and speed — terrible in about every
+  case;
+- inefficient, non-context-aware routing that walks into bad positions
+  that are hard to get out of. **With more energy comes more options** —
+  efficient routing compounds.
 
 ## 3. Representation
 
-### 3.1 Feature graph (from BSP, per map, automatic)
-Nodes: surfable features — ramp faces (non-walkable planes, nz < 0.7,
-grouped into faces/spines with edges and extents), the start zone, end
-zone, triggers (teleports/boosts, already modeled). Edges: candidate
-transfers A→B (including skips) gated by coarse reachability envelopes
-(gravity + air-gain bounds). Staged maps: the graph fragments at
-teleport resets into chained linear solves.
+### 3.1 Feature graph (from BSP, automatic, per map)
+Nodes: surfable features — ramp faces (non-walkable planes nz < 0.7,
+grouped with edges/extents/spines), start zone, end zone, triggers
+(teleport/boost — already modeled). Edges: candidate transfers A→B
+INCLUDING SKIPS, gated by coarse reachability envelopes (gravity +
+air-gain bounds). Staged maps fragment at teleport resets.
 
-### 3.2 The TRANSFER primitive (the unit of value)
+### 3.2 The TRANSFER primitive — the unit of value
 One transfer = exit state on A → air phase → board on B → carve on B →
-exit state on B. Everything the expert testified lives at this
-granularity. Per feature B and entry state, define:
-- **Board window**: region on the face × velocity cone (tangent-dominant)
-  that boards with clip loss below threshold.
-- **Exit manifold**: the set of exit states (position on face edge or
-  early-flick point × velocity) reachable from an entry via legal
-  carves, each tagged with time cost and energy delta.
-Transfers compose by intersecting A's exit manifold (propagated through
-the air phase) with B's board window.
+exit state on B. All expert criteria live at this granularity:
+- **Board window** of a feature: region on the face × velocity cone
+  (tangent-dominant, per §2.1) that boards under a clip-loss threshold.
+- **Exit manifold**: exit states (edge point or early-flick point ×
+  velocity) reachable from an entry via legal carves, tagged with tick
+  cost and energy delta.
+Transfers compose by propagating A's exit manifold through the air
+phase and intersecting with B's board window. Side boards, mid-face
+boards, and skips are all just different windows/edges.
 
 ### 3.3 Controls parameterization
 Per phase, controls collapse to a **yaw profile over ticks** (+ duck
 where relevant); fmove/smove follow optimal-strafe sync mechanically.
-Air phase: yaw(t) spline with boundary conditions (exit heading → board
-heading). Carve: yaw(t) on the face. This replaces free per-tick
-mutation with boundary-conditioned, physically-shaped curves — snappy
-yaw is unrepresentable except where the optimum truly is a fast arc.
+Air: yaw(t) spline with boundary conditions (exit heading → board
+heading), knot density capped by the strafe rate limit (§1). Carve:
+yaw(t) on the face. Snappy yaw is UNREPRESENTABLE in this space except
+where the optimum truly is a fast arc (e.g., the 90° board turn).
 
 ## 4. Scoring: the regret ledger
 
-Every level is scored as **regret against a physics bound**, not raw
-fitness — this is the context-awareness fix.
-
-- **Board loss** (exact): |v·n̂| destroyed at contact — already
-  instrumented tick-by-tick (TickEvents.contact_loss).
-- **Approach loss**: deviation of the turn from the optimal strafe-gain
-  turn rate (the gain-per-degree curve at the 30u/s cap) integrated
-  over the approach; late-sharp-turn is a large measured regret.
+Every level scored as **regret against a physics bound**, never raw
+fitness:
+- **Board loss** (exact): |v·n̂| destroyed at contact —
+  TickEvents.contact_loss already measures it tick-by-tick.
+- **Approach loss**: integrated deviation from the optimal
+  strafe-gain-vs-turn-rate curve over the approach arc (the
+  "late sharp turn" regret).
 - **Air-gain shortfall**: energy gained vs the strafe-gain bound for
-  the ticks and heading-change actually available (weaving counts).
-- **Conversion shortfall** on the carve: kinetic gained vs the
-  potential available along the chosen path.
+  the available ticks and net heading change (weaving counts).
+- **Conversion shortfall**: kinetic gained on the carve vs potential
+  available along the path taken.
 - **Time regret**: transfer ticks vs the flat-transfer bound at equal
-  energy.
-- **Route regret**: DP value difference vs the best known sibling
-  route.
-
-A run produces a LEDGER: loss attributed per transfer, per phase. The
-search spends compute where the ledger says, not everywhere.
+  energy (§2.4: flatter equal-energy paths are faster).
+- **Route regret**: DP value gap vs best sibling route.
+A run yields a LEDGER attributing loss per transfer per phase. Compute
+goes where the ledger points. "Needless loss" is a number with an
+address.
 
 ## 5. Search architecture (anytime, four stages)
 
-1. **Graph build** (offline, seconds): features + edges + bounds.
+1. **Graph build** (seconds): features, edges, bounds.
 2. **Route search** (fast, wide): beam/DP over feature sequences using
-   analytic bounds (energy in → time bound out per edge). Emits
-   thousands of ordered candidate routes; start-zone and skip decisions
-   live here. Admissible-ish heuristics keep it honest.
-3. **Transfer refinement** (the core): per candidate route, solve each
-   transfer's trajectory primitive (yaw-profile optimization on the
-   exact engine over short horizons: approach turn, board, carve,
-   flick), propagating entry states forward; infeasible transfers
-   prune the route immediately. Rolling 2-4 feature window exactly like
-   the human: each flick optimized against the NEXT board's window and
-   the ramp after it.
-4. **Assembly + polish**: chain the transfer solutions into full runs
-   on the exact engine; CMA-ES persists ONLY as a local polisher over
-   the yaw-spline residuals (small, well-conditioned, boundary-locked),
-   seeded by stage 3, never random. The ledger routes further polish to
-   the worst transfers.
+   analytic bounds (energy in → time bound out). Start-zone plan and
+   skip decisions live here. Thousands of ordered candidates.
+3. **Transfer refinement** (the core): per route, solve each transfer's
+   yaw-profile trajectory on the exact engine over short horizons
+   (approach arc / board / carve / flick), propagating entry states
+   forward with a rolling 2-4 feature window (§2.5) — each flick
+   optimized against the NEXT board window and the ramp after.
+   Infeasible transfer → prune route immediately.
+4. **Assembly + polish**: chain transfer solutions into full runs on
+   the exact engine; CMA-ES survives ONLY as a residual polisher on the
+   yaw-splines (small, boundary-locked, seeded, never random). The
+   ledger routes extra polish to the worst transfers.
 
-Anytime property: stage 2 yields finishable chains in minutes; quality
-scales with budget. Toggles: beam widths, window depth, polish rounds —
-the "2-minute vs 20-minute, 5 ticks apart" dial. If a map can't finish
-inside 30 minutes, the ROUTING rules are wrong — fix rules, not budget.
+Anytime: finishable chains in minutes from stages 2-3; quality scales
+with budget via toggles (beam width, window depth, polish rounds) — the
+accepted dial is "2-minute solve within ~5 ticks of the 20-minute
+solve". Current budget ceiling 30 minutes; **if a map can't even finish
+inside 30 minutes the ROUTING RULES are wrong — fix rules, never throw
+budget.** Ultimate goal: thousands-to-millions of good candidates, push
+solve time down hard.
 
 ## 6. Validation
 
-- Exact-engine replay + in-game tape verification (existing
-  instruments; batch into rare sessions — the design loop is offline).
-- **Human demos as validation, never seeding**: hour-long session
-  demos exist, ~10-20s of valid completion each, marked by the
-  completion chat line. Build a .dem extractor that locates completes
-  and emits position/angle traces; compare the expert's ledger (their
-  board losses, transfer times) against ours on maps we never tuned on.
-- The regret ledger itself is the primary development instrument:
-  "needless loss" is a number with an address (map, transfer, phase).
+- Exact-engine replay + tape verification with existing instruments
+  (battery/diff/playback); batch in-game checks into rare sessions —
+  the design loop is offline (the user is DONE with relaunch grind).
+- **Human demos: validation only, NEVER seeding.** The user is cutting
+  hour-long session demos (top-1% difficulty zones, ~10-20s valid
+  completion each, completion marked by a chat line with the time) down
+  to useful ranges with a demo editor they are building; files incoming.
+  Build a .dem trace extractor when they land; compare the expert's
+  ledger (board losses, transfer times) against ours on maps we never
+  tuned on.
+- The regret ledger is the primary development instrument.
 
-## 7. What survives from the current codebase
+## 7. What survives from the old codebase
 
-Survives: the engine model (all of it), playback/diff/battery
-instruments, .tas writer, trigger handling, worker-pool infrastructure,
-CMA-ES (demoted to polisher). Dies: corridor beams, raw-fitness
-archives, contact-anchored random mutation, dissipation-bias heuristics
-— all replaced by the graph/transfer/ledger stack.
+Survives: the entire certified engine model, playback/diff/battery
+instruments, .tas writer, trigger handling, worker pools, CMA-ES
+(demoted to polisher). Dies: corridor beams, raw-fitness archives,
+contact-anchored random mutation, dissipation-bias heuristics.
 
-## 8. Open questions (answers slot here)
+## 8. Priority hierarchy (dominance order, from testimony)
 
-1. Mid-run jump legality: is ANY jump after the start-zone jump
-   illegal, or only grounded bhop chains (e.g., on spines)? Exact rule
-   wanted for the legality filter.
-2. Yaw legality: tick-perfect yaw is allowed (TAS), correct? Smoothness
-   is an efficiency emergent, not a rule?
-3. Demo handoff: paths to the session files + which maps they complete.
-4. Strafe-gain curve: derive the exact per-tick gain-vs-turn-rate law
-   from the certified engine (analytic, offline) — first math task of
-   the era.
+1. Clean tangent boards — bad boards kill runs; first board of the map
+   outranks late start-zone exit.
+2. Energy through the whole interaction (approach + board + carve +
+   flick as one object); spread unavoidable loss through the arc.
+3. Horizontal over vertical at equal energy, wherever the next board
+   stays clean; buy height minimally and only when forced (overshoot /
+   unboardable-fast cases).
+4. Route context: flick targets the next board SUCH THAT it sets up the
+   one after (rolling 2-4); skips are first-class options; more energy
+   = more options, so efficiency compounds.
+5. Time is the only terminal objective; everything above is
+   instrumental to it.
+
+## 9. Open items
+
+1. First math task: derive the exact strafe-gain-vs-turn-rate law from
+   the certified engine (analytic; underpins approach-loss and air-gain
+   bounds and the yaw parameterization).
+2. Set the strafe alternation rate limit constant with the user (the
+   aesthetic bound; also a search parameter).
+3. Demo files: incoming from the user's demo editor; build the
+   extractor then.
+4. Mid-run jump "limited circumstances": collect concrete cases as maps
+   demand them; treat jumps as exceptional route edges, spine-bhop hard-
+   filtered.
