@@ -1749,6 +1749,60 @@ namespace {
 		printf("routegraph: %d surfable faces, %d candidate transfers\n",
 			static_cast<int>(g.faces.size()),
 			static_cast<int>(g.edges.size()));
+		// Zone anchoring when an anchor tape is supplied (--anchor-tas /
+		// --control) - start under its anchor; end via --end-brush, or
+		// DERIVED from the tape's own finish (replay to the last tick and
+		// take the brush under the finisher - zones are plugin-side on real
+		// servers, so a human trace is the honest zone source; the expert
+		// demo traces will serve the same role per map).
+		if (!o.anchor_tas.empty()) {
+			Tape at;
+			int end_id = o.end_brush;
+			const bool tape_ok =
+				LoadTas(o.anchor_tas, at, &err) && at.start.valid;
+			if (end_id < 0 && tape_ok) {
+				PlayerState s;
+				s.pos = at.start.origin;
+				s.vel = at.start.velocity;
+				s.ducked = at.start.ducked;
+				s.hull_state = at.start.ducked ? 1 : 0;
+				s.stamina = at.start.stamina;
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+				for (size_t t = 0; t < at.frames.size(); ++t) {
+					const TapeFrame& fr = at.frames[t];
+					TickEvents ev;
+					MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+						fr.smove, fr.umove, fr.buttons, &ev);
+				}
+				end_id = w.BrushUnder(s.pos, s.ducked);
+				printf("routegraph: end zone derived from tape finish: "
+					"brush id %d at (%.0f,%.0f,%.0f)\n", end_id,
+					s.pos.X, s.pos.Y, s.pos.Z);
+			}
+			if (tape_ok
+				&& Route::AnchorZones(w, &g, at.start.origin,
+					at.start.ducked, end_id, 2000.f, &err)) {
+				printf("routegraph: start brush idx %d (under anchor), "
+					"%d candidate first boards", g.start_brush,
+					static_cast<int>(g.start_faces.size()));
+				if (g.end_brush >= 0)
+					printf("; end brush idx %d, %d feeder faces",
+						g.end_brush,
+						static_cast<int>(g.end_faces.size()));
+				printf("\n");
+			} else {
+				printf("routegraph: zone anchoring FAILED: %s\n",
+					err.c_str());
+			}
+		}
 		for (size_t i = 0; i < g.faces.size() && i < 40; ++i) {
 			const Route::Face& f = g.faces[i];
 			printf("  face %2d  brush %4d side %d  n(%+.3f,%+.3f,%+.3f)  "
@@ -1778,6 +1832,116 @@ namespace {
 		}
 		fflush(stdout);
 		return 0;
+	}
+
+	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
+	// Replay certified tapes through the exact sim, collect every SURF
+	// contact (contacted plane normal.z < walkable), and verify each
+	// (brush, plane) pair maps to an extracted Route::Face. Missing pairs
+	// are printed WITH THE REASON the extractor dropped them - the fix is
+	// then a measured change, not a guess.
+	int CmdFaceCover(const std::string& map_path, const ReplayOpts& o,
+	                 const std::vector<std::string>& tapes) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("facecover: %s\n", err.c_str());
+			return 1;
+		}
+		// (brush, plane) -> face index
+		auto find_face = [&](int brush, int plane) {
+			for (size_t i = 0; i < g.faces.size(); ++i)
+				if (g.faces[i].brush == brush && g.faces[i].side == plane)
+					return static_cast<int>(i);
+			return -1;
+		};
+
+		struct Miss { int brush, plane, hits; float nz; Vec3 at; };
+		std::vector<Miss> misses;
+		int contacts = 0, covered = 0;
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("LOAD FAILED (tas %s): %s\n", tp.c_str(), err.c_str());
+				return 1;
+			}
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& f = tape.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+					f.umove, f.buttons, &ev);
+				for (int c = 0; c < ev.ncontacts; ++c) {
+					const int b = ev.contact_brush[c];
+					const int p = ev.contact_plane[c];
+					if (b < 0 || p < 0)
+						continue;
+					const Vec3& n = w.brushes[b].n[p];
+					if (n.Z >= o.params.walkable_z || n.Z <= 0.f)
+						continue;   // ground/ceiling contact, not surf
+					contacts++;
+					if (find_face(b, p) >= 0) {
+						covered++;
+						continue;
+					}
+					bool seen = false;
+					for (Miss& m : misses)
+						if (m.brush == b && m.plane == p) {
+							m.hits++;
+							seen = true;
+							break;
+						}
+					if (!seen)
+						misses.push_back({ b, p, 1, n.Z, s.pos });
+				}
+			}
+			printf("facecover: %s replayed (%d frames)\n", tp.c_str(),
+				static_cast<int>(tape.frames.size()));
+		}
+		printf("facecover: %d surf contacts | %d covered | %d distinct "
+			"MISSING faces\n", contacts, covered,
+			static_cast<int>(misses.size()));
+		for (const Miss& m : misses) {
+			const WorldBrush& b = w.brushes[m.brush];
+			const char* why = "unknown - extractor bug";
+			if (m.plane < static_cast<int>(b.pid.size())
+				&& b.pid[m.plane] < 0)
+				why = "side is a compiler BEVEL (pid < 0)";
+			else if (m.nz <= 0.05f)
+				why = "nz <= 0.05 window floor";
+			else if (m.nz >= 0.7f)
+				why = "nz >= 0.7 (walkable window)";
+			else
+				why = "passed filters - polygon clip or area dropped it";
+			printf("  MISSING brush %d (id %d) plane %d nz %.4f hits %d "
+				"near(%.0f,%.0f,%.0f)  <- %s\n",
+				m.brush, b.id, m.plane, m.nz, m.hits,
+				m.at.X, m.at.Y, m.at.Z, why);
+		}
+		fflush(stdout);
+		return misses.empty() ? 0 : 2;
 	}
 
 	// tracegen-quads: turn funcdiff's MISMATCH MANIFEST into direct
@@ -4450,6 +4614,16 @@ int main(int argc, char** argv) {
 			static_cast<float>(atof(argv[7])),
 			static_cast<float>(atof(argv[8])));
 		return CmdTraceOne(argv[2], o, a, b, atoi(argv[9]));
+	}
+	if (cmd == "facecover" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdFaceCover(argv[2], o, tapes);
 	}
 	if (cmd == "strafelaw" && argc >= 3) {
 		ReplayOpts o;

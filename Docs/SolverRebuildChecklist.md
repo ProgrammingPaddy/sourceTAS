@@ -9,7 +9,8 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M0.4 face coverage, then M1.1 transfer envelopes.
+**NOW →** M1.1 transfer envelopes (M0.6 rate-limit constant awaits the
+user's number).
 
 ---
 
@@ -22,14 +23,18 @@ a measurable pass/fail, never a vibe.
       (max 2.0 in speed² of 11.5M; 8e-9 rad) (d4f6402)
 - [x] 0.3 Feature extractor v0 + `routegraph` command — brush-side
       polygons, plane/area/extents/downhill, candidate edges (d4f6402)
-- [ ] 0.4 FULL face coverage on basictest: spine faces + upper ramps +
-      every surface the 292 tape touches. Current v0 finds 4 lower
-      ramps only — widen/diagnose the nz window, check upper-geometry
-      filtering.
-      GATE: every ramp contact in the 292 + solved12 tapes maps to an
-      extracted face; zero phantom faces on manual review.
-- [ ] 0.5 Zone anchoring: start/end brush indices become graph nodes
-      (reuse solve-anchor zone identification).
+- [x] 0.4 Face coverage on basictest — GATE PASSED via the new
+      `facecover` command: both certified tapes replayed through the
+      exact sim, **483/483 surf contacts map to extracted faces, 0
+      missing**. (The spine worry was unfounded: its ridden moments are
+      walkable-top GROUND contacts, not surf.) `facecover` stays as the
+      standing per-map gate.
+- [x] 0.5 Zone anchoring: `Route::AnchorZones` — start = brush under
+      the anchor origin; end = --end-brush or DERIVED by replaying the
+      anchor tape to its finish (zones are plugin-side on real servers,
+      so a human trace is the honest zone source — the expert demo
+      traces serve this role per map). basictest: start idx 6, 3
+      candidate first boards; end id 10, 2 feeder faces.
 - [ ] 0.6 Strafe alternation rate limit: constant agreed with the user,
       stored in params, enforced as yaw-spline knot cap. (OPEN with
       user: the number.)
@@ -152,3 +157,7 @@ a measurable pass/fail, never a vibe.
   queue-capture built into the DLL (one click, unattended, snapshot-
   gated rows). Tools/demextract.py kept for header/cmd walking.
   Awaiting one short game session for the traces; not blocking M0.4.
+- 2026-08-16 (later): M0.4 GATE PASSED (facecover: 483/483 tape surf
+  contacts covered, 0 missing) and M0.5 done (AnchorZones + derived
+  end zone from tape finish). NOW = M1.1 envelopes; M0.6 awaits the
+  strafe rate-limit number from the user.

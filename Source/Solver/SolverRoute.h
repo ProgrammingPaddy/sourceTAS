@@ -40,6 +40,13 @@ namespace Route {
 	struct Graph {
 		std::vector<Face> faces;
 		std::vector<Edge> edges;
+		// Zone anchoring (M0.5): the run's endpoints as graph nodes.
+		int  start_brush = -1;      // World::brushes index (the platform)
+		Vec3 start_pos;             // the solve anchor's origin
+		int  end_brush = -1;        // World::brushes index (finish zone)
+		Vec3 end_center;
+		std::vector<int> start_faces;   // candidate first boards
+		std::vector<int> end_faces;     // faces that can feed the finish
 	};
 
 	// Build the graph from a loaded world. max_edge_dist gates candidate
@@ -47,6 +54,13 @@ namespace Route {
 	// envelope replaces this in stage 2).
 	bool Build(const World& w, Graph* out, float max_edge_dist,
 	           std::string* err);
+
+	// Resolve start/end zones into the graph: start = the brush under the
+	// anchor origin, end = a brush id (the finish platform/zone marker the
+	// era already uses). Candidate lists are distance-gated like edges.
+	bool AnchorZones(const World& w, Graph* g, const Vec3& anchor_pos,
+	                 bool ducked, int end_brush_id, float max_edge_dist,
+	                 std::string* err);
 
 } // namespace Route
 } // namespace Solver

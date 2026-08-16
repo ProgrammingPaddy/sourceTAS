@@ -139,5 +139,40 @@ namespace Route {
 		return true;
 	}
 
+	bool AnchorZones(const World& w, Graph* g, const Vec3& anchor_pos,
+	                 bool ducked, int end_brush_id, float max_edge_dist,
+	                 std::string* err) {
+		if (!g)
+			return false;
+		g->start_pos = anchor_pos;
+		const int start_id = w.BrushUnder(anchor_pos, ducked);
+		g->start_brush = w.IndexOfBrushId(start_id);
+		if (g->start_brush < 0) {
+			if (err) *err = "no brush under the anchor origin";
+			return false;
+		}
+		g->end_brush =
+			end_brush_id >= 0 ? w.IndexOfBrushId(end_brush_id) : -1;
+		if (end_brush_id >= 0 && g->end_brush < 0) {
+			if (err) *err = "end brush id not found in world";
+			return false;
+		}
+		if (g->end_brush >= 0) {
+			const WorldBrush& e = w.brushes[g->end_brush];
+			g->end_center = Scale(e.bmin + e.bmax, 0.5f);
+		}
+		g->start_faces.clear();
+		g->end_faces.clear();
+		for (size_t i = 0; i < g->faces.size(); ++i) {
+			const Face& f = g->faces[i];
+			if (Len(f.centroid - anchor_pos) <= max_edge_dist)
+				g->start_faces.push_back(static_cast<int>(i));
+			if (g->end_brush >= 0
+				&& Len(f.centroid - g->end_center) <= max_edge_dist)
+				g->end_faces.push_back(static_cast<int>(i));
+		}
+		return true;
+	}
+
 } // namespace Route
 } // namespace Solver
