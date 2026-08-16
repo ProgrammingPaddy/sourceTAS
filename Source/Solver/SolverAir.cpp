@@ -57,6 +57,7 @@ namespace Air {
 		const int sh = (t.aim_tick > 0 && t.aim_tick < horizon)
 			? t.aim_tick : horizon;
 		r.yaw.reserve(horizon);
+		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
 		for (int k = 0; k < horizon; ++k) {
 			const float theta = SplineEval(knots, k, sh);
@@ -65,11 +66,22 @@ namespace Air {
 			TickEvents ev;
 			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, hold, &ev);
 			r.yaw.push_back(yaw_deg);
+			r.fmove.push_back(fmove);
 			r.smove.push_back(smove);
-			const float dxa = s.pos.X - t.aim.X;
-			const float dya = s.pos.Y - t.aim.Y;
-			const float dza = s.pos.Z - t.aim.Z;
-			const float da = sqrtf(dxa * dxa + dya * dya + dza * dza);
+			float da;
+			if (t.aim_region) {
+				// Distance to the face itself: plane offset +
+				// outside-the-polygon shortfall.
+				const float off = Dot(face.n, s.pos) - face.d;
+				const float eo = Board::EdgeDistOut(face, s.pos);
+				da = sqrtf(off * off
+					+ (eo > 0.f ? eo * eo : 0.f));
+			} else {
+				const float dxa = s.pos.X - t.aim.X;
+				const float dya = s.pos.Y - t.aim.Y;
+				const float dza = s.pos.Z - t.aim.Z;
+				da = sqrtf(dxa * dxa + dya * dya + dza * dza);
+			}
 			if (da < r.miss_dist)
 				r.miss_dist = da;
 			if (ev.ncontacts > 0) {
@@ -84,12 +96,17 @@ namespace Air {
 					r.edge = Board::EdgeDistOut(face, r.pos);
 					r.speed = Len(r.v1);
 					r.speed2d = Len2D(r.v1);
+					r.end_state = s;
+					r.end_pos = s.pos;
+					r.flips = ctl.flips;
+					return r;
 				}
-				else
+				// Any other contact is a GRAZE: clip and keep flying
+				// (wall-grazes are legal surf; ending the flight here
+				// killed chains 37u short of their face). The clip
+				// cost shows up in the arrival speed on its own.
+				if (r.struck_brush < 0)
 					r.struck_brush = ev.contact_brush[0];
-				r.end_pos = s.pos;
-				r.flips = ctl.flips;
-				return r;   // any other strike = miss, flight over
 			}
 			if (s.on_ground) {
 				r.grounded = true;
@@ -170,6 +187,16 @@ namespace Air {
 		                        endA <= endB ? candB : candA };
 
 		if (knots_n < 2) knots_n = 2;
+		// UNSEEDED solves have no aim_tick: the spline must still span
+		// the EXPECTED flight, not the sim cap (the M1.3 dead-knot
+		// lesson) - use the ballistic arrival estimate.
+		Target t2 = t;
+		if (t2.aim_tick <= 0) {
+			t2.aim_tick = n_arr;
+			t2.tick_w = 0.f;
+			t2.tick_tol = -1;
+		}
+		const Target& tt = t2;
 		// RESTART FAMILIES: pattern search on heading knots is local, and
 		// the basin is set by the initial path's curvature profile (an
 		// early turn and a late turn arrive at very different boards).
@@ -186,9 +213,18 @@ namespace Air {
 			                            // leave the plane, then return)
 		};
 		int used = 0;
-		const int per_fam = evals / 6 > 8 ? evals / 6 : 8;
+		// Unseeded solves also search TWO spline domains: the direct
+		// ballistic arrival and a 1.7x longer swing (a tangent board
+		// often needs the wide approach the direct fall cannot shape -
+		// the tape's own first transfer is a 73-tick swing over a
+		// ~45-tick drop).
+		const bool dual_dom = t.aim_tick <= 0;
+		const int n_dom = dual_dom ? 2 : 1;
+		const int per_fam = evals / (6 * n_dom) > 8
+			? evals / (6 * n_dom) : 8;
 		float best_score = FLT_MAX;
 		std::vector<float> best_knots;
+		int best_dom_tick = t2.aim_tick;
 		Result best_r;
 		// Deterministic jitter source (basin hops must replay exactly).
 		unsigned rng = 977u;
@@ -199,13 +235,14 @@ namespace Air {
 		};
 		auto EvalOne = [&](const std::vector<float>& kn, float* sc_out)
 			-> Result {
-			Result rr = FlyHeadingSpline(entry, w, p, t, g, kn,
-				t.max_ticks);
+			Result rr = FlyHeadingSpline(entry, w, p, tt, g, kn,
+				tt.max_ticks);
 			used++;
-			const float sc = Score(rr, t);
+			const float sc = Score(rr, tt);
 			if (sc < best_score) {
 				best_score = sc;
 				best_knots = kn;
+				best_dom_tick = tt.aim_tick;
 				best_r = rr;
 			}
 			if (sc_out) *sc_out = sc;
@@ -241,42 +278,52 @@ namespace Air {
 			}
 			return spent;
 		};
-		for (int fam = 0; fam < 5 && used < evals; ++fam) {
-			std::vector<float> knots(knots_n);
-			for (int i = 0; i < knots_n; ++i) {
-				float f = static_cast<float>(i)
-					/ static_cast<float>(knots_n - 1);
-				const float bf = sinf(kPi * f) * fams[fam].bulge;
-				f = powf(f, fams[fam].pow);
-				knots[i] = h0 + WrapPi(fams[fam].end - h0) * f;
-				if (bf > 0.f)
-					knots[i] = knots[i]
-						+ WrapPi(psi - knots[i]) * bf;
-			}
-			float kscore;
-			EvalOne(knots, &kscore);
-			int spent = 1;
-			spent += Descend(knots, kscore, 0.6f, per_fam - spent);
-			// BASIN HOPPING: the descent converges long before the
-			// budget - spend the rest restarting from the family best
-			// plus jitter (a converged descent is a local statement;
-			// the window problem is multimodal).
-			while (spent + 1 < per_fam && used < evals) {
-				std::vector<float> hop = knots;
-				for (int i = 0; i < knots_n; ++i)
-					hop[i] = WrapPi(hop[i] + 0.35f * frand_pm());
-				float hscore;
-				EvalOne(hop, &hscore);
-				spent++;
-				spent += Descend(hop, hscore, 0.3f, per_fam - spent);
-				if (hscore < kscore) {
-					knots = hop;
-					kscore = hscore;
+		const int dom_base = t2.aim_tick;
+		for (int dom = 0; dom < n_dom && used < evals; ++dom) {
+			t2.aim_tick = dom == 0 ? dom_base
+				: static_cast<int>(dom_base * 1.7f);
+			if (t2.aim_tick >= t2.max_ticks)
+				t2.aim_tick = t2.max_ticks - 1;
+			for (int fam = 0; fam < 5 && used < evals; ++fam) {
+				std::vector<float> knots(knots_n);
+				for (int i = 0; i < knots_n; ++i) {
+					float f = static_cast<float>(i)
+						/ static_cast<float>(knots_n - 1);
+					const float bf = sinf(kPi * f) * fams[fam].bulge;
+					f = powf(f, fams[fam].pow);
+					knots[i] = h0 + WrapPi(fams[fam].end - h0) * f;
+					if (bf > 0.f)
+						knots[i] = knots[i]
+							+ WrapPi(psi - knots[i]) * bf;
+				}
+				float kscore;
+				EvalOne(knots, &kscore);
+				int spent = 1;
+				spent += Descend(knots, kscore, 0.6f,
+					per_fam - spent);
+				// BASIN HOPPING: the descent converges long before
+				// the budget - spend the rest restarting from the
+				// family best plus jitter.
+				while (spent + 1 < per_fam && used < evals) {
+					std::vector<float> hop = knots;
+					for (int i = 0; i < knots_n; ++i)
+						hop[i] = WrapPi(hop[i]
+							+ 0.35f * frand_pm());
+					float hscore;
+					EvalOne(hop, &hscore);
+					spent++;
+					spent += Descend(hop, hscore, 0.3f,
+						per_fam - spent);
+					if (hscore < kscore) {
+						knots = hop;
+						kscore = hscore;
+					}
 				}
 			}
 		}
-		// Polish share: hop tightly around the global best to the end
-		// of the budget.
+		// Polish share: hop tightly around the global best (in ITS
+		// domain) to the end of the budget.
+		t2.aim_tick = best_dom_tick;
 		while (used < evals && !best_knots.empty()) {
 			std::vector<float> hop = best_knots;
 			for (int i = 0; i < knots_n; ++i)

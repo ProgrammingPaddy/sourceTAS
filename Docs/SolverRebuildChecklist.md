@@ -9,7 +9,8 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M3 transfer refinement & assembly.
+**NOW →** M3 transfer refinement & assembly (IN PROGRESS — see 3.1/3.2
+status and the 2026-08-16 changelog tail for exactly where it stands).
 
 ---
 
@@ -184,13 +185,35 @@ a measurable pass/fail, never a vibe.
 
 ## M3 — Transfer refinement & assembly (stage 3)
 
-- [ ] 3.1 Rolling-window chained refinement along a route (2→4
-      features): each flick optimized against the next board window and
-      the ramp after; entry states propagated; infeasible → prune.
-- [ ] 3.2 Assembly into a full run on the exact engine; .tas export.
+- [~] 3.1/3.2 Assembler (`SolverAssemble.h/.cpp` + `msolvegate`) — IN
+      PROGRESS. Built and working: shape iteration from the M2 pool;
+      START plan search scored by the RESULTING BOARD via probe air
+      solves (launch-speed-toward-the-face was the head-on plunge
+      setup: dot −458 → −59.8 when fixed); region-mode air targets
+      (miss gradient to the nearest face point — point pursuit fights
+      tangency); graze-through flights (a non-target clip continues
+      the flight; ending it killed chains 37u short); TAP TRANSFERS
+      (striking the next leg's face IS the transfer — the 3-tick
+      clean-air exit is impossible between adjoining valley faces);
+      the UNIFIED TRANSFER primitive (tap mode: the ride flows through
+      exit + flight and is scored by the next strike — the design's
+      stage-3 unit); zone proxy + ZoneTick + ledger comparison + .tas
+      export all wired. Best chain so far: [0]@−59.8 → [1]@−10.1
+      boards at 950+ u/s (two legs at near-tape-quality tangency).
+      REMAINING: the transfer-guidance policy between adjoining faces
+      (the strike-region gradient + how the ride levels out before
+      separating: measured transfer band +55..+100 above face bottom,
+      exits must cross flat/ascending). All prior gates still pass
+      after every assembler change (airsolve 12/12, carve 10/10).
       GATE (M3): unseeded finisher on basictest in < 2 minutes wall
       clock; its ledger strictly dominates the old solver's best line
       (fewer board losses, less approach regret, fewer ticks).
+      IMPORTANT M4 QUESTION discovered en route: Run 21 (the presumed
+      human tape) DIVES INTO A PIT at z −1056 and never reaches the
+      platform the 292 line finishes on — the two reference runs have
+      DIFFERENT destinations. Which finish is the real zone (platform
+      per the 292/tape-derived proxy, or the pit)? ASK THE USER before
+      the M4 benchmark is defined.
 
 ## M4 — Polish & anytime behavior (stage 4)
 
@@ -345,3 +368,18 @@ a measurable pass/fail, never a vibe.
   rank 4. NOW = M3: chain SolveTransfer/SolveCarve along the shape
   pool, assemble full runs, export .tas; gate = unseeded finisher
   < 2 min whose ledger dominates the old line.
+- 2026-08-16 (session end): M3 assembler ~80% — ten evidence-driven
+  iterations, findings baked into code and the 3.1 status above. The
+  transfer physics of basictest measured from the certified line
+  (ridedump): valley-hop transfers separate MID-FACE at +55..+100
+  above zmin, cross flat-or-ascending (in-plane heading clamped out
+  of the downhill half), and board the next base at z ≈ −10; Run 21's
+  crest exit is a DUCK-OFF; the start jump must be chosen by its
+  BOARD, not its launch speed. Two chained boards at −59.8/−10.1
+  prove the primitives compose. Next concrete steps: (1) make the
+  unified tap transfer's guidance walk the ride through the measured
+  band before separation (the strike gradient alone lets rides dive
+  and ground in the valley); (2) once [0,1,2,3] chains, FlyToZone
+  from face 3 mirrors the 292 ending; (3) resolve the ZONE QUESTION
+  with the user (platform vs pit) before M4. Wall per full attempt
+  ~25-30s — well under the 2-min gate budget.

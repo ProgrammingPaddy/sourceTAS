@@ -38,6 +38,11 @@ namespace Carve {
 		// Optional exit-position preference.
 		Vec3  aim_pos;
 		float pos_w = 0.f;
+		// A strike on THIS brush/side is a TAP TRANSFER, not a
+		// failure: adjoining faces are boarded straight off the ride
+		// (solved12's multi-taps) - scored by the tap's own clip loss.
+		int   tap_brush = -1;
+		int   tap_side = -1;
 		// Full exit-velocity target (vel_w > 0 replaces the heading
 		// term). This is the honest exit spec: a CREST LAUNCH separates
 		// with mostly-vertical velocity, where horizontal heading is
@@ -62,12 +67,19 @@ namespace Carve {
 		float ride_loss2 = 0.f;  // sum of clip dot^2 over the ride
 		int   ride_ticks = 0;    // ticks with face contact
 		int   struck_brush = -1; // ended by striking something else
+		int   struck_plane = -1;
+		float strike_dot = 0.f;  // clip dot of that strike (the tap's
+		                         // board loss when it IS the transfer)
 		bool  grounded = false;
 		Vec3  end_pos;
 		float miss_dist = 1e9f;  // closest approach to aim_pos (when
 		                         // pos_w > 0): the no-exit gradient
 		int   duck_at = -1;      // duck-off press tick used (-1 = none)
-		std::vector<float> yaw, smove;
+		// The full state at the first airborne tick (= the next air
+		// leg's entry). On exit the first `tick` control entries are
+		// the ride's frames.
+		PlayerState end_state;
+		std::vector<float> yaw, fmove, smove;
 	};
 
 	// effort: optional per-knot duty cycle in [0,1] (same knot spacing

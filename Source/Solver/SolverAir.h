@@ -30,6 +30,11 @@ namespace Air {
 		Vec3  aim;              // point on (or near) the face to reach
 		float dot_cap = 100.f;  // success ceiling on arrival |dot|
 		int   max_ticks = 200;  // flight horizon
+		// Region mode (unseeded assembly): the miss gradient pulls
+		// toward the NEAREST point of the face, not the aim point -
+		// point pursuit forces head-on arrivals and fights tangency;
+		// the aim then only seeds initial bearings.
+		bool  aim_region = false;
 		// Optional arrival-time preference (the route plan owns timing;
 		// tick_w = 0 ignores it). aim_tick also SCALES THE SPLINE: knots
 		// span [0, aim_tick] so every knot is a live parameter of the
@@ -54,8 +59,13 @@ namespace Air {
 		int   struck_brush = -1; // on miss: what ended the flight
 		bool  grounded = false;  // on miss: landed on walkable ground
 		Vec3  end_pos;           // where the flight ended (diagnostics)
-		// The realized controls (for assembly/export).
+		// The full state after the strike tick (= the carve's entry;
+		// the board tick belongs to this flight's last frame).
+		PlayerState end_state;
+		// The realized controls (for assembly/export; on a hit the
+		// first `tick` entries are the flight's frames).
 		std::vector<float> yaw;
+		std::vector<float> fmove;
 		std::vector<float> smove;
 	};
 

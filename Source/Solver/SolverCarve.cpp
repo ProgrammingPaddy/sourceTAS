@@ -53,6 +53,7 @@ namespace Carve {
 		int exit_tick = 0;
 		float duty = 1.f;   // effort accumulator (first tick strafes)
 		r.yaw.reserve(horizon);
+		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
 		for (int k = 0; k < horizon; ++k) {
 			const float theta = SplineEval(knots, k, sh);
@@ -75,6 +76,7 @@ namespace Carve {
 			TickEvents ev;
 			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, btn, &ev);
 			r.yaw.push_back(yaw_deg);
+			r.fmove.push_back(fmove);
 			r.smove.push_back(smove);
 			if (t.pos_w > 0.f) {
 				const float da = Len(s.pos - t.aim_pos);
@@ -98,6 +100,15 @@ namespace Carve {
 						ours = false;
 				if (!ours) {
 					r.struck_brush = ev.contact_brush[0];
+					r.struck_plane = ev.contact_plane[0];
+					if (r.struck_brush >= 0 && r.struck_plane >= 0) {
+						const Vec3& sn = w.brushes[r.struck_brush]
+							.n[r.struck_plane];
+						r.strike_dot = Dot(ev.contact_vel[0], sn);
+					}
+					r.tick = k + 1;
+					r.end_state = s;   // post-strike = the next
+					                   // leg's post-board entry
 					r.end_pos = s.pos;
 					r.flips = ctl.flips;
 					return r;
@@ -116,7 +127,12 @@ namespace Carve {
 					have_exit = true;
 				}
 				air_streak++;
-				if (air_streak >= 3) {
+				// With a TAP target the transfer is ONE primitive:
+				// the ride continues through the clean-air exit into
+				// the flight, ending at the strike on the tap face
+				// (handled above as the !ours contact). Without one,
+				// three clean ticks end the carve as before.
+				if (air_streak >= 3 && t.tap_brush < 0) {
 					r.exited = true;
 					r.tick = exit_tick;
 					r.exit_pos = exit_s.pos;
@@ -125,6 +141,7 @@ namespace Carve {
 						exit_s.vel.X);
 					r.speed2d = Len2D(exit_s.vel);
 					r.end_pos = s.pos;
+					r.end_state = exit_s;
 					r.flips = ctl.flips;
 					return r;
 				}
@@ -138,14 +155,22 @@ namespace Carve {
 	namespace {
 
 		float Score(const Result& r, const Target& t) {
-			if (!r.exited)
-				// A non-exit CLOSE to the aim must be able to outscore
-				// an exit FAR from it, or the search can never walk
-				// through the stall region that borders a crest exit
-				// (a hard 1e6 wall froze [7]/[8] across three fix
-				// rounds). Floor 600 keeps any decent exit dominant.
+			if (!r.exited) {
+				// A strike on the TAP face is the transfer itself:
+				// scored by its own board loss (soft taps beat any
+				// lob that still has a board ahead of it).
+				if (t.tap_brush >= 0
+					&& r.struck_brush == t.tap_brush
+					&& r.struck_plane == t.tap_side)
+					return 0.6f * fabsf(r.strike_dot)
+						- 0.01f * Len2D(r.end_state.vel);
+				// A non-exit CLOSE to the aim must be able to
+				// outscore an exit FAR from it, or the search can
+				// never walk through the stall region bordering a
+				// crest exit. Floor 600 keeps decent exits dominant.
 				return 600.f
 					+ (r.miss_dist < 1e8f ? 2.f * r.miss_dist : 1e6f);
+			}
 			float j = t.vel_w > 0.f
 				? t.vel_w * Len(r.exit_vel - t.aim_vel)
 				: 300.f * fabsf(WrapPi(r.exit_heading
