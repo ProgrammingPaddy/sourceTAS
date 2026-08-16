@@ -616,20 +616,29 @@ namespace Solver {
 			FixPlayerCrouchStuck(s, w);
 		}
 
-		// CCSGameMovement::CanUnduck (0x1f4b20): a zero-length STANDING
-		// test AT the (air: -8.5) candidate origin - the DESTINATION box,
-		// not the path. (The sweep variant was tried: Duck 21 -> 58; a
-		// floor below the drop blocks a sweep the engine allows. The -18
-		// full-hull-delta candidate was also tried and reverted: it broke
-		// five battery decks.)
+		// CCSGameMovement::CanUnduck (0x1f4b20), the law from 5,981 isolated
+		// calls margin-cross-tabbed (2026-08-15):
+		//  - GROUNDED: pos == cand, an UNSWEPT standing test - blocked iff
+		//    startsolid, which now includes the leaf-contents rule (the 212
+		//    blocked-while-brush-clear rows on the ceiling slab).
+		//  - AIR: a SWEPT standing trace pos -> pos-8.5. The brush the box
+		//    STARTS inside is invisible for the whole sweep (64+21 rows
+		//    free with both endpoints overlapping the same brush), so
+		//    blocked iff the sweep ENTERS a started-outside brush
+		//    (fraction < 1) - NOT iff the destination overlaps. The earlier
+		//    "destination box" and "frac>=1 && !startsolid" variants each
+		//    modeled half of this and each broke the other half.
 		bool CanUnduck(const PlayerState& s, const World& w,
 		               const MoveParams& p) {
-			const Vec3 cand = s.on_ground
-				? s.pos
-				: Vec3(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
+			if (s.on_ground) {
+				TraceResult ut;
+				w.TraceHull3(s.pos, s.pos, 0, &ut);
+				return !ut.startsolid;
+			}
+			const Vec3 cand(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
 			TraceResult ut;
-			w.TraceHull3(cand, cand, 0, &ut);
-			return !ut.startsolid;
+			const float uf = w.TraceHull3(s.pos, cand, 0, &ut);
+			return uf >= 1.f;
 		}
 
 		// CCSGameMovement::FinishUnDuck (0x1f6840): derives the same

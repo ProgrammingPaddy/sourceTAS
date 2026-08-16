@@ -803,8 +803,14 @@ namespace Solver {
 					const float r = fabsf(pn.X) * e.X + fabsf(pn.Y) * e.Y
 						+ fabsf(pn.Z) * e.Z;
 					const float d0 = Dot(pn, c) - pd;
-					if (d0 > r) { node = nd.child[0]; continue; }
-					if (d0 < -r) { node = nd.child[1]; continue; }
+					// TOUCHING a leaf boundary is NOT inside it: at
+					// |d0| == r the box only meets the plane, so descend
+					// one side. The both-sides variant made every box
+					// standing exactly ON a floor "overlap" the solid
+					// leaf below - FinishDuck's stuck ladder fired on
+					// ordinary grounded states and broke a tape (544u).
+					if (d0 >= r) { node = nd.child[0]; continue; }
+					if (d0 <= -r) { node = nd.child[1]; continue; }
 					if (Visit(nd.child[0]))
 						return true;
 					node = nd.child[1];
@@ -861,18 +867,18 @@ namespace Solver {
 			: hull == 2 ? hulls_.unduck_min : hulls_.stand_min;
 		const Vec3& wmx = hull == 1 ? hulls_.duck_max
 			: hull == 2 ? hulls_.unduck_max : hulls_.stand_max;
-		// TWO UNSWEPT PATHS IN THE ENGINE (both measured 2026-08-15, box
-		// oracle vs isolated movement functions at the SAME positions):
-		// IEngineTrace::TraceRay with a zero-length ray consults LEAF
-		// CONTENTS (ss1+as1 above the ceiling slab in a brushless void
-		// leaf), but the movement code's own position tests behave
-		// brushes-only there (CanUnduck frees a hull the raw ray calls
-		// solid). TRIED AND REVERTED: wiring the leaf rule in HERE took
-		// Duck 25 -> 2,316 and broke a tape - this function models the
-		// MOVEMENT path, so it stays brushes-only. BoxInSolidLeaf carries
-		// the raw-ray law for instruments that need it; pinning
-		// TestPlayerPosition is the instrument that settles the fine
-		// distinction.
+		// THE UNSWEPT QUESTION (open, precisely named): the raw-ray oracle
+		// and grounded CanUnduck consult LEAF CONTENTS on zero-length tests
+		// (212 blocked-while-brush-clear rows on the ceiling slab), but
+		// FixPlayerCrouchStuck's ladder and TryPlayerMove's stuck-guard
+		// measurably do NOT (wiring the leaf rule here took FinishDuck
+		// 496 -> 1,147 and broke the solved12 tape at its void-crossing
+		// finish flight). Two zero-length consumers, two behaviors - the
+		// distinction lives in CanUnduck's grounded branch at client.dll
+		// 0x1f4c5f, and READING that body is the next instrument; until
+		// then this movement-path trace stays brushes-only and the 212
+		// stay counted as open, not papered over. BoxInSolidLeaf carries
+		// the leaf law for the instruments that need it.
 		int order[1024];
 		const int norder = OrderedLeafBrushes(a, b, wmn, wmx, order, 1024);
 		// Fallback when leaf tables are absent: grid gathering, cell-major
@@ -1037,8 +1043,7 @@ namespace Solver {
 		float best = 1.f;
 		int best_brush = -1, best_plane = -1;
 		// Same start-solid law and ENGINE ORDER as TraceHull3 (see the
-		// comment there; the raw-ray leaf-contents rule stays OUT of the
-		// movement path - see the note there).
+		// comments there, including the open unswept leaf question).
 		bool l_ss = false, l_as = false;
 		int order[1024];
 		const int norder = OrderedLeafBrushes(a, b, mins, maxs, order, 1024);
