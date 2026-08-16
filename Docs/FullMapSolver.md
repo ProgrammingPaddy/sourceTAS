@@ -2058,6 +2058,57 @@ the invented hull was masking it. Next pins: `CheckJumpButton` (baked double
 
 Spec + full function inventory: `Docs/FuncProbe.md`.
 
+## 2026-08-15 (night) — ZERO mismatches: the start-solid law and the engine's own trace organization
+
+**Both pinned functions are now PERFECT on 40,072 torture probes:**
+`CategorizePosition` 20,072/20,072, `CheckJumpButton` 20,000/20,000,
+controls 72/72, map-sweep flags 6,624/6,624 both, tapes 0.000u, and the
+whole-tick corpus at its best-ever 33,318/40,000 (a diagnostic now, not a
+target). Everything ran offline from existing captures after the one
+box-oracle click.
+
+**The jump path** was re-coded 1-to-1 from client.dll bodies rather than
+patched: `CheckJumpButton` @0x1f5330 (gate order, sv_autobunnyhopping
+release-gate bypass, ground-ENTITY gate, double impulse, stamina order),
+`FinishGravity` @0x11a0c0 (water gate, m_flGravity 0→1, exact multiply
+pairing `(g*e)*(dt*0.5)`, the CheckVelocity call we skipped),
+`CheckVelocity` @0x1182e0 (NaN exponent-mask zeroing + clamp). The
+`jump_finishgravity` toggle died - the binary calls it unconditionally.
+Its first grade said 239/20,000: bool returns live in AL ONLY, and the
+runner had captured full EAX (stack garbage in bits 8-31). AL was exact,
+so the same results file re-graded 19,999/20,000 after masking. The
+runner also now zeroes mv->m_nOldButtons after SetupMove - the release
+gate is declared input, not whatever was being pressed.
+
+**THE START-SOLID LAW** (box oracle, 6,700 + 125 engine answers - the
+trace_results files had carried it unread all along, because tracediff
+never compared normals on startsolid rows):
+- start-solid brush: FLAGS only; geometrically invisible (0 of 1,236
+  ss-only rows zeroed the fraction).
+- ALLSOLID brush: fraction = 0 THE MOMENT IT IS PROCESSED (789/789), so
+  earlier recordings survive (66/789 + 75/125 carry planes) and later
+  brushes cannot record. `mv` semantics: that surviving walkable plane is
+  how the engine GROUNDS a hull embedded in a wall.
+- This makes brush PROCESSING ORDER observable. Ascending-index and
+  global-best each fixed one dataset and broke the other; the engine's
+  order is its leaf walk. So the trace now HAS the engine's organization:
+  parse leafbrush lists (dleaf_t firstleafbrush@24 - the face fields at
+  +20/22 masquerade as valid indices and scored battery 0/15 before the
+  offset was caught), walk near-child-first, clip per-leaf in lump order,
+  first occurrence only. The entire law in code is ONE LINE: `best = 0`
+  when an allsolid brush is processed - recording stays
+  `enterfrac < fraction`, the engine's own strict compare.
+- TRIED AND REVERTED: CM's literal `>= offset` front-only node prune lost
+  20 real startsolid flags; the engine's recursion clips SEGMENTS, not
+  subtrees. Strict `>` keeps coverage exact.
+
+**OPEN:** 25/125 box-oracle rows (full-hull boxes, one embedded site)
+differ on the surviving NORMAL only - no function output affected; true
+segment-splitting recursion is the instrument that would settle them.
+`unduck_face` 14/15. Solver throughput under the leaf walk unmeasured.
+Next pins: the duck family (needs a non-constant discriminator), then
+WalkMove/AirMove.
+
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
 - 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
