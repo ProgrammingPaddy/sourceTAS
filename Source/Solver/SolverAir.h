@@ -82,10 +82,18 @@ namespace Air {
 	// closed-form tangent-arrival heading from M1.1 ballistics + M1.2
 	// dot line), then pattern search on knot values against the exact
 	// engine. evals bounds the number of simulated flights.
+	// alts (optional): the top alts_k DIVERSE hits (deduped by strike
+	// region, best first - alts[0] == the returned best). A board that
+	// minimizes its own dot can sabotage the ride it feeds (measured:
+	// the same face's soft-tangent board sets up a -400 transfer where
+	// a harder board sets up -160); the CALLER composes each board
+	// with its downstream carve and picks by the whole transfer.
 	Result SolveTransfer(const PlayerState& entry, const World& w,
 	                     const MoveParams& p, const Route::Graph& g,
 	                     const Target& t, int knots_n = 4,
-	                     int evals = 400);
+	                     int evals = 400,
+	                     std::vector<Result>* alts = nullptr,
+	                     int alts_k = 3);
 
 } // namespace Air
 } // namespace Solver

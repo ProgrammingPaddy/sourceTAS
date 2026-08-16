@@ -174,14 +174,16 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       Ranking = best lb per DISTINCT BASE SHAPE (first-occurrence face
       order; cycle variants and multi-taps collapse — the pool stage 3
       consumes). GATE PASSED: 60 raw routes → 10 shapes in 0.00s;
-      human [0] rank 4, solved12 [0 1 2 3] rank 7; the pool also
-      surfaces the old solver's [0 2]/[0 2 3] and unexplored variants.
-      DISCOVERY en route: the ledger on Run 21 (the actual human tape)
-      shows the human line is ONE RIDE — [start, 0, end], board regret
-      only 4.9k, 407k of gravity conversion to 924 u/s, then a pure
-      flight + landing run. Total dissipation 71k vs the old solver's
-      329k. That is the line to beat and the search now proposes its
-      shape unseeded.
+      the pool contains the HUMAN shape [0 2 3], solved12's [0 1 2 3]
+      (rank 7), the old solver's [0 2], and the speculative one-ride
+      [0] (rank 4 — no real run validates it; worth probing in M4).
+      CORRECTION 2026-08-16: a session mislabeled Run 21.tas as "the
+      human line" (one ride, 71k dissipation, pit finish) and briefly
+      made it the benchmark. Run 21 is a DEAD TAPE — it rides face 0
+      into the map FLOOR (z −1056 = brush 1's top) and never finishes;
+      its header says surf_basictest only because it was recorded
+      in-game there. All conclusions drawn from it are PURGED. The
+      REAL human run is `basictest.tas` (user-confirmed; see M4).
 
 ## M3 — Transfer refinement & assembly (stage 3)
 
@@ -198,22 +200,60 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       the UNIFIED TRANSFER primitive (tap mode: the ride flows through
       exit + flight and is scored by the next strike — the design's
       stage-3 unit); zone proxy + ZoneTick + ledger comparison + .tas
-      export all wired. Best chain so far: [0]@−59.8 → [1]@−10.1
-      boards at 950+ u/s (two legs at near-tape-quality tangency).
-      REMAINING: the transfer-guidance policy between adjoining faces
-      (the strike-region gradient + how the ride levels out before
-      separating: measured transfer band +55..+100 above face bottom,
-      exits must cross flat/ascending). All prior gates still pass
-      after every assembler change (airsolve 12/12, carve 10/10).
+      export all wired.
+      SESSION 2026-08-16b (tapprobe-driven, every step measured):
+      the unified transfer NOW SOLVES the human's own transfers -
+      `tapprobe` (new isolation instrument: replay any tape to a
+      tick, run the tap/zone solve from that exact state) showed the
+      0→2 valley transfer unseeded at dot −162.8 @ 887 u/s (human:
+      −206.4 @ 874 on the same face pair) and the face-3→zone ENDING
+      in 101 ticks (human: 123 from the same entry). What it took,
+      in order (each verified by the probe): (1) tap target = the
+      next face's BOARD REGION (aim_region math, not corner points);
+      (2) FRONT-SIDE-ONLY miss gradient (behind-plane closeness is
+      not approach — kills the corridor/under-dive traps); (3)
+      graze-through in the flight section (only the tap face ends a
+      tap; zone mode grazes everything); (4) ballistic REACH-
+      SHORTFALL term at separation (M1.1 closed form: prices
+      "separate higher/ascending"); (5) S-CARVE families (dive then
+      up — the measured human shape: final ride heading +8°, exit
+      ascending +128 vz off the face edge); (6) DUAL SPLINE DOMAINS
+      in SolveCarve (est and est/2; zone est×1.7 — the M1.3 dead-
+      knot lesson recurs because the ride doubles the speed); (7)
+      6 knots for two-phase transfers; (8) 12k carve evals (probe-
+      measured: −395@4k → −163@12k); (9) ZONE MODE = the last
+      transfer ends by entering the end volume, scored by arrival
+      tick (the objective itself), no more FlyToZone dependence;
+      (10) board ALTERNATIVES (SolveTransfer returns top-K diverse
+      hits; the leg composes each with its carve — a dot-minimal
+      board measurably set up −400 taps where a harder board set up
+      −110); (11) rolling-context NEXT_COST (exact climb law
+      v−√(v²−2g·sh) toward the leg-after target).
+      In-assembler best so far: [0 2] leg 0 at −110.3 @ 877.
+      REMAINING (the one blocker): chain CONSISTENCY - tap landings
+      cluster at the bottom-west of each face where the NEXT
+      transfer has no runway; min-over-verts reach can't
+      discriminate (the lowest vert is always reachable). NEXT: the
+      design's rolling window applied literally - depth-2
+      composition (probe the next leg from each candidate landing
+      before committing; beam 2-3 per leg). All primitives are
+      proven capable; this is selection, not capability.
+      All prior gates still pass after every change this session
+      (airsolve 12/12, carve 10/10 re-run after each edit).
       GATE (M3): unseeded finisher on basictest in < 2 minutes wall
       clock; its ledger strictly dominates the old solver's best line
       (fewer board losses, less approach regret, fewer ticks).
-      IMPORTANT M4 QUESTION discovered en route: Run 21 (the presumed
-      human tape) DIVES INTO A PIT at z −1056 and never reaches the
-      platform the 292 line finishes on — the two reference runs have
-      DIFFERENT destinations. Which finish is the real zone (platform
-      per the 292/tape-derived proxy, or the pit)? ASK THE USER before
-      the M4 benchmark is defined.
+      ZONES RESOLVED 2026-08-16 (user: "the one with the red texture
+      is the end zone" + BSP texture data): START = brush 6 (carries
+      CABLE/GREEN, the spawn platform), END = brush 10 (carries
+      CABLE/RED, reflectivity 0.511/0.002/0.002 — the raised platform
+      z 192..256). The assembler's InZone target (brush 10) was
+      already correct. Texture identity now loads from the BSP
+      (texinfo→texdata→string lumps, per-side `texd` +
+      `World::texnames/texreflect`; `mapinfo` prints per-brush
+      textures) so zone identification is map data, not lore.
+      `tapeinfo` (new) prints every tape's map/frames/anchor —
+      the provenance check that would have caught the Run 21 mixup.
 
 ## M4 — Polish & anytime behavior (stage 4)
 
@@ -225,6 +265,20 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       GATE (M4): **beat the human tape's zone time on basictest,
       unseeded.** The 2-min setting lands within ~5 ticks of the
       20-min setting.
+      THE MISSION IS THE SOLVER, NOT A MAP (user, repeatedly): the
+      gate is generic — on any map with a human/reference run, the
+      unseeded solve beats it. Per-map numbers below are VALIDATION
+      INSTANCES only; nothing in the solver may reference them.
+      basictest instance (measured 2026-08-16, user-confirmed tape):
+      `basictest.tas` = the human run. Zone clock **319 ticks
+      (4.785 s)** from start-zone exit (t112) to grounding on brush
+      10 (t431). Route shape [0 2 3] (skips face 1). Max 915.9 u/s.
+      Its ledger: boards −115.1 (regret 5.4k), −206.4 (regret 42.6k,
+      tangency 0 available), −142.4 (regret 20.3k); whole-tape
+      dissipation 343.9k + air shortfall 138.7k. The old solver's
+      best line (cma_S292) scored 292 ticks — already faster than
+      the human — so this instance's bar is < 292 ticks unseeded,
+      with the human's 68k board regret as energy headroom.
 
 ## M5 — Generalization
 
@@ -362,10 +416,9 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   POTENTIAL LEDGER (E' = E + 900·ticks + 2g·Δz uniformly, telescoping
   anchors, cycle-proof); (3) vertex-anchored credits inverted on one
   edge (s_ub 10) — same ledger fix. Plus: the END edge needed the
-  fly-then-RUN leg, and ranking needed base-shape dedup. Run 21's
-  ledger identified THE HUMAN LINE as a one-ride skip route ([0],
-  71k dissipation, 924 u/s carve exit) — now proposed unseeded at
-  rank 4. NOW = M3: chain SolveTransfer/SolveCarve along the shape
+  fly-then-RUN leg, and ranking needed base-shape dedup. (A Run 21
+  "human line" claim from this entry is RETRACTED — see the next
+  entry.) NOW = M3: chain SolveTransfer/SolveCarve along the shape
   pool, assemble full runs, export .tas; gate = unseeded finisher
   < 2 min whose ledger dominates the old line.
 - 2026-08-16 (session end): M3 assembler ~80% — ten evidence-driven
@@ -379,7 +432,37 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   prove the primitives compose. Next concrete steps: (1) make the
   unified tap transfer's guidance walk the ride through the measured
   band before separation (the strike gradient alone lets rides dive
-  and ground in the valley); (2) once [0,1,2,3] chains, FlyToZone
-  from face 3 mirrors the 292 ending; (3) resolve the ZONE QUESTION
+  and ground in the valley); (2) once a full shape chains, FlyToZone
+  from the last face finishes the run; (3) resolve the ZONE QUESTION
   with the user (platform vs pit) before M4. Wall per full attempt
   ~25-30s — well under the 2-min gate budget.
+- 2026-08-16 (corrections, user in the loop): (a) Run 21 RETRACTED as
+  any kind of benchmark — it is a dead in-game tape that rides face 0
+  into the floor; the REAL human run is `basictest.tas` (319 zone
+  ticks; ledger in M4 notes). (b) Zones are marked BY TEXTURE (user:
+  red = end zone; basictest: green CABLE/GREEN on start brush 6, red
+  CABLE/RED on end brush 10). Added texture identity to the world
+  loader (texinfo→texdata→string lumps), per-brush textures in
+  `mapinfo`, and `tapeinfo` (per-tape map/frames/anchor provenance).
+  (c) REFRAME, user's words: "we are not solving a map, we are
+  building a solver to solve every map" — so zone identification
+  becomes a solver capability (detect start/end from texture
+  dominance in map data; trigger-entity zones join in M5), and all
+  per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-16 (session 2b): the transfer-capability campaign — eleven
+  measured steps (list in 3.1) driven by the new `tapprobe` isolation
+  instrument (the FUNCPROBE method at transfer granularity: replay a
+  tape to a tick, solve from that exact state, dump the winner's
+  trajectory). Probe verdicts: 0→2 unseeded −162.8 @ 887 (human −206
+  @ 874); face-3→zone ending 101 ticks (human 123). Killed traps, in
+  the order the trajectories exposed them: corner-point targets → the
+  corridor thread (behind-plane miss counted as progress) → grazes
+  ending flights → descending separations (ballistic shortfall term)
+  → dead spline knots (dual domains, again) → arrival shaping (6
+  knots, 12k evals) → the ending (zone mode: arrival tick IS the
+  score) → myopic boards (top-K diverse alts composed with their
+  carve). `DetectEndZone` now feeds routegraph/routesgate/msolvegate
+  from texture marks with reference-replay fallback. Remaining: chain
+  consistency (landings that strand the NEXT leg — depth-2 rolling-
+  window composition is the next move, all primitives proven).
+  Gates re-run green after every step: airsolve 12/12, carve 10/10.

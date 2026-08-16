@@ -3,6 +3,8 @@
 #include <float.h>
 #include <math.h>
 
+#include <algorithm>
+
 #include "SolverBoard.h"
 #include "SolverEnvelope.h"
 #include "SolverSteer.h"
@@ -71,11 +73,15 @@ namespace Air {
 			float da;
 			if (t.aim_region) {
 				// Distance to the face itself: plane offset +
-				// outside-the-polygon shortfall.
+				// outside-the-polygon shortfall. FRONT SIDE ONLY -
+				// a strike comes from off > 0 (same law as the carve
+				// tap gradient); behind-the-plane closeness is not
+				// approach.
 				const float off = Dot(face.n, s.pos) - face.d;
 				const float eo = Board::EdgeDistOut(face, s.pos);
-				da = sqrtf(off * off
-					+ (eo > 0.f ? eo * eo : 0.f));
+				da = off > 0.f
+					? sqrtf(off * off + (eo > 0.f ? eo * eo : 0.f))
+					: 1e9f;
 			} else {
 				const float dxa = s.pos.X - t.aim.X;
 				const float dya = s.pos.Y - t.aim.Y;
@@ -145,7 +151,8 @@ namespace Air {
 
 	Result SolveTransfer(const PlayerState& entry, const World& w,
 	                     const MoveParams& p, const Route::Graph& g,
-	                     const Target& t, int knots_n, int evals) {
+	                     const Target& t, int knots_n, int evals,
+	                     std::vector<Result>* alts, int alts_k) {
 		Result best;
 		if (t.face < 0 || t.face >= static_cast<int>(g.faces.size()))
 			return best;
@@ -233,6 +240,10 @@ namespace Air {
 			return static_cast<float>((rng >> 8) & 0xFFFFu)
 				/ 32767.5f - 1.f;
 		};
+		// Diverse-hit pool for the caller's downstream composition:
+		// best result per STRIKE REGION (48u clusters).
+		struct PR { Result r; float sc; };
+		std::vector<PR> pool;
 		auto EvalOne = [&](const std::vector<float>& kn, float* sc_out)
 			-> Result {
 			Result rr = FlyHeadingSpline(entry, w, p, tt, g, kn,
@@ -244,6 +255,21 @@ namespace Air {
 				best_knots = kn;
 				best_dom_tick = tt.aim_tick;
 				best_r = rr;
+			}
+			if (alts && rr.hit) {
+				bool merged = false;
+				for (PR& pr : pool) {
+					if (Len(pr.r.pos - rr.pos) < 48.f) {
+						if (sc < pr.sc) {
+							pr.r = rr;
+							pr.sc = sc;
+						}
+						merged = true;
+						break;
+					}
+				}
+				if (!merged)
+					pool.push_back({ rr, sc });
 			}
 			if (sc_out) *sc_out = sc;
 			return rr;
@@ -333,6 +359,16 @@ namespace Air {
 			Descend(hop, hscore, 0.15f, evals - used);
 		}
 		best = best_r;
+		if (alts) {
+			std::sort(pool.begin(), pool.end(),
+				[](const PR& a, const PR& b) { return a.sc < b.sc; });
+			alts->clear();
+			for (const PR& pr : pool) {
+				if (static_cast<int>(alts->size()) >= alts_k)
+					break;
+				alts->push_back(pr.r);
+			}
+		}
 		return best;
 	}
 

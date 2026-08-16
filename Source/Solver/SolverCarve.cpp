@@ -3,6 +3,7 @@
 #include <float.h>
 #include <math.h>
 
+#include "SolverBoard.h"
 #include "SolverSteer.h"
 
 namespace Solver {
@@ -41,6 +42,9 @@ namespace Carve {
 		if (t.face < 0 || t.face >= static_cast<int>(g.faces.size()))
 			return r;
 		const Route::Face& face = g.faces[t.face];
+		const Route::Face* tapf = (t.tap_face >= 0
+			&& t.tap_face < static_cast<int>(g.faces.size()))
+			? &g.faces[t.tap_face] : nullptr;
 		PlayerState s = entry;
 		const int hold = s.ducked ? IN_DUCK : 0;
 		r.duck_at = duck_at;
@@ -49,8 +53,46 @@ namespace Carve {
 			? t.aim_tick : horizon;
 		int air_streak = 0;
 		bool have_exit = false;
+		bool ever_exit = false;
 		PlayerState exit_s;
 		int exit_tick = 0;
+		// Ballistic shortfall from a separation state to the target
+		// (exact discrete z law, current-speed flight time - speed
+		// gain only shortens it, so this under-promises, never over).
+		// Targets: the tap face's verts, or in zone mode the NEAREST
+		// point of the volume's bottom rim (xy-clamped - a corner set
+		// misreads a wide zone as unreachable).
+		auto BallShort = [&](const PlayerState& es, const Vec3& v)
+			-> float {
+			const float s2d = Len2D(es.vel);
+			if (s2d < 1.f)
+				return 1e6f;
+			const float dx = v.X - es.pos.X;
+			const float dy = v.Y - es.pos.Y;
+			const float n = sqrtf(dx * dx + dy * dy) / (s2d * p.dt);
+			const float z = es.pos.Z + n * p.dt * es.vel.Z
+				- 0.5f * p.gravity * p.dt * p.dt * n * n;
+			return v.Z - z > 0.f ? v.Z - z : 0.f;
+		};
+		auto ReachShort = [&](const PlayerState& es) -> float {
+			if (t.to_zone) {
+				Vec3 v(es.pos.X, es.pos.Y, t.zone_min.Z);
+				if (v.X < t.zone_min.X) v.X = t.zone_min.X;
+				if (v.X > t.zone_max.X) v.X = t.zone_max.X;
+				if (v.Y < t.zone_min.Y) v.Y = t.zone_min.Y;
+				if (v.Y > t.zone_max.Y) v.Y = t.zone_max.Y;
+				return BallShort(es, v);
+			}
+			if (!tapf)
+				return 0.f;
+			float best = FLT_MAX;
+			for (const Vec3& v : tapf->verts) {
+				const float sh = BallShort(es, v);
+				if (sh < best)
+					best = sh;
+			}
+			return best;
+		};
 		float duty = 1.f;   // effort accumulator (first tick strafes)
 		r.yaw.reserve(horizon);
 		r.fmove.reserve(horizon);
@@ -78,7 +120,53 @@ namespace Carve {
 			r.yaw.push_back(yaw_deg);
 			r.fmove.push_back(fmove);
 			r.smove.push_back(smove);
-			if (t.pos_w > 0.f) {
+			if (t.to_zone) {
+				// Zone entry ends the transfer - the run is DONE at
+				// this tick (the clock's own event).
+				if (s.pos.X >= t.zone_min.X && s.pos.X <= t.zone_max.X
+					&& s.pos.Y >= t.zone_min.Y
+					&& s.pos.Y <= t.zone_max.Y
+					&& s.pos.Z >= t.zone_min.Z
+					&& s.pos.Z <= t.zone_max.Z) {
+					r.zoned = true;
+					r.tick = k + 1;
+					r.end_state = s;
+					r.end_pos = s.pos;
+					r.flips = ctl.flips;
+					return r;
+				}
+				// No-arrival gradient: 3D distance to the volume.
+				const float dx = s.pos.X < t.zone_min.X
+					? t.zone_min.X - s.pos.X
+					: (s.pos.X > t.zone_max.X
+						? s.pos.X - t.zone_max.X : 0.f);
+				const float dy = s.pos.Y < t.zone_min.Y
+					? t.zone_min.Y - s.pos.Y
+					: (s.pos.Y > t.zone_max.Y
+						? s.pos.Y - t.zone_max.Y : 0.f);
+				const float dz = s.pos.Z < t.zone_min.Z
+					? t.zone_min.Z - s.pos.Z
+					: (s.pos.Z > t.zone_max.Z
+						? s.pos.Z - t.zone_max.Z : 0.f);
+				const float da = sqrtf(dx * dx + dy * dy + dz * dz);
+				if (da < r.miss_dist)
+					r.miss_dist = da;
+			} else if (tapf) {
+				// Closest approach to the tap face REGION - the
+				// no-strike gradient (air primitive's aim_region).
+				// FRONT SIDE ONLY: a clip strikes from off > 0 with
+				// v·n < 0; positions behind the plane (threading a
+				// corridor past the face, diving under it) can never
+				// convert to a strike and must not read as progress.
+				const float off = Dot(tapf->n, s.pos) - tapf->d;
+				if (off > 0.f) {
+					const float eo = Board::EdgeDistOut(*tapf, s.pos);
+					const float da = sqrtf(off * off
+						+ (eo > 0.f ? eo * eo : 0.f));
+					if (da < r.miss_dist)
+						r.miss_dist = da;
+				}
+			} else if (t.pos_w > 0.f) {
 				const float da = Len(s.pos - t.aim_pos);
 				if (da < r.miss_dist)
 					r.miss_dist = da;
@@ -87,6 +175,8 @@ namespace Carve {
 				r.grounded = true;
 				r.end_pos = s.pos;
 				r.flips = ctl.flips;
+				if (ever_exit)
+					r.reach_short = ReachShort(exit_s);
 				return r;
 			}
 			if (ev.ncontacts > 0) {
@@ -99,18 +189,72 @@ namespace Carve {
 						|| ev.contact_plane[c] != face.side)
 						ours = false;
 				if (!ours) {
-					r.struck_brush = ev.contact_brush[0];
-					r.struck_plane = ev.contact_plane[0];
+					// In tap mode only the TAP face ends the
+					// transfer; any other contact is a GRAZE - clip
+					// and keep going (the air primitive's law: ending
+					// on grazes killed chains short of their face;
+					// the clip cost shows up in the arrival itself).
+					// Zone mode grazes EVERYTHING - only the volume,
+					// the ground, or the horizon end it.
+					int tc = 0;
+					if (t.to_zone || t.tap_brush >= 0) {
+						tc = -1;
+						if (!t.to_zone)
+							for (int c = 0; c < ev.ncontacts; ++c)
+								if (ev.contact_brush[c] == t.tap_brush
+									&& ev.contact_plane[c]
+										== t.tap_side)
+									tc = c;
+						if (tc < 0) {
+							if (r.struck_brush < 0) {
+								r.struck_brush = ev.contact_brush[0];
+								r.struck_plane = ev.contact_plane[0];
+							}
+							air_streak = 0;
+							have_exit = false;
+							continue;
+						}
+					}
+					r.struck_brush = ev.contact_brush[tc];
+					r.struck_plane = ev.contact_plane[tc];
 					if (r.struck_brush >= 0 && r.struck_plane >= 0) {
 						const Vec3& sn = w.brushes[r.struck_brush]
 							.n[r.struck_plane];
-						r.strike_dot = Dot(ev.contact_vel[0], sn);
+						r.strike_dot = Dot(ev.contact_vel[tc], sn);
 					}
 					r.tick = k + 1;
 					r.end_state = s;   // post-strike = the next
 					                   // leg's post-board entry
 					r.end_pos = s.pos;
 					r.flips = ctl.flips;
+					// Rolling context: the climb this landing still
+					// owes toward the LEG-AFTER target, priced by
+					// the exact energy law v' = sqrt(v^2 - 2g*sh).
+					float nsh = -1.f;
+					if (t.next_face >= 0 && t.next_face
+						< static_cast<int>(g.faces.size())) {
+						nsh = FLT_MAX;
+						for (const Vec3& v
+							: g.faces[t.next_face].verts) {
+							const float sh = BallShort(s, v);
+							if (sh < nsh)
+								nsh = sh;
+						}
+					} else if (t.next_is_zone) {
+						Vec3 v(s.pos.X, s.pos.Y, t.zone_min.Z);
+						if (v.X < t.zone_min.X) v.X = t.zone_min.X;
+						if (v.X > t.zone_max.X) v.X = t.zone_max.X;
+						if (v.Y < t.zone_min.Y) v.Y = t.zone_min.Y;
+						if (v.Y > t.zone_max.Y) v.Y = t.zone_max.Y;
+						nsh = BallShort(s, v);
+					}
+					if (nsh > 0.f && nsh < 1e6f) {
+						const float v0 = Len2D(s.vel);
+						const float rem = v0 * v0
+							- 2.f * p.gravity * nsh;
+						r.next_cost = rem > 0.f
+							? v0 - sqrtf(rem) : v0;
+					}
 					return r;
 				}
 				air_streak = 0;
@@ -125,6 +269,7 @@ namespace Carve {
 					exit_s = s;   // first airborne tick = the exit state
 					exit_tick = k + 1;
 					have_exit = true;
+					ever_exit = true;
 				}
 				air_streak++;
 				// With a TAP target the transfer is ONE primitive:
@@ -132,7 +277,8 @@ namespace Carve {
 				// the flight, ending at the strike on the tap face
 				// (handled above as the !ours contact). Without one,
 				// three clean ticks end the carve as before.
-				if (air_streak >= 3 && t.tap_brush < 0) {
+				if (air_streak >= 3 && t.tap_brush < 0
+					&& !t.to_zone) {
 					r.exited = true;
 					r.tick = exit_tick;
 					r.exit_pos = exit_s.pos;
@@ -149,12 +295,23 @@ namespace Carve {
 		}
 		r.end_pos = s.pos;
 		r.flips = ctl.flips;
+		if (ever_exit)
+			r.reach_short = ReachShort(exit_s);
 		return r;
 	}
 
 	namespace {
 
 		float Score(const Result& r, const Target& t) {
+			if (t.to_zone) {
+				// The last transfer: arrival tick IS the objective.
+				// Any arrival beats any non-arrival.
+				if (r.zoned)
+					return -2000.f + static_cast<float>(r.tick);
+				return 600.f
+					+ (r.miss_dist < 1e8f ? 2.f * r.miss_dist : 1e6f)
+					+ 2.f * r.reach_short;
+			}
 			if (!r.exited) {
 				// A strike on the TAP face is the transfer itself:
 				// scored by its own board loss (soft taps beat any
@@ -162,14 +319,20 @@ namespace Carve {
 				if (t.tap_brush >= 0
 					&& r.struck_brush == t.tap_brush
 					&& r.struck_plane == t.tap_side)
-					return 0.6f * fabsf(r.strike_dot)
+					// Strike loss + the climb the landing owes the
+					// next leg - both u/s, same weight (the whole
+					// transfer pays, not just the touch).
+					return 0.6f * (fabsf(r.strike_dot) + r.next_cost)
 						- 0.01f * Len2D(r.end_state.vel);
 				// A non-exit CLOSE to the aim must be able to
 				// outscore an exit FAR from it, or the search can
 				// never walk through the stall region bordering a
 				// crest exit. Floor 600 keeps decent exits dominant.
+				// reach_short prices separations the ballistic law
+				// says can never arrive at the face's altitude.
 				return 600.f
-					+ (r.miss_dist < 1e8f ? 2.f * r.miss_dist : 1e6f);
+					+ (r.miss_dist < 1e8f ? 2.f * r.miss_dist : 1e6f)
+					+ 2.f * r.reach_short;
 			}
 			float j = t.vel_w > 0.f
 				? t.vel_w * Len(r.exit_vel - t.aim_vel)
@@ -198,7 +361,14 @@ namespace Carve {
 
 	Result SolveCarve(const PlayerState& entry, const World& w,
 	                  const MoveParams& p, const Route::Graph& g,
-	                  const Target& t, int knots_n, int evals) {
+	                  const Target& t_in, int knots_n, int evals) {
+		// Local mutable copy: the solve runs DUAL SPLINE DOMAINS
+		// (given aim_tick and its half) because the straight-line-at-
+		// entry-speed estimate overshoots when the ride doubles the
+		// speed - late knots go dead exactly like the M1.3 air case,
+		// and the up-turn of an S-carve lands inside a fraction of
+		// the first segment. Polish runs in the winning domain.
+		Target t = t_in;
 		Result best;
 		if (t.face < 0 || t.face >= static_cast<int>(g.faces.size()))
 			return best;
@@ -214,18 +384,25 @@ namespace Carve {
 		// rides TOWARD the aim position until fraction b of the ride,
 		// then turns to the exit heading - the natural carve structure
 		// (position first, heading last) for curvy rides.
-		const float az_aim = t.pos_w > 0.f
-			? atan2f(t.aim_pos.Y - entry.pos.Y,
-				t.aim_pos.X - entry.pos.X)
-			: t.exit_heading;
+		const float az_aim = t.tap_face >= 0
+			&& t.tap_face < static_cast<int>(g.faces.size())
+			? atan2f(g.faces[t.tap_face].centroid.Y - entry.pos.Y,
+				g.faces[t.tap_face].centroid.X - entry.pos.X)
+			: (t.pos_w > 0.f
+				? atan2f(t.aim_pos.Y - entry.pos.Y,
+					t.aim_pos.X - entry.pos.X)
+				: t.exit_heading);
 		struct Fam {
 			float end; float pow; float bulge; float eff; float b;
 		};
 		const float up_az = WrapPi(dh_az + kPi);   // up-slope azimuth
+		// The S-carve exit: the aim direction rotated halfway toward
+		// up-slope - dive for speed, then carve up and separate
+		// ascending (the tape transfers' measured shape).
+		const float s_az = WrapPi(az_aim
+			+ 0.5f * WrapPi(up_az - az_aim));
 		struct FamD { Fam f; int duck; };
-		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
-			: t.max_ticks / 2;
-		const FamD fams[9] = {
+		const FamD fams[11] = {
 			{ { h0, 1.f, 0.f, 1.f, 0.f }, -1 },       // hold, full effort
 			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.f }, -1 },  // linear
 			{ { t.exit_heading, 2.f, 0.f, 1.f, 0.f }, -1 },  // late turn
@@ -237,12 +414,29 @@ namespace Carve {
 			// The DUCK-OFF family: slow pursuit of the aim, pop off at
 			// the end (the solved12 crest exit pattern).
 			{ { t.exit_heading, 1.f, 0.f, 0.4f, 0.7f }, 0 },
+			// S-carves: bulge deep toward downhill (the dive), end
+			// with an up-slope component (the ascending separation).
+			{ { s_az, 1.f, 0.7f, 1.f, 0.f }, -1 },
+			{ { s_az, 2.f, 0.5f, 1.f, 0.f }, -1 },    // later up-turn
 		};
 		int used = 0;
-		const int per_fam = evals / 10 > 8 ? evals / 10 : 8;
+		// Tap transfers: the ride doubles the speed, so the estimate
+		// runs LONG - pair it with its half. Zone endings: ride+arc
+		// runs LONGER than the straight line - pair with 1.7x.
+		const int dom_full = t.aim_tick;
+		int dom_alt = t.to_zone
+			? static_cast<int>(dom_full * 1.7f)
+			: (dom_full > 20 ? dom_full / 2 : dom_full);
+		if (dom_alt > t.max_ticks)
+			dom_alt = t.max_ticks;
+		const int dom_half = dom_alt;
+		const int ndom = dom_half != dom_full ? 2 : 1;
+		const int per_fam = evals / (12 * ndom) > 8
+			? evals / (12 * ndom) : 8;
 		float best_score = FLT_MAX;
 		std::vector<float> best_th, best_ef;
 		int best_duck = -1;
+		int best_dom = dom_full;
 		Result best_r;
 		unsigned rng = 1409u;
 		auto frand_pm = [&rng]() {
@@ -265,6 +459,7 @@ namespace Carve {
 				best_th = th;
 				best_ef = ef;
 				best_duck = duck;
+				best_dom = t.aim_tick;
 				best_r = rr;
 			}
 			if (sc_out) *sc_out = sc;
@@ -329,7 +524,11 @@ namespace Carve {
 			}
 			return spent;
 		};
-		for (int fam = 0; fam < 9 && used < evals; ++fam) {
+		for (int di = 0; di < ndom; ++di) {
+		t.aim_tick = di == 0 ? dom_full : dom_half;
+		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
+			: t.max_ticks / 2;
+		for (int fam = 0; fam < 11 && used < evals; ++fam) {
 			std::vector<float> th(knots_n), ef(knots_n,
 				fams[fam].f.eff);
 			int duck = fams[fam].duck == 0 ? duck_guess : -1;
@@ -379,6 +578,8 @@ namespace Carve {
 				}
 			}
 		}
+		}
+		t.aim_tick = best_dom;   // polish in the winning domain
 		while (used < evals && !best_th.empty()) {
 			std::vector<float> hth = best_th, hef = best_ef;
 			int hduck = best_duck;

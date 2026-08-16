@@ -51,6 +51,8 @@ namespace {
 	void PrintUsage() {
 		printf("SolverLab commands:\n");
 		printf("  mapinfo <map.bsp>\n");
+		printf("  tapeinfo [pattern]   recordings inventory: map/frames/anchor\n");
+		printf("          per tape (provenance check - which map is it FOR?)\n");
 		printf("  replay  <map.bsp> <run.tas> [--start-brush N] [--end-brush N]\n");
 		printf("          [--csv path] [--maxspeed X] [--gravity X] [--accel X]\n");
 		printf("          [--airaccel X] [--friction X] [--stopspeed X] [--no-jump-fg]\n");
@@ -107,6 +109,57 @@ namespace {
 				w.PointInSolidLeaf(q.p) ? 1 : 0);
 	}
 
+	// End zone id from MAP DATA first (the red-texture convention -
+	// the path that generalizes to every marked map); fall back to
+	// replaying the reference tape to its finish on unmarked maps
+	// (zones are plugin-side on real servers, so a human trace is the
+	// honest fallback source). Prints what it decided under `tag`.
+	int DetectEndZone(const World& w, const MoveParams& p,
+	                  const Tape& at, const char* tag) {
+		std::vector<int> greens, reds;
+		w.FindZoneBrushes(&greens, &reds);
+		if (!reds.empty()) {
+			printf("%s: end zone from texture marks: red brush", tag);
+			for (int rid : reds)
+				printf(" %d", rid);
+			if (!greens.empty()) {
+				printf(" | start marks (green):");
+				for (int gid : greens)
+					printf(" %d", gid);
+			}
+			printf("\n");
+			return reds[0];
+		}
+		if (!at.start.valid || at.frames.empty())
+			return -1;
+		PlayerState s;
+		s.pos = at.start.origin;
+		s.vel = at.start.velocity;
+		s.ducked = at.start.ducked;
+		s.hull_state = at.start.ducked ? 1 : 0;
+		s.stamina = at.start.stamina;
+		TraceResult tr;
+		const float gf = w.TraceHull(s.pos,
+			s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+		if (gf < 1.f && tr.brush >= 0
+			&& tr.normal.Z >= p.walkable_z) {
+			s.pos.Z -= 2.f * gf;
+			s.on_ground = true;
+			s.ground_brush = tr.brush;
+		}
+		for (size_t t = 0; t < at.frames.size(); ++t) {
+			const TapeFrame& fr = at.frames[t];
+			TickEvents ev;
+			MoveTick(s, w, p, fr.pitch, fr.yaw, fr.fmove,
+				fr.smove, fr.umove, fr.buttons, &ev);
+		}
+		const int end_id = w.BrushUnder(s.pos, s.ducked);
+		printf("%s: no texture zone marks - end derived from the "
+			"reference finish: brush %d at (%.0f,%.0f,%.0f)\n", tag,
+			end_id, s.pos.X, s.pos.Y, s.pos.Z);
+		return end_id;
+	}
+
 	int CmdMapInfo(const std::string& path) {
 		World w;
 		std::string err;
@@ -129,11 +182,32 @@ namespace {
 			printf("spawn NOT FOUND in entities\n");
 		if (w.brushes.size() <= 64) {
 			for (const WorldBrush& b : w.brushes) {
+				// Distinct side textures: zones are identified by texture
+				// (the red end zone), so the readout must show them.
+				std::string tex;
+				for (int s = 0; s < static_cast<int>(b.texd.size()); ++s) {
+					const char* nm = w.SideTexName(b, s);
+					if (!nm[0])
+						continue;
+					if (tex.find(nm) == std::string::npos) {
+						if (!tex.empty())
+							tex += ",";
+						tex += nm;
+					}
+				}
 				printf("brush %3d contents=0x%x planes=%d (sides %d) "
-					"aabb (%.0f,%.0f,%.0f)..(%.0f,%.0f,%.0f)\n",
+					"aabb (%.0f,%.0f,%.0f)..(%.0f,%.0f,%.0f) tex[%s]\n",
 					b.id, b.contents, static_cast<int>(b.n.size()), b.nsides,
-					b.bmin.X, b.bmin.Y, b.bmin.Z, b.bmax.X, b.bmax.Y, b.bmax.Z);
+					b.bmin.X, b.bmin.Y, b.bmin.Z, b.bmax.X, b.bmax.Y, b.bmax.Z,
+					tex.c_str());
 			}
+		}
+		if (!w.texnames.empty()) {
+			printf("texdata (%d):\n", static_cast<int>(w.texnames.size()));
+			for (size_t i = 0; i < w.texnames.size(); ++i)
+				printf("  [%2d] %-40s reflect (%.3f %.3f %.3f)\n",
+					static_cast<int>(i), w.texnames[i].c_str(),
+					w.texreflect[i].X, w.texreflect[i].Y, w.texreflect[i].Z);
 		}
 		ReportLeafProbes(w);
 		return 0;
@@ -1768,33 +1842,8 @@ namespace {
 			int end_id = o.end_brush;
 			const bool tape_ok =
 				LoadTas(o.anchor_tas, at, &err) && at.start.valid;
-			if (end_id < 0 && tape_ok) {
-				PlayerState s;
-				s.pos = at.start.origin;
-				s.vel = at.start.velocity;
-				s.ducked = at.start.ducked;
-				s.hull_state = at.start.ducked ? 1 : 0;
-				s.stamina = at.start.stamina;
-				TraceResult tr;
-				const float gf = w.TraceHull(s.pos,
-					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
-				if (gf < 1.f && tr.brush >= 0
-					&& tr.normal.Z >= o.params.walkable_z) {
-					s.pos.Z -= 2.f * gf;
-					s.on_ground = true;
-					s.ground_brush = tr.brush;
-				}
-				for (size_t t = 0; t < at.frames.size(); ++t) {
-					const TapeFrame& fr = at.frames[t];
-					TickEvents ev;
-					MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
-						fr.smove, fr.umove, fr.buttons, &ev);
-				}
-				end_id = w.BrushUnder(s.pos, s.ducked);
-				printf("routegraph: end zone derived from tape finish: "
-					"brush id %d at (%.0f,%.0f,%.0f)\n", end_id,
-					s.pos.X, s.pos.Y, s.pos.Z);
-			}
+			if (end_id < 0 && tape_ok)
+				end_id = DetectEndZone(w, o.params, at, "routegraph");
 			if (tape_ok
 				&& Route::AnchorZones(w, &g, at.start.origin,
 					at.start.ducked, end_id, 2000.f, &err)) {
@@ -2735,31 +2784,7 @@ namespace {
 			printf("routesgate: anchor tape: %s\n", err.c_str());
 			return 1;
 		}
-		int end_id = -1;
-		{
-			PlayerState s;
-			s.pos = at.start.origin;
-			s.vel = at.start.velocity;
-			s.ducked = at.start.ducked;
-			s.hull_state = at.start.ducked ? 1 : 0;
-			s.stamina = at.start.stamina;
-			TraceResult tr;
-			const float gf = w.TraceHull(s.pos,
-				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
-			if (gf < 1.f && tr.brush >= 0
-				&& tr.normal.Z >= o.params.walkable_z) {
-				s.pos.Z -= 2.f * gf;
-				s.on_ground = true;
-				s.ground_brush = tr.brush;
-			}
-			for (size_t t = 0; t < at.frames.size(); ++t) {
-				const TapeFrame& fr = at.frames[t];
-				TickEvents ev;
-				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
-					fr.smove, fr.umove, fr.buttons, &ev);
-			}
-			end_id = w.BrushUnder(s.pos, s.ducked);
-		}
+		const int end_id = DetectEndZone(w, o.params, at, "routesgate");
 		if (!Route::AnchorZones(w, &g, at.start.origin,
 			at.start.ducked, end_id, 2000.f, &err)) {
 			printf("routesgate: %s\n", err.c_str());
@@ -2866,31 +2891,7 @@ namespace {
 			printf("msolvegate: anchor tape: %s\n", err.c_str());
 			return 1;
 		}
-		int end_id = -1;
-		{
-			PlayerState s;
-			s.pos = at.start.origin;
-			s.vel = at.start.velocity;
-			s.ducked = at.start.ducked;
-			s.hull_state = at.start.ducked ? 1 : 0;
-			s.stamina = at.start.stamina;
-			TraceResult tr;
-			const float gf = w.TraceHull(s.pos,
-				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
-			if (gf < 1.f && tr.brush >= 0
-				&& tr.normal.Z >= o.params.walkable_z) {
-				s.pos.Z -= 2.f * gf;
-				s.on_ground = true;
-				s.ground_brush = tr.brush;
-			}
-			for (size_t t = 0; t < at.frames.size(); ++t) {
-				const TapeFrame& fr = at.frames[t];
-				TickEvents ev;
-				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
-					fr.smove, fr.umove, fr.buttons, &ev);
-			}
-			end_id = w.BrushUnder(s.pos, s.ducked);
-		}
+		const int end_id = DetectEndZone(w, o.params, at, "msolvegate");
 		if (!Route::AnchorZones(w, &g, at.start.origin,
 			at.start.ducked, end_id, 2000.f, &err)) {
 			printf("msolvegate: %s\n", err.c_str());
@@ -3251,6 +3252,166 @@ namespace {
 		}
 		fflush(stdout);
 		return 0;
+	}
+
+	// tapprobe: ISOLATION instrument for the unified tap transfer (the
+	// FUNCPROBE method at transfer granularity). Replay a tape to a
+	// tick, then run the tap-mode carve solve from that EXACT state:
+	// can the primitive find ride->flight->strike on the target face
+	// from a known-good entry? Dumps the winner's trajectory so a
+	// failure is attributable (dive? wall? wrong side?).
+	int CmdTapProbe(const std::string& map_path, const ReplayOpts& o,
+	                const std::string& tape_path, int at_tick,
+	                int ride_face, int tap_face, int evals) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("tapprobe: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("LOAD FAILED (tas): %s\n", err.c_str());
+			return 1;
+		}
+		// tap_face -1 = ZONE MODE: the ending transfer into the red-
+		// texture end zone volume.
+		const bool zone_mode = tap_face < 0;
+		if (ride_face < 0
+			|| ride_face >= static_cast<int>(g.faces.size())
+			|| (!zone_mode
+				&& tap_face >= static_cast<int>(g.faces.size()))) {
+			printf("tapprobe: face out of range (%d faces)\n",
+				static_cast<int>(g.faces.size()));
+			return 1;
+		}
+		int zone_idx = -1;
+		if (zone_mode) {
+			std::vector<int> reds;
+			w.FindZoneBrushes(nullptr, &reds);
+			if (reds.empty()) {
+				printf("tapprobe: zone mode needs a red-texture end "
+					"zone\n");
+				return 1;
+			}
+			zone_idx = w.IndexOfBrushId(reds[0]);
+		}
+		PlayerState s;
+		s.pos = tape.start.origin;
+		s.vel = tape.start.velocity;
+		s.ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
+		s.stamina = tape.start.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		for (int t = 0; t < at_tick
+			&& t < static_cast<int>(tape.frames.size()); ++t) {
+			const TapeFrame& f = tape.frames[t];
+			TickEvents ev;
+			MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+				f.umove, f.buttons, &ev);
+		}
+		Carve::Target ct;
+		ct.face = ride_face;
+		ct.max_ticks = 320;
+		Vec3 aim_at;
+		if (zone_mode) {
+			const WorldBrush& zb = w.brushes[zone_idx];
+			ct.to_zone = true;
+			ct.zone_min = Vec3(zb.bmin.X, zb.bmin.Y, zb.bmin.Z - 4.f);
+			ct.zone_max = Vec3(zb.bmax.X, zb.bmax.Y,
+				zb.bmax.Z + 120.f);
+			aim_at = Vec3(0.5f * (zb.bmin.X + zb.bmax.X),
+				0.5f * (zb.bmin.Y + zb.bmax.Y), zb.bmax.Z);
+			printf("tapprobe: entry t%d pos(%.1f,%.1f,%.1f) v(%.1f,"
+				"%.1f,%.1f) s2d %.1f | ride face %d (brush %d) -> "
+				"ZONE brush %d vol (%.0f,%.0f,%.0f)..(%.0f,%.0f,"
+				"%.0f)\n", at_tick, s.pos.X, s.pos.Y, s.pos.Z,
+				s.vel.X, s.vel.Y, s.vel.Z, Len2D(s.vel), ride_face,
+				g.faces[ride_face].brush, zb.id, ct.zone_min.X,
+				ct.zone_min.Y, ct.zone_min.Z, ct.zone_max.X,
+				ct.zone_max.Y, ct.zone_max.Z);
+		} else {
+			const Route::Face& nf = g.faces[tap_face];
+			ct.tap_brush = nf.brush;
+			ct.tap_side = nf.side;
+			ct.tap_face = tap_face;
+			aim_at = nf.centroid;
+			printf("tapprobe: entry t%d pos(%.1f,%.1f,%.1f) v(%.1f,"
+				"%.1f,%.1f) s2d %.1f | ride face %d (brush %d) -> "
+				"tap face %d (brush %d side %d, centroid %.0f,%.0f,"
+				"%.0f)\n", at_tick, s.pos.X, s.pos.Y, s.pos.Z,
+				s.vel.X, s.vel.Y, s.vel.Z, Len2D(s.vel), ride_face,
+				g.faces[ride_face].brush, tap_face, nf.brush, nf.side,
+				nf.centroid.X, nf.centroid.Y, nf.centroid.Z);
+		}
+		ct.exit_heading = atan2f(aim_at.Y - s.pos.Y,
+			aim_at.X - s.pos.X);
+		const float s_est = Len2D(s.vel);
+		const float est = s_est > 100.f
+			? Len(aim_at - s.pos) / (s_est * o.params.dt) : 80.f;
+		ct.aim_tick = est < 10.f ? 10
+			: (est > 240.f ? 240 : static_cast<int>(est));
+		ct.tick_w = 0.02f;
+		Carve::Result cr = Carve::SolveCarve(s, w, o.params, g, ct, 6,
+			evals);
+		const bool tap_hit = cr.zoned
+			|| (!zone_mode && !cr.exited
+				&& cr.struck_brush == ct.tap_brush
+				&& cr.struck_plane == ct.tap_side);
+		printf("tapprobe: %s | tick %d | strike dot %.1f | end (%.1f,"
+			"%.1f,%.1f) v(%.1f,%.1f,%.1f) s2d %.1f | miss %.1f | "
+			"reach_short %.1f | grounded %d struck %d\n",
+			cr.zoned ? "ZONE ENTRY" : (tap_hit ? "TAP STRIKE"
+				: (cr.exited ? "exited(?)" : "NO STRIKE")), cr.tick,
+			cr.strike_dot, cr.end_pos.X,
+			cr.end_pos.Y, cr.end_pos.Z, cr.end_state.vel.X,
+			cr.end_state.vel.Y, cr.end_state.vel.Z,
+			Len2D(cr.end_state.vel), cr.miss_dist, cr.reach_short,
+			cr.grounded ? 1 : 0, cr.struck_brush);
+		// The winner's trajectory, tick by tick (replayed controls).
+		PlayerState rs = s;
+		for (size_t k = 0; k < cr.yaw.size(); ++k) {
+			TickEvents ev;
+			MoveTick(rs, w, o.params, 0.f, cr.yaw[k], cr.fmove[k],
+				cr.smove[k], 0.f,
+				(s.ducked ? IN_DUCK : 0)
+					| (cr.duck_at >= 0
+						&& static_cast<int>(k) >= cr.duck_at
+						? IN_DUCK : 0), &ev);
+			int cb = -1;
+			float dot = 0.f;
+			if (ev.ncontacts > 0) {
+				cb = w.brushes[ev.contact_brush[0]].id;
+				dot = Dot(ev.contact_vel[0],
+					w.brushes[ev.contact_brush[0]]
+						.n[ev.contact_plane[0]]);
+			}
+			printf("  k%4d pos(%7.1f,%7.1f,%6.1f) v(%6.1f,%6.1f,%6.1f)"
+				" s2d %5.1f | c%d dot %6.1f%s\n",
+				static_cast<int>(k), rs.pos.X, rs.pos.Y, rs.pos.Z,
+				rs.vel.X, rs.vel.Y, rs.vel.Z, Len2D(rs.vel), cb, dot,
+				rs.on_ground ? " GROUND" : "");
+			if (static_cast<int>(k) + 1 >= cr.tick && cr.tick > 0)
+				break;
+		}
+		fflush(stdout);
+		return tap_hit ? 0 : 2;
 	}
 
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
@@ -5492,6 +5653,45 @@ namespace {
 		return 0;
 	}
 
+	// Inventory the recordings library: each tape's MAP, length, and
+	// start anchor. A tape is only evidence about a solve when it was
+	// recorded ON that map (2026-08-16: a wrong-map tape briefly stood
+	// in as the basictest human benchmark) - this is the one-click
+	// provenance check.
+	int CmdTapeInfo(const char* filter) {
+		const std::string rec = RecordingsDir();
+		const std::string pat = filter ? filter : "*.tas";
+		WIN32_FIND_DATAA fd;
+		HANDLE h = FindFirstFileA((rec + pat).c_str(), &fd);
+		if (h == INVALID_HANDLE_VALUE) {
+			printf("tapeinfo: no %s in %s\n", pat.c_str(), rec.c_str());
+			return 1;
+		}
+		printf("tapeinfo: %-58s %-20s %2s %6s %3s  %s\n", "tape", "map",
+			"v", "frames", "seg", "start anchor");
+		do {
+			Tape tape;
+			std::string err;
+			if (!LoadTas(rec + fd.cFileName, tape, &err)) {
+				printf("tapeinfo: %-58s UNREADABLE (%s)\n", fd.cFileName,
+					err.c_str());
+				continue;
+			}
+			char anchor[128] = "-";
+			if (tape.start.valid)
+				sprintf_s(anchor, "(%.0f %.0f %.0f) yaw %.0f%s",
+					tape.start.origin.X, tape.start.origin.Y,
+					tape.start.origin.Z, tape.start.yaw,
+					tape.start.ducked ? " ducked" : "");
+			printf("tapeinfo: %-58s %-20s %2d %6d %3d  %s\n", fd.cFileName,
+				tape.map.empty() ? "?" : tape.map.c_str(), tape.version,
+				static_cast<int>(tape.frames.size()),
+				static_cast<int>(tape.segment_starts.size()), anchor);
+		} while (FindNextFileA(h, &fd));
+		FindClose(h);
+		return 0;
+	}
+
 	// Score every battery capture against the core, per mechanism.
 	int CmdBattery(const std::string& map_path, const ReplayOpts& o) {
 		World w;
@@ -5937,6 +6137,21 @@ int main(int argc, char** argv) {
 	const std::string cmd = argv[1];
 	if (cmd == "mapinfo" && argc >= 3)
 		return CmdMapInfo(argv[2]);
+	if (cmd == "tapeinfo")
+		return CmdTapeInfo(argc >= 3 ? argv[2] : nullptr);
+	if (cmd == "tapprobe" && argc >= 7) {
+		ReplayOpts o;
+		int evals = 4000;
+		int next = 7;
+		if (argc >= 8 && argv[7][0] != '-') {
+			evals = atoi(argv[7]);
+			next = 8;
+		}
+		if (!ParseCommon(argc, argv, next, o))
+			return 1;
+		return CmdTapProbe(argv[2], o, argv[3], atoi(argv[4]),
+			atoi(argv[5]), atoi(argv[6]), evals);
+	}
 	if (cmd == "replay" && argc >= 4) {
 		ReplayOpts o;
 		if (!ParseCommon(argc, argv, 4, o))

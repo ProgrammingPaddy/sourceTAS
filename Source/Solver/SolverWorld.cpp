@@ -10,6 +10,10 @@ namespace Solver {
 	namespace {
 		constexpr int kLumpEntities = 0;
 		constexpr int kLumpPlanes = 1;
+		constexpr int kLumpTexdata = 2;
+		constexpr int kLumpTexinfo = 6;
+		constexpr int kLumpTexdataStringData = 43;
+		constexpr int kLumpTexdataStringTable = 44;
 		constexpr int kLumpNodes = 5;
 		constexpr int kLumpLeafs = 10;
 		constexpr int kLumpModels = 14;
@@ -263,6 +267,39 @@ namespace Solver {
 			}
 		}
 
+		// ---- texture identity (texinfo -> texdata -> string lumps) -----------
+		// Fixed on-disk strides: texinfo 72 (texdata int at +68), texdata 32
+		// (reflectivity 3 floats at +0, nameStringTableID int at +12).
+		std::vector<int32_t> ti2td(lumps[kLumpTexinfo].len / 72, -1);
+		for (size_t i = 0; i < ti2td.size(); ++i)
+			std::memcpy(&ti2td[i], p + lumps[kLumpTexinfo].ofs + i * 72 + 68, 4);
+		{
+			const int ntd = lumps[kLumpTexdata].len / 32;
+			const int nst = lumps[kLumpTexdataStringTable].len / 4;
+			texnames.assign(ntd, std::string());
+			texreflect.assign(ntd, Vec3());
+			for (int i = 0; i < ntd; ++i) {
+				const char* tp = p + lumps[kLumpTexdata].ofs + i * 32;
+				float r[3];
+				std::memcpy(r, tp, 12);
+				texreflect[i] = Vec3(r[0], r[1], r[2]);
+				int32_t sid = -1;
+				std::memcpy(&sid, tp + 12, 4);
+				if (sid < 0 || sid >= nst)
+					continue;
+				int32_t sofs = 0;
+				std::memcpy(&sofs,
+					p + lumps[kLumpTexdataStringTable].ofs + sid * 4, 4);
+				const char* s = p + lumps[kLumpTexdataStringData].ofs + sofs;
+				const char* e = p + lumps[kLumpTexdataStringData].ofs
+					+ lumps[kLumpTexdataStringData].len;
+				if (sofs < 0 || s >= e)
+					continue;
+				while (s < e && *s)
+					texnames[i].push_back(*s++);
+			}
+		}
+
 		// ---- brushes ---------------------------------------------------------
 		const int nsides_total = lumps[kLumpBrushSides].len / 8;
 		nbrushes_entity = 0;
@@ -319,6 +356,10 @@ namespace Solver {
 					wb.n.push_back(n);
 					wb.d.push_back(d);
 					wb.pid.push_back(planenum);
+					wb.texd.push_back(
+						(texinfo >= 0
+							&& texinfo < static_cast<int>(ti2td.size()))
+							? ti2td[texinfo] : -1);
 					if (axial) note_axial(n, d);
 				} else if (axial) {
 					// The compiler's EXACT axial extents. Deferred: appended
@@ -1216,6 +1257,26 @@ namespace Solver {
 			if (brushes[i].id == bsp_id)
 				return i;
 		return -1;
+	}
+
+	void World::FindZoneBrushes(std::vector<int>* green_ids,
+	                            std::vector<int>* red_ids) const {
+		auto dominant = [](const Vec3& r, int ch) {
+			const float v[3] = { r.X, r.Y, r.Z };
+			return v[ch] > 2.f * v[(ch + 1) % 3]
+				&& v[ch] > 2.f * v[(ch + 2) % 3];
+		};
+		for (const WorldBrush& b : brushes) {
+			bool grn = false, red = false;
+			for (int td : b.texd) {
+				if (td < 0 || td >= static_cast<int>(texreflect.size()))
+					continue;
+				if (dominant(texreflect[td], 1)) grn = true;
+				if (dominant(texreflect[td], 0)) red = true;
+			}
+			if (grn && green_ids) green_ids->push_back(b.id);
+			if (red && red_ids) red_ids->push_back(b.id);
+		}
 	}
 
 } // namespace Solver

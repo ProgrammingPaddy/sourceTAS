@@ -257,8 +257,9 @@ namespace Assemble {
 			at0.aim_region = true;
 			at0.dot_cap = 300.f;
 			at0.max_ticks = 240;
-			StartPlan sp;
-			float best_sc = FLT_MAX;
+			// Stage 1: rank plans by their BOARD (cheap probes).
+			struct StartCand { StartPlan sp; float sc; };
+			std::vector<StartCand> cands;
 			const float offs[3] = { 0.f, -35.f, 35.f };
 			const float rates[4] = { 3.f, 4.5f, 6.f, 8.f };
 			const int holds[2] = { 45, 75 };
@@ -275,17 +276,82 @@ namespace Assemble {
 					cand.entry, w, p, g, at0, 4, 800);
 				if (!probe.hit)
 					continue;
-				const float sc = -probe.dot
-					- 0.01f * probe.speed2d;
-				if (sc < best_sc) {
-					best_sc = sc;
-					sp = cand;
-				}
+				cands.push_back({ cand,
+					-probe.dot - 0.01f * probe.speed2d });
 			}
-			if (!sp.ok) {
+			if (cands.empty()) {
 				printf("assemble: shape[0]=%d START PLAN FAILED\n",
 					shape[0]);
 				return false;
+			}
+			std::sort(cands.begin(), cands.end(),
+				[](const StartCand& a, const StartCand& b) {
+					return a.sc < b.sc;
+				});
+			// Stage 2 (testimony: the board must SET UP the next
+			// transfer): for the best few boards, run the ACTUAL
+			// first transfer and choose the start by its strike -
+			// the first board of the map serves the whole chain,
+			// not its own dot.
+			StartPlan sp = cands[0].sp;
+			if (shape.size() > 1) {
+				float best_deep = FLT_MAX;
+				const int deep_n = static_cast<int>(cands.size()) < 4
+					? static_cast<int>(cands.size()) : 4;
+				for (int ci = 0; ci < deep_n; ++ci) {
+					const Vec3 next_t0 =
+						g.faces[shape[1]].centroid;
+					const Vec3 va = ClosestVert(f0.verts,
+						cands[ci].sp.entry.pos);
+					const Vec3 vn = ClosestVert(f0.verts, next_t0);
+					Air::Target at;
+					at.face = shape[0];
+					at.aim = Scale(f0.centroid, 0.4f)
+						+ Scale(va, 0.3f) + Scale(vn, 0.3f);
+					at.aim_region = true;
+					at.dot_cap = 300.f;
+					at.max_ticks = 240;
+					Air::Result ar = Air::SolveTransfer(
+						cands[ci].sp.entry, w, p, g, at, 4,
+						o.air_evals);
+					if (!ar.hit)
+						continue;
+					const Route::Face& nf0 = g.faces[shape[1]];
+					Carve::Target ct0;
+					ct0.face = shape[0];
+					ct0.max_ticks = 320;
+					ct0.tap_brush = nf0.brush;
+					ct0.tap_side = nf0.side;
+					ct0.tap_face = shape[1];
+					ct0.exit_heading = atan2f(
+						next_t0.Y - ar.end_state.pos.Y,
+						next_t0.X - ar.end_state.pos.X);
+					const float se = Len2D(ar.end_state.vel);
+					const float es = se > 100.f
+						? Len(next_t0 - ar.end_state.pos)
+							/ (se * p.dt) : 80.f;
+					ct0.aim_tick = es < 10.f ? 10
+						: (es > 240.f ? 240
+							: static_cast<int>(es));
+					ct0.tick_w = 0.02f;
+					Carve::Result c0 = Carve::SolveCarve(
+						ar.end_state, w, p, g, ct0, 6, 8000);
+					const bool tap0 = !c0.exited
+						&& c0.struck_brush == ct0.tap_brush
+						&& c0.struck_plane == ct0.tap_side;
+					const float dsc = tap0
+						? 0.6f * fabsf(c0.strike_dot)
+							- 0.01f * Len2D(c0.end_state.vel)
+						: 1e5f + c0.miss_dist;
+					printf("assemble: start cand %d board %.1f -> "
+						"transfer %s%.1f\n", ci, -cands[ci].sc,
+						tap0 ? "dot " : "MISS ",
+						tap0 ? c0.strike_dot : c0.miss_dist);
+					if (dsc < best_deep) {
+						best_deep = dsc;
+						sp = cands[ci].sp;
+					}
+				}
 			}
 			RunResult rr;
 			rr.shape = shape;
@@ -306,8 +372,116 @@ namespace Assemble {
 				Vec3 aim = Scale(fc.centroid, 0.4f)
 					+ Scale(va, 0.3f) + Scale(vn, 0.3f);
 				float leg_board_dot = 0.f;
+				// THIS leg's carve (tap / zone / lob fallback) from a
+				// given entry - shared by every board alternative so
+				// the choice IS the executed thing. Mid legs run the
+				// UNIFIED TRANSFER (ride flows into flight, ends at
+				// the strike, priced with the leg-after climb); the
+				// last leg runs ZONE MODE (ride -> flight -> end-zone
+				// entry, priced by arrival tick).
+				struct LegOut {
+					Carve::Result cr;
+					Carve::Target ct;
+					float sc = 1e9f;
+				};
+				auto SolveLeg = [&](const PlayerState& entry)
+					-> LegOut {
+					LegOut lo;
+					Carve::Target& ct = lo.ct;
+					ct.face = fi;
+					ct.max_ticks = 320;
+					const float s_est = Len2D(entry.vel);
+					const float est = s_est > 100.f
+						? Len(next_t - entry.pos) / (s_est * p.dt)
+						: 80.f;
+					ct.aim_tick = est < 10.f ? 10
+						: (est > 240.f ? 240
+							: static_cast<int>(est));
+					ct.tick_w = 0.02f;
+					if (li + 1 < shape.size()) {
+						const Route::Face& nf =
+							g.faces[shape[li + 1]];
+						ct.tap_brush = nf.brush;
+						ct.tap_side = nf.side;
+						ct.tap_face = shape[li + 1];
+						if (li + 2 < shape.size())
+							ct.next_face = shape[li + 2];
+						else {
+							ct.next_is_zone = true;
+							ct.zone_min = Vec3(eb.bmin.X,
+								eb.bmin.Y, eb.bmin.Z - 4.f);
+							ct.zone_max = Vec3(eb.bmax.X,
+								eb.bmax.Y, eb.bmax.Z + 120.f);
+						}
+						ct.exit_heading = atan2f(
+							next_t.Y - entry.pos.Y,
+							next_t.X - entry.pos.X);
+						lo.cr = Carve::SolveCarve(entry, w, p, g,
+							ct, 6, o.carve_evals);
+						const bool tp = !lo.cr.exited
+							&& lo.cr.struck_brush == ct.tap_brush
+							&& lo.cr.struck_plane == ct.tap_side;
+						lo.sc = tp
+							? 0.6f * (fabsf(lo.cr.strike_dot)
+								+ lo.cr.next_cost) - 0.01f
+								* Len2D(lo.cr.end_state.vel)
+							: 1e6f + lo.cr.miss_dist;
+					} else {
+						ct.to_zone = true;
+						ct.zone_min = Vec3(eb.bmin.X, eb.bmin.Y,
+							eb.bmin.Z - 4.f);
+						ct.zone_max = Vec3(eb.bmax.X, eb.bmax.Y,
+							eb.bmax.Z + 120.f);
+						ct.exit_heading = atan2f(
+							zone_c.Y - entry.pos.Y,
+							zone_c.X - entry.pos.X);
+						lo.cr = Carve::SolveCarve(entry, w, p, g,
+							ct, 6, o.carve_evals);
+						if (!lo.cr.zoned) {
+							// Fallback: the old lob exit + fly/run.
+							Carve::Target lt = ct;
+							lt.to_zone = false;
+							const float dh_az = atan2f(
+								fc.downhill.Y, fc.downhill.X);
+							float bearing = atan2f(
+								next_t.Y - entry.pos.Y,
+								next_t.X - entry.pos.X);
+							const float rel = Steer::WrapPi(
+								bearing - dh_az);
+							if (cosf(rel) > -0.05f)
+								bearing = dh_az
+									+ (rel >= 0.f ? 1.f : -1.f)
+									* (Steer::kSteerPi * 0.5f
+										+ 0.1f);
+							lt.exit_heading =
+								Steer::WrapPi(bearing);
+							lt.aim_vel = Vec3(
+								cosf(lt.exit_heading) * s_est,
+								sinf(lt.exit_heading) * s_est,
+								140.f);
+							lt.vel_w = 0.8f;
+							Carve::Result fb = Carve::SolveCarve(
+								entry, w, p, g, lt, 4,
+								o.carve_evals);
+							if (fb.exited) {
+								lo.cr = fb;
+								lo.ct = lt;
+							}
+						}
+						lo.sc = lo.cr.zoned
+							? -2000.f
+								+ static_cast<float>(lo.cr.tick)
+							: (lo.cr.exited
+								? 500.f - 0.01f
+									* Len2D(lo.cr.exit_vel)
+								: 1e6f + lo.cr.miss_dist);
+					}
+					return lo;
+				};
+				LegOut lo;
 				if (skip_air) {
 					skip_air = false;   // tap already boarded us
+					lo = SolveLeg(cur);
 				} else {
 					Air::Target at;
 					at.face = fi;
@@ -315,12 +489,13 @@ namespace Assemble {
 					at.aim_region = true;
 					at.dot_cap = 300.f;
 					at.max_ticks = 240;
+					std::vector<Air::Result> alts;
 					Air::Result ar = Air::SolveTransfer(cur, w, p,
-						g, at, 4, o.air_evals);
+						g, at, 4, o.air_evals, &alts, 3);
 					if (!ar.hit) {
 						at.aim = fc.centroid;
 						ar = Air::SolveTransfer(cur, w, p, g, at, 4,
-							o.air_evals);
+							o.air_evals, &alts, 3);
 					}
 					if (!ar.hit) {
 						printf("assemble: leg %d AIR MISS to face "
@@ -332,66 +507,55 @@ namespace Assemble {
 							cur.pos.Z, Len2D(cur.vel));
 						return false;
 					}
-					AppendAir(&rr.frames, ar, cur.ducked);
-					rr.board_loss2 += ar.dot * ar.dot;
-					leg_board_dot = ar.dot;
-					cur = ar.end_state;
+					// Compose each BOARD with its downstream carve;
+					// the whole transfer chooses, not the touch (a
+					// dot-minimal board measurably set up -400 taps
+					// where a harder board set up -160).
+					int bi = -1;
+					float bsc = FLT_MAX;
+					LegOut blo;
+					for (size_t ai = 0; ai < alts.size(); ++ai) {
+						LegOut alo = SolveLeg(alts[ai].end_state);
+						const float composed = alo.sc
+							+ 0.6f * fabsf(alts[ai].dot);
+						printf("assemble: leg %d board alt %d dot "
+							"%.1f -> leg score %.1f\n",
+							static_cast<int>(li),
+							static_cast<int>(ai), alts[ai].dot,
+							alo.sc);
+						if (composed < bsc) {
+							bsc = composed;
+							bi = static_cast<int>(ai);
+							blo = alo;
+						}
+					}
+					const Air::Result& ba = alts[bi];
+					AppendAir(&rr.frames, ba, cur.ducked);
+					rr.board_loss2 += ba.dot * ba.dot;
+					leg_board_dot = ba.dot;
+					cur = ba.end_state;
+					lo = blo;
 				}
-				// The carve. Mid legs run the UNIFIED TRANSFER
-				// primitive: the ride flows through its exit and the
-				// flight, ending at the strike on the next face - the
-				// genome shapes the whole transfer and is scored by
-				// the strike itself (the design's stage-3 unit). The
-				// last leg exits toward the zone with a lob target.
-				Carve::Target ct;
-				ct.face = fi;
-				ct.max_ticks = 320;
-				const float s_est = Len2D(cur.vel);
-				const float est = s_est > 100.f
-					? Len(next_t - cur.pos) / (s_est * p.dt)
-					: 80.f;
-				ct.aim_tick = est < 10.f ? 10
-					: (est > 240.f ? 240 : static_cast<int>(est));
-				ct.tick_w = 0.02f;
-				Carve::Result cr;
-				if (li + 1 < shape.size()) {
-					const Route::Face& nf = g.faces[shape[li + 1]];
-					ct.tap_brush = nf.brush;
-					ct.tap_side = nf.side;
-					// The strike region: the next face's corner
-					// nearest THIS face lifted off the valley floor
-					// (taps land low on the adjacent edge, not at
-					// the centroid mid-ramp).
-					Vec3 tap_at = ClosestVert(nf.verts, fc.centroid);
-					if (tap_at.Z < nf.zmin + 40.f)
-						tap_at.Z = nf.zmin + 40.f;
-					ct.aim_pos = tap_at;
-					ct.pos_w = 0.15f;
-					ct.exit_heading = atan2f(
-						next_t.Y - cur.pos.Y, next_t.X - cur.pos.X);
-					cr = Carve::SolveCarve(cur, w, p, g, ct, 4,
-						o.carve_evals);
-				} else {
-					const float dh_az = atan2f(fc.downhill.Y,
-						fc.downhill.X);
-					float bearing = atan2f(next_t.Y - cur.pos.Y,
-						next_t.X - cur.pos.X);
-					const float rel = Steer::WrapPi(bearing - dh_az);
-					if (cosf(rel) > -0.05f)
-						bearing = dh_az + (rel >= 0.f ? 1.f : -1.f)
-							* (Steer::kSteerPi * 0.5f + 0.1f);
-					ct.exit_heading = Steer::WrapPi(bearing);
-					ct.aim_vel = Vec3(cosf(ct.exit_heading) * s_est,
-						sinf(ct.exit_heading) * s_est, 140.f);
-					ct.vel_w = 0.8f;
-					cr = Carve::SolveCarve(cur, w, p, g, ct, 4,
-						o.carve_evals);
-				}
+				Carve::Result& cr = lo.cr;
+				const Carve::Target& ct = lo.ct;
 				auto tapped = [&](const Carve::Result& c) {
 					return !c.exited && ct.tap_brush >= 0
 						&& c.struck_brush == ct.tap_brush
 						&& c.struck_plane == ct.tap_side;
 				};
+				if (cr.zoned) {
+					AppendCarve(&rr.frames, cr, cur.ducked);
+					rr.finished = true;
+					rr.zone_tick =
+						static_cast<int>(rr.frames.size()) - 1;
+					printf("assemble: leg %d ZONE ENTRY at tick %d "
+						"(%.0f,%.0f,%.0f v %.0f)\n",
+						static_cast<int>(li), cr.tick,
+						cr.end_pos.X, cr.end_pos.Y, cr.end_pos.Z,
+						Len2D(cr.end_state.vel));
+					*out = rr;
+					return true;
+				}
 				if (!cr.exited && !tapped(cr)) {
 					printf("assemble: leg %d CARVE FAILED on face "
 						"%d (%s%d, miss %.0f)\n",

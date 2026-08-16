@@ -30,7 +30,10 @@ namespace Assemble {
 	struct Opts {
 		double wall_budget_s = 110.0;
 		int    air_evals = 3000;
-		int    carve_evals = 4000;
+		int    carve_evals = 12000;  // the unified transfer needs the
+		                             // arrival-shaping budget (probe-
+		                             // measured: dot -395 at 4k evals,
+		                             // -163 at 12k on the 0->2 case)
 		int    max_shapes = 10;
 	};
 

@@ -43,6 +43,14 @@ namespace Carve {
 		// (solved12's multi-taps) - scored by the tap's own clip loss.
 		int   tap_brush = -1;
 		int   tap_side = -1;
+		// Route face index of the tap target. When set, no-strike
+		// candidates are scored by their closest approach to the FACE
+		// REGION (plane offset + outside-the-polygon shortfall - the
+		// same gradient the air primitive's aim_region uses), so the
+		// search walks rides toward the whole board window instead of
+		// chasing a single point below the crossing band (the dive-
+		// and-ground trap).
+		int   tap_face = -1;
 		// Full exit-velocity target (vel_w > 0 replaces the heading
 		// term). This is the honest exit spec: a CREST LAUNCH separates
 		// with mostly-vertical velocity, where horizontal heading is
@@ -55,6 +63,22 @@ namespace Carve {
 		// solved12 crest exit at frame 470 does exactly this). The
 		// press tick is a searched genome dimension.
 		bool  try_duck = true;
+		// ZONE MODE (the run's LAST transfer): the ride flows through
+		// its exit and flight and ends by ENTERING THE END-ZONE VOLUME
+		// - scored by arrival tick (the objective is time, nothing
+		// else). The volume is the shared InZone proxy. The no-arrival
+		// gradient is distance to the volume + ballistic shortfall,
+		// so "climb the face to buy altitude" is discoverable.
+		bool  to_zone = false;
+		Vec3  zone_min, zone_max;
+		// ROLLING CONTEXT (testimony: the flick targets the next board
+		// SUCH THAT it sets up the one after): the leg-after target.
+		// A tap strike is charged the exact climb cost its landing
+		// state owes toward this target (v - sqrt(v^2 - 2g*shortfall),
+		// pure energy law) - strikes that bottom out below the next
+		// leg's reach stop looking cheap.
+		int   next_face = -1;
+		bool  next_is_zone = false;
 	};
 
 	struct Result {
@@ -71,9 +95,21 @@ namespace Carve {
 		float strike_dot = 0.f;  // clip dot of that strike (the tap's
 		                         // board loss when it IS the transfer)
 		bool  grounded = false;
+		bool  zoned = false;     // zone mode: entered the end volume
 		Vec3  end_pos;
 		float miss_dist = 1e9f;  // closest approach to aim_pos (when
 		                         // pos_w > 0): the no-exit gradient
+		float reach_short = 0.f; // tap mode, no strike: how far BELOW
+		                         // the target face the ballistic
+		                         // arrival from the last separation
+		                         // sits (M1.1 closed form, min over
+		                         // face verts; 0 = reachable). The
+		                         // gradient that prices "separate
+		                         // higher / ascending".
+		float next_cost = 0.f;   // tap strike with next_face/next_is_
+		                         // zone set: the exact speed cost of
+		                         // the climb the landing still owes
+		                         // toward the leg-after target (u/s).
 		int   duck_at = -1;      // duck-off press tick used (-1 = none)
 		// The full state at the first airborne tick (= the next air
 		// leg's entry). On exit the first `tick` control entries are

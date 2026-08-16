@@ -59,6 +59,8 @@ namespace Solver {
 		std::vector<float> d_unduck;  // hull-expanded, post-air-unduck
 		                              // transient (top 62.5; see Hulls)
 		std::vector<int>   pid;       // BSP plane id (sides), -2 for bevels
+		std::vector<int>   texd;      // texdata index per REAL side (-1 none):
+		                              // name/reflectivity via World::texnames
 		int nsides = 0;
 		// Origin-space AABB gates (brush box minus hull), per hull.
 		Vec3 gmin_stand, gmax_stand;
@@ -173,6 +175,32 @@ namespace Solver {
 		std::string entities_text;   // raw entities lump (zone/trigger work later)
 
 		std::vector<WorldBrush> brushes;   // collidable set only
+
+		// Texture identity per texdata entry (texinfo -> texdata -> string
+		// lumps). Zones are IDENTIFIED BY TEXTURE (user 2026-08-16: "the
+		// one with the red texture is the end zone"): name + compiled
+		// reflectivity answer "which brush is red" from map data alone.
+		std::vector<std::string> texnames;    // by texdata index
+		std::vector<Vec3>        texreflect;  // texdata reflectivity (RGB)
+		const char* SideTexName(const WorldBrush& b, int side) const {
+			if (side < 0 || side >= static_cast<int>(b.texd.size()))
+				return "";
+			const int td = b.texd[side];
+			if (td < 0 || td >= static_cast<int>(texnames.size()))
+				return "";
+			return texnames[td].c_str();
+		}
+		// Zone detection from map data (the general convention, user
+		// 2026-08-16): start zone marked with a GREEN-dominant texture,
+		// end zone with a RED-dominant one. A channel dominates when it
+		// more than doubles both others in the compiled reflectivity
+		// (basictest: CABLE/RED 0.511/0.002/0.002, CABLE/GREEN
+		// 0.013/0.251/0.040, vs BRICKFLOOR 0.227/0.151/0.102 which
+		// fails the test). Returns BSP brush ids; a zone may span
+		// several brushes; empty = unmarked map (callers fall back to
+		// spawn-brush / reference-run detection).
+		void FindZoneBrushes(std::vector<int>* green_ids,
+		                     std::vector<int>* red_ids) const;
 
 		// The map's brush-box union. NOT the sealed volume - a protruding
 		// brush (basictest's finish platform reaches y -2336, past the wall
