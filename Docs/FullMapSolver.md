@@ -2157,6 +2157,43 @@ call site is NOT inside Duck for ~1/5 of states (diagnostic 15,979 vs
 4,021) — mapping it is next; FinishDuck/FinishUnDuck/HandleDuckingSpeedCrop
 pinned but not yet probed standalone.
 
+## 2026-08-15 (end of day) — The unswept dichotomy: the last duck law, half-landed
+
+Targeted batteries (funcgen --sites planted dense duck decks at all 109
+disputed positions; 83,015 probes) + margin cross-tabs of 5,981 isolated
+CanUnduck calls against exact brush geometry produced the era's sharpest
+findings:
+
+**Landed:** AIR CanUnduck is a SWEPT standing trace pos→pos-8.5 under the
+certified start-solid law — the brush the box STARTS inside is invisible
+for the whole sweep (64+21 rows free with both endpoints inside the same
+brush); blocked iff the sweep ENTERS a started-outside brush. The
+destination-box and frac-AND-ss variants each modeled half and broke the
+other. HandleDuckingSpeedCrop 5,000/5,000 — with the mixed Duck diagnostic
+this proves the engine crops on the PRE-Duck state (call site precedes
+Duck). CategorizePosition and CheckJumpButton re-verified PERFECT on a
+fresh session. A wrong-map click was caught by the control gate
+(worldspawn serial changed; batch voided instead of 65k phantom
+mismatches).
+
+**Open — the one remaining law:** zero-length tests consult LEAF CONTENTS
+in the raw-ray oracle AND grounded CanUnduck (212 blocked-while-brush-clear
+rows ON the ceiling slab demand it) but NOT in FixPlayerCrouchStuck or
+TryPlayerMove's stuck-guard (wiring it there broke solved12's
+void-crossing finish flight, 544u). Two zero-length consumers, two
+behaviors. The distinction lives in CanUnduck's grounded branch
+(client.dll 0x1f4c5f) — READ IT next; do not fit. Residuals held open in
+the honest configuration: CanUnduck 325, FinishDuck 496, Duck 91,
+FinishUnDuck 4 — concentrated BY CONSTRUCTION at void/embedded torture
+sites; real-play surfaces are clean (tapes 0.000u, corpus best-ever
+33,449, battery 14/15).
+
+Also learned: the leaf-classification pass had misread leaf FACES as
+brush ids forever (fixed; changed nothing on this map), basictest has
+ZERO static props, and the ceiling slab (brush 0, z 1248–1280) explains
+every "impossible" solid — the disputed sites were inside or atop the
+map's shell, not in play space.
+
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
 - 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
