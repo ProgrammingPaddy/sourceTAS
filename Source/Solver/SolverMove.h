@@ -170,6 +170,11 @@ namespace Solver {
 		          int buttons);
 		bool CanUnduck(const PlayerState& s, const World& w,
 		               const MoveParams& p);
+		void FinishDuck(PlayerState& s, const World& w, const MoveParams& p);
+		void FinishUnDuck(PlayerState& s, const World& w,
+		                  const MoveParams& p);
+		void HandleDuckingSpeedCrop(const PlayerState& s, int buttons,
+		                            float* fwd, float* side);
 	}
 
 } // namespace Solver

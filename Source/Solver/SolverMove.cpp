@@ -566,13 +566,130 @@ namespace Solver {
 		// finishes INSTANTLY with the origin pulled up by (standing - ducked)
 		// hull height (the measured ~18u FinishDuck lift); on the ground the
 		// hull swaps after TIME_TO_DUCK. Unduck reverses the shift and must fit.
-		void HandleDuck(PlayerState& s, const World& w, const MoveParams& p,
-		                int buttons, TickEvents* ev) {
-			// SDK CGameMovement::Duck, ported with the DOWN-counting shared
-			// timer and ducking=true through BOTH transitions (fuzz-
-			// corrected 2026-08-15: a tapped-and-released ground duck keeps
-			// ducking for TIME_TO_UNDUCK, flipping the next jump to the SET
-			// path - engine 289.99 vs the instant-cancel model's 283.99).
+		// ---- THE DUCK FAMILY, in the ENGINE'S OWN DECOMPOSITION ----------
+		// One mirror function per pinned engine function (func_pins.cfg:
+		// Duck 0x1f5cb0, FinishDuck 0x1f6500, FinishUnDuck 0x1f6840,
+		// CanUnduck 0x1f4b20, HandleDuckingSpeedCrop 0x1f6ba0, plus
+		// FixPlayerCrouchStuck as FinishDuck's helper). Behavior is the
+		// isolated-grade-validated law set, unchanged - this is structure,
+		// not semantics.
+
+		// CGameMovement::FixPlayerCrouchStuck (upward): the stuck test is
+		// the engine's TestPlayerPosition - a ZERO-LENGTH DUCKED-hull trace
+		// with certified startsolid semantics, not the legacy point test
+		// (which stopped one 1u ladder step short: ours -1056 vs engine
+		// -1055 across a whole residual family). Probe up for a free spot;
+		// RESTORE the origin when none is found (the keep-partial-nudge
+		// variant ended 18u high).
+		void FixPlayerCrouchStuck(PlayerState& s, const World& w) {
+			auto stuck = [&](const Vec3& at) {
+				TraceResult st;
+				w.TraceHull3(at, at, 1, &st);
+				return st.startsolid;
+			};
+			if (!stuck(s.pos))
+				return;
+			const Vec3 save = s.pos;
+			for (int i = 0; i < 36; ++i) {
+				s.pos.Z += 1.f;
+				if (!stuck(s.pos))
+					return;
+			}
+			s.pos = save;
+		}
+
+		// CCSGameMovement::FinishDuck (0x1f6500): completion is idempotent
+		// on the flag; the +8.5 air re-base applies to a FIRST-TIME duck
+		// only (already-ducked and grounded completions hold dz 0 across
+		// every isolated class), and FixPlayerCrouchStuck runs
+		// UNCONDITIONALLY (the 1u ladder shows on already-ducked and
+		// grounded rows too, dz +17..+35).
+		void FinishDuck(PlayerState& s, const World& w, const MoveParams& p,
+		                TickEvents* ev) {
+			const bool already = s.ducked;
+			s.ducked = true;
+			s.hull_state = 1;          // duck: flag and hull together
+			s.ducking = false;
+			if (ev && !already) ev->duck_changed = true;
+			if (!s.on_ground && !already)
+				s.pos.Z += p.duck_air_shift;
+			FixPlayerCrouchStuck(s, w);
+		}
+
+		// CCSGameMovement::CanUnduck (0x1f4b20): a zero-length STANDING
+		// test AT the (air: -8.5) candidate origin - the DESTINATION box,
+		// not the path. (The sweep variant was tried: Duck 21 -> 58; a
+		// floor below the drop blocks a sweep the engine allows. The -18
+		// full-hull-delta candidate was also tried and reverted: it broke
+		// five battery decks.)
+		bool CanUnduck(const PlayerState& s, const World& w,
+		               const MoveParams& p) {
+			const Vec3 cand = s.on_ground
+				? s.pos
+				: Vec3(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
+			TraceResult ut;
+			w.TraceHull3(cand, cand, 0, &ut);
+			return !ut.startsolid;
+		}
+
+		// CCSGameMovement::FinishUnDuck (0x1f6840): derives the same
+		// candidate origin CanUnduck tested. Binary-decoded: the AIR shift
+		// is UNCONDITIONAL - no was-ducked gate - so a never-completed duck
+		// released in the air still re-bases -8.5 (fuzz_b t4, measured).
+		void FinishUnDuck(PlayerState& s, const World& /*w*/,
+		                  const MoveParams& p, TickEvents* ev) {
+			const bool was_ducked = s.ducked;
+			s.ducked = false;
+			s.ducking = false;
+			s.duck_timer_ms = 0.f;
+			if (ev) ev->duck_changed = true;
+			if (!s.on_ground) {
+				s.pos.Z -= p.duck_air_shift;
+				// Hull: a REAL unduck leaves the world-space ducked bounds
+				// in place until grounding (the measured 62.5 transient); a
+				// never-ducked "unduck" had standing bounds all along.
+				s.hull_state = was_ducked
+					? (p.unduck_hull_defer ? 2 : 0) : 0;
+			} else {
+				s.hull_state = 0;    // ground: stand now
+			}
+		}
+
+		// CCSGameMovement::HandleDuckingSpeedCrop (0x1f6ba0): baked 0.34 on
+		// fwd/side/up when duck-held OR ducking OR ducked, once per tick
+		// (the m_iSpeedCropped bit; a per-tick local here). The CALL SITE
+		// inside the engine's tick is still being mapped (the isolated
+		// diagnostic split 15,979 vs 4,021 on "Duck itself crops") - this
+		// mirror exists for isolation and for wiring once measured.
+		void HandleDuckingSpeedCrop(const PlayerState& s, int buttons,
+		                            float* fwd, float* side, float* up,
+		                            bool* cropped) {
+			if (cropped && *cropped)
+				return;
+			if ((buttons & IN_DUCK) || s.ducking || s.ducked) {
+				const float k = 0.34f;
+				if (fwd)  *fwd *= k;
+				if (side) *side *= k;
+				if (up)   *up *= k;
+				if (cropped) *cropped = true;
+			}
+		}
+
+		// CCSGameMovement::Duck (0x1f5cb0): the state machine, calling the
+		// functions above exactly where the engine's body calls its own.
+		// Laws (all isolated-grade-measured 2026-08-15):
+		//  - DOWN-counting shared timer; ducking=true through BOTH
+		//    transitions (a tapped ground duck stays "ducking" for
+		//    TIME_TO_UNDUCK - flips the next jump to the SET path).
+		//  - ASYMMETRIC boundaries: duck completes AT exactly TIME_TO_DUCK
+		//    (>=), unduck holds AT exactly TIME_TO_UNDUCK (strict >).
+		//  - BLOCKED unduck: timer := 1000 and, on a release EDGE only,
+		//    ducking := true.
+		// NOT yet modeled: the CS curtime duck-hold gate (gm+0xed8) that
+		// can force-clear IN_DUCK - zeroed per probe by the runner; needs
+		// its cvar identified before the mirror can be honest.
+		void Duck(PlayerState& s, const World& w, const MoveParams& p,
+		          int buttons, TickEvents* ev) {
 			const bool want = (buttons & IN_DUCK) != 0;
 			const bool was = (s.old_buttons & IN_DUCK) != 0;
 			const bool pressed = want && !was;
@@ -580,50 +697,6 @@ namespace Solver {
 				s.old_buttons |= IN_DUCK;
 			else
 				s.old_buttons &= ~IN_DUCK;
-			// Engine-measured shift (see MoveParams), NOT the hull delta.
-			const float lift = p.duck_air_shift;
-
-			auto finish_duck = [&]() {
-				const bool already = s.ducked;
-				s.ducked = true;
-				s.hull_state = 1;          // duck: flag and hull together
-				s.ducking = false;
-				if (ev && !already) ev->duck_changed = true;
-				// The +8.5 re-base applies to a first-time duck in the air
-				// (isolated grades: already-ducked and grounded completions
-				// hold dz 0 across every class).
-				if (!s.on_ground && !already)
-					s.pos.Z += lift;
-				// FixPlayerCrouchStuck runs UNCONDITIONALLY inside the
-				// engine's FinishDuck (isolated grades 2026-08-15: the 1u
-				// stuck ladder shows on already-ducked AND grounded rows -
-				// dz +17..+35 - not just on first-time air ducks). Probe
-				// upward for a free spot; RESTORE the origin when none is
-				// found (the keep-partial-nudge variant ended 18u high).
-				// The stuck test is the engine's TestPlayerPosition - a
-				// ZERO-LENGTH HULL TRACE with the certified startsolid
-				// semantics - not the legacy point test: the two disagree
-				// at sub-unit embedments and left us one ladder step short
-				// (ours -1056 vs engine -1055 across the residual family).
-				auto stuck = [&](const Vec3& at) {
-					TraceResult st;
-					w.TraceHull3(at, at, 1, &st);
-					return st.startsolid;
-				};
-				if (stuck(s.pos)) {
-					const Vec3 save = s.pos;
-					bool freed = false;
-					for (int i = 0; i < 36; ++i) {
-						s.pos.Z += 1.f;
-						if (!stuck(s.pos)) {
-							freed = true;
-							break;
-						}
-					}
-					if (!freed)
-						s.pos = save;
-				}
-			};
 
 			if (!(s.ducking || s.ducked || want))
 				return;
@@ -636,83 +709,35 @@ namespace Solver {
 				if (s.ducking) {
 					const float elapsed = 1000.f - s.duck_timer_ms > 0.f
 						? 1000.f - s.duck_timer_ms : 0.f;
-					// ASYMMETRIC BOUNDARIES (isolated grades): the DUCK
-					// completes AT exactly TIME_TO_DUCK (>=, probe at
-					// elapsed 400 finished d1), while the UNDUCK below
-					// holds AT exactly TIME_TO_UNDUCK (strict >). Measured,
-					// not assumed - a strict > here broke the 400 row.
 					if (elapsed >= p.time_to_duck_ms || !s.on_ground
 						|| s.ducked)
-						finish_duck();
+						FinishDuck(s, w, p, ev);
 				}
 			} else if (s.ducking || s.ducked) {
-				// Try to unduck. CanUnduck = a STANDING-hull SWEEP from the
-				// current origin to the (air: -8.5) candidate - the engine's
-				// own body (0x1f4b20) builds the shifted origin and runs
-				// TracePlayerBBox; free means no startsolid and a full
-				// fraction. The legacy point test disagreed at sub-unit
-				// embedments in BOTH directions (grounded roof rows blocked
-				// by the engine but "free" to the point test, and the
-				// (1380,-1444) air family the other way around).
-				// (The -18 full-hull-delta candidate was TRIED AND REVERTED
-				// 2026-08-15: it broke five battery decks; capture beats
-				// recollected SDK.)
-				const Vec3 cand = s.on_ground
-					? s.pos : Vec3(s.pos.X, s.pos.Y, s.pos.Z - lift);
-				// ZERO-LENGTH standing test AT the candidate. TRIED AND
-				// REVERTED: a sweep from the current origin to cand scored
-				// WORSE (Duck 21 -> 58) - a floor below the -8.5 drop blocks
-				// a sweep the engine demonstrably allows, so the engine
-				// tests the destination box, not the path.
-				TraceResult ut;
-				w.TraceHull3(cand, cand, 0, &ut);
-				if (!ut.startsolid) {
+				if (CanUnduck(s, w, p)) {
 					// Release while FULLY ducked restarts the shared timer
 					// for the unduck transition; a mid-duck release keeps
-					// the press timer running (a 30ms tap stays "ducking"
-					// until TIME_TO_UNDUCK elapses - the fuzz_a t4 case).
+					// the press timer running (fuzz_a t4).
 					if (was && !want && s.ducked) {
 						s.duck_timer_ms = 1000.f;
 						s.ducking = true;
 					}
 					const float elapsed = 1000.f - s.duck_timer_ms > 0.f
 						? 1000.f - s.duck_timer_ms : 0.f;
-					// STRICT >: a grounded release at elapsed exactly
-					// TIME_TO_UNDUCK stays ducked one more tick (isolated
-					// grade: in-t 800 ground release held d1).
-					if (elapsed > p.time_to_unduck_ms || !s.on_ground) {
-						// FinishUnDuck. Binary-decoded (server.dll Duck
-						// @2eec76/2eec88 -> FinishUnDuck @2eea20): the AIR
-						// origin shift is UNCONDITIONAL - no was-ducked gate
-						// in the SDK - so a never-completed duck released in
-						// the air still re-bases -8.5 (fuzz_b t4, measured).
-						const bool was_ducked = s.ducked;
-						s.ducked = false;
-						s.ducking = false;
-						s.duck_timer_ms = 0.f;
-						if (ev) ev->duck_changed = true;
-						if (!s.on_ground) {
-							s.pos = cand;
-							// Hull: a REAL unduck leaves the world-space
-							// ducked bounds in place until grounding (the
-							// measured 62.5 transient); a never-ducked
-							// "unduck" had standing bounds all along.
-							s.hull_state = was_ducked
-								? (p.unduck_hull_defer ? 2 : 0) : 0;
-						} else {
-							s.hull_state = 0;    // ground: stand now
-						}
-					}
+					if (elapsed > p.time_to_unduck_ms || !s.on_ground)
+						FinishUnDuck(s, w, p, ev);
 				} else {
-					// Blocked under geometry: the engine resets the timer
-					// AND - on a release EDGE - sets m_bDucking (isolated
-					// grades: old4->btn0 blocked rows leave k1, old0->btn0
-					// blocked rows leave k unchanged; both leave t1000).
 					s.duck_timer_ms = 1000.f;
 					if (was && !want)
 						s.ducking = true;
 				}
 			}
+		}
+
+		// Transitional alias for the tick path.
+		void HandleDuck(PlayerState& s, const World& w, const MoveParams& p,
+		                int buttons, TickEvents* ev) {
+			Duck(s, w, p, buttons, ev);
 		}
 
 	} // namespace
@@ -731,20 +756,24 @@ namespace Solver {
 		}
 		void Duck(PlayerState& s, const World& w, const MoveParams& p,
 		          int buttons) {
-			HandleDuck(s, w, p, buttons, nullptr);
+			::Solver::Duck(s, w, p, buttons, nullptr);
 		}
 		bool CanUnduck(const PlayerState& s, const World& w,
 		               const MoveParams& p) {
-			// The engine's rule (0x1f4b20): a zero-length STANDING-hull test
-			// AT the (air: -8.5) candidate origin - destination box, not the
-			// path (the sweep variant was tried and scored worse). Same test
-			// HandleDuck uses.
-			const Vec3 cand = s.on_ground
-				? s.pos
-				: Vec3(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
-			TraceResult ut;
-			w.TraceHull3(cand, cand, 0, &ut);
-			return !ut.startsolid;
+			return ::Solver::CanUnduck(s, w, p);
+		}
+		void FinishDuck(PlayerState& s, const World& w, const MoveParams& p) {
+			::Solver::FinishDuck(s, w, p, nullptr);
+		}
+		void FinishUnDuck(PlayerState& s, const World& w,
+		                  const MoveParams& p) {
+			::Solver::FinishUnDuck(s, w, p, nullptr);
+		}
+		void HandleDuckingSpeedCrop(const PlayerState& s, int buttons,
+		                            float* fwd, float* side) {
+			bool cropped = false;
+			::Solver::HandleDuckingSpeedCrop(s, buttons, fwd, side, nullptr,
+				&cropped);
 		}
 	}
 

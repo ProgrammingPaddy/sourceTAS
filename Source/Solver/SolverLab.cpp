@@ -903,6 +903,40 @@ namespace {
 					IN_DUCK);
 				wrote++;
 			}
+
+			// The remaining pinned duck functions, standalone - each is a
+			// leaf the engine's Duck composes, so each gets its own deck.
+			if ((i & 3) == 1) {
+				const int fd_d = (next() & 1) ? 1 : 0;
+				fprintf(f, "FinishDuck,%.9g,%.9g,%.9g,0,0,%.9g,"
+					"0,0,0,1,%d,%d,0,%.9g,0,1,1,%.9g,%.9g,0,0,0\n",
+					pos.X, pos.Y, pos.Z, (next() & 1) ? 0.f : vz,
+					fd_d, (next() & 1) ? 1 : 0,
+					(next() & 1) ? 600.f : 999.f,
+					fd_d ? 54.f : 72.f, span(-180.f, 180.f));
+				wrote++;
+			}
+			if ((i & 3) == 2) {
+				const int fu_d = (next() & 1) ? 1 : 0;
+				fprintf(f, "FinishUnDuck,%.9g,%.9g,%.9g,0,0,%.9g,"
+					"0,0,0,1,%d,%d,0,%.9g,0,1,1,%.9g,%.9g,0,0,0\n",
+					pos.X, pos.Y, pos.Z, (next() & 1) ? 0.f : vz,
+					fu_d, (next() & 1) ? 1 : 0,
+					(next() & 1) ? 800.f : 0.f,
+					fu_d ? 54.f : 72.f, span(-180.f, 180.f));
+				wrote++;
+			}
+			if ((i & 3) == 3) {
+				const int hc_d = (next() & 1) ? 1 : 0;
+				fprintf(f, "HandleDuckingSpeedCrop,%.9g,%.9g,%.9g,0,0,0,"
+					"0,0,0,1,%d,%d,%d,0,0,1,1,%.9g,%.9g,%.9g,%.9g,0\n",
+					pos.X, pos.Y, pos.Z,
+					hc_d, (next() & 1) ? 1 : 0,
+					(next() & 1) ? IN_DUCK : 0,
+					hc_d ? 54.f : 72.f, span(-180.f, 180.f),
+					span(-450.f, 450.f), span(-450.f, 450.f));
+				wrote++;
+			}
 		}
 		fclose(f);
 		printf("funcgen: %d probes -> %s\n", wrote, out_path.c_str());
@@ -1054,7 +1088,20 @@ namespace {
 		int jexact = 0, jbad = 0, jshown = 0;
 		int dexact = 0, dbad = 0, dshown = 0;
 		int uexact = 0, ubad = 0, ushown = 0;
+		int fdexact = 0, fdbad = 0, fdshown = 0;
+		int fuexact = 0, fubad = 0;
+		int hcexact = 0, hcbad = 0;
 		int crop_match = 0, crop_bad = 0;
+		// Mismatch MANIFEST: every graded miss becomes one row that
+		// tracegen-quads can turn into direct box-oracle questions.
+		std::vector<std::string> mm;
+		auto note_mm = [&](const char* fn, const P& q, bool pre_ground,
+		                   float candz) {
+			char b[256];
+			_snprintf_s(b, sizeof(b), _TRUNCATE, "%s,%.9g,%.9g,%.9g,%d,%d,%.9g",
+				fn, q.ox, q.oy, q.oz, q.ducked, pre_ground ? 1 : 0, candz);
+			mm.push_back(b);
+		};
 		for (size_t i = 0; i < n; ++i) {
 			if (!rs[i].ok) { faulted++; continue; }
 			const bool is_jump = strcmp(ps[i].fn, "CheckJumpButton") == 0;
@@ -1083,6 +1130,51 @@ namespace {
 			// Same call sequence the pin declares: the prelude first, then
 			// the function under test.
 			Fn::CategorizePosition(s, w, o.params);
+			const bool pre_g = s.on_ground;
+			const bool is_fduck = strcmp(ps[i].fn, "FinishDuck") == 0;
+			const bool is_funduck = strcmp(ps[i].fn, "FinishUnDuck") == 0;
+			const bool is_crop = strcmp(ps[i].fn, "HandleDuckingSpeedCrop") == 0;
+			if (is_fduck || is_funduck) {
+				if (is_fduck)
+					Fn::FinishDuck(s, w, o.params);
+				else
+					Fn::FinishUnDuck(s, w, o.params);
+				const bool eng_fl = (rs[i].flags & 2) != 0;
+				const float dp = Len(s.pos - Vec3(rs[i].ox, rs[i].oy, rs[i].oz));
+				const bool fok = (rs[i].ducked != 0) == s.ducked
+					&& (rs[i].ducking != 0) == s.ducking
+					&& fabsf(rs[i].ducktime - s.duck_timer_ms) <= 0.01f
+					&& eng_fl == s.ducked
+					&& dp <= 0.001f;
+				if (is_fduck) { if (fok) fdexact++; else fdbad++; }
+				else { if (fok) fuexact++; else fubad++; }
+				if (!fok) {
+					note_mm(ps[i].fn, ps[i], pre_g,
+						pre_g ? ps[i].oz : ps[i].oz - o.params.duck_air_shift);
+					if (is_fduck && fdshown < 6) {
+						fdshown++;
+						printf("  %s probe %d  in d%d k%d g%d\n", ps[i].fn,
+							static_cast<int>(i), ps[i].ducked, ps[i].ducking,
+							pre_g ? 1 : 0);
+						printf("    eng  d%d k%d t%.1f pos(%.3f,%.3f,%.3f)\n",
+							rs[i].ducked, rs[i].ducking, rs[i].ducktime,
+							rs[i].ox, rs[i].oy, rs[i].oz);
+						printf("    ours d%d k%d t%.1f pos(%.3f,%.3f,%.3f)\n",
+							s.ducked ? 1 : 0, s.ducking ? 1 : 0,
+							s.duck_timer_ms, s.pos.X, s.pos.Y, s.pos.Z);
+					}
+				}
+				continue;
+			}
+			if (is_crop) {
+				float fwd = ps[i].fmove, side = ps[i].smove;
+				Fn::HandleDuckingSpeedCrop(s, ps[i].buttons, &fwd, &side);
+				const bool cok = fabsf(rs[i].fwd - fwd) <= 0.01f
+					&& fabsf(rs[i].side - side) <= 0.01f;
+				if (cok) hcexact++; else { hcbad++;
+					note_mm(ps[i].fn, ps[i], pre_g, ps[i].oz); }
+				continue;
+			}
 			if (is_duck) {
 				Fn::Duck(s, w, o.params, ps[i].buttons);
 				const bool eng_flduck = (rs[i].flags & 2) != 0;
@@ -1101,6 +1193,8 @@ namespace {
 				else crop_bad++;
 				if (dok) { dexact++; continue; }
 				dbad++;
+				note_mm("Duck", ps[i], pre_g,
+					pre_g ? ps[i].oz : ps[i].oz - o.params.duck_air_shift);
 				if (dshown < 8) {
 					dshown++;
 					printf("  DUCK probe %d  btn %d old %d in d%d k%d t%.0f "
@@ -1121,6 +1215,8 @@ namespace {
 				const bool eng = (rs[i].ret & 0xff) != 0;
 				if (ours == eng) { uexact++; continue; }
 				ubad++;
+				note_mm("CanUnduck", ps[i], pre_g,
+					pre_g ? ps[i].oz : ps[i].oz - o.params.duck_air_shift);
 				if (ushown < 8) {
 					ushown++;
 					printf("  CANUNDUCK probe %d  pos(%.3f,%.3f,%.3f) ground %d"
@@ -1142,6 +1238,7 @@ namespace {
 					&& fabsf(rs[i].stamina - s.stamina) <= 0.01f;
 				if (jok) { jexact++; continue; }
 				jbad++;
+				note_mm("CheckJumpButton", ps[i], pre_g, ps[i].oz);
 				if (jshown < 8) {
 					jshown++;
 					printf("  JUMP probe %d  pre vz %.3f stam %.2f duck %d "
@@ -1163,6 +1260,7 @@ namespace {
 				&& fabsf(rs[i].sfric - s.surface_friction) <= 0.0001f;
 			if (ok) { exact++; continue; }
 			bad++;
+			note_mm("CategorizePosition", ps[i], pre_g, ps[i].oz);
 			if (shown < 10) {
 				shown++;
 				printf("  probe %d  in pos(%.3f,%.3f,%.3f) vz %.4f hull %.0f "
@@ -1190,6 +1288,32 @@ namespace {
 		if (uexact + ubad > 0)
 			printf("funcdiff: CanUnduck          | %d probes | EXACT %d | "
 				"MISMATCH %d\n", uexact + ubad, uexact, ubad);
+		if (fdexact + fdbad > 0)
+			printf("funcdiff: FinishDuck         | %d probes | EXACT %d | "
+				"MISMATCH %d\n", fdexact + fdbad, fdexact, fdbad);
+		if (fuexact + fubad > 0)
+			printf("funcdiff: FinishUnDuck       | %d probes | EXACT %d | "
+				"MISMATCH %d\n", fuexact + fubad, fuexact, fubad);
+		if (hcexact + hcbad > 0)
+			printf("funcdiff: HandleDuckingSpeedCrop | %d probes | EXACT %d | "
+				"MISMATCH %d\n", hcexact + hcbad, hcexact, hcbad);
+		// Write the mismatch manifest beside the results file - the input
+		// tracegen-quads turns into direct box-oracle questions.
+		{
+			std::string dir = rpath;
+			const size_t cut = dir.find_last_of("\\/");
+			dir = cut == std::string::npos ? "" : dir.substr(0, cut + 1);
+			const std::string mpath = dir + "func_mismatch.csv";
+			FILE* mf = nullptr;
+			if (fopen_s(&mf, mpath.c_str(), "w") == 0 && mf) {
+				fprintf(mf, "fn,ox,oy,oz,ducked,grounded,candz\n");
+				for (const std::string& l : mm)
+					fprintf(mf, "%s\n", l.c_str());
+				fclose(mf);
+				printf("funcdiff: %d mismatch rows -> %s\n",
+					static_cast<int>(mm.size()), mpath.c_str());
+			}
+		}
 		// RULE EXTRACTION, not theory: bucket the engine's ground answer by
 		// our own down-probe fraction and by the plane it struck. Whatever
 		// separates ground from no-ground has to show up here.
@@ -1434,16 +1558,18 @@ namespace {
 		return 0;
 	}
 
-	// tracegen-quads: for every FUNCPROBE position where the engine and our
-	// CategorizePosition disagree about ground, emit EXPLICIT-BOX oracle
-	// queries (15-field rows): the full hull and the four
-	// TracePlayerBBoxForGround quadrant boxes, on an xy jitter fan around the
-	// mismatch. The in-game oracle answers what the engine's trace ACTUALLY
-	// returns for a quadrant box starting inside a wall - the question the
-	// wall-embedded residual family hinges on. No meaning assigned: box in,
-	// frac/normal/startsolid out.
+	// tracegen-quads: turn funcdiff's MISMATCH MANIFEST into direct
+	// box-oracle questions (15-field explicit-box rows). Per row:
+	//  - CategorizePosition / CheckJumpButton sites: the full hull + four
+	//    TracePlayerBBoxForGround quadrant boxes on an xy jitter fan
+	//    (down-2u sweeps) - the ground-ordering family.
+	//  - Duck-family sites: ZERO-LENGTH boxes - the STANDING hull at the
+	//    unduck candidate origin and the DUCKED hull at the probe origin,
+	//    on a small xy fan - the exact traces CanUnduck and
+	//    FixPlayerCrouchStuck dispute. No meaning assigned: box in,
+	//    frac/normal/startsolid out.
 	int CmdTraceGenQuads(const std::string& map_path, const ReplayOpts& o,
-	                     const std::string& ppath, const std::string& rpath,
+	                     const std::string& mmpath,
 	                     const std::string& out_path) {
 		World w;
 		std::string err;
@@ -1452,51 +1578,24 @@ namespace {
 			printf("LOAD FAILED (bsp): %s\n", err.c_str());
 			return 1;
 		}
-		struct P { char fn[48]; float ox, oy, oz, vx, vy, vz; int ducked; };
-		std::vector<P> ps;
+		struct M { char fn[48]; float ox, oy, oz, candz; int ducked, grounded; };
+		std::vector<M> ms;
 		{
 			FILE* f = nullptr;
-			if (fopen_s(&f, ppath.c_str(), "r") != 0 || !f) {
-				printf("tracegen-quads: cannot read %s\n", ppath.c_str());
+			if (fopen_s(&f, mmpath.c_str(), "r") != 0 || !f) {
+				printf("tracegen-quads: cannot read %s (run funcdiff first - "
+					"it writes the mismatch manifest)\n", mmpath.c_str());
 				return 1;
 			}
 			char l[512];
 			while (fgets(l, sizeof(l), f)) {
 				if (l[0] == '#' || l[0] == 'f') continue;
-				P q = {};
-				float bx, by, bz, ducktime, stamina, sfric, gravity, maxz, yaw,
-					fmove, smove;
-				int onground, ducking, buttons;
-				if (sscanf_s(l, "%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,"
-					"%d,%f,%f,%f,%f,%f,%f,%f,%f",
+				M q = {};
+				if (sscanf_s(l, "%47[^,],%f,%f,%f,%d,%d,%f",
 					q.fn, static_cast<unsigned>(sizeof(q.fn)),
-					&q.ox, &q.oy, &q.oz, &q.vx, &q.vy, &q.vz,
-					&bx, &by, &bz, &onground, &q.ducked, &ducking,
-					&buttons, &ducktime, &stamina, &sfric, &gravity,
-					&maxz, &yaw, &fmove, &smove) == 22)
-					ps.push_back(q);
-			}
-			fclose(f);
-		}
-		std::vector<int> ground;   // engine groundent per row, parallel to ps
-		{
-			FILE* f = nullptr;
-			if (fopen_s(&f, rpath.c_str(), "r") != 0 || !f) {
-				printf("tracegen-quads: cannot read %s\n", rpath.c_str());
-				return 1;
-			}
-			char l[512];
-			while (fgets(l, sizeof(l), f)) {
-				// Data rows start with the numeric id; everything else
-				// (comment, header) is not a row. The first version filtered
-				// only '#'/'f' and swallowed the "id,fn,..." header, shifting
-				// every result one row off its probe - 207 phantom mismatch
-				// sites from one lazy filter.
-				if (l[0] < '0' || l[0] > '9') continue;
-				// groundent is the LAST column of the results row.
-				const char* p = strrchr(l, ',');
-				if (!p) continue;
-				ground.push_back(atoi(p + 1));
+					&q.ox, &q.oy, &q.oz, &q.ducked, &q.grounded,
+					&q.candz) == 7)
+					ms.push_back(q);
 			}
 			fclose(f);
 		}
@@ -1506,49 +1605,56 @@ namespace {
 			return 1;
 		}
 		fprintf(f, "id,tick,ax,ay,az,bx,by,bz,ducked,mnx,mny,mnz,mxx,mxy,mxz\n");
-		const size_t n = ps.size() < ground.size() ? ps.size() : ground.size();
-		int id = 0, sites = 0;
+		int id = 0;
 		const float jit[5] = { 0.f, -0.5f, 0.5f, -2.f, 2.f };
-		for (size_t i = 0; i < n; ++i) {
-			if (strcmp(ps[i].fn, "CategorizePosition") != 0)
-				continue;
-			// Rebuild our verdict exactly as funcdiff does.
-			PlayerState s;
-			s.pos = Vec3(ps[i].ox, ps[i].oy, ps[i].oz);
-			s.vel = Vec3(ps[i].vx, ps[i].vy, ps[i].vz);
-			s.on_ground = false;
-			s.ducked = ps[i].ducked != 0;
-			s.hull_state = ps[i].ducked ? 1 : 0;
-			ReplayOpts oo = o;
-			Fn::CategorizePosition(s, w, oo.params);
-			const bool eng_g = ground[i] != -1 && ground[i] != 0;
-			if (s.on_ground == eng_g)
-				continue;
-			sites++;
-			const float top = ps[i].ducked ? 54.f : 72.f;
-			const Vec3 hmn(-16.f, -16.f, 0.f), hmx(16.f, 16.f, top);
-			const Vec3 boxes[5][2] = {
-				{ hmn, hmx },                                        // full
-				{ hmn, Vec3(0.f, 0.f, hmx.Z) },                      // -x-y
-				{ Vec3(0.f, 0.f, 0.f), hmx },                        // +x+y
-				{ Vec3(hmn.X, 0.f, 0.f), Vec3(0.f, hmx.Y, hmx.Z) },  // -x+y
-				{ Vec3(0.f, hmn.Y, 0.f), Vec3(hmx.X, 0.f, hmx.Z) },  // +x-y
-			};
-			for (int jx = 0; jx < 5; ++jx)
-			for (int jy = 0; jy < 5; ++jy) {
-				const Vec3 a(ps[i].ox + jit[jx], ps[i].oy + jit[jy], ps[i].oz);
-				const Vec3 b = a - Vec3(0.f, 0.f, 2.f);
-				for (int bi = 0; bi < 5; ++bi)
-					fprintf(f, "%d,0,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,"
-						"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
-						id++, a.X, a.Y, a.Z, b.X, b.Y, b.Z, ps[i].ducked,
-						boxes[bi][0].X, boxes[bi][0].Y, boxes[bi][0].Z,
-						boxes[bi][1].X, boxes[bi][1].Y, boxes[bi][1].Z);
+		const float jz[3] = { 0.f, -0.5f, 0.5f };
+		for (const M& m : ms) {
+			const bool ground_site =
+				strcmp(m.fn, "CategorizePosition") == 0
+				|| strcmp(m.fn, "CheckJumpButton") == 0;
+			if (ground_site) {
+				const float top = m.ducked ? 54.f : 72.f;
+				const Vec3 hmn(-16.f, -16.f, 0.f), hmx(16.f, 16.f, top);
+				const Vec3 boxes[5][2] = {
+					{ hmn, hmx },
+					{ hmn, Vec3(0.f, 0.f, hmx.Z) },
+					{ Vec3(0.f, 0.f, 0.f), hmx },
+					{ Vec3(hmn.X, 0.f, 0.f), Vec3(0.f, hmx.Y, hmx.Z) },
+					{ Vec3(0.f, hmn.Y, 0.f), Vec3(hmx.X, 0.f, hmx.Z) },
+				};
+				for (int jx = 0; jx < 5; ++jx)
+				for (int jy = 0; jy < 5; ++jy) {
+					const Vec3 a(m.ox + jit[jx], m.oy + jit[jy], m.oz);
+					const Vec3 b = a - Vec3(0.f, 0.f, 2.f);
+					for (int bi = 0; bi < 5; ++bi)
+						fprintf(f, "%d,0,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,"
+							"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n",
+							id++, a.X, a.Y, a.Z, b.X, b.Y, b.Z, m.ducked,
+							boxes[bi][0].X, boxes[bi][0].Y, boxes[bi][0].Z,
+							boxes[bi][1].X, boxes[bi][1].Y, boxes[bi][1].Z);
+				}
+			} else {
+				// Duck-family site: the two disputed zero-length tests.
+				for (int jx = 0; jx < 3; ++jx)
+				for (int jy = 0; jy < 3; ++jy)
+				for (int jzz = 0; jzz < 3; ++jzz) {
+					const float dx = jz[jx], dy = jz[jy], dz = jz[jzz];
+					// STANDING hull at the unduck candidate.
+					fprintf(f, "%d,0,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,0,"
+						"-16,-16,0,16,16,72\n",
+						id++, m.ox + dx, m.oy + dy, m.candz + dz,
+						m.ox + dx, m.oy + dy, m.candz + dz);
+					// DUCKED hull at the probe origin (the stuck-fix test).
+					fprintf(f, "%d,0,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,1,"
+						"-16,-16,0,16,16,54\n",
+						id++, m.ox + dx, m.oy + dy, m.oz + dz,
+						m.ox + dx, m.oy + dy, m.oz + dz);
+				}
 			}
 		}
 		fclose(f);
-		printf("tracegen-quads: %d ground-mismatch site(s) -> %d box queries -> %s\n",
-			sites, id, out_path.c_str());
+		printf("tracegen-quads: %d manifest row(s) -> %d box queries -> %s\n",
+			static_cast<int>(ms.size()), id, out_path.c_str());
 		printf("tracegen-quads: in-game 'Run trace oracle' answers them; then\n"
 			"  SolverLab quaddiff <map.bsp> \"%s\" <results.csv>\n",
 			out_path.c_str());
@@ -4082,11 +4188,11 @@ int main(int argc, char** argv) {
 			static_cast<float>(atof(argv[8])));
 		return CmdTraceOne(argv[2], o, a, b, atoi(argv[9]));
 	}
-	if (cmd == "tracegen-quads" && argc >= 6) {
+	if (cmd == "tracegen-quads" && argc >= 5) {
 		ReplayOpts o;
-		if (!ParseCommon(argc, argv, 6, o))
+		if (!ParseCommon(argc, argv, 5, o))
 			return 1;
-		return CmdTraceGenQuads(argv[2], o, argv[3], argv[4], argv[5]);
+		return CmdTraceGenQuads(argv[2], o, argv[3], argv[4]);
 	}
 	if (cmd == "quaddiff" && argc >= 5) {
 		ReplayOpts o;
