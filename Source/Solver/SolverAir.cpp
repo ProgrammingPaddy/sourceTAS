@@ -5,6 +5,7 @@
 
 #include "SolverBoard.h"
 #include "SolverEnvelope.h"
+#include "SolverSteer.h"
 #include "SolverStrafe.h"
 
 namespace Solver {
@@ -12,13 +13,8 @@ namespace Air {
 
 	namespace {
 
-		constexpr float kPi = 3.14159265358979f;
-
-		float WrapPi(float a) {
-			while (a > kPi) a -= 2.f * kPi;
-			while (a < -kPi) a += 2.f * kPi;
-			return a;
-		}
+		constexpr float kPi = Steer::kSteerPi;
+		using Steer::WrapPi;
 
 		// Linear interpolation over knots placed at equal fractions of
 		// [0, horizon].
@@ -40,58 +36,6 @@ namespace Air {
 			return knots[i] + WrapPi(knots[i + 1] - knots[i]) * f;
 		}
 
-		float TurnAt(const Strafe::TickLaw& law, float cosa) {
-			const float s2 = 1.f - cosa * cosa;
-			return law.TurnRad(cosa, s2 > 0.f ? sqrtf(s2) : 0.f);
-		}
-
-		// Invert the law's turn curve: the cosa in [0, min(1, cap/v)]
-		// whose TurnRad equals want (monotone decreasing in cosa).
-		float CosForTurn(const Strafe::TickLaw& law, float want) {
-			float lo = 0.f;
-			float hi = law.v > law.cap ? law.cap / law.v : 1.f;
-			// TurnRad(lo) = max turn; TurnRad(hi) = 0.
-			for (int it = 0; it < 12; ++it) {
-				const float mid = 0.5f * (lo + hi);
-				if (TurnAt(law, mid) > want)
-					lo = mid;
-				else
-					hi = mid;
-			}
-			return 0.5f * (lo + hi);
-		}
-
-		// THE BRAKING TURN ("eat the energy in the turn", testimony
-		// 2.2/2.3): with cosa < 0 the accel budget (airaccel * wishspeed
-		// * dt = 562.5 standing) dwarfs the 30 cap, so a backward-biased
-		// wish rotates the velocity far faster than the perpendicular
-		// strafe - at real speed cost. Returns the cosa in [-1, 0]
-		// achieving 'want' (or the max-turn cosa if 'want' exceeds it).
-		// The turn curve rises from TurnAt(0) to a peak then falls to 0
-		// at cosa=-1: scan for the peak, then bisect the rising side.
-		float CosForBrakeTurn(const Strafe::TickLaw& law, float want) {
-			float best_c = 0.f, best_t = TurnAt(law, 0.f);
-			for (int i = 1; i <= 16; ++i) {
-				const float c = -static_cast<float>(i) / 16.f;
-				const float tr = TurnAt(law, c);
-				if (tr > best_t) {
-					best_t = tr;
-					best_c = c;
-				}
-			}
-			if (want >= best_t)
-				return best_c;
-			float lo = 0.f, hi = best_c;   // turn(lo) < want <= turn(hi)
-			for (int it = 0; it < 12; ++it) {
-				const float mid = 0.5f * (lo + hi);
-				if (TurnAt(law, mid) < want)
-					lo = mid;
-				else
-					hi = mid;
-			}
-			return 0.5f * (lo + hi);
-		}
-
 	} // namespace
 
 	Result FlyHeadingSpline(const PlayerState& entry, const World& w,
@@ -107,9 +51,7 @@ namespace Air {
 		// not this primitive's business; changing mid-air would shift z
 		// off the tape's ballistic family).
 		const int hold = s.ducked ? IN_DUCK : 0;
-		const int min_gap = static_cast<int>(
-			ceilf((1.f / p.dt) / p.strafe_rate_max));
-		int side = 0, last_flip = -1000;
+		Steer::Controller ctl;
 		// The spline spans the EXPECTED flight (aim_tick), not the sim
 		// cap - otherwise late knots are dead parameters.
 		const int sh = (t.aim_tick > 0 && t.aim_tick < horizon)
@@ -117,59 +59,9 @@ namespace Air {
 		r.yaw.reserve(horizon);
 		r.smove.reserve(horizon);
 		for (int k = 0; k < horizon; ++k) {
-			const float s2d = Len2D(s.vel);
-			const float h = s2d > 1.f
-				? atan2f(s.vel.Y, s.vel.X)
-				: SplineEval(knots, k, sh);
 			const float theta = SplineEval(knots, k, sh);
-			const float e = WrapPi(theta - h);
-			Strafe::TickLaw law = Strafe::Law(p, s2d, 1.f, s.ducked);
-			const float maxturn = law.TurnRad(0.f, 1.f);
-			int want = side;
-			if (e > 0.02f) want = 1;
-			else if (e < -0.02f) want = -1;
-			else if (side == 0) want = (e >= 0.f) ? 1 : -1;
-			bool coast = false;
-			if (want != side) {
-				if (side == 0 || k - last_flip >= min_gap) {
-					side = want;
-					last_flip = k;
-					r.flips += (k > 0) ? 1 : 0;
-				} else if (fabsf(e) > 0.26f) {
-					coast = true;   // blocked flip, big error: coast
-				}
-				// else: weave on the old side until the flip is legal
-			}
-			float yaw_deg = h * 57.2957795f;
-			float smove = 0.f;
-			if (!coast && s2d > 1.f) {
-				const float ae = fabsf(e);
-				const bool with_side = (side > 0) == (e > 0.f)
-					&& ae > 1e-4f;
-				// Demand within the perp turn rate: land it exactly at
-				// full gain. Beyond it: the BRAKING TURN family (speed
-				// for curvature - the optimizer owns that tradeoff via
-				// the spline slope). Against the side: hold the no-op
-				// point (a = 0) and weave.
-				const float cosa = (with_side && ae < maxturn)
-					? CosForTurn(law, ae)
-					: (with_side ? CosForBrakeTurn(law, ae) : law.cap
-						/ (s2d > law.cap ? s2d : law.cap));
-				// Wish at angle alpha from velocity on 'side'; realize
-				// with a pure side-strafe (smove sign = -side keeps the
-				// yaw within 90 deg of travel, the human idiom).
-				const float alpha = acosf(cosa > 1.f ? 1.f : cosa);
-				const float wh = h + (side > 0 ? alpha : -alpha);
-				smove = -450.f * static_cast<float>(side);
-				yaw_deg = (wh + (side > 0 ? 1.f : -1.f) * kPi * 0.5f)
-					* 57.2957795f;
-			} else if (!coast) {
-				// Near-zero horizontal speed: push straight at the
-				// spline heading.
-				yaw_deg = theta * 57.2957795f;
-				smove = 0.f;
-			}
-			const float fmove = (!coast && s2d <= 1.f) ? 450.f : 0.f;
+			float yaw_deg, fmove, smove;
+			ctl.Tick(s, p, theta, k, &yaw_deg, &fmove, &smove);
 			TickEvents ev;
 			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, hold, &ev);
 			r.yaw.push_back(yaw_deg);
@@ -196,15 +88,18 @@ namespace Air {
 				else
 					r.struck_brush = ev.contact_brush[0];
 				r.end_pos = s.pos;
+				r.flips = ctl.flips;
 				return r;   // any other strike = miss, flight over
 			}
 			if (s.on_ground) {
 				r.grounded = true;
 				r.end_pos = s.pos;
+				r.flips = ctl.flips;
 				return r;
 			}
 		}
 		r.end_pos = s.pos;
+		r.flips = ctl.flips;
 		return r;
 	}
 

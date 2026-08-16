@@ -23,6 +23,8 @@
 #include "SolverEnvelope.h"
 #include "SolverBoard.h"
 #include "SolverAir.h"
+#include "SolverCarve.h"
+#include "SolverSteer.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -2378,6 +2380,397 @@ namespace {
 		printf("airsolve: M1.3 GATE %s\n", pass ? "PASS" : "FAIL");
 		fflush(stdout);
 		return pass ? 0 : 2;
+	}
+
+	// carve: THE M1.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
+	// Two halves:
+	//  A. TAPE CARVES - every tape ride (>= 6 contact ticks on one
+	//     mapped face, ending in clean air) is re-solved UNSEEDED: the
+	//     primitive gets the entry state + the tape's exit heading/
+	//     tick/position, never the controls. Reproduce = exit within
+	//     0.20 rad, +/-8 ticks, 80u, speed within 30 u/s.
+	//  B. MANIFOLD - sampled on-face states across faces x directions x
+	//     speeds, zero-input: the carve ENERGY IDENTITY
+	//       v2_end + sum(dot^2) = v2_0 + 2g*(z0 - z_end)
+	//     must hold on the exact engine (clip work = -dot^2, gravity
+	//     work = 2g*drop, nothing else moves energy); full-strafe rides
+	//     must respect the law bound (wish work <= 900/tick on top).
+	int CmdCarve(const std::string& map_path, const ReplayOpts& o,
+	             const std::vector<std::string>& tapes) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("carve: %s\n", err.c_str());
+			return 1;
+		}
+		auto find_face = [&](int brush, int plane) {
+			for (size_t i = 0; i < g.faces.size(); ++i)
+				if (g.faces[i].brush == brush && g.faces[i].side == plane)
+					return static_cast<int>(i);
+			return -1;
+		};
+
+		// ---- A: tape carves -------------------------------------------
+		struct Ride {
+			PlayerState entry;
+			int face = -1, n = 0;
+			float exit_heading = 0.f, exit_s2d = 0.f;
+			Vec3 exit_pos;
+			Vec3 exit_vel;
+			int t0 = 0, tape_idx = 0;
+		};
+		std::vector<Ride> rides;
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("LOAD FAILED (tas %s): %s\n", tp.c_str(), err.c_str());
+				return 1;
+			}
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			int ride_face = -1, contact_ticks = 0, entry_tick = 0;
+			int air_streak = 0, exit_tick = 0;
+			PlayerState entry_s, exit_s;
+			bool have_exit = false;
+			auto close_ride = [&](bool clean) {
+				if (clean && ride_face >= 0 && contact_ticks >= 6
+					&& have_exit) {
+					Ride r;
+					r.entry = entry_s;
+					r.face = ride_face;
+					r.n = exit_tick - entry_tick;
+					r.exit_heading = atan2f(exit_s.vel.Y,
+						exit_s.vel.X);
+					r.exit_s2d = Len2D(exit_s.vel);
+					r.exit_pos = exit_s.pos;
+					r.exit_vel = exit_s.vel;
+					r.t0 = entry_tick;
+					if (r.n >= 2)
+						rides.push_back(r);
+				}
+				ride_face = -1;
+				contact_ticks = 0;
+				air_streak = 0;
+				have_exit = false;
+			};
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& f = tape.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove,
+					f.smove, f.umove, f.buttons, &ev);
+				if (s.on_ground) {
+					close_ride(false);
+					continue;
+				}
+				if (ev.ncontacts > 0) {
+					int fi = -1;
+					bool uniform = true;
+					for (int c = 0; c < ev.ncontacts; ++c) {
+						const int b = ev.contact_brush[c];
+						const int pl = ev.contact_plane[c];
+						if (b < 0 || pl < 0) { uniform = false; break; }
+						const Vec3& n = w.brushes[b].n[pl];
+						if (n.Z <= 0.f || n.Z >= o.params.walkable_z) {
+							uniform = false;
+							break;
+						}
+						const int fc = find_face(b, pl);
+						if (fc < 0 || (fi >= 0 && fc != fi)) {
+							uniform = false;
+							break;
+						}
+						fi = fc;
+					}
+					if (!uniform) {
+						close_ride(false);
+					} else if (fi == ride_face) {
+						contact_ticks++;
+						air_streak = 0;
+						have_exit = false;
+					} else {
+						close_ride(false);
+						ride_face = fi;
+						contact_ticks = 1;
+						entry_s = s;   // post-board state
+						entry_tick = static_cast<int>(t);
+					}
+				} else if (ride_face >= 0) {
+					if (!have_exit) {
+						exit_s = s;
+						exit_tick = static_cast<int>(t);
+						have_exit = true;
+					}
+					air_streak++;
+					if (air_streak >= 3)
+						close_ride(true);
+				}
+			}
+			close_ride(false);
+			printf("carve: %s replayed\n", tp.c_str());
+		}
+
+		int ok = 0;
+		for (size_t i = 0; i < rides.size(); ++i) {
+			const Ride& x = rides[i];
+			Carve::Target tg;
+			tg.face = x.face;
+			tg.exit_heading = x.exit_heading;
+			tg.max_ticks = x.n + 40;
+			tg.aim_tick = x.n;
+			tg.tick_w = 0.2f;
+			tg.tick_tol = 8;
+			tg.aim_pos = x.exit_pos;
+			tg.pos_w = 0.2f;
+			tg.aim_vel = x.exit_vel;
+			tg.vel_w = 1.f;
+			// Long rides get more knots: an 84-tick crest carve needs
+			// a finer speed/heading profile than a 20-tick sweep.
+			const int kn = x.n >= 60 ? 6 : 4;
+			const Carve::Result r = Carve::SolveCarve(x.entry, w,
+				o.params, g, tg, kn, 20000);
+			const float dh = r.exited ? fabsf(Steer::WrapPi(
+				r.exit_heading - x.exit_heading)) : 9.f;
+			const float dp = r.exited ? Len(r.exit_pos - x.exit_pos)
+				: 1e9f;
+			const float dv = r.exited ? Len(r.exit_vel - x.exit_vel)
+				: 1e9f;
+			const bool good = r.exited && dv <= 60.f
+				&& (r.tick - x.n <= 8 && x.n - r.tick <= 8)
+				&& dp <= 80.f;
+			if (good) ok++;
+			if (r.exited)
+				printf("carve[%2d]: face %2d | tape n=%3d h=%6.1f "
+					"s2d=%6.1f | solver n=%3d h=%6.1f s2d=%6.1f "
+					"dv=%5.1f dpos=%5.1f flips=%d | %s\n",
+					static_cast<int>(i), x.face, x.n,
+					x.exit_heading * 57.29578f, x.exit_s2d, r.tick,
+					r.exit_heading * 57.29578f, r.speed2d, dv, dp,
+					r.flips, good ? "OK" : "OFF");
+			else
+				printf("carve[%2d]: face %2d | tape n=%3d h=%6.1f "
+					"s2d=%6.1f | solver NO EXIT (%s%d)\n",
+					static_cast<int>(i), x.face, x.n,
+					x.exit_heading * 57.29578f, x.exit_s2d,
+					r.grounded ? "grounded, brush "
+						: "struck brush ",
+					r.struck_brush >= 0
+						? w.brushes[r.struck_brush].id : -1);
+			if (!good)
+				printf("           entry(%.0f,%.0f,%.0f) v(%.0f,%.0f,"
+					"%.0f s2d %.0f) -> tape exit(%.0f,%.0f,%.0f) "
+					"vz %.0f dz %.0f | tape frames %d..%d\n",
+					x.entry.pos.X, x.entry.pos.Y, x.entry.pos.Z,
+					x.entry.vel.X, x.entry.vel.Y, x.entry.vel.Z,
+					Len2D(x.entry.vel), x.exit_pos.X, x.exit_pos.Y,
+					x.exit_pos.Z, x.exit_vel.Z,
+					x.exit_pos.Z - x.entry.pos.Z, x.t0, x.t0 + x.n);
+		}
+		printf("carve: %d/%d tape carves reproduced unseeded\n", ok,
+			static_cast<int>(rides.size()));
+
+		// ---- B: manifold (energy identity + law bound) ----------------
+		unsigned rng = 4242u;
+		auto next = [&rng]() {
+			rng = rng * 1664525u + 1013904223u;
+			return (rng >> 8) & 0xFFFFu;
+		};
+		auto frand = [&next]() { return next() / 65535.f; };
+		int id_samples = 0, id_fail = 0, skipped = 0;
+		int law_samples = 0, law_fail = 0;
+		float worst_rel = 0.f, worst_law = -1e9f;
+		const float speeds[2] = { 300.f, 800.f };
+		const float betas[5] = { -60.f, -30.f, 0.f, 30.f, 60.f };
+		for (size_t fi = 0; fi < g.faces.size(); ++fi) {
+			const Route::Face& fc = g.faces[fi];
+			if (fc.verts.size() < 3)
+				continue;
+			const float support = 16.f * fabsf(fc.n.X)
+				+ 16.f * fabsf(fc.n.Y) + 36.f * fabsf(fc.n.Z);
+			const float dh_az = atan2f(fc.downhill.Y, fc.downhill.X);
+			for (int pt = 0; pt < 2; ++pt) {
+				Vec3 q = fc.centroid;
+				for (size_t vi = 0; vi < fc.verts.size(); ++vi)
+					q = q + Scale(fc.verts[vi] - fc.centroid,
+						frand() * 0.4f / fc.verts.size());
+				for (int si = 0; si < 2; ++si)
+				for (int bi = 0; bi < 5; ++bi)
+				for (int wish = 0; wish < 2; ++wish) {
+					const float az = dh_az
+						+ betas[bi] * 0.017453293f;
+					Vec3 d(cosf(az), sinf(az), 0.f);
+					Vec3 ip = d - Scale(fc.n, Dot(d, fc.n));
+					const float il = Len(ip);
+					if (il < 0.2f)
+						continue;
+					ip = Scale(ip, 1.f / il);
+					PlayerState s;
+					s.pos = q + Scale(fc.n, support + 0.5f);
+					s.vel = Scale(ip, speeds[si]);
+					s.on_ground = false;
+					const float v20 = Len2(s.vel);
+					const float z0 = s.pos.Z;
+					float sum_dot2 = 0.f, cross_bound = 0.f;
+					bool bad = false;
+					int ticks = 0;
+					Steer::Controller ctl;
+					const float hold_az = atan2f(s.vel.Y, s.vel.X);
+					for (int k = 0; k < 40; ++k) {
+						float yaw_deg = 0.f, fmove = 0.f, smove = 0.f;
+						if (wish)
+							ctl.Tick(s, o.params, hold_az, k,
+								&yaw_deg, &fmove, &smove);
+						TickEvents ev;
+						MoveTick(s, w, o.params, 0.f, yaw_deg, fmove,
+							smove, 0.f, 0, &ev);
+						ticks++;
+						if (s.on_ground) { bad = true; break; }
+						if (ev.ncontacts > 1) { bad = true; break; }
+						if (ev.ncontacts == 1) {
+							const int b = ev.contact_brush[0];
+							const int pl = ev.contact_plane[0];
+							if (b < 0 || pl < 0) { bad = true; break; }
+							const Vec3& n = w.brushes[b].n[pl];
+							const float dt2 = Dot(ev.contact_vel[0], n);
+							sum_dot2 += dt2 * dt2;
+							// The DERIVED discrete cross term: a clip
+							// at fraction f inside a half-gravity tick
+							// shifts E by g*dt*(2f-1)*nz*dot, so the
+							// identity holds within
+							// sum(g*dt*nz*|dot|) - law, not a fit.
+							cross_bound += o.params.gravity
+								* o.params.dt * fabsf(n.Z)
+								* fabsf(dt2);
+							if (Len2(s.vel) < 1.f) { bad = true; break; }
+						}
+					}
+					if (bad) {
+						skipped++;
+						continue;
+					}
+					const float v2e = Len2(s.vel);
+					const float drop = 2.f * o.params.gravity
+						* (z0 - s.pos.Z);
+					if (!wish) {
+						id_samples++;
+						const float lhs = v2e + sum_dot2;
+						const float rhs = v20 + drop;
+						const float err = fabsf(lhs - rhs);
+						const float lim = cross_bound + 60.f;
+						const float rel = err
+							/ (v20 > v2e ? v20 : v2e);
+						if (rel > worst_rel) worst_rel = rel;
+						if (err > lim)
+							id_fail++;
+					} else {
+						law_samples++;
+						const float wish_work = v2e + sum_dot2
+							- v20 - drop;
+						const float bound = 900.f
+							* static_cast<float>(ticks)
+							+ cross_bound + 60.f;
+						if (wish_work - bound > worst_law)
+							worst_law = wish_work - bound;
+						if (wish_work > bound)
+							law_fail++;
+					}
+				}
+			}
+		}
+		printf("carve: manifold zero-input %d samples %d FAIL (worst "
+			"rel %.5f) | strafing %d samples %d over law bound (worst "
+			"margin %.0f) | %d skipped\n", id_samples, id_fail,
+			worst_rel, law_samples, law_fail, worst_law, skipped);
+		const bool pass = !rides.empty()
+			&& ok == static_cast<int>(rides.size())
+			&& id_samples >= 30 && id_fail == 0 && law_fail == 0;
+		printf("carve: M1.4 GATE %s\n", pass ? "PASS" : "FAIL");
+		fflush(stdout);
+		return pass ? 0 : 2;
+	}
+
+	// ridedump: diagnostic - print a tape ride's per-tick trajectory and
+	// CONTROLS (what maneuver does the primitive have to express?).
+	int CmdRideDump(const std::string& map_path, const ReplayOpts& o,
+	                const std::string& tape_path, int want_start,
+	                int want_end) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("LOAD FAILED (tas): %s\n", err.c_str());
+			return 1;
+		}
+		PlayerState s;
+		s.pos = tape.start.origin;
+		s.vel = tape.start.velocity;
+		s.ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
+		s.stamina = tape.start.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		for (size_t t = 0; t < tape.frames.size(); ++t) {
+			const TapeFrame& f = tape.frames[t];
+			TickEvents ev;
+			MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+				f.umove, f.buttons, &ev);
+			if (static_cast<int>(t) >= want_start
+				&& static_cast<int>(t) <= want_end) {
+				float dot = 0.f;
+				int cb = -1;
+				if (ev.ncontacts > 0) {
+					cb = w.brushes[ev.contact_brush[0]].id;
+					const Vec3& n =
+						w.brushes[ev.contact_brush[0]]
+							.n[ev.contact_plane[0]];
+					dot = Dot(ev.contact_vel[0], n);
+				}
+				printf("t%5d pos(%7.1f,%7.1f,%6.1f) v(%6.1f,%6.1f,"
+					"%6.1f) s2d %5.1f h %6.1f | yaw %6.1f f %4.0f "
+					"s %4.0f b%d d%d | c%d dot %6.1f%s\n",
+					static_cast<int>(t), s.pos.X, s.pos.Y, s.pos.Z,
+					s.vel.X, s.vel.Y, s.vel.Z, Len2D(s.vel),
+					atan2f(s.vel.Y, s.vel.X) * 57.29578f, f.yaw,
+					f.fmove, f.smove, f.buttons, s.ducked ? 1 : 0,
+					cb, dot, s.on_ground ? " GROUND" : "");
+			}
+		}
+		fflush(stdout);
+		return 0;
 	}
 
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
@@ -5200,6 +5593,23 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdAirSolve(argv[2], o, tapes);
+	}
+	if (cmd == "ridedump" && argc >= 6) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 6, o))
+			return 1;
+		return CmdRideDump(argv[2], o, argv[3], atoi(argv[4]),
+			atoi(argv[5]));
+	}
+	if (cmd == "carve" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdCarve(argv[2], o, tapes);
 	}
 	if (cmd == "strafelaw" && argc >= 3) {
 		ReplayOpts o;

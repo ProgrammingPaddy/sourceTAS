@@ -9,7 +9,7 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M1.4 carve primitive.
+**NOW →** M1.5 THE LEDGER.
 
 ---
 
@@ -116,10 +116,24 @@ a measurable pass/fail, never a vibe.
       Quality: the primitive beats the tape's board on 10/12 —
       e.g. dot −50 vs tape −377, −205 vs −432, two near-perfect
       tangent arrivals (−1.8, −0.6).
-- [ ] 1.4 Carve primitive: on-face entry → exit manifold with time +
-      energy tags (conversion along downhill axis, flick setup).
-      GATE: reproduces tape carves' exits; manifold matches sim
-      sampling on 3 faces.
+- [x] 1.4 Carve primitive (`SolverCarve.h/.cpp` + `carve` gate + the
+      shared `SolverSteer.h` controller): on-face rides driven by the
+      SAME certified controller as the air phase, with two extra
+      dials — an EFFORT channel (per-knot duty-cycled coasting: the
+      expert's speed control; slow rides are effort choices, not
+      heading choices) and the DUCK-OFF exit move (press duck while
+      riding: the +8.5 air-duck shift pops the hull off the face,
+      keeping the climb velocity — how solved12's crest exit works,
+      found by `ridedump` on the tape's final tick: b1028 d1). Carve
+      ENERGY LAW verified against the engine: v²_exit + Σdot² = v²_entry
+      + 2g·drop (+ wish work ≤ 900/tick), with the DERIVED discrete
+      cross-term bound Σ g·dt·nz·|dot| (a clip at fraction f inside a
+      half-gravity tick shifts E by g·dt·(2f−1)·nz·dot — measured law,
+      not a fitted tolerance). Exit spec = full VELOCITY VECTOR (crest
+      launches have mostly-vertical velocity; horizontal heading alone
+      is ill-conditioned). GATE PASSED: 10/10 tape carves reproduced
+      unseeded (worst dv 16.4 u/s, seven rows < 8), manifold 80/80
+      zero-input identity + 80/80 strafing law bound, 6.4s wall.
 - [ ] 1.5 THE LEDGER: per-transfer, per-phase regret readout (board
       loss, approach loss, air-gain shortfall, conversion shortfall,
       time regret) computable for ANY simulated line.
@@ -260,3 +274,18 @@ a measurable pass/fail, never a vibe.
   deterministic jitter actually spends the budget and closed the last
   2 rows. Primitive beats the tape's board loss on 10/12 transfers.
   NOW = M1.4 carve primitive.
+- 2026-08-16 (later): M1.4 GATE PASSED (10/10 carves + 160/160
+  manifold). Six iteration rounds, each evidence-driven: (1) the carve
+  energy identity needs the DERIVED half-gravity cross-term bound, not
+  a tolerance; (2) slow rides demanded the EFFORT channel; (3) crest
+  launches demanded the full exit-velocity-vector spec (heading of a
+  near-vertical launch is noise); (4) the 1e6 no-exit wall froze two
+  rows across three fix rounds — a stall NEAR the aim must outscore an
+  exit FAR from it (comparable scores restored the gradient and one
+  row snapped to dv 2.2); (5) budget was NOT the lever (20k evals =
+  same failure); (6) `ridedump` on the last stubborn ride revealed the
+  DUCK-OFF exit (duck press on the final tick separates the hull with
+  climb velocity intact) — added as a searched genome dimension and
+  the row closed at dv 16.4. The primitive kit now expresses: tangent
+  boards, braking flicks, weaves, coasting, crest launches, duck-offs.
+  NOW = M1.5 the ledger.
