@@ -1,0 +1,140 @@
+# Solver Rebuild — Build Plan & Living Checklist
+
+**This is the status document.** Design and testimony live in
+`Docs/SolverRebuild.md`; the narrative log lives in
+`Docs/FullMapSolver.md`; this file tracks WHAT IS BUILT and WHAT IS
+NEXT, and is updated every working session (change log at the bottom).
+
+Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
+`(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
+a measurable pass/fail, never a vibe.
+
+**NOW →** M0.4 face coverage, then M1.1 transfer envelopes.
+
+---
+
+## M0 — Foundations
+
+- [x] 0.1 Design of record + uncompressed expert knowledge base
+      (`SolverRebuild.md`, commit c6de8a8)
+- [x] 0.2 Strafe law: closed form (`SolverStrafe.h`) + `strafelaw`
+      prover — 1,120 states vs certified MoveTick, float-ULP exact
+      (max 2.0 in speed² of 11.5M; 8e-9 rad) (d4f6402)
+- [x] 0.3 Feature extractor v0 + `routegraph` command — brush-side
+      polygons, plane/area/extents/downhill, candidate edges (d4f6402)
+- [ ] 0.4 FULL face coverage on basictest: spine faces + upper ramps +
+      every surface the 292 tape touches. Current v0 finds 4 lower
+      ramps only — widen/diagnose the nz window, check upper-geometry
+      filtering.
+      GATE: every ramp contact in the 292 + solved12 tapes maps to an
+      extracted face; zero phantom faces on manual review.
+- [ ] 0.5 Zone anchoring: start/end brush indices become graph nodes
+      (reuse solve-anchor zone identification).
+- [ ] 0.6 Strafe alternation rate limit: constant agreed with the user,
+      stored in params, enforced as yaw-spline knot cap. (OPEN with
+      user: the number.)
+
+## M1 — Transfer primitives & the ledger
+
+- [ ] 1.1 Reachability envelope: from an exit state (pos, vel), the
+      cone of reachable states at time t under gravity + the proven
+      gain law (outer bound: perpendicular gain every tick; inner:
+      ballistic). Used to gate graph edges and prune routes.
+      GATE: envelope CONTAINS every transfer observed in the two tapes
+      and excludes states beyond the analytic bound (sim-sampled
+      falsification, 10k random control sequences stay inside).
+- [ ] 1.2 Board window per face: region × velocity cone with clip loss
+      below threshold (tangent-dominant per testimony §2.1), including
+      side/mid-face boards.
+      GATE: every tape board lands inside its face's window; window
+      edge cases spot-checked against the exact engine.
+- [ ] 1.3 Air-phase primitive: yaw-spline boundary-value solver (entry
+      state → target board window), knots capped by 0.6; solved on the
+      exact engine.
+      GATE: reproduces each tape transfer's board within small
+      tick/loss deltas WITHOUT seeing the tape's controls.
+- [ ] 1.4 Carve primitive: on-face entry → exit manifold with time +
+      energy tags (conversion along downhill axis, flick setup).
+      GATE: reproduces tape carves' exits; manifold matches sim
+      sampling on 3 faces.
+- [ ] 1.5 THE LEDGER: per-transfer, per-phase regret readout (board
+      loss, approach loss, air-gain shortfall, conversion shortfall,
+      time regret) computable for ANY simulated line.
+      GATE: ledger of the 292 tape line matches hand analysis on 3
+      transfers; ledger of a deliberately bad line localizes the
+      planted losses.
+
+## M2 — Route search (stage 2)
+
+- [ ] 2.1 Analytic edge bounds: energy-in → min-ticks + exit-energy
+      bound per transfer edge (from 1.1 + 1.2).
+- [ ] 2.2 Beam/DP over feature sequences: skips first-class, start-zone
+      plan (prestrafe + single jump + first-board tradeoff), end-zone
+      terminal.
+- [ ] 2.3 Feasibility pruning via envelopes; jump edges only as
+      exceptional moves (legality per SolverRebuild §1).
+      GATE (M2): on basictest, unseeded, the top-10 routes include the
+      human route shape and the solved12 shape; route enumeration under
+      5 seconds.
+
+## M3 — Transfer refinement & assembly (stage 3)
+
+- [ ] 3.1 Rolling-window chained refinement along a route (2→4
+      features): each flick optimized against the next board window and
+      the ramp after; entry states propagated; infeasible → prune.
+- [ ] 3.2 Assembly into a full run on the exact engine; .tas export.
+      GATE (M3): unseeded finisher on basictest in < 2 minutes wall
+      clock; its ledger strictly dominates the old solver's best line
+      (fewer board losses, less approach regret, fewer ticks).
+
+## M4 — Polish & anytime behavior (stage 4)
+
+- [ ] 4.1 CMA-ES residual polish on yaw splines (boundary-locked,
+      seeded from 3.1, never random).
+- [ ] 4.2 Ledger-directed re-solve: budget flows to the worst transfer.
+- [ ] 4.3 Anytime toggles: beam width, window depth, polish rounds;
+      2-minute vs 20-minute dial demonstrated.
+      GATE (M4): **beat the human tape's zone time on basictest,
+      unseeded.** The 2-min setting lands within ~5 ticks of the
+      20-min setting.
+
+## M5 — Generalization
+
+- [ ] 5.1 Second linear map, brush-geometry only, end-to-end unseeded.
+      GATE: finisher + clean ledger, no code changes specific to the
+      map.
+- [ ] 5.2 (!) Displacement collision in the world model — parity-side
+      prerequisite for most of the map population (tracked as parity
+      open item; build when a target map demands it).
+- [ ] 5.3 Demo extractor for the user's cut demos (incoming) → expert
+      ledger on non-tuned maps; compare ours vs theirs per transfer.
+- [ ] 5.4 Staged maps: per-stage chaining with teleport-reset
+      boundaries and per-stage prestrafe.
+- [ ] 5.5 Solve-time hardening: worst-case < 30 min across the test
+      set; profile and push down. Throughput benchmark of the
+      leaf-ordered trace under solver load (carried from parity era).
+
+## M6 — In-game validation (batched; respect the relaunch fatigue)
+
+- [ ] 6.1 Export candidate lines and validate IN ONE SESSION per batch
+      (playback capture, diff 0.000u required).
+- [ ] 6.2 Only then: showcase-quality review against the aesthetic
+      rate-limit rule.
+
+## Cross-cutting rules
+
+- Every module validates against the certified engine or the tapes
+  BEFORE anything builds on it (the strafelaw pattern: prover first).
+- No fitted constants in scoring — bounds derive from the engine model;
+  the ledger measures regret, not vibes.
+- No per-map tuning anywhere. If a map needs special handling, the
+  design is wrong.
+- Jumps: exceptional route edges only; spine-bhop hard-filtered.
+
+---
+
+## Change log
+
+- 2026-08-16: Created. M0.1–0.3 done (design doc; strafe law proven
+  float-ULP vs certified mirror; extractor v0 with 4 faces + 12
+  candidate edges on basictest). NOW = M0.4 face coverage.
