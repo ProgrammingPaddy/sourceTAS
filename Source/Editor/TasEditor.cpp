@@ -8673,6 +8673,15 @@ namespace {
 			std::ifstream f(SolverDir() + "\\demo_queue.txt");
 			std::string line;
 			while (std::getline(f, line)) {
+				// Strip a UTF-8 BOM (PowerShell's utf8 writes one; three
+				// invisible bytes on line 1 made playdemo miss the file -
+				// round 3's "first demo never loads", and round 2's
+				// "nothing until map 2").
+				if (line.size() >= 3
+					&& static_cast<unsigned char>(line[0]) == 0xEF
+					&& static_cast<unsigned char>(line[1]) == 0xBB
+					&& static_cast<unsigned char>(line[2]) == 0xBF)
+					line.erase(0, 3);
 				while (!line.empty()
 					&& (line.back() == '\r' || line.back() == ' '))
 					line.pop_back();
