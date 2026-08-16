@@ -60,6 +60,7 @@
     <ClCompile Include="Source\Solver\SolverSmooth.cpp" />
     <ClCompile Include="Source\Solver\SolverChain.cpp" />
     <ClCompile Include="Source\Solver\SolverRoute.cpp" />
+    <ClCompile Include="Source\Solver\SolverRouteSearch.cpp" />
     <ClCompile Include="Source\Solver\SolverLab.cpp" />
   </ItemGroup>
   <ItemGroup>

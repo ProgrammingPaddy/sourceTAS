@@ -9,7 +9,7 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M2 route search (M1 COMPLETE — all five primitives gated).
+**NOW →** M3 transfer refinement & assembly.
 
 ---
 
@@ -156,16 +156,31 @@ a measurable pass/fail, never a vibe.
 
 ## M2 — Route search (stage 2)
 
-- [ ] 2.1 Analytic edge bounds: energy-in → min-ticks + exit-energy
-      bound per transfer edge (from 1.1 + 1.2).
-- [ ] 2.2 Beam/DP over feature sequences: skips first-class, start-zone
-      plan (prestrafe + single jump + first-board tradeoff), end-zone
-      terminal.
-- [ ] 2.3 Feasibility pruning via envelopes; jump edges only as
-      exceptional moves (legality per SolverRebuild §1).
-      GATE (M2): on basictest, unseeded, the top-10 routes include the
-      human route shape and the solved12 shape; route enumeration under
-      5 seconds.
+- [x] 2.1-2.3 Route search (`SolverRouteSearch.h/.cpp` + `routesgate`):
+      best-first enumeration over feature sequences under THE POTENTIAL
+      LEDGER — total energy obeys E' = E + 900·ticks + 2g·Δz for
+      flights and rides alike, anchored per node (anchors telescope;
+      cycles net exactly their wish work, killing the corner-bounce
+      energy exploit that broke two earlier attempts). Edges = M1
+      closed forms: ballistic z-window × gain-law distance coverage
+      from the departure anchor; ride traversal priced arrival→
+      departure anchor at ledger speed; the END edge allows LANDING
+      SHORT + RUNNING the remainder (the human line's final leg).
+      START = measured prestrafe ceiling (certified-sim circle-strafe
+      probe ×1.15, no fitted constant) + the single legal jump folded
+      into E. Skips are first-class (the search REJECTS start→1/2/3
+      as unreachable without the face-0 board — correct physics).
+      Ranking = best lb per DISTINCT BASE SHAPE (first-occurrence face
+      order; cycle variants and multi-taps collapse — the pool stage 3
+      consumes). GATE PASSED: 60 raw routes → 10 shapes in 0.00s;
+      human [0] rank 4, solved12 [0 1 2 3] rank 7; the pool also
+      surfaces the old solver's [0 2]/[0 2 3] and unexplored variants.
+      DISCOVERY en route: the ledger on Run 21 (the actual human tape)
+      shows the human line is ONE RIDE — [start, 0, end], board regret
+      only 4.9k, 407k of gravity conversion to 924 u/s, then a pure
+      flight + landing run. Total dissipation 71k vs the old solver's
+      329k. That is the line to beat and the search now proposes its
+      shape unseeded.
 
 ## M3 — Transfer refinement & assembly (stage 3)
 
@@ -317,3 +332,16 @@ a measurable pass/fail, never a vibe.
   feature sequences (2.2), envelope pruning + start/end planning
   (2.3). Gate: top-10 routes on basictest include the human shape and
   solved12 shape, enumeration < 5s.
+- 2026-08-16 (later): M2 GATE PASSED after three bound revisions, each
+  caught by edge diagnostics: (1) unpriced ride traversal made
+  adjacent-face cycles free; (2) per-face full-drop energy credits let
+  corner bounces harvest fake energy every revisit — replaced by THE
+  POTENTIAL LEDGER (E' = E + 900·ticks + 2g·Δz uniformly, telescoping
+  anchors, cycle-proof); (3) vertex-anchored credits inverted on one
+  edge (s_ub 10) — same ledger fix. Plus: the END edge needed the
+  fly-then-RUN leg, and ranking needed base-shape dedup. Run 21's
+  ledger identified THE HUMAN LINE as a one-ride skip route ([0],
+  71k dissipation, 924 u/s carve exit) — now proposed unseeded at
+  rank 4. NOW = M3: chain SolveTransfer/SolveCarve along the shape
+  pool, assemble full runs, export .tas; gate = unseeded finisher
+  < 2 min whose ledger dominates the old line.

@@ -26,6 +26,7 @@
 #include "SolverCarve.h"
 #include "SolverSteer.h"
 #include "SolverLedger.h"
+#include "SolverRouteSearch.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -2706,6 +2707,136 @@ namespace {
 			&& ok == static_cast<int>(rides.size())
 			&& id_samples >= 30 && id_fail == 0 && law_fail == 0;
 		printf("carve: M1.4 GATE %s\n", pass ? "PASS" : "FAIL");
+		fflush(stdout);
+		return pass ? 0 : 2;
+	}
+
+	// routesgate: THE M2 ACCEPTANCE GATE - unseeded route enumeration
+	// by analytic lower bounds. Top-10 must include the HUMAN shape
+	// (start -> face 0 -> end: Run 21's one-ride line) and the
+	// solved12 shape (0 -> 1 -> 2 -> 3), under 5 seconds.
+	int CmdRoutesGate(const std::string& map_path, const ReplayOpts& o,
+	                  const std::string& anchor_tas) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("routesgate: %s\n", err.c_str());
+			return 1;
+		}
+		Tape at;
+		if (!LoadTas(anchor_tas, at, &err) || !at.start.valid) {
+			printf("routesgate: anchor tape: %s\n", err.c_str());
+			return 1;
+		}
+		int end_id = -1;
+		{
+			PlayerState s;
+			s.pos = at.start.origin;
+			s.vel = at.start.velocity;
+			s.ducked = at.start.ducked;
+			s.hull_state = at.start.ducked ? 1 : 0;
+			s.stamina = at.start.stamina;
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+			for (size_t t = 0; t < at.frames.size(); ++t) {
+				const TapeFrame& fr = at.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+					fr.smove, fr.umove, fr.buttons, &ev);
+			}
+			end_id = w.BrushUnder(s.pos, s.ducked);
+		}
+		if (!Route::AnchorZones(w, &g, at.start.origin,
+			at.start.ducked, end_id, 2000.f, &err)) {
+			printf("routesgate: %s\n", err.c_str());
+			return 1;
+		}
+		const clock_t c0 = clock();
+		RouteSearch::Opts ro;
+		ro.top_k = 60;   // raw pool; ranked by DISTINCT BASE SHAPE
+		std::vector<RouteSearch::Candidate> routes;
+		if (!RouteSearch::Enumerate(w, g, o.params, ro, &routes,
+			&err)) {
+			printf("routesgate: %s\n", err.c_str());
+			return 1;
+		}
+		const double secs = static_cast<double>(clock() - c0)
+			/ CLOCKS_PER_SEC;
+		// A route's SHAPE = its faces in first-occurrence order (cycle
+		// variants and multi-taps collapse: solved12's own face-3 taps
+		// are one shape). Rank the best lb per distinct shape - that
+		// pool is what stage 3 consumes.
+		struct Shape {
+			std::vector<int> base;
+			float lb = 0.f;
+			float end_v = 0.f;
+		};
+		std::vector<Shape> shapes;
+		for (const RouteSearch::Candidate& r : routes) {
+			Shape s;
+			for (int fidx : r.faces) {
+				bool seen = false;
+				for (int b : s.base)
+					if (b == fidx)
+						seen = true;
+				if (!seen)
+					s.base.push_back(fidx);
+			}
+			s.lb = r.lb_ticks;
+			s.end_v = sqrtf(r.end_s2_ub);
+			bool merged = false;
+			for (Shape& e : shapes)
+				if (e.base == s.base) {
+					if (s.lb < e.lb)
+						e = s;
+					merged = true;
+					break;
+				}
+			if (!merged)
+				shapes.push_back(s);
+		}
+		std::sort(shapes.begin(), shapes.end(),
+			[](const Shape& a, const Shape& b) {
+				return a.lb < b.lb;
+			});
+		if (shapes.size() > 10)
+			shapes.resize(10);
+		bool have_human = false, have_s12 = false;
+		for (size_t i = 0; i < shapes.size(); ++i) {
+			const Shape& s = shapes[i];
+			printf("routesgate[%2d]: lb %6.0f ticks | end v<= %6.0f "
+				"| shape", static_cast<int>(i), s.lb, s.end_v);
+			for (int fidx : s.base)
+				printf(" %d", fidx);
+			printf("\n");
+			if (s.base.size() == 1 && s.base[0] == 0)
+				have_human = true;
+			if (s.base.size() == 4 && s.base[0] == 0
+				&& s.base[1] == 1 && s.base[2] == 2
+				&& s.base[3] == 3)
+				have_s12 = true;
+		}
+		printf("routesgate: %d routes -> %d shapes in %.2fs | human "
+			"shape [0] %s | solved12 shape [0 1 2 3] %s\n",
+			static_cast<int>(routes.size()),
+			static_cast<int>(shapes.size()), secs,
+			have_human ? "PRESENT" : "MISSING",
+			have_s12 ? "PRESENT" : "MISSING");
+		const bool pass = have_human && have_s12 && secs < 5.0;
+		printf("routesgate: M2 GATE %s\n", pass ? "PASS" : "FAIL");
 		fflush(stdout);
 		return pass ? 0 : 2;
 	}
@@ -5829,6 +5960,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdAirSolve(argv[2], o, tapes);
+	}
+	if (cmd == "routesgate" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdRoutesGate(argv[2], o, argv[3]);
 	}
 	if (cmd == "ledger" && argc >= 4) {
 		ReplayOpts o;
