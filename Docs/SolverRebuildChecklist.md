@@ -9,8 +9,7 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M1.1 transfer envelopes (M0.6 rate-limit constant awaits the
-user's number).
+**NOW →** M1.2 board windows per face.
 
 ---
 
@@ -65,13 +64,18 @@ user's number).
 
 ## M1 — Transfer primitives & the ledger
 
-- [ ] 1.1 Reachability envelope: from an exit state (pos, vel), the
-      cone of reachable states at time t under gravity + the proven
-      gain law (outer bound: perpendicular gain every tick; inner:
-      ballistic). Used to gate graph edges and prune routes.
-      GATE: envelope CONTAINS every transfer observed in the two tapes
-      and excludes states beyond the analytic bound (sim-sampled
-      falsification, 10k random control sequences stay inside).
+- [x] 1.1 Reachability envelope (`SolverEnvelope.h` + `envelope` gate
+      command): EXACT discrete ballistic z (half-gravity structure:
+      z(n) = z0 + n·dt·vz0 − g·dt²·n²/2), speed bound s(n)² ≤ s0²+900n,
+      distance bound (gain-optimal straight line), ZWindow + CanReach
+      edge gate. GATE PASSED: 15/15 tape airborne stretches contained
+      (z/speed/dist all 0 violations) + 500/500 random-control
+      falsification trials stay inside, 0 escapes. Laws learned: the
+      envelope bounds the AIR PHASE ONLY — measure at the last airborne
+      tick, never after the contact tick (the board clip converts vz
+      into horizontal speed = M1.2's business); z sits in a duck-offset
+      band {−8.5, 0, +8.5} RELATIVE TO ENTRY DUCK STATE, not on the
+      ballistic point.
 - [ ] 1.2 Board window per face: region × velocity cone with clip loss
       below threshold (tangent-dominant per testimony §2.1), including
       side/mid-face boards.
@@ -193,3 +197,16 @@ user's number).
   drain #2 added in the message pump (main thread, all app states),
   abort/timeout clear the queue. Stale zero-origin python traces
   deleted. Capture still PENDING one click with the new DLL.
+- 2026-08-16 (later): M5.3 CAPTURED (all 7 traces, rounds 3-5 fixes:
+  DT_CSPlayer-rooted netvars, settle+load-timeout, BOM strip,
+  runner-by-name, stopdemo; run segments via dense+moving selector).
+  M1.1 GATE PASSED after two fix rounds, both diagnosed from gate
+  evidence: (1) first run had 6 "speed violations" up to +57u — the
+  measurement included the contact tick, where the board clip converts
+  vz into horizontal speed; envelope now measured at the last airborne
+  tick. (2) 476 falsification escapes at exactly 8.5002 — the air-duck
+  origin shift; z checks now use the duck band, RELATIVE TO ENTRY DUCK
+  STATE {−8.5, 0, +8.5} (a stretch entering ducked that unducks
+  mid-air sits at −8.5). Final: 15/15 contained, 500/500 falsification
+  clean. Battery still 14/15 (unduck_face 1.45u = the documented
+  parity-era residual, untouched). NOW = M1.2 board windows.

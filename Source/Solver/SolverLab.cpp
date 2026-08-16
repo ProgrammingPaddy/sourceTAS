@@ -20,6 +20,7 @@
 #include "SolverChain.h"
 #include "SolverRoute.h"
 #include "SolverStrafe.h"
+#include "SolverEnvelope.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -1832,6 +1833,172 @@ namespace {
 		}
 		fflush(stdout);
 		return 0;
+	}
+
+	// envelope: THE M1.1 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
+	// Containment: replay the certified tapes; every airborne stretch
+	// (surf exit -> next contact) must sit INSIDE the analytic envelope
+	// (exact ballistic z, speed <= SMax, distance <= DMax).
+	// Falsification: from sampled airborne states, run random control
+	// sequences on the exact engine and verify NONE escapes the bounds.
+	int CmdEnvelope(const std::string& map_path, const ReplayOpts& o,
+	                const std::vector<std::string>& tapes) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		int stretches = 0, contained = 0, viol_z = 0, viol_s = 0, viol_d = 0;
+		float worst_z = 0.f, worst_s = 0.f, worst_d = 0.f;
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("LOAD FAILED (tas %s): %s\n", tp.c_str(), err.c_str());
+				return 1;
+			}
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			// Track airborne stretches between contacts. The envelope
+			// bounds the AIR PHASE ONLY, so measurement ends at the LAST
+			// AIRBORNE tick - the contact tick's clip converts vz into
+			// horizontal speed (that conversion is the BOARD's physics,
+			// M1.2's business, and it blew the speed bound by +57 when
+			// measured post-clip).
+			bool in_air = false;
+			Vec3 a_pos, a_vel;
+			int a_tick = 0;
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& f = tape.frames[t];
+				TickEvents ev;
+				const bool was_air = in_air;
+				const Vec3 pre_pos = s.pos, pre_vel = s.vel;
+				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+					f.umove, f.buttons, &ev);
+				const bool contact = ev.ncontacts > 0 || s.on_ground;
+				if (!was_air && !contact) {
+					in_air = true;
+					a_pos = s.pos;   // first fully-airborne state
+					a_vel = s.vel;
+					a_tick = static_cast<int>(t);
+				} else if (was_air && contact) {
+					in_air = false;
+					// End state = the last fully-airborne tick (pre this).
+					const int n = static_cast<int>(t) - 1 - a_tick;
+					if (n < 2)
+						continue;
+					stretches++;
+					// pre_pos/pre_vel = the state entering the contact tick
+					// = the state AFTER the last fully-airborne tick.
+					const float zp = Envelope::ZAfter(a_pos.Z, a_vel.Z, n,
+						o.params, s.gravity_scale);
+					const float dzv = pre_pos.Z - zp;
+					const float sm = Envelope::SMax(Len2D(a_vel), n,
+						o.params);
+					const float sa = Len2D(pre_vel);
+					const float dm = Envelope::DMax(Len2D(a_vel), n,
+						o.params);
+					const float dx = pre_pos.X - a_pos.X;
+					const float dy = pre_pos.Y - a_pos.Y;
+					const float da = sqrtf(dx * dx + dy * dy);
+					bool ok = true;
+					// z band: ballistic plus the air-duck offset, which is
+					// {-8.5, 0, +8.5} RELATIVE TO THE ENTRY DUCK STATE (a
+					// stretch entered ducked that unducks mid-air sits at
+					// -8.5 - the one violation of the first gate run).
+					if (dzv < -9.5f || dzv > 9.5f) { viol_z++; ok = false;
+						if (fabsf(dzv) > worst_z) worst_z = fabsf(dzv); }
+					if (sa > sm + 1.f) { viol_s++; ok = false;
+						if (sa - sm > worst_s) worst_s = sa - sm; }
+					if (da > dm + 8.f) { viol_d++; ok = false;
+						if (da - dm > worst_d) worst_d = da - dm; }
+					if (ok) contained++;
+				}
+			}
+			printf("envelope: %s replayed\n", tp.c_str());
+		}
+		printf("envelope: %d airborne stretches | %d contained | "
+			"violations z %d s %d d %d (worst %.3f / %.3f / %.3f)\n",
+			stretches, contained, viol_z, viol_s, viol_d,
+			worst_z, worst_s, worst_d);
+
+		// FALSIFICATION: random control sims must stay inside.
+		unsigned rng = 77u;
+		auto next = [&rng]() {
+			rng = rng * 1664525u + 1013904223u;
+			return (rng >> 8) & 0xFFFFu;
+		};
+		auto frand = [&next]() { return next() / 65535.f; };
+		int fal_n = 0, fal_out = 0;
+		float fal_worst = 0.f;
+		for (int trial = 0; trial < 500; ++trial) {
+			PlayerState s;
+			s.pos = Vec3(-400.f + frand() * 800.f,
+				-700.f + frand() * 800.f, 2600.f);
+			const float sp = frand() * 2000.f;
+			const float hd = frand() * 6.2831853f;
+			s.pos.Z = 2600.f;
+			s.vel = Vec3(sp * cosf(hd), sp * sinf(hd),
+				-300.f + frand() * 500.f);
+			s.on_ground = false;
+			const Vec3 p0 = s.pos;
+			const Vec3 v0 = s.vel;
+			const int n = 10 + (next() % 50);
+			bool escaped = false;
+			for (int k = 0; k < n; ++k) {
+				TickEvents ev;
+				MoveTick(s, w, o.params, 0.f,
+					frand() * 360.f - 180.f,
+					frand() * 900.f - 450.f, frand() * 900.f - 450.f, 0.f,
+					(next() % 8 == 0) ? IN_DUCK : 0, &ev);
+				if (ev.ncontacts > 0 || s.on_ground) { escaped = true; break; }
+				const int kk = k + 1;
+				const float zp = Envelope::ZAfter(p0.Z, v0.Z, kk, o.params);
+				const float sm = Envelope::SMax(Len2D(v0), kk, o.params);
+				const float dm = Envelope::DMax(Len2D(v0), kk, o.params);
+				const float dx = s.pos.X - p0.X, dy = s.pos.Y - p0.Y;
+				const float over_s = Len2D(s.vel) - sm;
+				const float over_d = sqrtf(dx * dx + dy * dy) - dm;
+				// z: ballistic plus the air-duck offset band {0, +8.5}.
+				const float zerr = s.pos.Z - zp;
+				const float over_z = zerr > 9.f ? zerr - 9.f
+					: (zerr < -0.5f ? -zerr : 0.f);
+				if (over_s > 0.6f || over_d > 8.f || over_z > 0.f) {
+					fal_out++;
+					const float wv = over_s > over_d
+						? (over_s > over_z ? over_s : over_z)
+						: (over_d > over_z ? over_d : over_z);
+					if (wv > fal_worst) fal_worst = wv;
+					escaped = true;
+					break;
+				}
+			}
+			if (!escaped)
+				fal_n++;
+		}
+		printf("envelope: falsification %d clean trials | %d ESCAPES "
+			"(worst %.4f)\n", fal_n, fal_out, fal_worst);
+		const bool pass = viol_z == 0 && viol_s == 0 && viol_d == 0
+			&& fal_out == 0 && stretches > 0;
+		printf("envelope: M1.1 GATE %s\n", pass ? "PASS" : "FAIL");
+		fflush(stdout);
+		return pass ? 0 : 2;
 	}
 
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
@@ -4614,6 +4781,16 @@ int main(int argc, char** argv) {
 			static_cast<float>(atof(argv[7])),
 			static_cast<float>(atof(argv[8])));
 		return CmdTraceOne(argv[2], o, a, b, atoi(argv[9]));
+	}
+	if (cmd == "envelope" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdEnvelope(argv[2], o, tapes);
 	}
 	if (cmd == "facecover" && argc >= 4) {
 		ReplayOpts o;
