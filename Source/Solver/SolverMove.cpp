@@ -589,27 +589,39 @@ namespace Solver {
 				s.hull_state = 1;          // duck: flag and hull together
 				s.ducking = false;
 				if (ev && !already) ev->duck_changed = true;
-				if (!s.on_ground && !already) {
+				// The +8.5 re-base applies to a first-time duck in the air
+				// (isolated grades: already-ducked and grounded completions
+				// hold dz 0 across every class).
+				if (!s.on_ground && !already)
 					s.pos.Z += lift;
-					// FixPlayerCrouchStuck, ENGINE-EXACT: probe upward for a
-					// free spot and RESTORE THE ORIGINAL ORIGIN when none is
-					// found. The old loop kept every partial nudge, so a hull
-					// that never fits ended 18 units high - the exact
-					// 18.0000 offset seen across fuzz probes 3, 4, 11 and 13
-					// while the engine had not moved at all.
-					if (w.OriginInSolid(s.pos, true)) {
-						const Vec3 save = s.pos;
-						bool freed = false;
-						for (int i = 0; i < 36; ++i) {
-							s.pos.Z += 1.f;
-							if (!w.OriginInSolid(s.pos, true)) {
-								freed = true;
-								break;
-							}
+				// FixPlayerCrouchStuck runs UNCONDITIONALLY inside the
+				// engine's FinishDuck (isolated grades 2026-08-15: the 1u
+				// stuck ladder shows on already-ducked AND grounded rows -
+				// dz +17..+35 - not just on first-time air ducks). Probe
+				// upward for a free spot; RESTORE the origin when none is
+				// found (the keep-partial-nudge variant ended 18u high).
+				// The stuck test is the engine's TestPlayerPosition - a
+				// ZERO-LENGTH HULL TRACE with the certified startsolid
+				// semantics - not the legacy point test: the two disagree
+				// at sub-unit embedments and left us one ladder step short
+				// (ours -1056 vs engine -1055 across the residual family).
+				auto stuck = [&](const Vec3& at) {
+					TraceResult st;
+					w.TraceHull3(at, at, 1, &st);
+					return st.startsolid;
+				};
+				if (stuck(s.pos)) {
+					const Vec3 save = s.pos;
+					bool freed = false;
+					for (int i = 0; i < 36; ++i) {
+						s.pos.Z += 1.f;
+						if (!stuck(s.pos)) {
+							freed = true;
+							break;
 						}
-						if (!freed)
-							s.pos = save;
 					}
+					if (!freed)
+						s.pos = save;
 				}
 			};
 
@@ -624,22 +636,37 @@ namespace Solver {
 				if (s.ducking) {
 					const float elapsed = 1000.f - s.duck_timer_ms > 0.f
 						? 1000.f - s.duck_timer_ms : 0.f;
+					// ASYMMETRIC BOUNDARIES (isolated grades): the DUCK
+					// completes AT exactly TIME_TO_DUCK (>=, probe at
+					// elapsed 400 finished d1), while the UNDUCK below
+					// holds AT exactly TIME_TO_UNDUCK (strict >). Measured,
+					// not assumed - a strict > here broke the 400 row.
 					if (elapsed >= p.time_to_duck_ms || !s.on_ground
 						|| s.ducked)
 						finish_duck();
 				}
 			} else if (s.ducking || s.ducked) {
-				// Try to unduck. CanUnduck = the standing hull fits at the
-				// (air: dropped) candidate origin.
+				// Try to unduck. CanUnduck = a STANDING-hull SWEEP from the
+				// current origin to the (air: -8.5) candidate - the engine's
+				// own body (0x1f4b20) builds the shifted origin and runs
+				// TracePlayerBBox; free means no startsolid and a full
+				// fraction. The legacy point test disagreed at sub-unit
+				// embedments in BOTH directions (grounded roof rows blocked
+				// by the engine but "free" to the point test, and the
+				// (1380,-1444) air family the other way around).
+				// (The -18 full-hull-delta candidate was TRIED AND REVERTED
+				// 2026-08-15: it broke five battery decks; capture beats
+				// recollected SDK.)
 				const Vec3 cand = s.on_ground
 					? s.pos : Vec3(s.pos.X, s.pos.Y, s.pos.Z - lift);
-				// NOTE: the SDK's CanUnduck() offsets its test origin by the
-				// full hull delta (18) when airborne, not by the applied 8.5
-				// shift. TRIED AND REVERTED 2026-08-15: testing at -18 broke
-				// FIVE battery decks (engine-captured truth) and took the
-				// fuzz corpus 98.86% -> 96.61%. The measured 8.5 test is what
-				// this build does; recollected SDK source loses to capture.
-				if (!w.OriginInSolid(cand, false)) {
+				// ZERO-LENGTH standing test AT the candidate. TRIED AND
+				// REVERTED: a sweep from the current origin to cand scored
+				// WORSE (Duck 21 -> 58) - a floor below the -8.5 drop blocks
+				// a sweep the engine demonstrably allows, so the engine
+				// tests the destination box, not the path.
+				TraceResult ut;
+				w.TraceHull3(cand, cand, 0, &ut);
+				if (!ut.startsolid) {
 					// Release while FULLY ducked restarts the shared timer
 					// for the unduck transition; a mid-duck release keeps
 					// the press timer running (a 30ms tap stays "ducking"
@@ -650,7 +677,10 @@ namespace Solver {
 					}
 					const float elapsed = 1000.f - s.duck_timer_ms > 0.f
 						? 1000.f - s.duck_timer_ms : 0.f;
-					if (elapsed >= p.time_to_unduck_ms || !s.on_ground) {
+					// STRICT >: a grounded release at elapsed exactly
+					// TIME_TO_UNDUCK stays ducked one more tick (isolated
+					// grade: in-t 800 ground release held d1).
+					if (elapsed > p.time_to_unduck_ms || !s.on_ground) {
 						// FinishUnDuck. Binary-decoded (server.dll Duck
 						// @2eec76/2eec88 -> FinishUnDuck @2eea20): the AIR
 						// origin shift is UNCONDITIONAL - no was-ducked gate
@@ -674,8 +704,13 @@ namespace Solver {
 						}
 					}
 				} else {
-					// Blocked under geometry: reset so we retry next tick.
+					// Blocked under geometry: the engine resets the timer
+					// AND - on a release EDGE - sets m_bDucking (isolated
+					// grades: old4->btn0 blocked rows leave k1, old0->btn0
+					// blocked rows leave k unchanged; both leave t1000).
 					s.duck_timer_ms = 1000.f;
+					if (was && !want)
+						s.ducking = true;
 				}
 			}
 		}
@@ -700,15 +735,16 @@ namespace Solver {
 		}
 		bool CanUnduck(const PlayerState& s, const World& w,
 		               const MoveParams& p) {
-			// Our current rule (capture-fitted): the standing hull fits at
-			// the (air: -8.5) candidate origin. The engine's own body
-			// (client.dll 0x1f4b20) computes its shift from -0.5 * the
-			// GetViewVectors hull delta and runs a real sweep - the isolated
-			// grade arbitrates the two directly.
+			// The engine's rule (0x1f4b20): a zero-length STANDING-hull test
+			// AT the (air: -8.5) candidate origin - destination box, not the
+			// path (the sweep variant was tried and scored worse). Same test
+			// HandleDuck uses.
 			const Vec3 cand = s.on_ground
 				? s.pos
 				: Vec3(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
-			return !w.OriginInSolid(cand, false);
+			TraceResult ut;
+			w.TraceHull3(cand, cand, 0, &ut);
+			return !ut.startsolid;
 		}
 	}
 
