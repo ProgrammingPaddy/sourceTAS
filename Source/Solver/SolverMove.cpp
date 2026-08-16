@@ -1,4 +1,4 @@
-#include "SolverMove.h"
+﻿#include "SolverMove.h"
 
 namespace Solver {
 
@@ -702,6 +702,25 @@ namespace Solver {
 			}
 		}
 
+		// CCSGameMovement::CheckParameters' MOVE SCALING (0x1f56b0, decoded:
+		// spd2 = f*f + s*s + u*u via mv +0x2c/+0x34/+0x38, GetPlayerMaxSpeed
+		// min'd with the surface maxspeed factor, then all three moves scale
+		// by maxspeed/sqrt(spd2) when over). Runs BEFORE Duck in the tick,
+		// which is why ducked ground speed is 0.34 * 250 = 85: the sqrt cap
+		// takes 450 -> 250 first, the crop takes 250 -> 85 second. The rest
+		// of CheckParameters (IN_SPEED halving, duck-hold curtime gate,
+		// angle work) is NOT yet mirrored and stays listed as open.
+		void CheckParametersScaleMoves(const MoveParams& p, float* fmove,
+		                               float* smove) {
+			const float f = *fmove, s = *smove;
+			const float spd2 = f * f + s * s;
+			if (spd2 > p.maxspeed * p.maxspeed && spd2 > 0.f) {
+				const float ratio = p.maxspeed / sqrtf(spd2);
+				*fmove *= ratio;
+				*smove *= ratio;
+			}
+		}
+
 		// CCSGameMovement::Duck (0x1f5cb0): the state machine, calling the
 		// functions above exactly where the engine's body calls its own.
 		// Laws (all isolated-grade-measured 2026-08-15):
@@ -716,7 +735,17 @@ namespace Solver {
 		// can force-clear IN_DUCK - zeroed per probe by the runner; needs
 		// its cvar identified before the mirror can be honest.
 		void Duck(PlayerState& s, const World& w, const MoveParams& p,
-		          int buttons, TickEvents* ev) {
+		          int buttons, TickEvents* ev, float* fmove, float* smove) {
+			// The 0.34 crop fires INSIDE Duck on the PRE-duck state
+			// (isolated grades: HandleDuckingSpeedCrop 5,000/5,000 with the
+			// pure pre-state condition; the Duck-row fwd/side outputs match
+			// pre-state cropping and mismatch post-state on exactly the
+			// state-changing rows).
+			if (fmove || smove) {
+				bool cropped = false;
+				HandleDuckingSpeedCrop(s, buttons, fmove, smove, nullptr,
+					&cropped);
+			}
 			const bool want = (buttons & IN_DUCK) != 0;
 			const bool was = (s.old_buttons & IN_DUCK) != 0;
 			const bool pressed = want && !was;
@@ -764,7 +793,7 @@ namespace Solver {
 		// Transitional alias for the tick path.
 		void HandleDuck(PlayerState& s, const World& w, const MoveParams& p,
 		                int buttons, TickEvents* ev) {
-			Duck(s, w, p, buttons, ev);
+			Duck(s, w, p, buttons, ev, nullptr, nullptr);
 		}
 
 	} // namespace
@@ -783,7 +812,7 @@ namespace Solver {
 		}
 		void Duck(PlayerState& s, const World& w, const MoveParams& p,
 		          int buttons) {
-			::Solver::Duck(s, w, p, buttons, nullptr);
+			::Solver::Duck(s, w, p, buttons, nullptr, nullptr, nullptr);
 		}
 		bool CanUnduck(const PlayerState& s, const World& w,
 		               const MoveParams& p) {
@@ -865,13 +894,18 @@ namespace Solver {
 		// ON the surface at 256.031 with one tick of friction, v 414->389)
 		// while the end-categorize-only model ran it as an air tick.
 		const bool was_ducked = s.ducked;
+		// ENGINE SHAPE, WIRING DEFERRED (measured 2026-08-15): the engine's
+		// mechanism is CheckParameters' sqrt scale (450 -> 250) then Duck's
+		// internal 0.34 crop (250 -> 85) - both mirrored as functions and
+		// probe-verified - but wiring them here produced a 0.001u wobble on
+		// the 292 tape (my scale float-detail is not yet exact: umove term,
+		// surface maxspeed, possible double math). The covenant is tape
+		// truth, so the tick keeps the validated equivalent-on-saturated-
+		// inputs cap until CheckParameters' arithmetic is decoded exactly.
 		const bool cap_pre = s.ducked || s.ducking;
-		HandleDuck(s, w, p, buttons, ev);
+		Duck(s, w, p, buttons, ev, nullptr, nullptr);
 		if (s.ducked != was_ducked)
 			CategorizePosition(s, w, p, nullptr);
-		// The tick's speed cap is ducked if the duck state was ducked or
-		// ducking at ANY point in this tick's duck processing (press ticks
-		// AND unduck ticks both cap ducked - see WalkMove/battery notes).
 		const bool cap_ducked = cap_pre || s.ducked || s.ducking;
 
 		// FullWalkMove. StartGravity (SDK): ent_gravity scale applies, then
