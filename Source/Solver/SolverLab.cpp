@@ -21,6 +21,7 @@
 #include "SolverRoute.h"
 #include "SolverStrafe.h"
 #include "SolverEnvelope.h"
+#include "SolverBoard.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -1997,6 +1998,231 @@ namespace {
 		const bool pass = viol_z == 0 && viol_s == 0 && viol_d == 0
 			&& fal_out == 0 && stretches > 0;
 		printf("envelope: M1.1 GATE %s\n", pass ? "PASS" : "FAIL");
+		fflush(stdout);
+		return pass ? 0 : 2;
+	}
+
+	// boardwin: THE M1.2 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
+	// Two halves:
+	//  A. TAPE BOARDS - replay the certified tapes, and for every
+	//     air->surf first clip check the recorded contact against the
+	//     face's window: approaching (dot < 0), in-region (hull-slack
+	//     edge distance), analytic min-loss lower bound holds, and the
+	//     clip-loss MODEL is engine-exact (|v1|^2 - dot^2 vs the
+	//     mirror's own measured loss). The measured |dot| distribution
+	//     is REPORTED - that number is expert evidence, not a fit.
+	//  B. SPOT CHECK - synthetic zero-input states sampled across every
+	//     face and the aim spectrum (tangent grazes to head-on boards);
+	//     the closed-form clip-tick prediction must match MoveTick and
+	//     every observed dot must sit inside the analytic DotRange.
+	int CmdBoardWin(const std::string& map_path, const ReplayOpts& o,
+	                const std::vector<std::string>& tapes) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("boardwin: %s\n", err.c_str());
+			return 1;
+		}
+		auto find_face = [&](int brush, int plane) {
+			for (size_t i = 0; i < g.faces.size(); ++i)
+				if (g.faces[i].brush == brush && g.faces[i].side == plane)
+					return static_cast<int>(i);
+			return -1;
+		};
+
+		// ---- A: tape boards -------------------------------------------
+		int boards = 0, creases = 0, unmapped = 0;
+		int bad_approach = 0, bad_region = 0, bad_minlaw = 0, bad_model = 0;
+		float max_dot = 0.f, max_frac = 0.f, max_edge = -1e9f;
+		float worst_model = 0.f;
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("LOAD FAILED (tas %s): %s\n", tp.c_str(), err.c_str());
+				return 1;
+			}
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			bool was_air = false;
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& f = tape.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+					f.umove, f.buttons, &ev);
+				const bool air_now = ev.ncontacts == 0 && !s.on_ground;
+				// A board = the first SURF clip arriving from the air.
+				if (was_air && ev.ncontacts > 0) {
+					const int b = ev.contact_brush[0];
+					const int pl = ev.contact_plane[0];
+					if (b >= 0 && pl >= 0) {
+						const Vec3& n = w.brushes[b].n[pl];
+						if (n.Z > 0.f && n.Z < o.params.walkable_z) {
+							const int fi = find_face(b, pl);
+							if (fi < 0) {
+								unmapped++;
+							} else if (ev.ncontacts > 1) {
+								creases++;   // multi-plane: not the
+								             // window's single-clip claim
+							} else {
+								boards++;
+								const Route::Face& fc = g.faces[fi];
+								const Vec3& v1 = ev.contact_vel[0];
+								const float dot = Dot(v1, fc.n);
+								const float edge = Board::EdgeDistOut(fc,
+									ev.contact_pos[0]);
+								const float sp1 = Len(v1);
+								if (dot >= 0.f) bad_approach++;
+								if (edge > Board::kHullCenterSlack)
+									bad_region++;
+								if (edge > max_edge) max_edge = edge;
+								if (-dot > max_dot) max_dot = -dot;
+								const float frac = sp1 > 1.f
+									? (dot * dot) / (sp1 * sp1) : 0.f;
+								if (frac > max_frac) max_frac = frac;
+								// Analytic min-loss lower bound.
+								const float md = Board::MinApproachDot(
+									Len2D(v1), v1.Z, fc.n);
+								if (md > -dot + 1e-2f) bad_minlaw++;
+								// Model exactness vs the mirror's own
+								// measured post-clip speed.
+								const float post_meas = sp1
+									- ev.contact_loss[0];
+								Vec3 pv;
+								Fn::ClipVelocity(v1, fc.n, &pv);
+								const float dmodel =
+									fabsf(Len(pv) - post_meas);
+								if (dmodel > worst_model)
+									worst_model = dmodel;
+								if (dmodel > 0.05f) bad_model++;
+							}
+						}
+					}
+				}
+				was_air = air_now;
+			}
+			printf("boardwin: %s replayed\n", tp.c_str());
+		}
+		printf("boardwin: %d tape boards (%d crease, %d unmapped) | "
+			"approach %d bad | region %d bad (max edge %.1fu) | "
+			"min-law %d bad | model %d bad (worst %.4f u/s)\n",
+			boards, creases, unmapped, bad_approach, bad_region,
+			max_edge, bad_minlaw, bad_model, worst_model);
+		printf("boardwin: measured expert boards: max |dot| %.1f u/s, "
+			"max loss fraction %.4f\n", max_dot, max_frac);
+
+		// ---- B: spot check across faces and the aim spectrum ----------
+		unsigned rng = 1234u;
+		auto next = [&rng]() {
+			rng = rng * 1664525u + 1013904223u;
+			return (rng >> 8) & 0xFFFFu;
+		};
+		auto frand = [&next]() { return next() / 65535.f; };
+		int checked = 0, cone_bad = 0, pred_bad = 0;
+		float worst_pred = 0.f, worst_dotp = 0.f;
+		const float speeds[3] = { 300.f, 800.f, 1400.f };
+		const float vzs[3] = { -400.f, -150.f, 150.f };
+		const float phis_deg[8] = { -80.f, -55.f, -30.f, -8.f,
+		                            8.f, 30.f, 55.f, 80.f };
+		for (size_t fi = 0; fi < g.faces.size(); ++fi) {
+			const Route::Face& fc = g.faces[fi];
+			const float h = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
+			if (h < 1e-4f || fc.verts.size() < 3)
+				continue;
+			const float inx = -fc.n.X / h, iny = -fc.n.Y / h; // into face
+			for (int trial = 0; trial < 3; ++trial) {
+				// Random interior point (convex polygon).
+				Vec3 q = fc.centroid;
+				for (size_t vi = 0; vi < fc.verts.size(); ++vi)
+					q = q + Scale(fc.verts[vi] - fc.centroid,
+						frand() * 0.5f / fc.verts.size());
+				for (int si = 0; si < 3; ++si)
+				for (int zi = 0; zi < 3; ++zi)
+				for (int pi = 0; pi < 8; ++pi) {
+					const float sp = speeds[si];
+					const float phi = phis_deg[pi] * 0.017453293f;
+					const float c = cosf(phi), sn = sinf(phi);
+					// Aim = into-face dir rotated by phi around z.
+					const float ax = inx * c - iny * sn;
+					const float ay = inx * sn + iny * c;
+					PlayerState s;
+					s.pos = q + Scale(fc.n, 25.f + frand() * 30.f);
+					s.pos.Z += 20.f;
+					s.vel = Vec3(sp * ax, sp * ay, vzs[zi]);
+					s.on_ground = false;
+					for (int k = 0; k < 80; ++k) {
+						const Vec3 pre_vel = s.vel;
+						TickEvents ev;
+						MoveTick(s, w, o.params, 0.f, 0.f, 0.f, 0.f,
+							0.f, 0, &ev);
+						if (s.on_ground)
+							break;
+						if (ev.ncontacts == 0)
+							continue;
+						// First contact: only grade OUR face, single
+						// plane (other geometry / creases: discard).
+						if (ev.ncontacts == 1
+							&& ev.contact_brush[0] == fc.brush
+							&& ev.contact_plane[0] == fc.side) {
+							checked++;
+							const Vec3& v1 = ev.contact_vel[0];
+							// v1 must equal pre_vel + StartGravity
+							// (zero input), and dot must sit in the
+							// analytic range for (s2d, vz).
+							Vec3 v1p = pre_vel;
+							v1p.Z -= s.gravity_scale * o.params.gravity
+								* 0.5f * o.params.dt;
+							const float ddp = fabsf(Dot(v1, fc.n)
+								- Dot(v1p, fc.n));
+							if (ddp > worst_dotp) worst_dotp = ddp;
+							float lo, hi;
+							Board::DotRange(Len2D(v1), v1.Z, fc.n,
+								&lo, &hi);
+							const float dot = Dot(v1, fc.n);
+							if (dot < lo - 1e-3f || dot > hi + 1e-3f)
+								cone_bad++;
+							// Closed-form clip-tick vs the exact tick.
+							const Vec3 pv = Board::PredictClipTickVel(
+								pre_vel, fc.n, o.params,
+								s.gravity_scale);
+							const float dp = Len(pv - s.vel);
+							if (dp > worst_pred) worst_pred = dp;
+							if (dp > 0.05f) pred_bad++;
+						}
+						break;   // any contact ends the sample
+					}
+				}
+			}
+		}
+		printf("boardwin: spot check %d single-plane strikes | cone %d "
+			"bad | predict %d bad (worst vel %.4f u/s, worst dot "
+			"%.5f)\n", checked, cone_bad, pred_bad, worst_pred,
+			worst_dotp);
+		const bool pass = boards > 0 && bad_approach == 0
+			&& bad_region == 0 && bad_minlaw == 0 && bad_model == 0
+			&& unmapped == 0 && checked >= 50 && cone_bad == 0
+			&& pred_bad == 0;
+		printf("boardwin: M1.2 GATE %s\n", pass ? "PASS" : "FAIL");
 		fflush(stdout);
 		return pass ? 0 : 2;
 	}
@@ -4801,6 +5027,16 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdFaceCover(argv[2], o, tapes);
+	}
+	if (cmd == "boardwin" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdBoardWin(argv[2], o, tapes);
 	}
 	if (cmd == "strafelaw" && argc >= 3) {
 		ReplayOpts o;

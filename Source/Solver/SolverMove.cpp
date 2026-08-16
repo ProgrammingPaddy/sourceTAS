@@ -78,6 +78,8 @@ namespace Solver {
 						ev->contact_brush[ev->ncontacts] = tr.brush;
 						ev->contact_plane[ev->ncontacts] = tr.plane;
 						ev->contact_loss[ev->ncontacts] = Len(primal_v);
+						ev->contact_pos[ev->ncontacts] = s.pos;
+						ev->contact_vel[ev->ncontacts] = primal_v;
 						ev->ncontacts++;
 					}
 					break;
@@ -113,6 +115,10 @@ namespace Solver {
 					ev->contact_brush[ev->ncontacts] = tr.brush;
 					ev->contact_plane[ev->ncontacts] = tr.plane;
 					ev->contact_loss[ev->ncontacts] = 0.f;
+					// s.pos = the impact point (the partial move already
+					// ran); s.vel = the velocity entering this bump's clip.
+					ev->contact_pos[ev->ncontacts] = s.pos;
+					ev->contact_vel[ev->ncontacts] = s.vel;
 					ev->ncontacts++;
 				}
 				if (numplanes >= 5) {
@@ -844,6 +850,9 @@ namespace Solver {
 				if (s.duck_timer_ms < 0.f)
 					s.duck_timer_ms = 0.f;
 			}
+		}
+		void ClipVelocity(const Vec3& in, const Vec3& n, Vec3* out) {
+			EngineClipVelocity(in, n, *out);
 		}
 	}
 

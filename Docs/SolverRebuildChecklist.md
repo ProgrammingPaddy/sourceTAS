@@ -9,7 +9,7 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M1.2 board windows per face.
+**NOW →** M1.3 air-phase yaw-spline primitive.
 
 ---
 
@@ -76,11 +76,24 @@ a measurable pass/fail, never a vibe.
       into horizontal speed = M1.2's business); z sits in a duck-offset
       band {−8.5, 0, +8.5} RELATIVE TO ENTRY DUCK STATE, not on the
       ballistic point.
-- [ ] 1.2 Board window per face: region × velocity cone with clip loss
-      below threshold (tangent-dominant per testimony §2.1), including
-      side/mid-face boards.
-      GATE: every tape board lands inside its face's window; window
-      edge cases spot-checked against the exact engine.
+- [x] 1.2 Board window per face (`SolverBoard.h` + `boardwin` gate):
+      closed-form clip physics — dot = v1·n sweeps [vz·nz − s·h,
+      vz·nz + s·h] over aim; speed² loss = dot² EXACTLY; MinApproachDot
+      = the tangency law (0 ⇔ s·h ≥ |vz·nz|, else unavoidable loss);
+      AimCone(cap); polygon region test with hull-center slack 43u
+      (=|(16,16,36)|, geometric). TickEvents grew contact_pos/
+      contact_vel (pure instrumentation); Fn::ClipVelocity exposed.
+      GATE PASSED first run: 13/13 tape boards approaching + in-region
+      (max edge −0.4u) + min-law held + clip model EXACT vs the
+      mirror's own measured loss (worst 0.0000 u/s); spot check 827
+      single-plane strikes across all faces × aim spectrum, 0 cone
+      violations, closed-form zero-input clip-tick prediction matches
+      MoveTick exactly (StartGravity → clip → FinishGravity decomposition
+      confirmed). FINDING: the certified tapes' worst board = |dot|
+      432 u/s = 38.5% of speed² lost — the OLD solver's board quality
+      quantified (these tapes are parity-certified, not optimality-
+      certified). The expert cap must come from the demo traces (M1.5
+      ledger), NOT from these tapes.
 - [ ] 1.3 Air-phase primitive: yaw-spline boundary-value solver (entry
       state → target board window), knots capped by 0.6; solved on the
       exact engine.
@@ -210,3 +223,11 @@ a measurable pass/fail, never a vibe.
   mid-air sits at −8.5). Final: 15/15 contained, 500/500 falsification
   clean. Battery still 14/15 (unduck_face 1.45u = the documented
   parity-era residual, untouched). NOW = M1.2 board windows.
+- 2026-08-16 (later): M1.2 GATE PASSED first run (boardwin: 13/13 tape
+  boards contained, clip model + zero-input tick decomposition both
+  EXACT vs the engine mirror; 827 synthetic strikes, 0 violations).
+  Board physics is now closed-form: loss² = (v1·n)², min-loss law
+  max(0, |vz|·nz − s·h)², aim cone per cap. KEY FINDING for the
+  mission: the old solver's tapes contain a 38.5%-of-speed² board —
+  the "needlessly lost energy on boards" the user diagnosed, now a
+  number the ledger can chase. NOW = M1.3 yaw-spline air primitive.

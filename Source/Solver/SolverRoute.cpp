@@ -8,11 +8,7 @@ namespace Route {
 
 	namespace {
 
-		Vec3 Cross(const Vec3& a, const Vec3& b) {
-			return Vec3(a.Y * b.Z - a.Z * b.Y,
-			            a.Z * b.X - a.X * b.Z,
-			            a.X * b.Y - a.Y * b.X);
-		}
+		// (Cross now lives in SolverMath.h.)
 		Vec3 Norm(const Vec3& v) {
 			const float l = Len(v);
 			return l > 1e-12f ? Scale(v, 1.f / l) : Vec3(0, 0, 0);

@@ -148,6 +148,9 @@ namespace Solver {
 		int   contact_brush[4];    // World::brushes indices struck this tick
 		int   contact_plane[4];
 		float contact_loss[4];     // speed the clip resolution removed (u/s)
+		// M1.2 board instrumentation (pure observability, no behavior):
+		Vec3  contact_pos[4];      // hull-center position at the impact
+		Vec3  contact_vel[4];      // velocity ENTERING the clip for the bump
 		int   ncontacts = 0;
 		bool  jumped = false;
 		bool  landed = false;      // air -> ground this tick
@@ -182,6 +185,10 @@ namespace Solver {
 		                            float* fwd, float* side);
 		// CCSGameMovement::ReduceTimers (vtable +100 = 0x1f7600).
 		void ReduceTimers(PlayerState& s, const MoveParams& p);
+		// CGameMovement::ClipVelocity, overbounce 1 (the TryPlayerMove
+		// clip). Exposed for M1.2 board-window prediction - SINGLE source
+		// of truth, forwards to the mirror's internal helper.
+		void ClipVelocity(const Vec3& in, const Vec3& n, Vec3* out);
 	}
 
 } // namespace Solver

@@ -21,6 +21,11 @@ namespace Solver {
 	inline float Len2(const Vec3& v) { return Dot(v, v); }
 	inline float Len(const Vec3& v) { return sqrtf(Len2(v)); }
 	inline float Len2D(const Vec3& v) { return sqrtf(v.X * v.X + v.Y * v.Y); }
+	inline Vec3 Cross(const Vec3& a, const Vec3& b) {
+		return Vec3(a.Y * b.Z - a.Z * b.Y,
+		            a.Z * b.X - a.X * b.Z,
+		            a.X * b.Y - a.Y * b.X);
+	}
 
 	constexpr float kPi = 3.14159265358979323846f;
 	inline float Deg2Rad(float d) { return d * (kPi / 180.f); }
