@@ -139,6 +139,8 @@ namespace {
 		std::string seed_tas;
 		std::string anchor_file;
 		std::string anchor_tas;
+		std::string sites_csv;   // funcgen --sites: mismatch manifest for
+		                         // TARGETED probe batteries at disputed spots
 		std::string out_tas;
 		std::string out_eloss;      // also write the min-dissipation finisher
 		std::string trace_log;      // replay: dump every TraceHull query+answer
@@ -262,6 +264,7 @@ namespace {
 			else if (a == "--dump-reach") o.fuzz_dump_reach = true;
 			// funcgen: playback CSV whose grounded ticks become CONTROL probes
 			else if (a == "--control") { if (i + 1 < argc) o.anchor_tas = argv[++i]; else ok = false; }
+			else if (a == "--sites") { if (i + 1 < argc) o.sites_csv = argv[++i]; else ok = false; }
 			else if (a == "--cell") ok = next_f(&o.cell);
 			else if (a == "--max-ticks") ok = next_i(&o.max_ticks);
 			else if (a == "--threads") ok = next_i(&o.threads);
@@ -936,6 +939,52 @@ namespace {
 					hc_d ? 54.f : 72.f, span(-180.f, 180.f),
 					span(-450.f, 450.f), span(-450.f, 450.f));
 				wrote++;
+			}
+		}
+
+		// TARGETED batteries at DISPUTED sites (--sites <mismatch csv>, the
+		// manifest funcdiff wrote): each site gets a dense duck-family
+		// battery on a small jitter fan - the isolated functions answer at
+		// exactly the positions the model and engine disagree about.
+		if (!o.sites_csv.empty()) {
+			FILE* sf = nullptr;
+			if (fopen_s(&sf, o.sites_csv.c_str(), "r") == 0 && sf) {
+				char l[512];
+				int sites = 0;
+				const float sj[3] = { 0.f, -0.5f, 0.5f };
+				while (fgets(l, sizeof(l), sf)) {
+					if (l[0] == '#' || l[0] == 'f') continue;
+					char fn[48] = "";
+					float sx, sy, sz, cz;
+					int sd, sg;
+					if (sscanf_s(l, "%47[^,],%f,%f,%f,%d,%d,%f",
+						fn, static_cast<unsigned>(sizeof(fn)),
+						&sx, &sy, &sz, &sd, &sg, &cz) != 7)
+						continue;
+					sites++;
+					for (int jx = 0; jx < 3; ++jx)
+					for (int jz = 0; jz < 3; ++jz) {
+						const float x = sx + sj[jx], y = sy, z = sz + sj[jz];
+						// CanUnduck from ducked, both vz classes.
+						fprintf(f, "CanUnduck,%.9g,%.9g,%.9g,0,0,0,"
+							"0,0,0,1,1,0,%d,0,0,1,1,54,0,0,0,%d\n",
+							x, y, z, IN_DUCK, IN_DUCK);
+						wrote++;
+						// FinishDuck from both already-states.
+						fprintf(f, "FinishDuck,%.9g,%.9g,%.9g,0,0,0,"
+							"0,0,0,1,%d,1,0,600,0,1,1,%.9g,0,0,0,0\n",
+							x, y, z, jx & 1, (jx & 1) ? 54.f : 72.f);
+						wrote++;
+						// Duck release edge (the blocked-family shape).
+						fprintf(f, "Duck,%.9g,%.9g,%.9g,0,0,0,"
+							"0,0,0,1,1,0,0,%.9g,0,1,1,54,0,0,0,%d\n",
+							x, y, z, (jz & 1) ? 999.f : 200.f, IN_DUCK);
+						wrote++;
+					}
+				}
+				fclose(sf);
+				printf("funcgen: targeted batteries at %d disputed site(s)\n",
+					sites);
 			}
 		}
 		fclose(f);
