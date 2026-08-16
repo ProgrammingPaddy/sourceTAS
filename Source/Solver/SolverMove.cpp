@@ -628,17 +628,31 @@ namespace Solver {
 		//    (fraction < 1) - NOT iff the destination overlaps. The earlier
 		//    "destination box" and "frac>=1 && !startsolid" variants each
 		//    modeled half of this and each broke the other half.
+		// DECODED VERBATIM from 0x1f4b20's tail (2026-08-15): ONE raw
+		// TraceRay from mv->origin to newOrigin with the STANDING hull
+		// (grounded: newOrigin == origin -> UNSWEPT; air: -8.5), verdict
+		// @1f4f94: return !trace.startsolid && trace.fraction == 1.0. The
+		// RAW-RAY unswept path consults LEAF CONTENTS (the 212 grounded
+		// blocked-while-brush-clear rows on the ceiling slab), so the leaf
+		// rule applies HERE for the unswept case - TestPlayerPosition
+		// consumers (crouch-stuck ladder, stuck-guard) measurably do not
+		// inherit it. This is also the surf ramp-ride rule: mid-ride the
+		// -8.5 sweep clips the ramp (fraction < 1) and the unduck refuses
+		// until the feet clear the surface.
 		bool CanUnduck(const PlayerState& s, const World& w,
 		               const MoveParams& p) {
-			if (s.on_ground) {
-				TraceResult ut;
-				w.TraceHull3(s.pos, s.pos, 0, &ut);
-				return !ut.startsolid;
-			}
-			const Vec3 cand(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
+			const Vec3 cand = s.on_ground
+				? s.pos
+				: Vec3(s.pos.X, s.pos.Y, s.pos.Z - p.duck_air_shift);
 			TraceResult ut;
 			const float uf = w.TraceHull3(s.pos, cand, 0, &ut);
-			return uf >= 1.f;
+			if (ut.startsolid || uf < 1.f)
+				return false;
+			if (s.on_ground
+				&& w.BoxInSolidLeaf(s.pos, w.HullDims().stand_min,
+					w.HullDims().stand_max))
+				return false;   // unswept raw ray: leaf contents count
+			return true;
 		}
 
 		// CCSGameMovement::FinishUnDuck (0x1f6840): derives the same
@@ -783,6 +797,20 @@ namespace Solver {
 			bool cropped = false;
 			::Solver::HandleDuckingSpeedCrop(s, buttons, fwd, side, nullptr,
 				&cropped);
+		}
+		void ReduceTimers(PlayerState& s, const MoveParams& p) {
+			// The tick's drains, exactly as MoveTick runs them (the CS body
+			// drains stamina; the base drains the duck timer).
+			if (s.stamina > 0.f) {
+				s.stamina -= p.dt * 1000.f;
+				if (s.stamina < 0.f)
+					s.stamina = 0.f;
+			}
+			if (s.duck_timer_ms > 0.f) {
+				s.duck_timer_ms -= p.dt * 1000.f;
+				if (s.duck_timer_ms < 0.f)
+					s.duck_timer_ms = 0.f;
+			}
 		}
 	}
 

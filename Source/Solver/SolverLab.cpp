@@ -942,6 +942,23 @@ namespace {
 			}
 		}
 
+		// ReduceTimers: pure timer drains - value sweeps across every
+		// boundary (zero, sub-tick remainders, the exact stamina arm).
+		{
+			const float kT[10] = { 0.f, 0.001f, 1.f, 14.999f, 15.f, 15.001f,
+				200.f, 400.f, 1000.f, 25000.f / 19.f };
+			for (int a = 0; a < 10; ++a)
+			for (int b = 0; b < 10; ++b) {
+				fprintf(f, "ReduceTimers,%.9g,%.9g,%.9g,0,0,0,"
+					"0,0,0,1,0,%d,0,%.9g,%.9g,1,1,72,0,0,0,0\n",
+					span(-2000.f, 2000.f), span(-2000.f, 1000.f),
+					span(-1000.f, 1400.f),
+					(a & 1),
+					kT[a], kT[b]);
+				wrote++;
+			}
+		}
+
 		// TARGETED batteries at DISPUTED sites (--sites <mismatch csv>, the
 		// manifest funcdiff wrote): each site gets a dense duck-family
 		// battery on a small jitter fan - the isolated functions answer at
@@ -1140,6 +1157,7 @@ namespace {
 		int fdexact = 0, fdbad = 0, fdshown = 0;
 		int fuexact = 0, fubad = 0;
 		int hcexact = 0, hcbad = 0;
+		int rtexact = 0, rtbad = 0;
 		int crop_match = 0, crop_bad = 0;
 		// Mismatch MANIFEST: every graded miss becomes one row that
 		// tracegen-quads can turn into direct box-oracle questions.
@@ -1221,6 +1239,15 @@ namespace {
 				const bool cok = fabsf(rs[i].fwd - fwd) <= 0.01f
 					&& fabsf(rs[i].side - side) <= 0.01f;
 				if (cok) hcexact++; else { hcbad++;
+					note_mm(ps[i].fn, ps[i], pre_g, ps[i].oz); }
+				continue;
+			}
+			if (strcmp(ps[i].fn, "ReduceTimers") == 0) {
+				Fn::ReduceTimers(s, o.params);
+				const bool rok =
+					fabsf(rs[i].ducktime - s.duck_timer_ms) <= 0.001f
+					&& fabsf(rs[i].stamina - s.stamina) <= 0.001f;
+				if (rok) rtexact++; else { rtbad++;
 					note_mm(ps[i].fn, ps[i], pre_g, ps[i].oz); }
 				continue;
 			}
@@ -1346,6 +1373,9 @@ namespace {
 		if (hcexact + hcbad > 0)
 			printf("funcdiff: HandleDuckingSpeedCrop | %d probes | EXACT %d | "
 				"MISMATCH %d\n", hcexact + hcbad, hcexact, hcbad);
+		if (rtexact + rtbad > 0)
+			printf("funcdiff: ReduceTimers       | %d probes | EXACT %d | "
+				"MISMATCH %d\n", rtexact + rtbad, rtexact, rtbad);
 		// Write the mismatch manifest beside the results file - the input
 		// tracegen-quads turns into direct box-oracle questions.
 		{

@@ -175,6 +175,8 @@ namespace Solver {
 		                  const MoveParams& p);
 		void HandleDuckingSpeedCrop(const PlayerState& s, int buttons,
 		                            float* fwd, float* side);
+		// CCSGameMovement::ReduceTimers (vtable +100 = 0x1f7600).
+		void ReduceTimers(PlayerState& s, const MoveParams& p);
 	}
 
 } // namespace Solver
