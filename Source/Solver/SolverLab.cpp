@@ -1691,10 +1691,12 @@ namespace {
 		// probe and the same position repeats across a battery fan.
 		std::vector<long long> seen_sites;
 		auto site_seen = [&](const M& m) {
+			// 4u granularity: a battery's jitter fan (+/-2) collapses to
+			// one site; distinct disputed spots stay distinct.
 			const long long key =
-				(static_cast<long long>(lroundf(m.ox * 2.f)) << 32)
-				^ (static_cast<long long>(lroundf(m.oy * 2.f)) << 12)
-				^ static_cast<long long>(lroundf(m.oz * 2.f));
+				(static_cast<long long>(lroundf(m.ox * 0.25f)) << 32)
+				^ (static_cast<long long>(lroundf(m.oy * 0.25f)) << 12)
+				^ static_cast<long long>(lroundf(m.oz * 0.25f));
 			for (long long s : seen_sites)
 				if (s == key)
 					return true;
