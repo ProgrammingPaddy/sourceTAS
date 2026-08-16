@@ -8538,17 +8538,22 @@ namespace {
 		struct Row { float sim; Vector pos; float pitch, yaw; };
 		std::vector<Row> g_rows;
 
+		// ALL offsets resolve from the DT_CSPlayer root (capture fix round
+		// 3): the walker recursion from the player class is the PROVEN path
+		// (Prediction resolves m_vecOrigin this way); the first version
+		// rooted at DT_BaseEntity/DT_BasePlayer and captured ZERO rows all
+		// session - the sim-time gate never saw a real value.
 		int OffOrigin() {
-			static int o = NetVars::Offset("DT_BaseEntity", "m_vecOrigin");
+			static int o = NetVars::Offset("DT_CSPlayer", "m_vecOrigin");
 			return o;
 		}
 		int OffSim() {
-			static int o = NetVars::Offset("DT_BaseEntity",
+			static int o = NetVars::Offset("DT_CSPlayer",
 				"m_flSimulationTime");
 			return o;
 		}
 		int OffObs() {
-			static int o = NetVars::Offset("DT_BasePlayer",
+			static int o = NetVars::Offset("DT_CSPlayer",
 				"m_hObserverTarget");
 			return o;
 		}
@@ -8558,9 +8563,27 @@ namespace {
 			return o;
 		}
 
+		void Log(const char* fmt, ...) {
+			const std::string dir = SolverDir() + "\\demo_traces";
+			CreateDirectoryA(dir.c_str(), nullptr);
+			FILE* f = nullptr;
+			if (fopen_s(&f, (dir + "\\capture.log").c_str(), "a") != 0 || !f)
+				return;
+			va_list ap;
+			va_start(ap, fmt);
+			vfprintf(f, fmt, ap);
+			va_end(ap);
+			fprintf(f, "\n");
+			fclose(f);
+		}
+
 		void Flush() {
 			if (g_idx < 0 || g_idx >= static_cast<int>(g_queue.size()))
 				return;
+			Log("demo %d/%d %s: %d rows, offsets origin=%d sim=%d obs=%d "
+				"eye=%d", g_idx + 1, static_cast<int>(g_queue.size()),
+				g_queue[g_idx].c_str(), static_cast<int>(g_rows.size()),
+				OffOrigin(), OffSim(), OffObs(), OffEye());
 			if (g_rows.size() < 10) {   // junk capture: don't write noise
 				g_rows.clear();
 				return;
@@ -8608,7 +8631,15 @@ namespace {
 					"queue DONE - traces in solver\\demo_traces");
 				return;
 			}
-			Launch();
+			// NEVER fire the next transition immediately (round 3): wait
+			// for a SETTLED menu first - racing the engine's own teardown
+			// with a fresh playdemo produced the stuck-load session.
+			g_phase = 5;
+			g_frames = 0;
+			g_stagnant = 0;
+			_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+				"waiting for menu before demo %d/%d", g_idx + 1,
+				static_cast<int>(g_queue.size()));
 		}
 
 		void Launch() {
@@ -8661,21 +8692,32 @@ namespace {
 			if (g_phase == 0)
 				return;
 			g_frames++;
+			if (g_phase == 5) {   // settle: stable MENU before the next demo
+				if (engine && engine->IsInGame()) {
+					g_stagnant = 0;   // still tearing down / still in game
+				} else if (++g_stagnant > 180) {   // ~3s of stable menu
+					Launch();
+					return;
+				}
+				if (g_frames > 3600) {
+					_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+						"menu never settled - queue aborted");
+					TasEditor::ClearEngineCmds();
+					g_phase = 0;
+					g_idx = -1;
+				}
+				return;
+			}
 			if (g_phase == 4) {   // waiting for the disconnect to land
 				if (engine && !engine->IsInGame()) {
-					char cmd[600];
-					_snprintf_s(cmd, sizeof(cmd), _TRUNCATE,
-						"playdemo \"%s\"", g_queue[g_idx].c_str());
-					TasEditor::PushEngineCmd(cmd);
-					g_phase = 2;
+					// settle like phase 5 rather than firing instantly
+					g_phase = 5;
 					g_frames = 0;
-					_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
-						"loading %d/%d: %s", g_idx + 1,
-						static_cast<int>(g_queue.size()),
-						g_queue[g_idx].c_str());
+					g_stagnant = 0;
 				} else if (g_frames > 3600) {
 					_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
 						"disconnect never landed - aborting queue");
+					TasEditor::ClearEngineCmds();
 					g_phase = 0;
 					g_idx = -1;
 				}
@@ -8689,8 +8731,19 @@ namespace {
 						"capturing %d/%d", g_idx + 1,
 						static_cast<int>(g_queue.size()));
 				} else if (g_frames > 5400) {   // ~90s load timeout
-					TasEditor::ClearEngineCmds();   // never fire late
-					Advance();
+					// ABORT THE WHOLE QUEUE (round 3): pushing the next
+					// playdemo at a possibly-stuck loading engine was the
+					// "stuck on loading, weird mouse" session. Leave the
+					// engine alone and report.
+					TasEditor::ClearEngineCmds();
+					Log("demo %d/%d %s: LOAD TIMEOUT - queue aborted",
+						g_idx + 1, static_cast<int>(g_queue.size()),
+						g_queue[g_idx].c_str());
+					_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+						"load timeout on %d/%d - queue aborted",
+						g_idx + 1, static_cast<int>(g_queue.size()));
+					g_phase = 0;
+					g_idx = -1;
 				}
 				return;
 			}
@@ -8726,6 +8779,12 @@ namespace {
 				? *reinterpret_cast<float*>(static_cast<char*>(target)
 					+ OffSim())
 				: 0.f;
+			// Live feedback: the status shows the row count while capturing.
+			if ((g_frames & 31) == 0)
+				_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+					"capturing %d/%d - %d rows", g_idx + 1,
+					static_cast<int>(g_queue.size()),
+					static_cast<int>(g_rows.size()));
 			if (sim > g_last_sim + 1e-6f) {
 				g_last_sim = sim;
 				g_stagnant = 0;
