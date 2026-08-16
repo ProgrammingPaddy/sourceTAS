@@ -135,17 +135,18 @@ user's number).
 - [ ] 5.2 (!) Displacement collision in the world model — parity-side
       prerequisite for most of the map population (tracked as parity
       open item; build when a target map demands it).
-- [~] 5.3 Expert demo ingestion. Demos received (7 cut runs: axiom,
-      cement, facility ×2 incl. m@'s faster bonus, fiellu_ksf, huh,
-      jumble). File parsing is DEAD (TV-style demos: democmdinfo carries
-      no camera - verified all-zero origins across 300k packets); the
-      chosen path lets THE ENGINE decode them: DLL "Capture demo traces"
-      button plays solver\demo_queue.txt unattended and records the
-      spectated target's SNAPSHOT positions (m_flSimulationTime-gated -
-      no interpolation smear) to solver\demo_traces\*.csv. Demos staged
-      in cstrike\demos\, queue written, DLL built. NEEDS: one game
-      session, one click, ~2-3 min unattended.
-      Then: the expert-ledger comparison once M1.5 exists.
+- [x] 5.3 Expert demo ingestion - CAPTURED (took 4 rounds; each failure
+      root-caused from the evidence log: render-thread transitions, menu
+      drain gap, UTF-8 BOM in the queue file, obs-netvar unreliability
+      in TV demos -> runner found BY NAME via runtime-validated
+      GetPlayerInfo, stopdemo instead of mid-demo disconnect). All 7
+      traces in solver\demo_traces\*.csv with *_run.csv run segments
+      (Tools/demo_run_extract.py: dense+moving signature selector).
+      Six tight (run time + 2-3s float); facility_Paddy partial (7.9s,
+      target-switch contamination) but facility is fully covered by
+      m@'s faster run. IF ever re-capturing: derive per-demo target
+      priority from the queue filename. Expert-ledger comparison awaits
+      M1.5.
 - [ ] 5.4 Staged maps: per-stage chaining with teleport-reset
       boundaries and per-stage prestrafe.
 - [ ] 5.5 Solve-time hardening: worst-case < 30 min across the test
