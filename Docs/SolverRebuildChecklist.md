@@ -35,9 +35,33 @@ user's number).
       so a human trace is the honest zone source — the expert demo
       traces serve this role per map). basictest: start idx 6, 3
       candidate first boards; end id 10, 2 feeder faces.
-- [ ] 0.6 Strafe alternation rate limit: constant agreed with the user,
-      stored in params, enforced as yaw-spline knot cap. (OPEN with
-      user: the number.)
+- [x] 0.6 Strafe alternation rate limit: **6 direction changes per
+      second** (user, 2026-08-16: "more than 6 strafes per second is
+      extremely rare") = min ~11 ticks between alternations at
+      66.67tps. `MoveParams::strafe_rate_max`, params-file loadable;
+      becomes the yaw-spline knot cap in M1.3.
+
+## M0.7 — DLL crash hardening (user-blocking, added 2026-08-16)
+
+- [x] 7.1 Demo-capture freeze ROOT-CAUSED by the breadcrumb journal
+      (last stage = update:democap, EndScene thr != CreateMove thr):
+      with multicore rendering, ALL UI ran on the render thread, and
+      connection transitions (playdemo/disconnect/map) issued there
+      deadlock the engine. FIX: game-thread command marshal
+      (PushEngineCmd/DrainEngineCmds via the CreateMove hook) +
+      DemoCap disconnect-first phase + observer-index clamp (1..64).
+- [x] 7.2 Old hard-crash family: the menu/HUD draw ran UNGUARDED for
+      its whole life (crash.log "stage=(none)" rows). Now under the
+      same hook-level SEH as Update/WorldDraw: fault -> logged +
+      retried, not a dead game.
+- [x] 7.3 Tab-out crash: the Reset hook rebuilt ImGui device objects
+      even when Reset FAILED (D3DERR_DEVICELOST retries while tabbed
+      out), corrupting the device. FIX: rebuild only on SUCCEEDED
+      reset + skip all drawing while TestCooperativeLevel != D3D_OK.
+- [ ] 7.4 Remaining families, evidence pending their next occurrence
+      (the journal now names the subsystem): inject-while-in-map,
+      map-load-without-server, wrong-map load, recordings-loaded
+      freezes. Do NOT guess - read breadcrumb.log after each.
 
 ## M1 — Transfer primitives & the ledger
 
