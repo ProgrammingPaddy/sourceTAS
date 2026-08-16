@@ -8563,6 +8563,64 @@ namespace {
 			return o;
 		}
 
+		// Find the RUNNER by NAME (capture fix round 4): the observer-target
+		// netvar is not reliable in TV demos (demo 1 captured exactly ONE
+		// row - the local dummy's simtime never advances). GetPlayerInfo is
+		// runtime-validated ONCE on the local player (printable name or the
+		// call is disabled for the session), then players 1..64 are scanned
+		// for the target substrings.
+		int  g_target_idx = -1;
+		int  g_pi_state = 0;   // 0 unvalidated, 1 ok, -1 disabled
+		char g_target_name[64] = "";
+
+		bool PlayerName(int idx, char* out, size_t out_n) {
+			char buf[256] = {};
+			if (!engine || !engine->GetPlayerInfo(idx, buf))
+				return false;
+			for (int i = 0; i < 32 && buf[i]; ++i)
+				if (static_cast<unsigned char>(buf[i]) < 0x20)
+					return false;   // control bytes = not a name
+			if (!buf[0])
+				return false;
+			strncpy_s(out, out_n, buf, _TRUNCATE);
+			return true;
+		}
+
+		bool ValidatePlayerInfo() {
+			if (g_pi_state != 0)
+				return g_pi_state == 1;
+			char name[64];
+			if (engine && engine->IsInGame()
+				&& PlayerName(engine->GetLocalPlayer(), name, sizeof(name)))
+				g_pi_state = 1;
+			else
+				g_pi_state = -1;
+			return g_pi_state == 1;
+		}
+
+		int FindRunner() {
+			if (!ValidatePlayerInfo())
+				return -1;
+			static const char* kTargets[] = { "paddy", "m@" };
+			char name[64], low[64];
+			for (int idx = 1; idx <= 64; ++idx) {
+				if (!PlayerName(idx, name, sizeof(name)))
+					continue;
+				size_t i = 0;
+				for (; name[i] && i + 1 < sizeof(low); ++i)
+					low[i] = static_cast<char>(tolower(
+						static_cast<unsigned char>(name[i])));
+				low[i] = 0;
+				for (const char* t : kTargets)
+					if (strstr(low, t)) {
+						strncpy_s(g_target_name, sizeof(g_target_name),
+							name, _TRUNCATE);
+						return idx;
+					}
+			}
+			return -1;
+		}
+
 		void Log(const char* fmt, ...) {
 			const std::string dir = SolverDir() + "\\demo_traces";
 			CreateDirectoryA(dir.c_str(), nullptr);
@@ -8650,6 +8708,8 @@ namespace {
 			g_last_sim = -1.f;
 			g_stagnant = 0;
 			g_frames = 0;
+			g_target_idx = -1;
+			g_target_name[0] = 0;
 			if (engine && engine->IsInGame()) {
 				TasEditor::PushEngineCmd("disconnect");
 				g_phase = 4;
@@ -8769,8 +8829,21 @@ namespace {
 				if (++g_stagnant > 2000) { Flush(); Advance(); }
 				return;
 			}
-			void* target = local;
-			if (OffObs() > 0) {
+			// Target priority (round 4): the RUNNER found by NAME, then the
+			// observer target, then the local player (last resort, logged).
+			if (g_target_idx < 0 || (g_frames & 127) == 0) {
+				const int found = FindRunner();
+				if (found > 0 && found != g_target_idx) {
+					g_target_idx = found;
+					Log("demo %d/%d: runner '%s' at entity %d", g_idx + 1,
+						static_cast<int>(g_queue.size()), g_target_name,
+						g_target_idx);
+				}
+			}
+			void* target = nullptr;
+			if (g_target_idx >= 1 && g_target_idx <= 64)
+				target = entitylist->GetClientEntity(g_target_idx);
+			if (!target && OffObs() > 0) {
 				const int h =
 					*reinterpret_cast<int*>(static_cast<char*>(local)
 						+ OffObs());
@@ -8784,6 +8857,8 @@ namespace {
 						target = t;
 				}
 			}
+			if (!target)
+				target = local;
 			const float sim = OffSim() > 0
 				? *reinterpret_cast<float*>(static_cast<char*>(target)
 					+ OffSim())
@@ -8813,8 +8888,11 @@ namespace {
 				}
 				g_rows.push_back(r);
 			} else if (++g_stagnant > 1200) {
-				// ~15-20s frozen: the cut demo idled out at its end.
-				TasEditor::PushEngineCmd("disconnect");
+				// ~15-20s frozen: the cut demo idled out at its end. Stop
+				// playback the ENGINE'S way - the mid-demo `disconnect`
+				// left demo state half-torn-down and the NEXT load crawled
+				// (both "super laggy loading screen" sessions followed it).
+				TasEditor::PushEngineCmd("stopdemo");
 				Flush();
 				Advance();
 			}
