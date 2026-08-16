@@ -20,6 +20,8 @@
 #include <shlobj.h>
 
 #include <cstrike/sdk.h>
+
+#include "../World/NetVars.h"
 #include <cstrike/Interfaces/IEngineTrace.h>
 #include <imgui/imgui.h>
 #include <imgui/imgui_internal.h>   // window-stack rebalance after a UI fault
@@ -8513,11 +8515,223 @@ namespace {
 		return n;
 	}
 
+	// ---- DEMO TRACE CAPTURE (rebuild checklist M5.3) ---------------------
+	// The cut expert demos are TV-style: democmdinfo carries no camera and
+	// the runner exists only as a networked entity - so the ENGINE decodes
+	// them for us. One click plays the whole queue (solver\demo_queue.txt)
+	// unattended and records the SPECTATED target's snapshot positions per
+	// demo into solver\demo_traces\<name>.csv. Rows land only when the
+	// target's m_flSimulationTime advances: raw server snapshots, no
+	// interpolation smear.
+	namespace DemoCap {
+		std::vector<std::string> g_queue;
+		int   g_idx = -1;
+		int   g_phase = 0;          // 0 idle, 1 launch, 2 loading, 3 capture
+		int   g_frames = 0;
+		float g_last_sim = -1.f;
+		int   g_stagnant = 0;
+		char  g_status[256] = "idle";
+		struct Row { float sim; Vector pos; float pitch, yaw; };
+		std::vector<Row> g_rows;
+
+		int OffOrigin() {
+			static int o = NetVars::Offset("DT_BaseEntity", "m_vecOrigin");
+			return o;
+		}
+		int OffSim() {
+			static int o = NetVars::Offset("DT_BaseEntity",
+				"m_flSimulationTime");
+			return o;
+		}
+		int OffObs() {
+			static int o = NetVars::Offset("DT_BasePlayer",
+				"m_hObserverTarget");
+			return o;
+		}
+		int OffEye() {
+			static int o = NetVars::Offset("DT_CSPlayer",
+				"m_angEyeAngles[0]");
+			return o;
+		}
+
+		void Flush() {
+			if (g_idx < 0 || g_idx >= static_cast<int>(g_queue.size()))
+				return;
+			if (g_rows.size() < 10) {   // junk capture: don't write noise
+				g_rows.clear();
+				return;
+			}
+			std::string name = g_queue[g_idx];
+			const size_t cut = name.find_last_of("/\\");
+			if (cut != std::string::npos)
+				name = name.substr(cut + 1);
+			const std::string dir = SolverDir() + "\\demo_traces";
+			CreateDirectoryA(dir.c_str(), nullptr);
+			const std::string path = dir + "\\" + name + ".csv";
+			FILE* o = nullptr;
+			if (fopen_s(&o, path.c_str(), "w") != 0 || !o) {
+				g_rows.clear();
+				return;
+			}
+			fprintf(o, "sim,tick,x,y,z,pitch,yaw,hspeed\n");
+			for (size_t i = 0; i < g_rows.size(); ++i) {
+				const Row& r = g_rows[i];
+				float hs = 0.f;
+				if (i > 0) {
+					const float dt = r.sim - g_rows[i - 1].sim;
+					if (dt > 1e-6f) {
+						const float dx = r.pos.X - g_rows[i - 1].pos.X;
+						const float dy = r.pos.Y - g_rows[i - 1].pos.Y;
+						hs = sqrtf(dx * dx + dy * dy) / dt;
+					}
+				}
+				fprintf(o, "%.6f,%d,%.3f,%.3f,%.3f,%.2f,%.2f,%.1f\n",
+					r.sim, static_cast<int>(r.sim / 0.015f + 0.5f),
+					r.pos.X, r.pos.Y, r.pos.Z, r.pitch, r.yaw, hs);
+			}
+			fclose(o);
+			g_rows.clear();
+		}
+
+		void Launch();
+
+		void Advance() {
+			g_idx++;
+			if (g_idx >= static_cast<int>(g_queue.size())) {
+				g_phase = 0;
+				g_idx = -1;
+				_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+					"queue DONE - traces in solver\\demo_traces");
+				return;
+			}
+			Launch();
+		}
+
+		void Launch() {
+			char cmd[600];
+			_snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "playdemo \"%s\"",
+				g_queue[g_idx].c_str());
+			engine->ClientCmd_Unrestricted(cmd);
+			g_phase = 2;
+			g_frames = 0;
+			g_rows.clear();
+			g_last_sim = -1.f;
+			g_stagnant = 0;
+			_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+				"loading %d/%d: %s", g_idx + 1,
+				static_cast<int>(g_queue.size()), g_queue[g_idx].c_str());
+		}
+
+		void Start() {
+			g_queue.clear();
+			std::ifstream f(SolverDir() + "\\demo_queue.txt");
+			std::string line;
+			while (std::getline(f, line)) {
+				while (!line.empty()
+					&& (line.back() == '\r' || line.back() == ' '))
+					line.pop_back();
+				if (!line.empty() && line[0] != '#')
+					g_queue.push_back(line);
+			}
+			if (g_queue.empty()) {
+				_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+					"demo_queue.txt empty or missing");
+				return;
+			}
+			g_idx = 0;
+			Launch();
+		}
+
+		void Step() {
+			if (g_phase == 0)
+				return;
+			g_frames++;
+			if (g_phase == 2) {
+				if (engine && engine->IsInGame()) {
+					g_phase = 3;
+					g_frames = 0;
+					_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+						"capturing %d/%d", g_idx + 1,
+						static_cast<int>(g_queue.size()));
+				} else if (g_frames > 5400) {   // ~90s load timeout
+					Advance();
+				}
+				return;
+			}
+			// phase 3: capture until the demo ends.
+			if (!engine || !engine->IsInGame()) {
+				Flush();
+				Advance();
+				return;
+			}
+			void* local = entitylist
+				? entitylist->GetClientEntity(engine->GetLocalPlayer())
+				: nullptr;
+			if (!local) {
+				if (++g_stagnant > 2000) { Flush(); Advance(); }
+				return;
+			}
+			void* target = local;
+			if (OffObs() > 0) {
+				const int h =
+					*reinterpret_cast<int*>(static_cast<char*>(local)
+						+ OffObs());
+				if (h != -1) {
+					void* t = entitylist->GetClientEntity(h & 0x7FF);
+					if (t)
+						target = t;
+				}
+			}
+			const float sim = OffSim() > 0
+				? *reinterpret_cast<float*>(static_cast<char*>(target)
+					+ OffSim())
+				: 0.f;
+			if (sim > g_last_sim + 1e-6f) {
+				g_last_sim = sim;
+				g_stagnant = 0;
+				Row r;
+				r.sim = sim;
+				r.pos = OffOrigin() > 0
+					? *reinterpret_cast<Vector*>(static_cast<char*>(target)
+						+ OffOrigin())
+					: Vector();
+				r.pitch = 0.f;
+				r.yaw = 0.f;
+				if (OffEye() > 0) {
+					const float* ang = reinterpret_cast<float*>(
+						static_cast<char*>(target) + OffEye());
+					r.pitch = ang[0];
+					r.yaw = ang[1];
+				}
+				g_rows.push_back(r);
+			} else if (++g_stagnant > 1200) {
+				// ~15-20s frozen: the cut demo idled out at its end.
+				engine->ClientCmd_Unrestricted("disconnect");
+				Flush();
+				Advance();
+			}
+		}
+	} // namespace DemoCap
+
 	void DrawMapSolveTab() {
 		Theme::Heading("Map Solve",
 			"Home of the full-map solver (design log: Docs\\FullMapSolver.md). "
 			"The ground-truth loop between the ENGINE and the offline core - "
 			"everything the solver grows lands in this tab.");
+
+		SubHeading("Expert demo capture (rebuild M5.3)");
+		if (DemoCap::g_phase == 0) {
+			if (ImGui::Button("Capture demo traces (queue)"))
+				DemoCap::Start();
+		} else {
+			if (ImGui::Button("Abort demo capture")) {
+				DemoCap::Flush();
+				DemoCap::g_phase = 0;
+				DemoCap::g_idx = -1;
+			}
+		}
+		ImGui::SameLine();
+		ImGui::TextUnformatted(DemoCap::g_status);
 
 		SubHeading("Consistent start (solve anchor)");
 		if (g_solve_anchor_valid || LoadSolveAnchorFile())
@@ -8990,6 +9204,10 @@ void TasEditor::Update() {
 	// verification runs HERE, never inside the view hook).
 	FreecamMove();
 	FreecamVerifyPump();
+
+	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: democap");
+	// Expert demo trace capture (no-op when idle).
+	DemoCap::Step();
 
 	Breadcrumb::Note(Breadcrumb::SlotUpdate, "update: teleport");
 	// Teleport landing check: report the measured delta from the anchor, and

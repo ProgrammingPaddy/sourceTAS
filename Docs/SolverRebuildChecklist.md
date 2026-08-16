@@ -106,8 +106,17 @@ a measurable pass/fail, never a vibe.
 - [ ] 5.2 (!) Displacement collision in the world model — parity-side
       prerequisite for most of the map population (tracked as parity
       open item; build when a target map demands it).
-- [ ] 5.3 Demo extractor for the user's cut demos (incoming) → expert
-      ledger on non-tuned maps; compare ours vs theirs per transfer.
+- [~] 5.3 Expert demo ingestion. Demos received (7 cut runs: axiom,
+      cement, facility ×2 incl. m@'s faster bonus, fiellu_ksf, huh,
+      jumble). File parsing is DEAD (TV-style demos: democmdinfo carries
+      no camera - verified all-zero origins across 300k packets); the
+      chosen path lets THE ENGINE decode them: DLL "Capture demo traces"
+      button plays solver\demo_queue.txt unattended and records the
+      spectated target's SNAPSHOT positions (m_flSimulationTime-gated -
+      no interpolation smear) to solver\demo_traces\*.csv. Demos staged
+      in cstrike\demos\, queue written, DLL built. NEEDS: one game
+      session, one click, ~2-3 min unattended.
+      Then: the expert-ledger comparison once M1.5 exists.
 - [ ] 5.4 Staged maps: per-stage chaining with teleport-reset
       boundaries and per-stage prestrafe.
 - [ ] 5.5 Solve-time hardening: worst-case < 30 min across the test
@@ -138,3 +147,8 @@ a measurable pass/fail, never a vibe.
 - 2026-08-16: Created. M0.1–0.3 done (design doc; strafe law proven
   float-ULP vs certified mirror; extractor v0 with 4 faces + 12
   candidate edges on basictest). NOW = M0.4 face coverage.
+- 2026-08-16 (later): M5.3 advanced - demos received and staged;
+  file-parse path measured dead (TV demos, zero cmdinfo); in-game
+  queue-capture built into the DLL (one click, unattended, snapshot-
+  gated rows). Tools/demextract.py kept for header/cmd walking.
+  Awaiting one short game session for the traces; not blocking M0.4.
