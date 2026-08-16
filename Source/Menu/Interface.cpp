@@ -161,6 +161,15 @@ namespace {
 			return false;
 		}
 	}
+	bool GuardedMenuHud(BasehookInterface* self, int* code) {
+		__try {
+			self->MenuHudBody();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			*code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
 	bool GuardedWorldDrawRender(int* code) {
 		__try {
 			WorldDraw::Render();
@@ -401,6 +410,22 @@ void BasehookInterface::OnEndScene() {
 		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: hud + menu");
 	}
 
+	// The HUD + menu body runs under the same hook-level SEH as Update and
+	// WorldDraw (crash fix 2026-08-16): it ran UNGUARDED for its whole life,
+	// so any fault in the (large) UI code was a straight process kill - the
+	// old crash.log "PROCESS CRASH ... stage=(none)" rows. Same tradeoff as
+	// the other guards: a fault is logged and the next frame retries.
+	{
+		static int mh_reported = 0;
+		int code = 0;
+		if (!GuardedMenuHud(this, &code) && mh_reported < 3) {
+			mh_reported++;
+			TasEditor::NoteExternalFault("Menu/HUD draw", code);
+		}
+	}
+}
+
+void BasehookInterface::MenuHudBody() {
 	// Replay HUD: small, translucent, information-focused. Shown while a run
 	// plays back whether or not the menu is open.
 	if (WorldDraw::show_replay_hud && g_tas.IsPlaying()) {

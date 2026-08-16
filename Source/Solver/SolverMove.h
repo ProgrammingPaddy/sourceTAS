@@ -90,6 +90,11 @@ namespace Solver {
 		// gate entirely (client.dll @1f546c reads the cvar before testing
 		// oldbuttons & IN_JUMP). Live server cvar, exported like the rest.
 		bool autobunnyhopping = false;
+		// THE ONE AESTHETIC RULE (user, 2026-08-16): at most 6 strafe
+		// direction changes per second - "more than 6 strafes per second
+		// is extremely rare". At 66.67tps that is a minimum of ~11 ticks
+		// between alternations; the yaw-spline knot cap derives from it.
+		float strafe_rate_max = 6.f;
 		// POST-AIR-UNDUCK TRANSIENT HULL (see PlayerState::hull_state):
 		// gates hull_state 2 on air unducks. Default ON (the measured
 		// behavior); off = flag-coupled hulls for arbitration.

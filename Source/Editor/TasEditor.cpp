@@ -8515,6 +8515,10 @@ namespace {
 		return n;
 	}
 
+	// ---- ENGINE COMMAND MARSHAL (see TasEditor.h) ------------------------
+	std::mutex g_cmdq_mu;
+	std::vector<std::string> g_cmdq;
+
 	// ---- DEMO TRACE CAPTURE (rebuild checklist M5.3) ---------------------
 	// The cut expert demos are TV-style: democmdinfo carries no camera and
 	// the runner exists only as a networked entity - so the ENGINE decodes
@@ -8608,15 +8612,26 @@ namespace {
 		}
 
 		void Launch() {
-			char cmd[600];
-			_snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "playdemo \"%s\"",
-				g_queue[g_idx].c_str());
-			engine->ClientCmd_Unrestricted(cmd);
-			g_phase = 2;
-			g_frames = 0;
+			// NEVER issue transitions from this (render) thread - push to
+			// the game-thread marshal. If still connected (user clicked
+			// mid-map), disconnect first and wait (phase 4).
 			g_rows.clear();
 			g_last_sim = -1.f;
 			g_stagnant = 0;
+			g_frames = 0;
+			if (engine && engine->IsInGame()) {
+				TasEditor::PushEngineCmd("disconnect");
+				g_phase = 4;
+				_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+					"disconnecting before demo %d/%d", g_idx + 1,
+					static_cast<int>(g_queue.size()));
+				return;
+			}
+			char cmd[600];
+			_snprintf_s(cmd, sizeof(cmd), _TRUNCATE, "playdemo \"%s\"",
+				g_queue[g_idx].c_str());
+			TasEditor::PushEngineCmd(cmd);
+			g_phase = 2;
 			_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
 				"loading %d/%d: %s", g_idx + 1,
 				static_cast<int>(g_queue.size()), g_queue[g_idx].c_str());
@@ -8646,6 +8661,26 @@ namespace {
 			if (g_phase == 0)
 				return;
 			g_frames++;
+			if (g_phase == 4) {   // waiting for the disconnect to land
+				if (engine && !engine->IsInGame()) {
+					char cmd[600];
+					_snprintf_s(cmd, sizeof(cmd), _TRUNCATE,
+						"playdemo \"%s\"", g_queue[g_idx].c_str());
+					TasEditor::PushEngineCmd(cmd);
+					g_phase = 2;
+					g_frames = 0;
+					_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+						"loading %d/%d: %s", g_idx + 1,
+						static_cast<int>(g_queue.size()),
+						g_queue[g_idx].c_str());
+				} else if (g_frames > 3600) {
+					_snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
+						"disconnect never landed - aborting queue");
+					g_phase = 0;
+					g_idx = -1;
+				}
+				return;
+			}
 			if (g_phase == 2) {
 				if (engine && engine->IsInGame()) {
 					g_phase = 3;
@@ -8676,8 +8711,12 @@ namespace {
 				const int h =
 					*reinterpret_cast<int*>(static_cast<char*>(local)
 						+ OffObs());
-				if (h != -1) {
-					void* t = entitylist->GetClientEntity(h & 0x7FF);
+				const int idx = h & 0x7FF;
+				// Only PLAYER entities (1..64) are safe to read player
+				// netvars from - a stale handle resolving to a small
+				// non-player entity would read past its allocation.
+				if (h != -1 && idx >= 1 && idx <= 64) {
+					void* t = entitylist->GetClientEntity(idx);
 					if (t)
 						target = t;
 				}
@@ -8706,7 +8745,7 @@ namespace {
 				g_rows.push_back(r);
 			} else if (++g_stagnant > 1200) {
 				// ~15-20s frozen: the cut demo idled out at its end.
-				engine->ClientCmd_Unrestricted("disconnect");
+				TasEditor::PushEngineCmd("disconnect");
 				Flush();
 				Advance();
 			}
@@ -9636,6 +9675,27 @@ void TasEditor::ToggleFreecam() {
 
 bool TasEditor::FreecamActive() {
 	return g_freecam;
+}
+
+void TasEditor::PushEngineCmd(const char* cmd) {
+	if (!cmd || !cmd[0])
+		return;
+	std::lock_guard<std::mutex> lk(g_cmdq_mu);
+	if (g_cmdq.size() < 64)   // a runaway pusher must not balloon memory
+		g_cmdq.push_back(cmd);
+}
+
+void TasEditor::DrainEngineCmds() {
+	// GAME THREAD ONLY (the CreateMove hook). Connection transitions are
+	// only safe from here - see TasEditor.h.
+	std::vector<std::string> cmds;
+	{
+		std::lock_guard<std::mutex> lk(g_cmdq_mu);
+		cmds.swap(g_cmdq);
+	}
+	for (const std::string& c : cmds)
+		if (engine)
+			engine->ClientCmd_Unrestricted(c.c_str());
 }
 
 bool TasEditor::FreecamEye(Vector* eye) {

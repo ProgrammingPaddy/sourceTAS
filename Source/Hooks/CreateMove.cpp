@@ -25,6 +25,10 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 	// first (the engine froze elsewhere, not in our hook).
 	Breadcrumb::Note(Breadcrumb::SlotGame, "createmove: enter");
 
+	// Engine-command marshal drain: THIS is the game thread, the only safe
+	// place for connection transitions pushed by UI/render-thread code.
+	TasEditor::DrainEngineCmds();
+
 	// Autohop (server-style autobhop for HUMAN input), the sim JM_AutoBhop's
 	// exact button transform: while jump is HELD, the button is stripped by
 	// default and pressed only on ticks that start GROUNDED with no press let

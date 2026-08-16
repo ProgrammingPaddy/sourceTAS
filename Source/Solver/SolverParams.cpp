@@ -112,6 +112,7 @@ namespace Solver {
 		else if (key == "jump_impulse") p.jump_impulse_d = val;
 		else if (key == "enablebunnyhopping") p.enablebunnyhopping = val != 0.f;
 		else if (key == "autobunnyhopping") p.autobunnyhopping = val != 0.f;
+		else if (key == "strafe_rate_max") p.strafe_rate_max = val;
 		else if (key == "duck_air_shift") p.duck_air_shift = val;
 		else if (key == "duck_speed_frac") p.duck_speed_frac = val;
 		else if (key == "time_to_duck_ms") p.time_to_duck_ms = val;

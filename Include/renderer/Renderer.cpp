@@ -131,8 +131,15 @@ namespace DX9GenericHooks {
 		HRESULT result = reinterpret_cast<Reset_t>(g_reset_hook.target)(device, params);
 		g_reset_hook.Enable();
 
-		ImGui_ImplDX9_CreateDeviceObjects();
-		renderer.OnDeviceReset(true);
+		// Rebuild ONLY on a successful reset (crash fix 2026-08-16): while
+		// tabbed out of fullscreen the game retries Reset and gets
+		// D3DERR_DEVICELOST repeatedly - rebuilding ImGui device objects on
+		// a lost device every retry corrupted the device state, the
+		// "tabbed out too long = hard crash" family.
+		if (SUCCEEDED(result)) {
+			ImGui_ImplDX9_CreateDeviceObjects();
+			renderer.OnDeviceReset(true);
+		}
 
 		return result;
 	}
@@ -157,6 +164,12 @@ void DX9RenderMgr::RenderFrame(IDirect3DDevice9* device) {
 		this->initialized = true;
 		this->OnInitialize();
 	}
+
+	// Draw NOTHING while the device is lost (crash fix 2026-08-16): during
+	// a long tab-out the device sits in D3DERR_DEVICELOST and every draw
+	// against it is undefined - the frame skips until Reset succeeds.
+	if (device->TestCooperativeLevel() != D3D_OK)
+		return;
 
 	ImGui_ImplDX9_NewFrame();
 	this->OnEndScene();
