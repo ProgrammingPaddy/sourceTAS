@@ -2109,6 +2109,54 @@ segment-splitting recursion is the instrument that would settle them.
 Next pins: the duck family (needs a non-constant discriminator), then
 WalkMove/AirMove.
 
+## 2026-08-15 (late night) — Duck family: pinned, graded, four laws landed
+
+**Pinned via the CCSGameMovement vtable** (.rdata 0x478220, located by two
+anchors — the one qword array containing both known virtual bodies IS the
+vtable). Slot map has one extra virtual vs stock 2007 SDK
+(PlayerRoughLandingEffects(float) @+110). Confirmed by body: Duck 0x1f5cb0
+(with a CS-only curtime duck-hold gate reading gm+0xed8 that can force-clear
+IN_DUCK — unmodeled, now a declared runner input), HandleDuckingSpeedCrop
+0x1f6ba0 (baked 0.34, m_iSpeedCropped gm+0xcc4), FinishUnDuck 0x1f6840,
+FinishDuck 0x1f6500, CanUnduck 0x1f4b20. Duck state trio =
+player+0x1250/1251/1254. Hull vectors come from GetViewVectors() scaled by
+m_flModelScale (+0x8e4) — runtime data; there was never an 8.5 constant to
+find. FUNCPROBE v2: oldbuttons declared per probe, gm-state zeroed per
+probe, mv fwd/side read back.
+
+**One harness save:** the first v2 click was answered by a DIFFERENT map
+(worldspawn serial changed; 103/65,072 grounded) — the control gate VOIDED
+the batch instead of handing over 65k phantom mismatches. Second click on
+basictest: controls 72/72.
+
+**The class slice** (every buttons x oldbuttons x ducked x ducking x
+grounded combination tabulated against engine outputs) delivered the laws:
+1. BLOCKED UNDUCK: timer := 1000 AND, on a release EDGE only, ducking :=
+   true (edge-less blocked rows leave ducking untouched).
+2. ASYMMETRIC BOUNDARIES: duck completes AT exactly 400ms (>=), unduck
+   holds AT exactly 200ms (strict >). Both directions measured; the
+   symmetric variant broke the 400 row.
+3. FixPlayerCrouchStuck runs UNCONDITIONALLY in FinishDuck (already-ducked
+   and grounded rows ladder too), and its stuck test is a ZERO-LENGTH HULL
+   TRACE (certified startsolid semantics) — the legacy point test stopped
+   one ladder step short across a whole family.
+4. CanUnduck = zero-length STANDING test AT the shifted candidate (the
+   sweep variant was tried: Duck 21→58 — the engine tests the destination
+   box, not the path).
+
+**Board after:** Duck 19,979/20,000, CanUnduck 4,997/5,000, Cat
+20,069/20,072, Jump 19,996/20,000 — 31 of 65,072 (99.95%). Whole-tick
+corpus 33,449/40,000, BEST EVER (the duck laws are load-bearing in
+composition). Tapes 0.000u.
+
+**OPEN:** the 31 residuals (embedded-position oddballs incl. one row whose
+"ours" output looks impossible for our code — differ-side suspicion);
+unduck_face 1.450u UNMOVED — with Duck near-perfect isolated, that defect
+lives in COMPOSITION (WalkMove interaction / crop timing); the speed-crop
+call site is NOT inside Duck for ~1/5 of states (diagnostic 15,979 vs
+4,021) — mapping it is next; FinishDuck/FinishUnDuck/HandleDuckingSpeedCrop
+pinned but not yet probed standalone.
+
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
 - 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
