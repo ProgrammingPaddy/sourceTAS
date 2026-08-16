@@ -225,6 +225,32 @@ namespace Solver {
 			tree_n = plane_n;
 			tree_d = plane_d;
 			std::memcpy(&headnode, p + lumps[kLumpModels].ofs + 36, 4);
+			// Engine brush order: per-leaf brush lists, lump order (raw BSP
+			// ids here; remapped to our filtered indices after the brush
+			// build below).
+			leaf_firstbrush.resize(nleafs);
+			leaf_numbrushes.resize(nleafs);
+			for (int i = 0; i < nleafs; ++i) {
+				uint16_t fb = 0, nb = 0;
+				const char* lp = p + lumps[kLumpLeafs].ofs + i * leaf_stride;
+				// dleaf_t: contents@0, cluster@4, area/flags@6, mins@8,
+				// maxs@14, firstleafFACE@20, numleafFACES@22,
+				// firstleafBRUSH@24, numleafBRUSHES@26. The face fields at
+				// +20/+22 parse as plausible indices and break everything
+				// downstream - measured: battery 0/15 and 1,857 missing
+				// startsolid flags before this offset was corrected.
+				std::memcpy(&fb, lp + 24, 2);
+				std::memcpy(&nb, lp + 26, 2);
+				leaf_firstbrush[i] = fb;
+				leaf_numbrushes[i] = nb;
+			}
+			const int nleafbrushes = lumps[kLumpLeafBrushes].len / 2;
+			leafbrush_ours.resize(nleafbrushes);
+			for (int i = 0; i < nleafbrushes; ++i) {
+				uint16_t bid = 0;
+				std::memcpy(&bid, p + lumps[kLumpLeafBrushes].ofs + i * 2, 2);
+				leafbrush_ours[i] = bid;
+			}
 		}
 
 		// ---- brushes ---------------------------------------------------------
@@ -362,6 +388,18 @@ namespace Solver {
 			wb.gmax_unduck = wb.bmax - hulls_.unduck_min;
 
 			brushes.push_back(std::move(wb));
+		}
+		// Remap the leafbrush lists from BSP brush ids to OUR filtered brush
+		// indices (-1 for brushes the build dropped: non-solid / entity).
+		{
+			std::vector<int> bsp2ours(nbrushes_total, -1);
+			for (size_t i = 0; i < brushes.size(); ++i)
+				bsp2ours[brushes[i].id] = static_cast<int>(i);
+			for (size_t i = 0; i < leafbrush_ours.size(); ++i) {
+				const int raw = leafbrush_ours[i];
+				leafbrush_ours[i] =
+					(raw >= 0 && raw < nbrushes_total) ? bsp2ours[raw] : -1;
+			}
 		}
 
 		// ---- TRIGGER VOLUMES (mirrors BspWorld::ParseEntities +
@@ -645,6 +683,89 @@ namespace Solver {
 		return TraceHull3(a, b, ducked ? 1 : 0, out);
 	}
 
+	// CM_RecursiveHullCheck's ORDER, reduced to brush enumeration: walk the
+	// tree with the swept box, NEAR child first (the side the sweep starts
+	// on), and append each touched leaf's brushes in leafbrush-lump order,
+	// first occurrence only (the engine's checkcount). Processing order is
+	// OBSERVABLE - an allsolid brush zeroes the fraction the moment it is
+	// processed, so which earlier recording survives depends on it. Neither
+	// ascending-index nor global-best matched the engine's answers; the leaf
+	// walk is the engine's actual organization, so order falls out of shape.
+	int World::OrderedLeafBrushes(const Vec3& a, const Vec3& b,
+	                              const Vec3& mins, const Vec3& maxs,
+	                              int* out_list, int cap) const {
+		if (nodes.empty() || leaf_firstbrush.empty() || leafbrush_ours.empty())
+			return -1;   // tables absent - caller falls back to the grid
+		struct Walker {
+			const World* w;
+			Vec3 ca, cb, e;
+			int* out;
+			int cap, n;
+			void Visit(int node) {
+				while (node >= 0) {
+					if (node >= static_cast<int>(w->nodes.size()))
+						return;
+					const BspNode& nd = w->nodes[node];
+					if (nd.plane < 0
+						|| nd.plane >= static_cast<int>(w->tree_n.size()))
+						return;
+					const Vec3& pn = w->tree_n[nd.plane];
+					const float pd = w->tree_d[nd.plane];
+					const float r = fabsf(pn.X) * e.X + fabsf(pn.Y) * e.Y
+						+ fabsf(pn.Z) * e.Z;
+					const float d0 = Dot(pn, ca) - pd;
+					const float d1 = Dot(pn, cb) - pd;
+					// Descend both sides whenever the swept box touches the
+					// plane (strict >). TRIED AND REVERTED: CM's literal
+					// '>= offset' front-only prune dropped 20 real startsolid
+					// flags (engine-only 20 on the certified sweep) and took
+					// funcdiff from 0+0 to 20+27 - the engine's own clip
+					// visits those exactly-touching back sides, because its
+					// recursion clips SEGMENTS, not whole subtrees. The one
+					// residual ordering nuance (25 of 125 box-oracle rows,
+					// full-hull boxes at one embedded site, normal-only, no
+					// function output affected) needs true segment-splitting
+					// recursion - an open item, not a fitted knob.
+					if (d0 > r && d1 > r) { node = nd.child[0]; continue; }
+					if (d0 < -r && d1 < -r) { node = nd.child[1]; continue; }
+					const int near_c = (d0 >= 0.f) ? 0 : 1;
+					Visit(nd.child[near_c]);
+					node = nd.child[near_c ^ 1];
+				}
+				const int leaf = -1 - node;
+				if (leaf < 0
+					|| leaf >= static_cast<int>(w->leaf_firstbrush.size()))
+					return;
+				const int fb = w->leaf_firstbrush[leaf];
+				const int nb = w->leaf_numbrushes[leaf];
+				for (int i = 0; i < nb; ++i) {
+					const int idx = fb + i;
+					if (idx < 0
+						|| idx >= static_cast<int>(w->leafbrush_ours.size()))
+						continue;
+					const int bi = w->leafbrush_ours[idx];
+					if (bi < 0)
+						continue;
+					bool seen = false;
+					for (int k = 0; k < n; ++k)
+						if (out[k] == bi) { seen = true; break; }
+					if (!seen && n < cap)
+						out[n++] = bi;
+				}
+			}
+		};
+		Walker wk{ this,
+			a + Vec3(0.5f * (mins.X + maxs.X), 0.5f * (mins.Y + maxs.Y),
+			         0.5f * (mins.Z + maxs.Z)),
+			b + Vec3(0.5f * (mins.X + maxs.X), 0.5f * (mins.Y + maxs.Y),
+			         0.5f * (mins.Z + maxs.Z)),
+			Vec3(0.5f * (maxs.X - mins.X), 0.5f * (maxs.Y - mins.Y),
+			     0.5f * (maxs.Z - mins.Z)),
+			out_list, cap, 0 };
+		wk.Visit(headnode);
+		return wk.n;
+	}
+
 	float World::TraceHull3(const Vec3& a, const Vec3& b, int hull,
 	                        TraceResult* out) const {
 		const bool ducked = hull == 1;   // trace-log row semantics
@@ -652,6 +773,8 @@ namespace Solver {
 			out->frac = 1.f;
 			out->brush = -1;
 			out->plane = -1;
+			out->startsolid = false;
+			out->allsolid = false;
 		}
 		if (nx_ == 0)
 			return 1.f;
@@ -669,14 +792,42 @@ namespace Solver {
 
 		float best = 1.f;
 		int best_brush = -1, best_plane = -1;
-		// Duplicate visits across cells re-run an idempotent min - cheaper than
-		// a mutable visited stamp, and keeps the trace const + thread-safe.
-		for (int z = z0; z <= z1; ++z)
-		for (int y = y0; y <= y1; ++y)
-		for (int x = x0; x <= x1; ++x) {
-			const std::vector<int>& cell =
-				cells_[(static_cast<size_t>(z) * ny_ + y) * nx_ + x];
-			for (int bi : cell) {
+		// THE START-SOLID LAW (engine's own answers, 2026-08-15): a brush the
+		// sweep starts inside contributes FLAGS only - it is geometrically
+		// invisible (0 of 1,236 ss-only engine rows zeroed the fraction). An
+		// ALLSOLID brush (start AND end inside) zeroes the fraction THE
+		// MOMENT IT IS PROCESSED (789/789 rows frac 0) - so recordings made
+		// BEFORE it survive and later brushes cannot record (their clamped
+		// enter fraction is never < 0). That mid-loop mechanism is exactly
+		// CM_ClipBoxToBrush + CM_TraceToLeaf, and it makes PROCESSING ORDER
+		// observable - so brushes are clipped in the engine's own order: the
+		// leaf walk, near side first, per-leaf lump order.
+		bool l_ss = false, l_as = false;
+		const Vec3& wmn = hull == 1 ? hulls_.duck_min
+			: hull == 2 ? hulls_.unduck_min : hulls_.stand_min;
+		const Vec3& wmx = hull == 1 ? hulls_.duck_max
+			: hull == 2 ? hulls_.unduck_max : hulls_.stand_max;
+		int order[1024];
+		const int norder = OrderedLeafBrushes(a, b, wmn, wmx, order, 1024);
+		// Fallback when leaf tables are absent: grid gathering, cell-major
+		// (order then unproven - real BSPs always have the tables).
+		std::vector<int> fb;
+		if (norder < 0) {
+			for (int z = z0; z <= z1; ++z)
+			for (int y = y0; y <= y1; ++y)
+			for (int x = x0; x <= x1; ++x) {
+				const std::vector<int>& cell =
+					cells_[(static_cast<size_t>(z) * ny_ + y) * nx_ + x];
+				for (int bi : cell)
+					if (std::find(fb.begin(), fb.end(), bi) == fb.end())
+						fb.push_back(bi);
+			}
+		}
+		const int* blist = norder >= 0 ? order : fb.data();
+		const int bcount = norder >= 0 ? norder : static_cast<int>(fb.size());
+		{
+			for (int oi = 0; oi < bcount; ++oi) {
+				const int bi = blist[oi];
 				const WorldBrush& bc = brushes[bi];
 				const Vec3& gmn = hull == 1 ? bc.gmin_duck
 					: hull == 2 ? bc.gmin_unduck : bc.gmin_stand;
@@ -752,10 +903,13 @@ namespace Solver {
 				// the engine froze for 18 ticks at v(0,0,-6) while our
 				// model flew on at 880 u/s.
 				if (!miss && !outside) {
-					if (out) {
-						out->startsolid = true;
-						if (!getout)
-							out->allsolid = true;
+					l_ss = true;
+					if (!getout) {
+						l_as = true;
+						// The engine's mid-loop zeroing: fraction drops to 0
+						// HERE, the recorded plane stays, and everything
+						// processed after this cannot beat 0.
+						best = 0.f;
 					}
 					continue;
 				}
@@ -770,24 +924,12 @@ namespace Solver {
 				}
 			}
 		}
-		// STARTSOLID DOMINATES THE WHOLE TRACE (funcprobe, 2026-08-15): if the
-		// sweep began inside any brush, the engine's aggregate trace reports
-		// fraction 0 with a ZEROED plane normal - it does not go on to report
-		// some other brush's surface. We were skipping the start-solid brush
-		// and returning the next hit's normal, so a hull embedded in a wall
-		// still "found ground" on the floor below. Measured on 387 of 20,000
-		// isolated CategorizePosition calls: engine ground 0, ours 1, every
-		// one of them embedded. A zeroed normal fails normal.z >= 0.7, which
-		// is exactly why the engine cannot ground there.
-		if (out && out->startsolid) {
-			out->frac = 0.f;
-			out->brush = -1;
-			out->plane = -1;
-			out->normal = Vec3();
-			return 0.f;
+		if (out) {
+			out->startsolid = l_ss;
+			out->allsolid = l_as;
+			out->frac = best;   // 0 when an allsolid brush zeroed it
 		}
 		if (out && best_brush >= 0) {
-			out->frac = best;
 			out->brush = best_brush;
 			out->plane = best_plane;
 			out->normal = brushes[best_brush].n[best_plane];
@@ -828,12 +970,28 @@ namespace Solver {
 		CellRange(lo + mins, hi + maxs, &x0, &x1, &y0, &y1, &z0, &z1);
 		float best = 1.f;
 		int best_brush = -1, best_plane = -1;
-		for (int z = z0; z <= z1; ++z)
-		for (int y = y0; y <= y1; ++y)
-		for (int x = x0; x <= x1; ++x) {
-			const std::vector<int>& cell =
-				cells_[(static_cast<size_t>(z) * ny_ + y) * nx_ + x];
-			for (int bi : cell) {
+		// Same start-solid law and ENGINE ORDER as TraceHull3 (see the
+		// comment there).
+		bool l_ss = false, l_as = false;
+		int order[1024];
+		const int norder = OrderedLeafBrushes(a, b, mins, maxs, order, 1024);
+		std::vector<int> fbx;
+		if (norder < 0) {
+			for (int z = z0; z <= z1; ++z)
+			for (int y = y0; y <= y1; ++y)
+			for (int x = x0; x <= x1; ++x) {
+				const std::vector<int>& cell =
+					cells_[(static_cast<size_t>(z) * ny_ + y) * nx_ + x];
+				for (int bi : cell)
+					if (std::find(fbx.begin(), fbx.end(), bi) == fbx.end())
+						fbx.push_back(bi);
+			}
+		}
+		const int* blist = norder >= 0 ? order : fbx.data();
+		const int bcount = norder >= 0 ? norder : static_cast<int>(fbx.size());
+		{
+			for (int oi = 0; oi < bcount; ++oi) {
+				const int bi = blist[oi];
 				const WorldBrush& bc = brushes[bi];
 				float tmin = -1.f, tmax = 1.f;
 				float tmin_t = -1.f, tmax_t = 1e9f;
@@ -865,10 +1023,10 @@ namespace Solver {
 					}
 				}
 				if (!miss && !outside) {
-					if (out) {
-						out->startsolid = true;
-						if (!getout)
-							out->allsolid = true;
+					l_ss = true;
+					if (!getout) {
+						l_as = true;
+						best = 0.f;   // mid-loop zeroing, plane survives
 					}
 					continue;
 				}
@@ -883,19 +1041,12 @@ namespace Solver {
 				}
 			}
 		}
-		// startsolid suppresses the quadrant result too. TRIED AND REVERTED:
-		// letting a start-solid quadrant still report its best hit took the
-		// isolated CategorizePosition score from 5 mismatches to 579, so the
-		// engine applies the same rule here as in the primary trace.
-		if (out && out->startsolid) {
-			out->frac = 0.f;
-			out->brush = -1;
-			out->plane = -1;
-			out->normal = Vec3();
-			return 0.f;
+		if (out) {
+			out->startsolid = l_ss;
+			out->allsolid = l_as;
+			out->frac = best;
 		}
 		if (out && best_brush >= 0) {
-			out->frac = best;
 			out->brush = best_brush;
 			out->plane = best_plane;
 			out->normal = brushes[best_brush].n[best_plane];

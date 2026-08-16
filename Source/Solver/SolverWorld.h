@@ -192,6 +192,23 @@ namespace Solver {
 		std::vector<float>   tree_d;
 		int headnode = 0;
 
+		// ENGINE BRUSH ORDER (leafbrushes lump): the trace clips brushes in
+		// leaf-traversal order, per-leaf list order - CM_TraceToLeaf's own
+		// organization. Order is OBSERVABLE: an allsolid brush zeroes the
+		// fraction the moment it is processed, so which recordings survive
+		// depends on processing order (measured: at one site the engine kept
+		// the floor plane past an allsolid wall in one box and dropped a
+		// neighbor's plane in another - one fixed list order explains both).
+		std::vector<int> leaf_firstbrush;   // per leaf, into leafbrush_ours
+		std::vector<int> leaf_numbrushes;
+		std::vector<int> leafbrush_ours;    // lump 17 mapped to OUR brush
+		                                    // indices (-1 = filtered brush)
+		// Swept-box leaf walk, near child first (the side the sweep starts
+		// on), appending each leaf's brushes in lump order, first occurrence
+		// only (the engine's checkcount). Returns count written to out_list.
+		int OrderedLeafBrushes(const Vec3& a, const Vec3& b, const Vec3& mins,
+		                       const Vec3& maxs, int* out_list, int cap) const;
+
 		// CONTENTS_SOLID of the leaf containing p (0 when the tree is
 		// absent). Mirrors CM_PointLeafnum's descent exactly.
 		bool PointInSolidLeaf(const Vec3& p) const;
