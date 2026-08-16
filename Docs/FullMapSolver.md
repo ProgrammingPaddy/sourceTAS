@@ -2229,6 +2229,52 @@ gated on the TraceRay post-processing question. The user's ramp law
 (can't unduck mid-ride until the feet clear) is confirmed as the swept
 fraction<1 test, decoded and mirrored.
 
+## 2026-08-15 (final) — Offline max-progress pass; zero further game sessions spent
+
+All of the following was done WITHOUT the game (user directive: stop
+burning relaunches; this engine build is a prerequisite, not the goal):
+
+**engine.dll TraceRay fully mapped** (via the EngineTraceClient003
+registration chain -> singleton 0x4796f0 -> vtable 0x3a4110 -> slot 4 =
+0x18e7d0): the world trace runs, a startsolid result SKIPS the entity
+loop and goes straight to finalization; the finalization rescales
+fraction/fractionleftsolid for the entity clip and zeroes
+fractionleftsolid on unswept rays - **there is NO startsolid rewrite**.
+The fractionleftsolid theory for the air-CanUnduck anomaly is DEAD, and
+with zero entities on this map, the world-only and everything filters
+provably produce identical traces - so the 582 verdict-vs-ray
+contradictions mean CanUnduck's RAY at those states differs from the
+assumed pos->pos-8.5 standing ray. The one soft spot in the CanUnduck
+decode is the mask argument: my static resolution hit vtable-base
+ambiguity (see below) and one candidate resolves to GetPlayerMins
+returning a POINTER - a nonsense mask - so the call-target byte decode
+at 0x1f4e84-0x1f4e9c needs one careful re-read next session (or a
+one-click live arg-log through the runner).
+
+**True CCSGameMovement vtable base = 0x4781c8** (constructor
+0x1e8b0-0x1e8c8 stores it into the GM singleton [0x68eec0]); my earlier
+slot map was based 0x58 too high - all function IDENTITIES survive
+(bodies were confirmed by member access, never by slot), but every slot
+INDEX was wrong. GetPlayerMins = 0x11c240 (viewvecs x modelscale, duck
+flag selects the vector; returns the out-pointer in RAX per MSVC).
+
+**CheckParameters' move scaling + the in-Duck crop are now mirrored as
+engine functions** (scale: sqrt(f^2+s^2+u^2) capped to maxspeed, from
+the 0x1f56b0 body; crop: HandleDuckingSpeedCrop called at Duck's top on
+the pre-state - both probe-verified). Wiring them into the TICK was
+tried and produced a 0.001u wobble at t376 on the 292 tape (my scale
+float-detail is not yet exact: umove term, surface maxspeed factor,
+possible double math). The covenant is tape truth, so the tick keeps
+the validated saturated-input-equivalent cap and the wiring waits on
+CheckParameters' exact arithmetic. unduck_face (1.450u) was NOT fixed
+by the crop and remains open - next suspect is the CheckParameters
+duck-hold gate or the transient-hull interaction.
+
+**Standing all-green:** tapes 0.000u both, battery 14/15, corpus
+33,382, trace parity TOTAL (75,003/75,003 + all earlier batches),
+functions: Cat/Jump/HDSC/ReduceTimers perfect, FinishUnDuck 4, duck
+residuals torture-site-only, gated on the CanUnduck ray question.
+
 ## Decisions log
 - 2026-08-12: Era opened. Candidates A–G written pre-findings per user request.
 - 2026-08-13: User answered all open questions + supplied the prior-attempt handoff
