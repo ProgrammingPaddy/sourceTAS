@@ -22,6 +22,7 @@
 #include "SolverStrafe.h"
 #include "SolverEnvelope.h"
 #include "SolverBoard.h"
+#include "SolverAir.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -2223,6 +2224,158 @@ namespace {
 			&& unmapped == 0 && checked >= 50 && cone_bad == 0
 			&& pred_bad == 0;
 		printf("boardwin: M1.2 GATE %s\n", pass ? "PASS" : "FAIL");
+		fflush(stdout);
+		return pass ? 0 : 2;
+	}
+
+	// airsolve: THE M1.3 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
+	// For every tape transfer (airborne stretch ending in a single-plane
+	// surf board on a mapped face), hand the UNSEEDED air primitive only
+	// the entry state and the tape's landing window (face + contact
+	// point + arrival tick preference) - never the tape's controls - and
+	// demand it reproduce the board: same face, in-region, arrival tick
+	// within +/-8, clip loss within +30 u/s of the tape's dot (better is
+	// fine). Strafe-side flips are rate-limited by construction.
+	int CmdAirSolve(const std::string& map_path, const ReplayOpts& o,
+	                const std::vector<std::string>& tapes) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("airsolve: %s\n", err.c_str());
+			return 1;
+		}
+		auto find_face = [&](int brush, int plane) {
+			for (size_t i = 0; i < g.faces.size(); ++i)
+				if (g.faces[i].brush == brush && g.faces[i].side == plane)
+					return static_cast<int>(i);
+			return -1;
+		};
+
+		struct Xfer {
+			PlayerState entry;
+			int n = 0, face = -1;
+			float dot = 0.f, s2d = 0.f;
+			Vec3 contact;
+		};
+		std::vector<Xfer> xfers;
+		int skipped = 0;
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("LOAD FAILED (tas %s): %s\n", tp.c_str(), err.c_str());
+				return 1;
+			}
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			bool was_air = false;
+			PlayerState entry;
+			int a_tick = 0;
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& f = tape.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, f.pitch, f.yaw, f.fmove, f.smove,
+					f.umove, f.buttons, &ev);
+				const bool air_now = ev.ncontacts == 0 && !s.on_ground;
+				if (!was_air && air_now) {
+					entry = s;
+					a_tick = static_cast<int>(t);
+				}
+				if (was_air && ev.ncontacts > 0) {
+					const int b = ev.contact_brush[0];
+					const int pl = ev.contact_plane[0];
+					if (b >= 0 && pl >= 0) {
+						const Vec3& n = w.brushes[b].n[pl];
+						const int fi = (n.Z > 0.f
+							&& n.Z < o.params.walkable_z)
+							? find_face(b, pl) : -1;
+						const int nt = static_cast<int>(t) - a_tick;
+						if (fi >= 0 && ev.ncontacts == 1 && nt >= 2) {
+							Xfer x;
+							x.entry = entry;
+							x.n = nt;
+							x.face = fi;
+							x.dot = Dot(ev.contact_vel[0],
+								g.faces[fi].n);
+							x.s2d = Len2D(ev.contact_vel[0]);
+							x.contact = ev.contact_pos[0];
+							xfers.push_back(x);
+						} else if (fi >= 0) {
+							skipped++;
+						}
+					}
+				}
+				was_air = air_now;
+			}
+			printf("airsolve: %s replayed\n", tp.c_str());
+		}
+
+		int ok = 0;
+		for (size_t i = 0; i < xfers.size(); ++i) {
+			const Xfer& x = xfers[i];
+			Air::Target tg;
+			tg.face = x.face;
+			tg.aim = x.contact;
+			tg.dot_cap = (-x.dot > 50.f ? -x.dot : 50.f) + 30.f;
+			tg.max_ticks = x.n + 40;
+			tg.aim_tick = x.n;
+			tg.tick_w = 0.2f;
+			tg.tick_tol = 8;
+			const Air::Result r = Air::SolveTransfer(x.entry, w,
+				o.params, g, tg, 4, 3000);
+			const bool good = r.hit
+				&& r.edge <= Board::kHullCenterSlack
+				&& -r.dot <= -x.dot + 30.f
+				&& (r.tick - x.n <= 8 && x.n - r.tick <= 8);
+			if (good) ok++;
+			if (r.hit)
+				printf("airsolve[%2d]: face %2d | tape n=%3d dot=%7.1f "
+					"s2d=%6.1f | solver n=%3d dot=%7.1f s2d=%6.1f "
+					"edge=%5.1f flips=%d | %s\n",
+					static_cast<int>(i), x.face, x.n, x.dot, x.s2d,
+					r.tick, r.dot, r.speed2d, r.edge, r.flips,
+					good ? "OK" : "OFF-WINDOW");
+			else
+				printf("airsolve[%2d]: face %2d | tape n=%3d dot=%7.1f "
+					"s2d=%6.1f | solver MISS (closest %.1fu, %s%d) "
+					"entry(%.0f,%.0f,%.0f v %.0f,%.0f,%.0f) end"
+					"(%.0f,%.0f,%.0f) aim(%.0f,%.0f,%.0f)\n",
+					static_cast<int>(i), x.face, x.n, x.dot, x.s2d,
+					r.miss_dist,
+					r.grounded ? "grounded, brush " : "struck brush ",
+					r.struck_brush >= 0
+						? w.brushes[r.struck_brush].id : -1,
+					x.entry.pos.X, x.entry.pos.Y, x.entry.pos.Z,
+					x.entry.vel.X, x.entry.vel.Y, x.entry.vel.Z,
+					r.end_pos.X, r.end_pos.Y, r.end_pos.Z,
+					x.contact.X, x.contact.Y, x.contact.Z);
+		}
+		printf("airsolve: %d/%d transfers reproduced unseeded (%d "
+			"skipped: crease/tiny)\n", ok,
+			static_cast<int>(xfers.size()), skipped);
+		const bool pass = !xfers.empty()
+			&& ok == static_cast<int>(xfers.size());
+		printf("airsolve: M1.3 GATE %s\n", pass ? "PASS" : "FAIL");
 		fflush(stdout);
 		return pass ? 0 : 2;
 	}
@@ -5037,6 +5190,16 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdBoardWin(argv[2], o, tapes);
+	}
+	if (cmd == "airsolve" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdAirSolve(argv[2], o, tapes);
 	}
 	if (cmd == "strafelaw" && argc >= 3) {
 		ReplayOpts o;

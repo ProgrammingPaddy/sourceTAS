@@ -48,6 +48,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Source\Solver\SolverWorld.cpp" />
+    <ClCompile Include="Source\Solver\SolverAir.cpp" />
     <ClCompile Include="Source\Solver\SolverMove.cpp" />
     <ClCompile Include="Source\Solver\SolverTape.cpp" />
     <ClCompile Include="Source\Solver\SolverParams.cpp" />

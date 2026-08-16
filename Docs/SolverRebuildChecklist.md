@@ -9,7 +9,7 @@ Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
 `(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
 a measurable pass/fail, never a vibe.
 
-**NOW →** M1.3 air-phase yaw-spline primitive.
+**NOW →** M1.4 carve primitive.
 
 ---
 
@@ -94,11 +94,28 @@ a measurable pass/fail, never a vibe.
       quantified (these tapes are parity-certified, not optimality-
       certified). The expert cap must come from the demo traces (M1.5
       ledger), NOT from these tapes.
-- [ ] 1.3 Air-phase primitive: yaw-spline boundary-value solver (entry
-      state → target board window), knots capped by 0.6; solved on the
-      exact engine.
-      GATE: reproduces each tape transfer's board within small
-      tick/loss deltas WITHOUT seeing the tape's controls.
+- [x] 1.3 Air-phase primitive (`SolverAir.h/.cpp` + `airsolve` gate):
+      target-heading spline flown on the exact engine by a law-derived
+      controller — per tick it lands the spline heading exactly via the
+      certified turn-curve inversion (cosa ∈ [0, cap/v]: full-turn-full-
+      gain → no-turn-no-gain), and beyond the perp rate engages the
+      BRAKING TURN (cosa < 0: budget 562.5 >> cap 30 buys ~32°/tick at
+      850 u/s for ~114 u/s — testimony's "eat the energy in the turn",
+      now a controller capability whose cost the optimizer owns via the
+      spline slope). Strafe-side flips rate-limited by construction
+      (min 12 ticks; blocked flip with small error weaves, large error
+      coasts). Search: 5 unseeded initial families (linear/late-turn/
+      pure-pursuit/mirrored-tangent/outward-bump) + BASIN HOPPING
+      (deterministic jitter restarts — plain coordinate descent
+      converged at ~200 evals and left the rest of any budget unspent)
+      + polish hops around the global best. Spline spans the expected
+      flight (aim_tick), not the sim cap — late knots must be live
+      parameters. GATE PASSED: 12/12 tape transfers reproduced
+      unseeded (entry state + landing window only, never tape
+      controls), 1.0s wall for the whole suite at 3000 evals/transfer.
+      Quality: the primitive beats the tape's board on 10/12 —
+      e.g. dot −50 vs tape −377, −205 vs −432, two near-perfect
+      tangent arrivals (−1.8, −0.6).
 - [ ] 1.4 Carve primitive: on-face entry → exit manifold with time +
       energy tags (conversion along downhill axis, flick setup).
       GATE: reproduces tape carves' exits; manifold matches sim
@@ -231,3 +248,15 @@ a measurable pass/fail, never a vibe.
   mission: the old solver's tapes contain a 38.5%-of-speed² board —
   the "needlessly lost energy on boards" the user diagnosed, now a
   number the ledger can chase. NOW = M1.3 yaw-spline air primitive.
+- 2026-08-16 (later): M1.3 GATE PASSED, 12/12 unseeded in 1.0s. Four
+  iteration rounds, each from row evidence: (1) spline domain must be
+  the expected flight, not the sim cap (dead-knot bug); (2) arrival
+  tick needs a hard window (tick_tol) or the search grazes back at
+  tick 1; (3) the controller NEEDED the braking turn (cosa < 0) — the
+  perp-only strafe family cannot soften hard boards; adding it turned
+  6 rows at once and IS the flick/eat-energy-in-the-turn mechanic;
+  (4) plain coordinate descent converges at ~200 evals regardless of
+  budget (identical output at 900 vs 3000) — basin hopping with
+  deterministic jitter actually spends the budget and closed the last
+  2 rows. Primitive beats the tape's board loss on 10/12 transfers.
+  NOW = M1.4 carve primitive.
