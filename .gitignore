@@ -340,4 +340,4 @@ ASALocalRun/
 healthchecksdb
 
 # sourceTAS injector build output (source + build_injector.bat are tracked)
-Tools/Injector.exe
+Tools/Injector.exeOutput/
