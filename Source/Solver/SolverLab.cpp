@@ -18,6 +18,8 @@
 #include "SolverMove.h"
 #include "SolverOptimize.h"
 #include "SolverChain.h"
+#include "SolverRoute.h"
+#include "SolverStrafe.h"
 #include "SolverParams.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
@@ -1633,6 +1635,147 @@ namespace {
 		printf("tracegen-map: %d queries -> %s\n", id, out_path.c_str());
 		printf("tracegen-map: in-game 'Run trace oracle' answers them; then\n"
 			"  SolverLab tracediff \"%s\" <results.csv>\n", out_path.c_str());
+		fflush(stdout);
+		return 0;
+	}
+
+	// strafelaw: PROVE the closed-form air-strafe law (SolverStrafe.h)
+	// against the certified engine mirror. Sweeps speed x sfric x duck x
+	// wish angle, runs ONE real MoveTick per point high in open air, and
+	// compares the analytic speed^2 delta and heading turn against what
+	// the mirror actually did. This is the bedrock of the regret ledger -
+	// it must be EXACT, not close.
+	int CmdStrafeLaw(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		const float kV[8] = { 30.f, 100.f, 300.f, 600.f, 1000.f, 1800.f,
+			2600.f, 3400.f };
+		const float kSf[2] = { 1.f, 0.25f };
+		float max_dg = 0.f, max_dt = 0.f;
+		int n = 0;
+		for (int vi = 0; vi < 8; ++vi)
+		for (int si = 0; si < 2; ++si)
+		for (int du = 0; du < 2; ++du)
+		for (int ad = 5; ad < 180; ad += 5) {
+			const float v = kV[vi];
+			const float alpha = Deg2Rad(static_cast<float>(ad));
+			PlayerState s;
+			// z=3000: far above the map shell - the certified world traces
+			// CLEAR out there for swept rays, so the tick is pure air
+			// physics with no contact contamination (the first version sat
+			// at (0,0,900), inside the spine's airspace, and graded clip
+			// deflections as "law deviation").
+			s.pos = Vec3(0.f, 0.f, 3000.f);
+			s.vel = Vec3(v, 0.f, 0.f);
+			s.on_ground = false;
+			s.ducked = du != 0;
+			s.hull_state = du ? 1 : 0;
+			s.surface_friction = kSf[si];
+			// Wish at angle alpha from velocity (velocity heading = 0 deg).
+			// fmove-forward wish: yaw IS the wish direction.
+			const float yaw = ad;   // degrees
+			TickEvents ev;
+			// Ducked samples HOLD the duck button - without it the tick
+			// UNDUCKS at Duck() before the wish is computed and the sample
+			// silently grades the standing law (the first version's only
+			// "deviation" was exactly this validator bug).
+			MoveTick(s, w, o.params, 0.f, yaw, 450.f, 0.f, 0.f,
+				du ? IN_DUCK : 0, &ev);
+			if (ev.ncontacts > 0 || s.on_ground)
+				continue;   // contaminated tick: not an air-law sample
+			const float sp2 = s.vel.X * s.vel.X + s.vel.Y * s.vel.Y;
+			const float heading = atan2f(s.vel.Y, s.vel.X);
+			Strafe::TickLaw law = Strafe::Law(o.params, v, kSf[si], du != 0);
+			const float ana2 = law.NewSpeed2(cosf(alpha));
+			const float anaT = law.TurnRad(cosf(alpha), sinf(alpha));
+			const float dg = fabsf(sp2 - ana2);
+			const float dt = fabsf(heading - anaT);
+			if (dg > max_dg) {
+				max_dg = dg;
+				printf("  worst dg so far: v %.0f sfric %.2f duck %d a %d | "
+					"eng sp2 %.1f ana %.1f | eng turn %.4f ana %.4f\n",
+					v, kSf[si], du, ad, sp2, ana2, heading, anaT);
+			}
+			if (dt > max_dt) max_dt = dt;
+			n++;
+		}
+		printf("strafelaw: %d points | max |dspeed^2| %.6f | max |dturn| %.8f rad\n",
+			n, max_dg, max_dt);
+		// Tolerance is ULP-relative: one ULP of speed^2 at 3400 u/s is ~1.0,
+		// so a few units of absolute drift IS float-exact agreement.
+		printf("strafelaw: %s\n", (max_dg <= 4.f && max_dt < 1e-5f)
+			? "closed form EXACT against the certified mirror (float ULP)"
+			: "LAW DEVIATES - do not build on it; find out why first");
+		// The economics table for the record: per-tick gain vs turn at the
+		// optimum and at biases, standing, sfric 1.
+		printf("  v      gain(perp)  turn(perp)deg | gain(b=15deg) turn(b=15)\n");
+		for (int vi = 0; vi < 8; ++vi) {
+			const float v = kV[vi];
+			Strafe::TickLaw law = Strafe::Law(o.params, v, 1.f, false);
+			const float g0 = sqrtf(v * v + law.OptGain2()) - v;
+			const float t0 = law.TurnRad(0.f, 1.f) * 57.29578f;
+			const float cb = cosf(Deg2Rad(75.f));   // 15 deg off perp
+			const float sb = sinf(Deg2Rad(75.f));
+			const float gb = sqrtf(law.NewSpeed2(cb)) - v;
+			const float tb = law.TurnRad(cb, sb) * 57.29578f;
+			printf("  %6.0f  %9.4f  %12.4f | %12.4f  %9.4f\n",
+				v, g0, t0, gb, tb);
+		}
+		fflush(stdout);
+		return (max_dg < 0.05f && max_dt < 1e-5f) ? 0 : 2;
+	}
+
+	// routegraph: STAGE 1 of the rebuild - extract the feature graph and
+	// dump it (summary + solver\route_features.csv for inspection).
+	int CmdRouteGraph(const std::string& map_path, const ReplayOpts& o,
+	                  const std::string& out_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("routegraph: %s\n", err.c_str());
+			return 1;
+		}
+		printf("routegraph: %d surfable faces, %d candidate transfers\n",
+			static_cast<int>(g.faces.size()),
+			static_cast<int>(g.edges.size()));
+		for (size_t i = 0; i < g.faces.size() && i < 40; ++i) {
+			const Route::Face& f = g.faces[i];
+			printf("  face %2d  brush %4d side %d  n(%+.3f,%+.3f,%+.3f)  "
+				"c(%8.1f,%8.1f,%7.1f)  area %8.0f  z[%7.1f..%7.1f]\n",
+				static_cast<int>(i), w.brushes[f.brush].id, f.side,
+				f.n.X, f.n.Y, f.n.Z,
+				f.centroid.X, f.centroid.Y, f.centroid.Z,
+				f.area, f.zmin, f.zmax);
+		}
+		FILE* f = nullptr;
+		if (fopen_s(&f, out_path.c_str(), "w") == 0 && f) {
+			fprintf(f, "face,brush,side,nx,ny,nz,cx,cy,cz,area,zmin,zmax,"
+				"dhx,dhy,dhz,nverts\n");
+			for (size_t i = 0; i < g.faces.size(); ++i) {
+				const Route::Face& q = g.faces[i];
+				fprintf(f, "%d,%d,%d,%.6f,%.6f,%.6f,%.3f,%.3f,%.3f,%.1f,"
+					"%.3f,%.3f,%.6f,%.6f,%.6f,%d\n",
+					static_cast<int>(i), w.brushes[q.brush].id, q.side,
+					q.n.X, q.n.Y, q.n.Z,
+					q.centroid.X, q.centroid.Y, q.centroid.Z, q.area,
+					q.zmin, q.zmax,
+					q.downhill.X, q.downhill.Y, q.downhill.Z,
+					static_cast<int>(q.verts.size()));
+			}
+			fclose(f);
+			printf("routegraph: features -> %s\n", out_path.c_str());
+		}
 		fflush(stdout);
 		return 0;
 	}
@@ -4307,6 +4450,20 @@ int main(int argc, char** argv) {
 			static_cast<float>(atof(argv[7])),
 			static_cast<float>(atof(argv[8])));
 		return CmdTraceOne(argv[2], o, a, b, atoi(argv[9]));
+	}
+	if (cmd == "strafelaw" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdStrafeLaw(argv[2], o);
+	}
+	if (cmd == "routegraph" && argc >= 3) {
+		const bool has_out = argc >= 4 && argv[3][0] != '-';
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, has_out ? 4 : 3, o))
+			return 1;
+		return CmdRouteGraph(argv[2], o,
+			has_out ? argv[3] : "route_features.csv");
 	}
 	if (cmd == "tracegen-quads" && argc >= 5) {
 		ReplayOpts o;
