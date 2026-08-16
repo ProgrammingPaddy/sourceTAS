@@ -185,3 +185,10 @@ user's number).
   contacts covered, 0 missing) and M0.5 done (AnchorZones + derived
   end zone from tape finish). NOW = M1.1 envelopes; M0.6 awaits the
   strafe rate-limit number from the user.
+- 2026-08-16 (later): M0.6 done (6/s). M0.7 crash hardening: marshal +
+  menu-draw SEH + device-lost fixes. Marshal ROUND 2 after the first
+  capture attempt: drain #1 (CreateMove) never fires in the MENU, so
+  queued playdemos sat stale and fired on the user's next map load;
+  drain #2 added in the message pump (main thread, all app states),
+  abort/timeout clear the queue. Stale zero-origin python traces
+  deleted. Capture still PENDING one click with the new DLL.
