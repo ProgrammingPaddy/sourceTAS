@@ -209,6 +209,14 @@ namespace Solver {
 		int OrderedLeafBrushes(const Vec3& a, const Vec3& b, const Vec3& mins,
 		                       const Vec3& maxs, int* out_list, int cap) const;
 
+		// True when the box at origin overlaps any CONTENTS_SOLID leaf.
+		// UNSWEPT tests consult LEAF CONTENTS (box oracle 2026-08-15: a
+		// zero-length box above the ceiling slab - overlapping NO brush -
+		// returns startsolid+allsolid, while swept traces out there return
+		// clear); swept traces clip brushes only.
+		bool BoxInSolidLeaf(const Vec3& origin, const Vec3& mins,
+		                    const Vec3& maxs) const;
+
 		// CONTENTS_SOLID of the leaf containing p (0 when the tree is
 		// absent). Mirrors CM_PointLeafnum's descent exactly.
 		bool PointInSolidLeaf(const Vec3& p) const;

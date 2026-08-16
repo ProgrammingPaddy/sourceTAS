@@ -166,8 +166,18 @@ namespace Solver {
 							continue;
 						const char* lp = p + lumps[kLumpLeafs].ofs + leaf * leaf_stride;
 						uint16_t first = 0, count = 0;
-						std::memcpy(&first, lp + 20, 2);
-						std::memcpy(&count, lp + 22, 2);
+						// dleaf_t: firstleafBRUSH@24 / numleafBRUSHES@26. This
+						// pass read the FACE fields at +20/+22 for its whole
+						// life - leaf faces misread as brush ids. Visible world
+						// brushes mostly got marked by index coincidence, but
+						// brushes whose ids never appear among face indices
+						// stayed unmarked and were DROPPED as "entity" brushes.
+						// Clip brushes have no faces at all - prime victims.
+						// Found when the box oracle reported startsolid at duck
+						// sites our world called free (1,089 of 1,296
+						// zero-length residual queries, 2026-08-15).
+						std::memcpy(&first, lp + 24, 2);
+						std::memcpy(&count, lp + 26, 2);
 						for (int i = 0; i < count; ++i) {
 							const int lbi = first + i;
 							if (lbi < 0 || lbi >= nleafbrushes)
@@ -766,6 +776,50 @@ namespace Solver {
 		return wk.n;
 	}
 
+	// Box-vs-tree walk: does the box at origin touch any CONTENTS_SOLID
+	// leaf? Radius-expanded plane tests, both children when spanning.
+	bool World::BoxInSolidLeaf(const Vec3& origin, const Vec3& mins,
+	                           const Vec3& maxs) const {
+		if (nodes.empty() || leaf_contents.empty())
+			return false;
+		const Vec3 c(origin.X + 0.5f * (mins.X + maxs.X),
+		             origin.Y + 0.5f * (mins.Y + maxs.Y),
+		             origin.Z + 0.5f * (mins.Z + maxs.Z));
+		const Vec3 e(0.5f * (maxs.X - mins.X), 0.5f * (maxs.Y - mins.Y),
+		             0.5f * (maxs.Z - mins.Z));
+		struct Walker {
+			const World* w;
+			Vec3 c, e;
+			bool Visit(int node) const {
+				while (node >= 0) {
+					if (node >= static_cast<int>(w->nodes.size()))
+						return false;
+					const BspNode& nd = w->nodes[node];
+					if (nd.plane < 0
+						|| nd.plane >= static_cast<int>(w->tree_n.size()))
+						return false;
+					const Vec3& pn = w->tree_n[nd.plane];
+					const float pd = w->tree_d[nd.plane];
+					const float r = fabsf(pn.X) * e.X + fabsf(pn.Y) * e.Y
+						+ fabsf(pn.Z) * e.Z;
+					const float d0 = Dot(pn, c) - pd;
+					if (d0 > r) { node = nd.child[0]; continue; }
+					if (d0 < -r) { node = nd.child[1]; continue; }
+					if (Visit(nd.child[0]))
+						return true;
+					node = nd.child[1];
+				}
+				const int leaf = -1 - node;
+				if (leaf < 0
+					|| leaf >= static_cast<int>(w->leaf_contents.size()))
+					return false;
+				return (w->leaf_contents[leaf] & 1) != 0;   // CONTENTS_SOLID
+			}
+		};
+		const Walker wk{ this, c, e };
+		return wk.Visit(headnode);
+	}
+
 	float World::TraceHull3(const Vec3& a, const Vec3& b, int hull,
 	                        TraceResult* out) const {
 		const bool ducked = hull == 1;   // trace-log row semantics
@@ -807,6 +861,18 @@ namespace Solver {
 			: hull == 2 ? hulls_.unduck_min : hulls_.stand_min;
 		const Vec3& wmx = hull == 1 ? hulls_.duck_max
 			: hull == 2 ? hulls_.unduck_max : hulls_.stand_max;
+		// TWO UNSWEPT PATHS IN THE ENGINE (both measured 2026-08-15, box
+		// oracle vs isolated movement functions at the SAME positions):
+		// IEngineTrace::TraceRay with a zero-length ray consults LEAF
+		// CONTENTS (ss1+as1 above the ceiling slab in a brushless void
+		// leaf), but the movement code's own position tests behave
+		// brushes-only there (CanUnduck frees a hull the raw ray calls
+		// solid). TRIED AND REVERTED: wiring the leaf rule in HERE took
+		// Duck 25 -> 2,316 and broke a tape - this function models the
+		// MOVEMENT path, so it stays brushes-only. BoxInSolidLeaf carries
+		// the raw-ray law for instruments that need it; pinning
+		// TestPlayerPosition is the instrument that settles the fine
+		// distinction.
 		int order[1024];
 		const int norder = OrderedLeafBrushes(a, b, wmn, wmx, order, 1024);
 		// Fallback when leaf tables are absent: grid gathering, cell-major
@@ -971,7 +1037,8 @@ namespace Solver {
 		float best = 1.f;
 		int best_brush = -1, best_plane = -1;
 		// Same start-solid law and ENGINE ORDER as TraceHull3 (see the
-		// comment there).
+		// comment there; the raw-ray leaf-contents rule stays OUT of the
+		// movement path - see the note there).
 		bool l_ss = false, l_as = false;
 		int order[1024];
 		const int norder = OrderedLeafBrushes(a, b, mins, maxs, order, 1024);
