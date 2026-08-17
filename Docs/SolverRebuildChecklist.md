@@ -327,6 +327,29 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 ## Change log
 
+- 2026-08-17 (session 5b, THE DOOM CULL WIRED - user approved): ONE
+  shared test `Carve::ExitDoomed` (tap: Envelope::CanReach with true
+  2D polygon distance + xy-AABB containment proxy, z from face
+  verts, hull-padded; zone: Field::ZoneReach) - benched as row
+  Mw-WIRED before wiring: falsekill 0.0% on ALL rides (the looser
+  hull-padded bounds fixed M0's 2.2%), deadcatch 91-99%, shrink
+  88-94%, 9-17 us. IN-SIM: RideHeadingSpline terminates a candidate
+  at any separation (re-tested after each graze) whose state fails
+  the test - new outcome DOOMED in results + reports; one-shot
+  region-distance miss + reach_short preserve the search gradient
+  for dead branches; g_doom_cull=false lets exitbench keep
+  collecting true fates. MEASURED EFFECT on the solve: face-3
+  arrivals now carry 592-644k (805-835 u/s) vs 18-337k pre-cull;
+  1->2 crease grazes halved (-113..-195k vs -570k); endings launch
+  from 567-614k (deficit to the ~722k requirement now ~110-155k =
+  70-95u of height). Remaining blockers, ledger-visible: the 1->2
+  crease graze persists in surviving lines (partially-grazed but
+  still-reachable paths pass the cull - correct; they need the
+  search to find the clean basin), and the human-style clean 2->3
+  (level ride, ascending pop, near-parallel board) is still
+  unfound. Gates green (airsolve/carve/boardproof) with the cull
+  live. Partial export now the [0 1 2 3] chain at 1088 frames.
+
 - 2026-08-17 (session 5, PROOF + BENCH - the board heatmap proven,
   exit-map models graded on engine truth, exit guidance UNWIRED):
   USER CORRECTIONS DRIVING THIS SESSION: the fpot "ratio 1.000"

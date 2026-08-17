@@ -4984,8 +4984,10 @@ namespace {
 			std::vector<Carve::ExitRec> recs;
 			recs.reserve(65536);
 			Carve::g_exit_rec = &recs;
+			Carve::g_doom_cull = false;   // the bench needs TRUE fates
 			Carve::SolveCarve(fe.at, w, o.params, g, ct, 6,
 				bench_evals);
+			Carve::g_doom_cull = true;
 			Carve::g_exit_rec = nullptr;
 			// Truth classes.
 			int n_clean = 0, n_scrape = 0, n_dead = 0;
@@ -5021,7 +5023,8 @@ namespace {
 				std::vector<float> pe, te;
 				double us = 0;
 			};
-			MStat ms[4];
+			MStat ms[5];   // + Mw = the WIRED doom test (must match
+			               // the sim's own cull exactly)
 			for (const auto& er : recs) {
 				const int tc = truth(er);
 				const float s2d = Len2D(er.xvel);
@@ -5164,14 +5167,17 @@ namespace {
 				const double us1 = 1e6
 					* static_cast<double>(clock() - ck0)
 					/ CLOCKS_PER_SEC;
-				const bool dead_m[4] = {
+				const bool dead_w = Carve::ExitDoomed(er.xpos,
+					er.xvel, o.params, ntface, last, zmin, zmax);
+				const bool dead_m[5] = {
 					!alive0,
 					!alive0 || !clear1,
 					!alive2,
-					!alive2 || !clear1 };
-				const float del_m[4] = { deliver0, deliver0,
-					deliver2, deliver2 };
-				for (int m = 0; m < 4; ++m) {
+					!alive2 || !clear1,
+					dead_w };
+				const float del_m[5] = { deliver0, deliver0,
+					deliver2, deliver2, deliver0 };
+				for (int m = 0; m < 5; ++m) {
 					MStat& st = ms[m];
 					st.us += m == 0 ? us0 : us1;
 					if (dead_m[m]) {
@@ -5190,11 +5196,11 @@ namespace {
 					}
 				}
 			}
-			const char* mn[4] = { "M0-feas ", "M1-clear", "M2-turn ",
-				"M3-both " };
+			const char* mn[5] = { "M0-feas ", "M1-clear", "M2-turn ",
+				"M3-both ", "Mw-WIRED" };
 			printf("exitbench:   model     falsekill scrapecatch "
 				"deadcatch shrink  Ebias   EMAE  corr  us/rec\n");
-			for (int m = 0; m < 4; ++m) {
+			for (int m = 0; m < 5; ++m) {
 				MStat& st = ms[m];
 				float corr = 0.f;
 				if (st.pe.size() >= 3) {

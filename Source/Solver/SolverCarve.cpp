@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "SolverBoard.h"
+#include "SolverField.h"
 #include "SolverSearchLog.h"
 #include "SolverSteer.h"
 
@@ -36,6 +37,54 @@ namespace Carve {
 	} // namespace
 
 	std::vector<ExitRec>* g_exit_rec = nullptr;
+	bool g_doom_cull = true;
+
+	bool ExitDoomed(const Vec3& pos, const Vec3& vel,
+	                const MoveParams& p, const Route::Face* tapf,
+	                bool to_zone, const Vec3& zmin, const Vec3& zmax) {
+		if (to_zone)
+			return Field::ZoneReach(pos, Len2D(vel), vel.Z, zmin,
+				zmax, p, 300, nullptr) < 0.f;
+		if (!tapf)
+			return false;
+		// 2D distance to the face: min over edges (point-segment),
+		// zero inside the xy bounding box (optimistic containment
+		// proxy - over-covering keeps the test admissible).
+		float zlo = FLT_MAX, zhi = -FLT_MAX;
+		float xlo = FLT_MAX, xhi = -FLT_MAX;
+		float ylo = FLT_MAX, yhi = -FLT_MAX;
+		for (const Vec3& v : tapf->verts) {
+			if (v.Z < zlo) zlo = v.Z;
+			if (v.Z > zhi) zhi = v.Z;
+			if (v.X < xlo) xlo = v.X;
+			if (v.X > xhi) xhi = v.X;
+			if (v.Y < ylo) ylo = v.Y;
+			if (v.Y > yhi) yhi = v.Y;
+		}
+		float dmin = 0.f;
+		if (pos.X < xlo || pos.X > xhi || pos.Y < ylo
+			|| pos.Y > yhi) {
+			dmin = FLT_MAX;
+			const size_t nv = tapf->verts.size();
+			for (size_t i = 0; i < nv; ++i) {
+				const Vec3& a = tapf->verts[i];
+				const Vec3& b = tapf->verts[(i + 1) % nv];
+				const float ex = b.X - a.X, ey = b.Y - a.Y;
+				const float l2 = ex * ex + ey * ey;
+				float t2 = l2 > 1e-6f
+					? ((pos.X - a.X) * ex + (pos.Y - a.Y) * ey) / l2
+					: 0.f;
+				if (t2 < 0.f) t2 = 0.f;
+				if (t2 > 1.f) t2 = 1.f;
+				const float px = a.X + ex * t2 - pos.X;
+				const float py = a.Y + ey * t2 - pos.Y;
+				const float d = sqrtf(px * px + py * py);
+				if (d < dmin)
+					dmin = d;
+			}
+		}
+		return !Envelope::CanReach(pos, vel, dmin, zlo, zhi, p, 300);
+	}
 
 	Result RideHeadingSpline(const PlayerState& entry, const World& w,
 	                         const MoveParams& p, const Target& t,
@@ -410,6 +459,51 @@ namespace Carve {
 						first_exit = s;
 						first_tick = k + 1;
 						have_first = true;
+					}
+					// THE DOOM CULL: a separation that provably
+					// cannot reach the target ends the candidate
+					// NOW (exitbench: 99%+ of dead candidates, ~0
+					// false kills). Re-tested after every graze
+					// (the state changed). One-shot region distance
+					// keeps the search gradient for dead branches.
+					if (g_doom_cull && r.ride_ticks > 0
+						&& (t.to_zone || tapf)
+						&& ExitDoomed(s.pos, s.vel, p, tapf,
+							t.to_zone, t.zone_min, t.zone_max)) {
+						r.doomed = true;
+						if (tapf) {
+							const float off = Dot(tapf->n, s.pos)
+								- tapf->d;
+							if (off > 0.f) {
+								const float eo = Board::EdgeDistOut(
+									*tapf, s.pos)
+									+ Board::kHullCenterSlack;
+								r.miss_dist = sqrtf(off * off
+									+ (eo > 0.f ? eo * eo : 0.f));
+							}
+						} else {
+							const float dx = s.pos.X < t.zone_min.X
+								? t.zone_min.X - s.pos.X
+								: (s.pos.X > t.zone_max.X
+									? s.pos.X - t.zone_max.X : 0.f);
+							const float dy = s.pos.Y < t.zone_min.Y
+								? t.zone_min.Y - s.pos.Y
+								: (s.pos.Y > t.zone_max.Y
+									? s.pos.Y - t.zone_max.Y : 0.f);
+							const float dz = s.pos.Z < t.zone_min.Z
+								? t.zone_min.Z - s.pos.Z
+								: (s.pos.Z > t.zone_max.Z
+									? s.pos.Z - t.zone_max.Z : 0.f);
+							r.miss_dist = sqrtf(dx * dx + dy * dy
+								+ dz * dz);
+						}
+						r.reach_short = ReachShort(exit_s);
+						r.end_pos = s.pos;
+						r.flips = ctl.flips;
+						RecExit(SearchLog::kDoomed, k + 1);
+						if (lg)
+							lg->EndTraj(SearchLog::kDoomed);
+						return r;
 					}
 				}
 				air_streak++;

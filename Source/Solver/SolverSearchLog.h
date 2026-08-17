@@ -44,6 +44,8 @@ namespace SearchLog {
 		kExited = 4,    // clean-air exit (carve non-tap mode)
 		kZoned = 5,     // entered the end-zone volume
 		kRef = 6,       // reference overlay (tape / result)
+		kDoomed = 7,    // terminated at separation: provably unable
+		                // to reach the target (the doom cull)
 	};
 
 	struct Traj {

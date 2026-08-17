@@ -274,7 +274,8 @@ const SP=D.spd?decodeB64(D.spd):null;
 const G2=2*(D.gravity||800);
 const T=D.trajs; // [stage,outcome,notable,score,eval,off,npts,ctx]
 const NT=T.length;
-const OUTNAMES=["miss","grounded","struck","HIT","exited","ZONED","ref"];
+const OUTNAMES=["miss","grounded","struck","HIT","exited","ZONED","ref",
+"doomed"];
 const OUTTIPS=[
 "ran to the horizon without reaching anything",
 "landed on walkable ground (the ride/flight died there)",
@@ -282,8 +283,9 @@ const OUTTIPS=[
 "board/tap strike ON the target face (a transfer)",
 "clean-air exit (carve handed off to a flight)",
 "entered the end-zone volume (a finish)",
-"reference overlay"];
-const OUTON=[true,true,true,true,true,true,true];
+"reference overlay",
+"terminated at separation: provably unable to reach the target"];
+const OUTON=[true,true,true,true,true,true,true,true];
 // per-stage score percentile ranks
 const rank=new Float32Array(NT);
 {const by={};for(let i=0;i<NT;i++){const s=T[i][0];(by[s]=by[s]||[]).push(i);}

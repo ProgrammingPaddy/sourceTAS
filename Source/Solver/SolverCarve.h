@@ -110,6 +110,9 @@ namespace Carve {
 		                         // board loss when it IS the transfer)
 		bool  grounded = false;
 		bool  zoned = false;     // zone mode: entered the end volume
+		bool  doomed = false;    // terminated at a separation that
+		                         // provably cannot reach the target
+		                         // (the exitbench-validated cull)
 		Vec3  end_pos;
 		float miss_dist = 1e9f;  // closest approach to aim_pos (when
 		                         // pos_w > 0): the no-exit gradient
@@ -148,6 +151,19 @@ namespace Carve {
 		int   end_tick = 0;
 	};
 	extern std::vector<ExitRec>* g_exit_rec;
+
+	// THE DOOM CULL (wired 2026-08-17 after exitbench measured it:
+	// 99%+ of dead candidates caught at ~0 false kills): true when a
+	// separation state provably cannot reach the transfer's target
+	// under the M1.1 bounds (ballistic z-window x gain-law distance,
+	// hull-padded - all optimistic, so a kill is a proof). ONE source
+	// of truth: the sim terminates on it, exitbench grades it (row
+	// Mw). g_doom_cull disables in-sim termination (the bench needs
+	// true fates).
+	bool ExitDoomed(const Vec3& pos, const Vec3& vel,
+	                const MoveParams& p, const Route::Face* tapf,
+	                bool to_zone, const Vec3& zmin, const Vec3& zmax);
+	extern bool g_doom_cull;
 
 	// effort: optional per-knot duty cycle in [0,1] (same knot spacing
 	// as the heading spline). A carve at effort < 1 COASTS a fraction
