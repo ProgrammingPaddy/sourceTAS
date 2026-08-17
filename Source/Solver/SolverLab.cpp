@@ -5275,6 +5275,281 @@ namespace {
 		return 0;
 	}
 
+	// autopsy: FACEPLANT FORENSICS (user 2026-08-17: "trace back from
+	// a sample of faceplants and find the bug"). Runs the assembler's
+	// own leg search (same field construction: blind-entry fallback,
+	// heat cells, aims) with the exit collector on, then for every
+	// strike on the tap face answers, from ITS OWN exit state:
+	//   - did it strike the cell it was scheduled to (ON/OFF-cell)?
+	//   - was a tangent arrival even feasible from that exit (the
+	//     strike cell's law minimum |dot| + turn need vs free budget)?
+	//   - how hard did it actually hit?
+	// The dominant class IS the bug.
+	int CmdAutopsy(const std::string& map_path, const ReplayOpts& o,
+	               const std::vector<std::string>& tapes,
+	               int bench_evals) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("autopsy: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<int> zreds;
+		w.FindZoneBrushes(nullptr, &zreds);
+		Vec3 zmin, zmax;
+		if (!zreds.empty()) {
+			const int zi = w.IndexOfBrushId(zreds[0]);
+			if (zi >= 0)
+				Assemble::ZoneVolume(w.brushes[zi], &zmin, &zmax);
+		}
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("autopsy: %s: %s\n", tp.c_str(), err.c_str());
+				continue;
+			}
+			std::string tname = tp;
+			const size_t sl = tname.find_last_of("\\/");
+			if (sl != std::string::npos)
+				tname = tname.substr(sl + 1);
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			struct FEvent { int tick; int fidx; PlayerState at; };
+			std::vector<FEvent> events;
+			int air = 0;
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& fr = tape.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+					fr.smove, fr.umove, fr.buttons, &ev);
+				if (ev.ncontacts > 0) {
+					int fidx = -1;
+					for (size_t fi = 0; fi < g.faces.size(); ++fi)
+						if (g.faces[fi].brush == ev.contact_brush[0]
+							&& g.faces[fi].side
+								== ev.contact_plane[0])
+							fidx = static_cast<int>(fi);
+					if (fidx >= 0 && air >= 8) {
+						FEvent fe;
+						fe.tick = static_cast<int>(t);
+						fe.fidx = fidx;
+						fe.at = s;
+						events.push_back(fe);
+					}
+					air = 0;
+				} else if (!s.on_ground) {
+					air++;
+				} else {
+					air = 0;
+				}
+			}
+			for (size_t k = 0; k + 1 < events.size(); ++k) {
+				const FEvent& fe = events[k];
+				const Route::Face& lfc = g.faces[fe.fidx];
+				const int nfi = events[k + 1].fidx;
+				const Route::Face& nf = g.faces[nfi];
+				// Assembler-equivalent target (field block included).
+				Carve::Target ct;
+				ct.face = fe.fidx;
+				ct.max_ticks = 320;
+				ct.tap_brush = nf.brush;
+				ct.tap_side = nf.side;
+				ct.tap_face = nfi;
+				Field::NextCtx fctx;
+				if (k + 2 < events.size()) {
+					fctx.has = true;
+					fctx.pt = g.faces[events[k + 2].fidx].centroid;
+					ct.next_face = events[k + 2].fidx;
+				} else {
+					fctx.has = true;
+					fctx.is_zone = true;
+					fctx.zmin = zmin;
+					fctx.zmax = zmax;
+					ct.next_is_zone = true;
+					ct.zone_min = zmin;
+					ct.zone_max = zmax;
+				}
+				const Vec3 lnext = nf.centroid;
+				ct.exit_heading = atan2f(lnext.Y - fe.at.pos.Y,
+					lnext.X - fe.at.pos.X);
+				const float se = Len2D(fe.at.vel);
+				const float es = se > 100.f
+					? Len(lnext - fe.at.pos) / (se * o.params.dt)
+					: 80.f;
+				ct.aim_tick = es < 10.f ? 10
+					: (es > 240.f ? 240 : static_cast<int>(es));
+				ct.tick_w = 0.02f;
+				Field::FaceMap fmap = Field::Compute(fe.at.pos,
+					fe.at.vel, nf, o.params, fe.at.ducked, 32.f,
+					300, 1.f, &fctx);
+				if (fmap.best < 0) {
+					Field::NextTarget xnt;
+					xnt.face = &nf;
+					xnt.face_idx = nfi;
+					xnt.after = fctx;
+					Field::ExitMap em = Field::ComputeExit(
+						fe.at.pos, fe.at.vel, lfc, xnt, o.params,
+						fe.at.ducked, 64.f, 12, 64.f, 300);
+					if (em.best_pot >= 0) {
+						const Field::ExitSample& bs =
+							em.samples[em.best_pot];
+						fmap = Field::Compute(bs.pt,
+							Scale(bs.dir, bs.pv), nf, o.params,
+							fe.at.ducked, 32.f, 300, 1.f, &fctx);
+					}
+				}
+				if (fmap.best >= 0) {
+					ct.field_aim = fmap.samples[fmap.best].q;
+					ct.have_field_aim = true;
+					ct.field_phi = fmap.samples[fmap.best].phi;
+					ct.field_n = fmap.samples[fmap.best].n;
+					ct.have_field_arr = true;
+					for (int pass = 0; pass < 2
+						&& ct.cells.empty(); ++pass)
+					for (const Field::Sample& sm : fmap.samples) {
+						if (!sm.reachable || sm.e_eff <= 0.f)
+							continue;
+						if (pass == 0 && !sm.run_viable)
+							continue;
+						const float rel = fmap.e_hi > 0.f
+							? sm.e_eff / fmap.e_hi : 0.f;
+						const int rep = rel >= 0.85f ? 3
+							: (rel >= 0.6f ? 1 : 0);
+						for (int rp = 0; rp < rep
+							&& ct.cells.size() < 192; ++rp) {
+							Carve::Target::Cell cc;
+							cc.q = sm.q;
+							cc.phi = sm.phi;
+							cc.n = sm.n;
+							ct.cells.push_back(cc);
+						}
+					}
+				}
+				std::vector<Carve::ExitRec> recs;
+				recs.reserve(65536);
+				Carve::g_exit_rec = &recs;
+				Carve::SolveCarve(fe.at, w, o.params, g, ct, 6,
+					bench_evals);
+				Carve::g_exit_rec = nullptr;
+				// Classify every tap-face strike.
+				int nb[4] = { 0, 0, 0, 0 };   // |dot| buckets
+				int oncell[4] = { 0, 0, 0, 0 };
+				int feas[4] = { 0, 0, 0, 0 };
+				int turnok[4] = { 0, 0, 0, 0 };
+				struct Worst { float dot; Carve::ExitRec er; };
+				std::vector<Worst> worst;
+				int hits = 0;
+				for (const auto& er : recs) {
+					if (er.outcome != SearchLog::kHit)
+						continue;
+					hits++;
+					const float ad = fabsf(er.sdot);
+					const int b = ad < 50.f ? 0
+						: (ad < 150.f ? 1 : (ad < 300.f ? 2 : 3));
+					nb[b]++;
+					if (er.have_cell
+						&& Len(er.spos - er.cell) < 64.f)
+						oncell[b]++;
+					// From ITS exit state: what was possible at the
+					// strike cell?
+					const float s2d = Len2D(er.xvel);
+					const int fly = er.end_tick - er.xtick;
+					const float vz_arr = Envelope::VzAfter(
+						er.xvel.Z, fly, o.params);
+					const float s_arr = Envelope::SMax(s2d, fly,
+						o.params);
+					const float res = Board::MinApproachDot(s_arr,
+						vz_arr, nf.n);
+					if (res != FLT_MAX && res < 50.f)
+						feas[b]++;
+					// Turn need to the tangent heading vs the free
+					// budget over the actual flight.
+					const float hn2 = sqrtf(nf.n.X * nf.n.X
+						+ nf.n.Y * nf.n.Y);
+					float cphi = s_arr * hn2 > 1e-4f
+						? -vz_arr * nf.n.Z / (s_arr * hn2) : 0.f;
+					if (cphi > 1.f) cphi = 1.f;
+					if (cphi < -1.f) cphi = -1.f;
+					const float psi2 = atan2f(nf.n.Y, nf.n.X);
+					const float h0 = atan2f(er.xvel.Y, er.xvel.X);
+					const float th2 = atan2f(
+						er.spos.Y - er.xpos.Y,
+						er.spos.X - er.xpos.X);
+					const float pa = Steer::WrapPi(psi2
+						+ acosf(cphi));
+					const float pb = Steer::WrapPi(psi2
+						- acosf(cphi));
+					const float na = Field::TurnNeed(h0, th2, pa);
+					const float nb2 = Field::TurnNeed(h0, th2, pb);
+					const float need = na < nb2 ? na : nb2;
+					const float freeb = Field::FreeTurnBudget(s2d,
+						static_cast<float>(fly), o.params,
+						fe.at.ducked);
+					if (need <= freeb)
+						turnok[b]++;
+					if (b >= 2) {
+						Worst ww;
+						ww.dot = ad;
+						ww.er = er;
+						worst.push_back(ww);
+					}
+				}
+				printf("autopsy: %s ride f%d -> f%d | %d records, "
+					"%d tap hits\n", tname.c_str(), fe.fidx, nfi,
+					static_cast<int>(recs.size()), hits);
+				const char* bn[4] = { "|dot|<50  ", "50-150    ",
+					"150-300   ", ">300 SLAM " };
+				printf("autopsy:   bucket      n     on-cell  "
+					"tangent-feasible  turn-in-budget\n");
+				for (int b = 0; b < 4; ++b)
+					printf("autopsy:   %s %5d  %5d     %5d          "
+						"   %5d\n", bn[b], nb[b], oncell[b],
+						feas[b], turnok[b]);
+				std::sort(worst.begin(), worst.end(),
+					[](const Worst& a, const Worst& b2) {
+						return a.dot > b2.dot;
+					});
+				for (size_t i2 = 0; i2 < worst.size() && i2 < 5;
+					++i2) {
+					const Carve::ExitRec& er = worst[i2].er;
+					printf("autopsy:   SAMPLE dot %.0f strike (%.0f,"
+						"%.0f,%.0f) cell (%.0f,%.0f,%.0f) d %.0fu | "
+						"exit (%.0f,%.0f,%.0f) v(%.0f,%.0f,%.0f) "
+						"fly %d\n", -worst[i2].dot, er.spos.X,
+						er.spos.Y, er.spos.Z, er.cell.X, er.cell.Y,
+						er.cell.Z,
+						er.have_cell ? Len(er.spos - er.cell) : -1.f,
+						er.xpos.X, er.xpos.Y, er.xpos.Z, er.xvel.X,
+						er.xvel.Y, er.xvel.Z,
+						er.end_tick - er.xtick);
+				}
+			}
+		}
+		fflush(stdout);
+		return 0;
+	}
+
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
 	// Replay certified tapes through the exact sim, collect every SURF
 	// contact (contacted plane normal.z < walkable), and verify each
@@ -8028,6 +8303,16 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdFieldGate(argv[2], o, tapes);
+	}
+	if (cmd == "autopsy" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdAutopsy(argv[2], o, tapes, 24000);
 	}
 	if (cmd == "boardproof" && argc >= 4) {
 		ReplayOpts o;

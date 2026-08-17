@@ -165,6 +165,12 @@ namespace Carve {
 		float e_end = 0.f;     // v^2 + 2g*z at the end of the sim
 		float graze2 = 0.f;    // total graze dot^2 after the exit
 		int   end_tick = 0;
+		// Faceplant autopsy fields: where it actually struck, how
+		// hard, and which heat cell it was being pulled toward.
+		Vec3  spos;            // strike position (kHit/kStruck)
+		float sdot = 0.f;      // strike clip dot
+		Vec3  cell;            // scheduled cell (field_aim) at eval
+		bool  have_cell = false;
 	};
 	extern std::vector<ExitRec>* g_exit_rec;
 

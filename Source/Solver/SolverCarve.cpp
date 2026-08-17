@@ -127,6 +127,10 @@ namespace Carve {
 				+ 2.f * p.gravity * s.pos.Z;
 			er.graze2 = r.graze_loss2;
 			er.end_tick = end_tick;
+			er.spos = s.pos;
+			er.sdot = r.strike_dot;
+			er.cell = t.field_aim;
+			er.have_cell = t.have_field_aim;
 			g_exit_rec->push_back(er);
 		};
 		// Ballistic shortfall from a separation state to the target
@@ -291,12 +295,30 @@ namespace Carve {
 				const float off = Dot(tapf->n, s.pos) - tapf->d;
 				if (off > 0.f) {
 					if (t.have_field_aim) {
-						// THE MAP CONTROLS CONTACT (user): pull to
-						// THIS candidate's scheduled heat cell -
-						// never to the nearest face point (nearest
-						// = the cold-edge attractor whose optimum
-						// was a perpendicular slam).
-						const float da = Len(s.pos - t.field_aim);
+						// THE ARRIVAL GRADIENT (autopsy verdict:
+						// 9239/9239 slams were tangent-feasible -
+						// plain distance-to-cell made the
+						// perpendicular line optimal by geometry).
+						// Cost = distance to the cell PLUS the
+						// distance needed to absorb the remaining
+						// turn to the cell's tangent heading at
+						// the free rate (the runway law's own
+						// turn-distance term). A head-on approach
+						// carries its unabsorbed 90 degrees as
+						// ~1200u of debt; the spread arc carries
+						// none.
+						float da = Len(s.pos - t.field_aim);
+						const float sv = Len2D(s.vel);
+						if (t.have_field_arr && sv > 1.f) {
+							Strafe::TickLaw tl = Strafe::Law(p, sv,
+								1.f, s.ducked);
+							const float rate = tl.TurnRad(0.f, 1.f);
+							const float need = fabsf(WrapPi(
+								t.field_phi
+								- atan2f(s.vel.Y, s.vel.X)));
+							if (rate > 1e-5f)
+								da += need / rate * sv * p.dt;
+						}
 						if (da < r.miss_dist)
 							r.miss_dist = da;
 					} else {
@@ -599,14 +621,16 @@ namespace Carve {
 				if (t.tap_brush >= 0 && r.tick > 0
 					&& r.struck_brush == t.tap_brush
 					&& r.struck_plane == t.tap_side)
-					// Strike softness + carry (the energy-currency
-					// form was retried WITH the rideability law
-					// 2026-08-17 and STILL regressed to hard taps -
-					// the score shapes the search trajectory, not
-					// just the pick; this weighting produced the
-					// best measured transfers: -7.5/-54 rideable
-					// landings).
-					return 0.6f * fabsf(r.strike_dot)
+					// Strike loss at FULL value (autopsy 2026-08-17:
+					// at 0.6 weight ANY strike outranked EVERY
+					// developing arc - score ~470 vs miss floor
+					// 600 - so basin hopping collapsed each family
+					// onto its first perpendicular striker; 8515
+					// slams, all tangent-feasible). At 1.0, a
+					// strike harder than the miss floor loses to a
+					// developing arc: slams are failures, not
+					// waypoints. Soft strikes still dominate all.
+					return fabsf(r.strike_dot)
 						- 0.01f * (Len2D(r.end_state.vel)
 							- r.next_cost);
 				// A non-exit CLOSE to the aim must be able to
@@ -924,6 +948,10 @@ namespace Carve {
 				tcell.aim_tick = t.aim_tick;
 				tcell.field_aim = c.q;
 				tcell.have_field_aim = true;
+				// The scheduled cell's own tangent heading feeds
+				// the arrival gradient.
+				tcell.field_phi = c.phi;
+				tcell.have_field_arr = true;
 				tp = &tcell;
 			}
 			Result rr = RideHeadingSpline(entry, w, p, *tp, g, th, &ef,
