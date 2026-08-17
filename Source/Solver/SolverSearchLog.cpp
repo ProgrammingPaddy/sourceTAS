@@ -503,6 +503,14 @@ cv.addEventListener("wheel",e=>{e.preventDefault();
 dist*=Math.pow(1.0016,e.deltaY);dist=Math.max(60,Math.min(40000,dist));},
 {passive:false});
 cv.addEventListener("contextmenu",e=>e.preventDefault());
+cv.addEventListener("dblclick",e=>{
+// re-center: pan drift made the closest zoom feel farther every
+// session; double-click focuses the view (picked point or map center)
+if(selId>=0&&selK>=0){const t=T[selId];const j=(t[5]+selK)*3;
+tgt=[P[j],P[j+1],P[j+2]];dist=Math.max(400,dist*0.35);}
+else{tgt=[ctr[0],ctr[1],ctr[2]];dist=D.geo.diag*1.1;}});
+window.addEventListener("keydown",e=>{
+if(e.key==="r"){tgt=[ctr[0],ctr[1],ctr[2]];dist=D.geo.diag*1.1;}});
 window.addEventListener("keydown",e=>{
 if(e.key==="Escape"&&selId>=0){selId=-1;computeSel();showPick();
 queueRebuild();}});
