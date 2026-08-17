@@ -7,6 +7,7 @@
 
 #include "SolverBoard.h"
 #include "SolverEnvelope.h"
+#include "SolverSearchLog.h"
 #include "SolverSteer.h"
 #include "SolverStrafe.h"
 
@@ -58,6 +59,9 @@ namespace Air {
 		// cap - otherwise late knots are dead parameters.
 		const int sh = (t.aim_tick > 0 && t.aim_tick < horizon)
 			? t.aim_tick : horizon;
+		SearchLog::Sink* lg = SearchLog::g_sink;
+		if (lg)
+			lg->StartTraj(s.pos);
 		r.yaw.reserve(horizon);
 		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
@@ -67,18 +71,23 @@ namespace Air {
 			ctl.Tick(s, p, theta, k, &yaw_deg, &fmove, &smove);
 			TickEvents ev;
 			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, hold, &ev);
+			if (lg)
+				lg->Point(s.pos);
 			r.yaw.push_back(yaw_deg);
 			r.fmove.push_back(fmove);
 			r.smove.push_back(smove);
 			float da;
 			if (t.aim_region) {
 				// Distance to the face itself: plane offset +
-				// outside-the-polygon shortfall. FRONT SIDE ONLY -
-				// a strike comes from off > 0 (same law as the carve
+				// outside-the-SAFE-INTERIOR shortfall (edge minus
+				// the hull-center slack, M1.2 - the raw boundary is
+				// still a marginal strike). FRONT SIDE ONLY - a
+				// strike comes from off > 0 (same law as the carve
 				// tap gradient); behind-the-plane closeness is not
 				// approach.
 				const float off = Dot(face.n, s.pos) - face.d;
-				const float eo = Board::EdgeDistOut(face, s.pos);
+				const float eo = Board::EdgeDistOut(face, s.pos)
+					+ Board::kHullCenterSlack;
 				da = off > 0.f
 					? sqrtf(off * off + (eo > 0.f ? eo * eo : 0.f))
 					: 1e9f;
@@ -105,6 +114,8 @@ namespace Air {
 					r.end_state = s;
 					r.end_pos = s.pos;
 					r.flips = ctl.flips;
+					if (lg)
+						lg->EndTraj(SearchLog::kHit);
 					return r;
 				}
 				// Any other contact is a GRAZE: clip and keep flying
@@ -118,11 +129,15 @@ namespace Air {
 				r.grounded = true;
 				r.end_pos = s.pos;
 				r.flips = ctl.flips;
+				if (lg)
+					lg->EndTraj(SearchLog::kGrounded);
 				return r;
 			}
 		}
 		r.end_pos = s.pos;
 		r.flips = ctl.flips;
+		if (lg)
+			lg->EndTraj(SearchLog::kMiss);
 		return r;
 	}
 
@@ -250,11 +265,15 @@ namespace Air {
 				tt.max_ticks);
 			used++;
 			const float sc = Score(rr, tt);
+			if (SearchLog::g_sink)
+				SearchLog::g_sink->Score(sc);
 			if (sc < best_score) {
 				best_score = sc;
 				best_knots = kn;
 				best_dom_tick = tt.aim_tick;
 				best_r = rr;
+				if (SearchLog::g_sink)
+					SearchLog::g_sink->MarkBest();
 			}
 			if (alts && rr.hit) {
 				bool merged = false;

@@ -3,7 +3,10 @@
 #include <float.h>
 #include <math.h>
 
+#include <algorithm>
+
 #include "SolverBoard.h"
+#include "SolverSearchLog.h"
 #include "SolverSteer.h"
 
 namespace Solver {
@@ -94,6 +97,9 @@ namespace Carve {
 			return best;
 		};
 		float duty = 1.f;   // effort accumulator (first tick strafes)
+		SearchLog::Sink* lg = SearchLog::g_sink;
+		if (lg)
+			lg->StartTraj(s.pos);
 		r.yaw.reserve(horizon);
 		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
@@ -117,6 +123,8 @@ namespace Carve {
 				| (duck_at >= 0 && k >= duck_at ? IN_DUCK : 0);
 			TickEvents ev;
 			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, btn, &ev);
+			if (lg)
+				lg->Point(s.pos);
 			r.yaw.push_back(yaw_deg);
 			r.fmove.push_back(fmove);
 			r.smove.push_back(smove);
@@ -133,6 +141,8 @@ namespace Carve {
 					r.end_state = s;
 					r.end_pos = s.pos;
 					r.flips = ctl.flips;
+					if (lg)
+						lg->EndTraj(SearchLog::kZoned);
 					return r;
 				}
 				// No-arrival gradient: 3D distance to the volume.
@@ -160,7 +170,13 @@ namespace Carve {
 				// convert to a strike and must not read as progress.
 				const float off = Dot(tapf->n, s.pos) - tapf->d;
 				if (off > 0.f) {
-					const float eo = Board::EdgeDistOut(*tapf, s.pos);
+					// Aim the SAFE interior, not the marginal edge:
+					// a hull-center at the raw polygon boundary is
+					// still kHullCenterSlack away from a guaranteed
+					// strike (M1.2), and 20-50u edge-skim misses
+					// were exactly what the chains died of.
+					const float eo = Board::EdgeDistOut(*tapf, s.pos)
+						+ Board::kHullCenterSlack;
 					const float da = sqrtf(off * off
 						+ (eo > 0.f ? eo * eo : 0.f));
 					if (da < r.miss_dist)
@@ -177,6 +193,8 @@ namespace Carve {
 				r.flips = ctl.flips;
 				if (ever_exit)
 					r.reach_short = ReachShort(exit_s);
+				if (lg)
+					lg->EndTraj(SearchLog::kGrounded);
 				return r;
 			}
 			if (ev.ncontacts > 0) {
@@ -255,6 +273,9 @@ namespace Carve {
 						r.next_cost = rem > 0.f
 							? v0 - sqrtf(rem) : v0;
 					}
+					if (lg)
+						lg->EndTraj(t.tap_brush >= 0
+							? SearchLog::kHit : SearchLog::kStruck);
 					return r;
 				}
 				air_streak = 0;
@@ -289,6 +310,8 @@ namespace Carve {
 					r.end_pos = s.pos;
 					r.end_state = exit_s;
 					r.flips = ctl.flips;
+					if (lg)
+						lg->EndTraj(SearchLog::kExited);
 					return r;
 				}
 			}
@@ -297,6 +320,8 @@ namespace Carve {
 		r.flips = ctl.flips;
 		if (ever_exit)
 			r.reach_short = ReachShort(exit_s);
+		if (lg)
+			lg->EndTraj(SearchLog::kMiss);
 		return r;
 	}
 
@@ -361,7 +386,8 @@ namespace Carve {
 
 	Result SolveCarve(const PlayerState& entry, const World& w,
 	                  const MoveParams& p, const Route::Graph& g,
-	                  const Target& t_in, int knots_n, int evals) {
+	                  const Target& t_in, int knots_n, int evals,
+	                  std::vector<Result>* alts, int alts_k) {
 		// Local mutable copy: the solve runs DUAL SPLINE DOMAINS
 		// (given aim_tick and its half) because the straight-line-at-
 		// entry-speed estimate overshoots when the ride doubles the
@@ -447,6 +473,10 @@ namespace Carve {
 		auto Clamp01 = [](float v) {
 			return v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
 		};
+		// Diverse-success pool for the caller's downstream
+		// composition: best result per END-POSITION cluster (48u).
+		struct PR { Result r; float sc; };
+		std::vector<PR> pool;
 		auto EvalOne = [&](const std::vector<float>& th,
 			const std::vector<float>& ef, int duck, float* sc_out)
 			-> Result {
@@ -454,6 +484,8 @@ namespace Carve {
 				t.max_ticks, duck);
 			used++;
 			const float sc = Score(rr, t);
+			if (SearchLog::g_sink)
+				SearchLog::g_sink->Score(sc);
 			if (sc < best_score) {
 				best_score = sc;
 				best_th = th;
@@ -461,6 +493,35 @@ namespace Carve {
 				best_duck = duck;
 				best_dom = t.aim_tick;
 				best_r = rr;
+				if (SearchLog::g_sink)
+					SearchLog::g_sink->MarkBest();
+			}
+			if (alts) {
+				const bool poolable = t.to_zone ? rr.zoned
+					: (t.tap_brush >= 0
+						? (!rr.exited
+							&& rr.struck_brush == t.tap_brush
+							&& rr.struck_plane == t.tap_side)
+						: rr.exited);
+				if (poolable) {
+					const Vec3& key = rr.exited ? rr.exit_pos
+						: rr.end_pos;
+					bool merged = false;
+					for (PR& pr : pool) {
+						const Vec3& pk = pr.r.exited ? pr.r.exit_pos
+							: pr.r.end_pos;
+						if (Len(pk - key) < 48.f) {
+							if (sc < pr.sc) {
+								pr.r = rr;
+								pr.sc = sc;
+							}
+							merged = true;
+							break;
+						}
+					}
+					if (!merged)
+						pool.push_back({ rr, sc });
+				}
 			}
 			if (sc_out) *sc_out = sc;
 			return rr;
@@ -592,6 +653,16 @@ namespace Carve {
 			Descend(hth, hef, hduck, hscore, 0.12f, evals - used);
 		}
 		best = best_r;
+		if (alts) {
+			std::sort(pool.begin(), pool.end(),
+				[](const PR& a, const PR& b) { return a.sc < b.sc; });
+			alts->clear();
+			for (const PR& pr : pool) {
+				if (static_cast<int>(alts->size()) >= alts_k)
+					break;
+				alts->push_back(pr.r);
+			}
+		}
 		return best;
 	}
 

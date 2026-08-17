@@ -29,6 +29,7 @@
 #include "SolverRouteSearch.h"
 #include "SolverAssemble.h"
 #include "SolverParams.h"
+#include "SolverSearchLog.h"
 #include "SolverSmooth.h"
 #include "SolverTape.h"
 #include "SolverWorld.h"
@@ -216,6 +217,7 @@ namespace {
 	struct ReplayOpts {
 		int start_brush = -1;      // BSP id; -1 = auto (brush under anchor)
 		int end_brush = -1;        // BSP id; -1 = none (no finish check)
+		std::string viz;           // search-space report path (--viz)
 		std::string csv;
 		MoveParams params;
 		Hulls hulls;
@@ -333,7 +335,8 @@ namespace {
 				if (i + 2 < argc) { o.trace_a = atoi(argv[++i]); o.trace_b = atoi(argv[++i]); }
 				else ok = false;
 			}
-			else if (a == "--anchor") { if (i + 1 < argc) o.anchor_file = argv[++i]; else ok = false; }
+			else if (a == "--viz") { if (i + 1 < argc) o.viz = argv[++i]; else ok = false; }
+		else if (a == "--anchor") { if (i + 1 < argc) o.anchor_file = argv[++i]; else ok = false; }
 			else if (a == "--anchor-tas") { if (i + 1 < argc) o.anchor_tas = argv[++i]; else ok = false; }
 			else if (a == "--out") { if (i + 1 < argc) o.out_tas = argv[++i]; else ok = false; }
 			else if (a == "--budget-s") { if (i + 1 < argc) o.budget_s = atof(argv[++i]); else ok = false; }
@@ -2897,11 +2900,66 @@ namespace {
 			printf("msolvegate: %s\n", err.c_str());
 			return 1;
 		}
+		// --viz: record every evaluated candidate for the search-
+		// space report (density of REAL lines, replayable in time).
+		SearchLog::Sink viz_sink;
+		if (!o.viz.empty())
+			SearchLog::g_sink = &viz_sink;
+		// Reference replays for the report overlay.
+		auto CollectRef = [&](const TapeAnchor& anchor,
+			const std::vector<TapeFrame>& frames,
+			std::vector<Vec3>* pts) {
+			PlayerState s;
+			s.pos = anchor.origin;
+			s.vel = anchor.velocity;
+			s.ducked = anchor.ducked;
+			s.hull_state = anchor.ducked ? 1 : 0;
+			s.stamina = anchor.stamina;
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+			pts->push_back(s.pos);
+			for (size_t t = 0; t < frames.size(); ++t) {
+				const TapeFrame& fr = frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+					fr.smove, fr.umove, fr.buttons, &ev);
+				if (t % 2 == 0)
+					pts->push_back(s.pos);
+			}
+		};
 		const clock_t c0 = clock();
 		Assemble::Opts ao;
 		Assemble::RunResult rr;
-		if (!Assemble::SolveMap(w, g, o.params, at.start, ao, &rr,
-			&err)) {
+		const bool solved = Assemble::SolveMap(w, g, o.params,
+			at.start, ao, &rr, &err);
+		if (!o.viz.empty()) {
+			SearchLog::g_sink = nullptr;
+			viz_sink.Flush();
+			std::vector<Vec3> ref;
+			CollectRef(at.start, at.frames, &ref);
+			viz_sink.AddRef("REF reference tape", ref);
+			if (solved) {
+				std::vector<Vec3> res;
+				CollectRef(at.start, rr.frames, &res);
+				viz_sink.AddRef("RESULT solved line", res);
+			}
+			std::string verr;
+			if (SearchLog::WriteHtml(o.viz, w, g, viz_sink,
+				"msolvegate search space - " + at.map, &verr))
+				printf("msolvegate: search report -> %s\n",
+					o.viz.c_str());
+			else
+				printf("msolvegate: VIZ WRITE FAILED: %s\n",
+					verr.c_str());
+		}
+		if (!solved) {
 			printf("msolvegate: SOLVE FAILED: %s\n", err.c_str());
 			return 2;
 		}
@@ -3368,8 +3426,15 @@ namespace {
 		ct.aim_tick = est < 10.f ? 10
 			: (est > 240.f ? 240 : static_cast<int>(est));
 		ct.tick_w = 0.02f;
+		SearchLog::Sink viz_sink(1200, 3);
+		if (!o.viz.empty()) {
+			SearchLog::g_sink = &viz_sink;
+			viz_sink.BeginStage(zone_mode ? "zone solve"
+				: "tap solve");
+		}
 		Carve::Result cr = Carve::SolveCarve(s, w, o.params, g, ct, 6,
 			evals);
+		SearchLog::g_sink = nullptr;
 		const bool tap_hit = cr.zoned
 			|| (!zone_mode && !cr.exited
 				&& cr.struck_brush == ct.tap_brush
@@ -3385,6 +3450,7 @@ namespace {
 			Len2D(cr.end_state.vel), cr.miss_dist, cr.reach_short,
 			cr.grounded ? 1 : 0, cr.struck_brush);
 		// The winner's trajectory, tick by tick (replayed controls).
+		std::vector<Vec3> win_pts;
 		PlayerState rs = s;
 		for (size_t k = 0; k < cr.yaw.size(); ++k) {
 			TickEvents ev;
@@ -3402,6 +3468,7 @@ namespace {
 					w.brushes[ev.contact_brush[0]]
 						.n[ev.contact_plane[0]]);
 			}
+			win_pts.push_back(rs.pos);
 			printf("  k%4d pos(%7.1f,%7.1f,%6.1f) v(%6.1f,%6.1f,%6.1f)"
 				" s2d %5.1f | c%d dot %6.1f%s\n",
 				static_cast<int>(k), rs.pos.X, rs.pos.Y, rs.pos.Z,
@@ -3409,6 +3476,21 @@ namespace {
 				rs.on_ground ? " GROUND" : "");
 			if (static_cast<int>(k) + 1 >= cr.tick && cr.tick > 0)
 				break;
+		}
+		if (!o.viz.empty()) {
+			viz_sink.AddRef("RESULT winner", win_pts);
+			std::string verr;
+			char ttl[128];
+			snprintf(ttl, sizeof(ttl), "tapprobe t%d face %d -> %s",
+				at_tick, ride_face,
+				zone_mode ? "ZONE" : "tap");
+			if (SearchLog::WriteHtml(o.viz, w, g, viz_sink, ttl,
+				&verr))
+				printf("tapprobe: search report -> %s\n",
+					o.viz.c_str());
+			else
+				printf("tapprobe: VIZ WRITE FAILED: %s\n",
+					verr.c_str());
 		}
 		fflush(stdout);
 		return tap_hit ? 0 : 2;

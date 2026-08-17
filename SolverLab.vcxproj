@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!-- SolverLab: console harness for the engine-independent solver core
      (Source/Solver). Builds with the same toolset and optimization flags as
      Basehook.vcxproj so float behavior matches when the DLL embeds the core.
@@ -62,6 +62,7 @@
     <ClCompile Include="Source\Solver\SolverChain.cpp" />
     <ClCompile Include="Source\Solver\SolverRoute.cpp" />
     <ClCompile Include="Source\Solver\SolverRouteSearch.cpp" />
+    <ClCompile Include="Source\Solver\SolverSearchLog.cpp" />
     <ClCompile Include="Source\Solver\SolverLab.cpp" />
   </ItemGroup>
   <ItemGroup>

@@ -449,6 +449,36 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-16 (session 2c): THE SEARCH-SPACE RECORDER (user directive:
+  "I want to actually see the routes being searched... a density
+  state space based on real lines"). New module SolverSearchLog.h/
+  .cpp: both spline sims stream every evaluated candidate's REAL
+  trajectory (every 3rd tick) into a per-stage sink — all best-so-far
+  improvements kept + a uniform reservoir of the rest — and
+  `WriteHtml` emits a SELF-CONTAINED interactive WebGL report: line
+  density over the map wireframe + face polygons + the red zone box,
+  stage/outcome/score-percentile filters, alpha dial, and a
+  chronological scrub that REPLAYS the search eval-by-eval;
+  reference tape + solved line as overlays. `--viz <path>` on
+  msolvegate and tapprobe. Serve via .claude/launch.json
+  (`search-reports`, port 8777) or open the file directly. Proven:
+  the full msolvegate report = 1,874,001 evaluated candidates
+  sampled to 44,452 lines across 66 stages, 12 MB, loads instantly.
+  SOLVER PROGRESS same session (each change probe/report-verified):
+  (12) interior-margin region gradient (EdgeDistOut +
+  kHullCenterSlack — the raw polygon boundary is a MARGINAL strike;
+  20-50u edge-skim misses were killing every chain: landings now
+  stick); (13) PER-LEG BEAM — SolveCarve returns top-K diverse
+  successes (mirroring the air alts), every leg composes (board alt
+  x carve alt) candidates and prices the top 3 with a DEPTH-2 probe
+  of the next leg from their landing; the beam found a 1->2 transfer
+  at dot -64 @ 898 u/s (human: -206 there). REMAINING, sharply
+  isolated by the beam prints: the 2->3 transfer (all candidates
+  strike face 3 low-south at dead speed vs the human's ascending
+  north-mid board at -8) and face-2 endings (likely genuinely
+  infeasible — the human uses face 3 as the elevator). The msolve
+  report shows both patterns as density; expert eyes requested.
+  Gates green after every step (airsolve 12/12, carve 10/10).
 - 2026-08-16 (session 2b): the transfer-capability campaign — eleven
   measured steps (list in 3.1) driven by the new `tapprobe` isolation
   instrument (the FUNCPROBE method at transfer granularity: replay a

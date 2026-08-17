@@ -134,10 +134,17 @@ namespace Carve {
 	// Unseeded boundary-value solve: initial spline families (hold /
 	// linear-to-exit / late-turn / downhill-bulge) + basin hopping on
 	// the exact engine.
+	// alts (optional): the top alts_k DIVERSE successful results
+	// (tap strikes / zone entries / exits by mode, clustered by end
+	// position, best first, alts[0] == the returned best) - the
+	// chain composes each with its downstream leg and picks by the
+	// WHOLE transfer, same law as the air primitive's board alts.
 	Result SolveCarve(const PlayerState& entry, const World& w,
 	                  const MoveParams& p, const Route::Graph& g,
 	                  const Target& t, int knots_n = 4,
-	                  int evals = 2000);
+	                  int evals = 2000,
+	                  std::vector<Result>* alts = nullptr,
+	                  int alts_k = 3);
 
 } // namespace Carve
 } // namespace Solver
