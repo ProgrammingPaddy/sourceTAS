@@ -853,3 +853,5 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   consistency (landings that strand the NEXT leg — depth-2 rolling-
   window composition is the next move, all primitives proven).
   Gates re-run green after every step: airsolve 12/12, carve 10/10.
+
+- 2026-08-17 (session 5c): MID-FLIGHT doom re-test (every 8th airborne tick - void lines die when the proof holds, not at the floor) + SNAKE families (swing-wide bulge to az_tan arrival, tap-only after a carve-gate fail re-measured the dilution law; divisor conditional). First run: snake f18 won 4 contexts; clean crease-free 1->2 exists (815k->783k, grazes 0); crease basin persists in other lines; no finisher yet. Gates green.

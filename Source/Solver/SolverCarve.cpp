@@ -507,6 +507,38 @@ namespace Carve {
 					}
 				}
 				air_streak++;
+				// Mid-flight doom re-test (user 2026-08-17: void
+				// lines survived because the cull only fired at
+				// separations): a flight that has STEERED itself
+				// into a provably-unreachable state dies the tick
+				// the proof holds, not at the floor. Every 8th
+				// airborne tick, ~2us.
+				if (g_doom_cull && (t.to_zone || tapf)
+					&& (air_streak & 7) == 0
+					&& ExitDoomed(s.pos, s.vel, p, tapf,
+						t.to_zone, t.zone_min, t.zone_max)) {
+					r.doomed = true;
+					if (tapf) {
+						const float off = Dot(tapf->n, s.pos)
+							- tapf->d;
+						if (off > 0.f) {
+							const float eo = Board::EdgeDistOut(
+								*tapf, s.pos)
+								+ Board::kHullCenterSlack;
+							const float da = sqrtf(off * off
+								+ (eo > 0.f ? eo * eo : 0.f));
+							if (da < r.miss_dist)
+								r.miss_dist = da;
+						}
+					}
+					r.reach_short = ReachShort(exit_s);
+					r.end_pos = s.pos;
+					r.flips = ctl.flips;
+					RecExit(SearchLog::kDoomed, k + 1);
+					if (lg)
+						lg->EndTraj(SearchLog::kDoomed);
+					return r;
+				}
 				// With a TAP target the transfer is ONE primitive:
 				// the ride continues through the clean-air exit into
 				// the flight, ending at the strike on the tap face
@@ -781,7 +813,7 @@ namespace Carve {
 			}
 		}
 		struct FamD { Fam f; int duck; };
-		const FamD fams[17] = {
+		const FamD fams[19] = {
 			{ { h0, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },    // hold, full effort
 			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },  // linear
 			{ { t.exit_heading, 2.f, 0.f, 1.f, 0.f, 0 }, -1 },  // late turn
@@ -811,6 +843,13 @@ namespace Carve {
 			// normal - straight in, and via the objective side.
 			{ { az_tan, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },
 			{ { az_tan, 1.f, 0.f, 1.f, 0.6f, 2 }, -1 },
+			// SNAKE families (user 2026-08-17: "curving strafes like
+			// a snake to land tangent"): swing WIDE mid-flight (the
+			// bulge, both sides) and come back through the tangent
+			// line at arrival - the curve-to-tangent basin the
+			// straight-to-tangent inits never enter.
+			{ { az_tan, 1.f, 0.7f, 1.f, 0.f, 0 }, -1 },
+			{ { az_tan, 1.f, -0.7f, 1.f, 0.f, 0 }, -1 },
 		};
 		int used = 0;
 		int cur_fam = -1;   // family provenance for win-rate data
@@ -825,8 +864,13 @@ namespace Carve {
 			dom_alt = t.max_ticks;
 		const int dom_half = dom_alt;
 		const int ndom = dom_half != dom_full ? 2 : 1;
-		const int per_fam = evals / (18 * ndom) > 8
-			? evals / (18 * ndom) : 8;
+		// Snake families are TAP-ONLY (az_tan is a tap construction;
+		// without one they duplicate the bulge families and dilute
+		// every row's budget - the family-dilution law, re-measured
+		// by an immediate carve-gate failure).
+		const int nfam_div = t.tap_face >= 0 ? 20 : 18;
+		const int per_fam = evals / (nfam_div * ndom) > 8
+			? evals / (nfam_div * ndom) : 8;
 		float best_score = FLT_MAX;
 		std::vector<float> best_th, best_ef;
 		int best_duck = -1;
@@ -958,7 +1002,9 @@ namespace Carve {
 		t.aim_tick = di == 0 ? dom_full : dom_half;
 		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
 			: t.max_ticks / 2;
-		for (int fam = 0; fam < 17 && used < evals; ++fam) {
+		for (int fam = 0; fam < 19 && used < evals; ++fam) {
+			if (fam >= 17 && t.tap_face < 0)
+				continue;   // snake families: tap transfers only
 			cur_fam = fam;
 			std::vector<float> th(knots_n), ef(knots_n,
 				fams[fam].f.eff);
