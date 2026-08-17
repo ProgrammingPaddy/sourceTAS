@@ -35,6 +35,8 @@ namespace Carve {
 
 	} // namespace
 
+	std::vector<ExitRec>* g_exit_rec = nullptr;
+
 	Result RideHeadingSpline(const PlayerState& entry, const World& w,
 	                         const MoveParams& p, const Target& t,
 	                         const Route::Graph& g,
@@ -59,6 +61,25 @@ namespace Carve {
 		bool ever_exit = false;
 		PlayerState exit_s;
 		int exit_tick = 0;
+		// Engine-truth exit record: the FIRST separation after real
+		// ride ticks + the candidate's eventual fate (exitbench data).
+		bool have_first = false;
+		PlayerState first_exit;
+		int first_tick = 0;
+		auto RecExit = [&](int oc, int end_tick) {
+			if (!g_exit_rec || !have_first)
+				return;
+			ExitRec er;
+			er.xpos = first_exit.pos;
+			er.xvel = first_exit.vel;
+			er.xtick = first_tick;
+			er.outcome = oc;
+			er.e_end = Dot(s.vel, s.vel)
+				+ 2.f * p.gravity * s.pos.Z;
+			er.graze2 = r.graze_loss2;
+			er.end_tick = end_tick;
+			g_exit_rec->push_back(er);
+		};
 		// Ballistic shortfall from a separation state to the target
 		// (exact discrete z law, current-speed flight time - speed
 		// gain only shortens it, so this under-promises, never over).
@@ -99,7 +120,7 @@ namespace Carve {
 		float duty = 1.f;   // effort accumulator (first tick strafes)
 		SearchLog::Sink* lg = SearchLog::g_sink;
 		if (lg)
-			lg->StartTraj(s.pos);
+			lg->StartTraj(s.pos, Len(s.vel));
 		r.yaw.reserve(horizon);
 		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
@@ -175,7 +196,7 @@ namespace Carve {
 			TickEvents ev;
 			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, btn, &ev);
 			if (lg)
-				lg->Point(s.pos);
+				lg->Point(s.pos, Len(s.vel));
 			r.yaw.push_back(yaw_deg);
 			r.fmove.push_back(fmove);
 			r.smove.push_back(smove);
@@ -192,6 +213,7 @@ namespace Carve {
 					r.end_state = s;
 					r.end_pos = s.pos;
 					r.flips = ctl.flips;
+					RecExit(SearchLog::kZoned, k + 1);
 					if (lg)
 						lg->EndTraj(SearchLog::kZoned);
 					return r;
@@ -244,6 +266,7 @@ namespace Carve {
 				r.flips = ctl.flips;
 				if (ever_exit)
 					r.reach_short = ReachShort(exit_s);
+				RecExit(SearchLog::kGrounded, k + 1);
 				if (lg)
 					lg->EndTraj(SearchLog::kGrounded);
 				return r;
@@ -362,6 +385,9 @@ namespace Carve {
 						r.next_cost = rem > 0.f
 							? v0 - sqrtf(rem) : v0;
 					}
+					RecExit(t.tap_brush >= 0
+						? SearchLog::kHit : SearchLog::kStruck,
+						k + 1);
 					if (lg)
 						lg->EndTraj(t.tap_brush >= 0
 							? SearchLog::kHit : SearchLog::kStruck);
@@ -380,6 +406,11 @@ namespace Carve {
 					exit_tick = k + 1;
 					have_exit = true;
 					ever_exit = true;
+					if (!have_first && r.ride_ticks > 0) {
+						first_exit = s;
+						first_tick = k + 1;
+						have_first = true;
+					}
 				}
 				air_streak++;
 				// With a TAP target the transfer is ONE primitive:
@@ -409,6 +440,7 @@ namespace Carve {
 		r.flips = ctl.flips;
 		if (ever_exit)
 			r.reach_short = ReachShort(exit_s);
+		RecExit(SearchLog::kMiss, horizon);
 		if (lg)
 			lg->EndTraj(SearchLog::kMiss);
 		return r;

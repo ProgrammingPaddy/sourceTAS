@@ -54,6 +54,9 @@ namespace SearchLog {
 		bool  notable = false; // best-so-far improvement (or ref)
 		float score = 0.f;
 		std::vector<Vec3> pts;
+		std::vector<float> spd;  // |v| at each kept point (u/s) - the
+		                         // report shows total energy at any
+		                         // selected point from it
 	};
 
 	struct Stage {
@@ -78,8 +81,8 @@ namespace SearchLog {
 		void SetContext(const std::string& ctx);
 
 		// Sim side: one candidate = StartTraj .. Point.. .. EndTraj.
-		void StartTraj(const Vec3& p0);
-		void Point(const Vec3& p);
+		void StartTraj(const Vec3& p0, float s0 = 0.f);
+		void Point(const Vec3& p, float s = 0.f);
 		void EndTraj(int outcome);
 
 		// Solver side, immediately after the sim call returns:
@@ -87,7 +90,12 @@ namespace SearchLog {
 		void MarkBest();
 
 		// Full-weight overlays (references, the chosen result).
-		void AddRef(const std::string& name, const std::vector<Vec3>& pts);
+		// spds (optional): |v| per point, for the energy readout.
+		void AddRef(const std::string& name, const std::vector<Vec3>& pts,
+		            const std::vector<float>* spds = nullptr);
+
+		// 2g factor source for the report's energy readout.
+		float gravity = 800.f;
 
 		// Energy-field heat triangles (the hotspot maps): v01 in [0,1]
 		// colors cold->hot; rendered as translucent surface overlay.

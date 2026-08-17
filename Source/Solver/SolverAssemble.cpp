@@ -502,70 +502,32 @@ namespace Assemble {
 						ct.exit_heading = atan2f(
 							lnext.Y - entry.pos.Y,
 							lnext.X - entry.pos.X);
-						// EXIT-MAP guidance (validated by exitgate:
-						// the human's exits sit at fpot ratio 1.000):
-						// the best time-priced exit sets the exit
-						// heading, and ITS induced argmax on the tap
-						// face becomes the pursuit aim. Fallback:
-						// the plain board field from the entry
-						// state. GUIDANCE only - families compete.
-						// Exit map on COMMITTING calls only (multi !=
-						// null): depth-2 probes price, they don't
-						// steer - the map per probe call halved
-						// shape depth inside the wall budget.
+						// Field-guided aim: the ENTRY (board) heatmap's
+						// runway-aware best landing on the tap face
+						// (guidance - families still compete). The
+						// exit map is DELIBERATELY not wired here: it
+						// steers nothing until it passes the engine-
+						// truth model comparison (exitbench).
 						{
-							if (multi) {
-								Field::NextTarget xnt;
-								xnt.face = &nf;
-								xnt.face_idx = shape[lidx + 1];
-								if (lidx + 2 < shape.size()) {
-									xnt.after.has = true;
-									xnt.after.pt =
-										g.faces[shape[lidx + 2]]
-										.centroid;
-								} else {
-									xnt.after.has = true;
-									xnt.after.is_zone = true;
-									ZoneVolume(eb, &xnt.after.zmin,
-										&xnt.after.zmax);
-								}
-								Field::ExitMap em =
-									Field::ComputeExit(entry.pos,
-									entry.vel, lfc, xnt, p,
-									entry.ducked, 64.f, 12, 64.f,
-									300);
-								if (em.best_pot >= 0) {
-									const Field::ExitSample& bs =
-										em.samples[em.best_pot];
-									ct.exit_heading = atan2f(bs.dir.Y,
-										bs.dir.X);
-									if (bs.q.have_argmax) {
-										ct.field_aim = bs.q_argmax;
-										ct.have_field_aim = true;
-									}
-								}
+							Field::NextCtx fctx;
+							if (lidx + 2 < shape.size()) {
+								fctx.has = true;
+								fctx.pt = g.faces[shape[lidx + 2]]
+									.centroid;
+							} else {
+								fctx.has = true;
+								fctx.is_zone = true;
+								ZoneVolume(eb, &fctx.zmin,
+									&fctx.zmax);
 							}
-							if (!ct.have_field_aim) {
-								Field::NextCtx fctx;
-								if (lidx + 2 < shape.size()) {
-									fctx.has = true;
-									fctx.pt = g.faces[shape[lidx + 2]]
-										.centroid;
-								} else {
-									fctx.has = true;
-									fctx.is_zone = true;
-									ZoneVolume(eb, &fctx.zmin,
-										&fctx.zmax);
-								}
-								Field::FaceMap fmap = Field::Compute(
-									entry.pos, entry.vel, nf, p,
-									entry.ducked, 32.f, 300, 1.f,
-									&fctx);
-								if (fmap.best >= 0) {
-									ct.field_aim =
-										fmap.samples[fmap.best].q;
-									ct.have_field_aim = true;
-								}
+							Field::FaceMap fmap = Field::Compute(
+								entry.pos, entry.vel, nf, p,
+								entry.ducked, 32.f, 300, 1.f,
+								&fctx);
+							if (fmap.best >= 0) {
+								ct.field_aim =
+									fmap.samples[fmap.best].q;
+								ct.have_field_aim = true;
 							}
 						}
 						std::vector<Carve::Result> calts;
@@ -625,25 +587,6 @@ namespace Assemble {
 						ct.exit_heading = atan2f(
 							rim.Y - entry.pos.Y,
 							rim.X - entry.pos.X);
-						// EXIT-MAP guidance for the ending: the
-						// earliest-arrival exit (ztime) sets the
-						// heading - typically the crest departure,
-						// not the straight rim bearing. GUIDANCE
-						// only; domains/families unchanged.
-						{
-							Field::NextTarget xnt;
-							xnt.is_zone = true;
-							ZoneVolume(eb, &xnt.zmin, &xnt.zmax);
-							Field::ExitMap em = Field::ComputeExit(
-								entry.pos, entry.vel, lfc, xnt, p,
-								entry.ducked, 64.f, 12, 64.f, 300);
-							if (em.best_pot >= 0) {
-								const Field::ExitSample& bs =
-									em.samples[em.best_pot];
-								ct.exit_heading = atan2f(bs.dir.Y,
-									bs.dir.X);
-							}
-						}
 						// The ending's spline domain spans the
 						// RUNWAY PATH (ride the face's length
 						// banking wish work, then fly) - a straight

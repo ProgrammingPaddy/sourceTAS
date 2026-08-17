@@ -327,6 +327,52 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 ## Change log
 
+- 2026-08-17 (session 5, PROOF + BENCH - the board heatmap proven,
+  exit-map models graded on engine truth, exit guidance UNWIRED):
+  USER CORRECTIONS DRIVING THIS SESSION: the fpot "ratio 1.000"
+  claim was a too-easy test (a nearly-flat score rates everything at
+  the top - passing says only "not doomed"); exit maps must be
+  graded against BEST RESULTS (engine truth), never against a
+  reference run; entry heatmaps preserved; visuals were all-red
+  (flat field normalized = wall of red).
+  UNWIRED: all exit-map steering removed from the assembler - tap
+  legs aim by the ENTRY (board) field exactly as before; the exit
+  map steers nothing until it passes exitbench.
+  BOARDPROOF (new gate) - the entry heatmap proven on its original
+  three claims vs the exact engine: PASS. Bounds perfect: 22/22
+  probed cells engine-reached, 0 violations of the gain-law speed
+  bound / tangency-law minimum loss / energy bound; 0/15
+  unreachable claims falsified (the turn cap's 0.5 brake factor
+  held). Effective: 100% hit-rate across hot/warm/cold tiers.
+  Inexpensive: 0.05-0.20 ms per full map (0.3-0.6 us/cell).
+  Caveat recorded: the 0.21 energy correlation is measured with
+  miss-minimizing probes that do not TRY to realize the bound.
+  EXITBENCH (new bench) - candidate exit states + real fates
+  collected from the assembler's own search (Carve::ExitRec
+  collector; ~24k records per ride from the tape's board states),
+  models graded blind: M0 feasibility-only, M1 +ballistic-arc world
+  clearance, M2 +braking-law turn pricing, M3 both. RESULTS
+  (basictest, human-tape entries): the search population is 93-97%
+  DEAD (the user's "tons of grounded runs", quantified). M0 alone
+  catches 99.2-99.9% of dead exits and 100% of scrape exits at
+  0-2.2% false-kill of clean boards, shrinking 93-99.9% of exit
+  space at 15-28 us/record - the state-space shrinker exists and
+  is nearly free. M1 (arc clearance) added ZERO everywhere - drop
+  it, measured no-op. M2 fixed energy prediction (bias +529k ->
+  +93k, MAE 529k -> 222k) but ranking within the alive set stays
+  weak (corr 0.21) - the exit map's proven value is CULLING, not
+  fine ranking. Bin purity 97-100% at 64u/30deg and 128u/45deg -
+  coarse cells are pure, so variable-resolution representation is
+  valid on this data. NEXT (pending user): diagnose the 2.2%
+  false-kills (which bound; push to 0 with law-derived slack),
+  then wire M0 as IN-SIM TERMINATION at first separation -
+  provably-doomed flights end at birth (removes grounded spam,
+  buys wall time for deeper search).
+  VISUALS: click-inspect now shows TOTAL ENERGY at the picked
+  point (per-point speeds recorded: sims + reference tapes;
+  E = v^2 + 2g*z with u/s and z shown); LEFT-drag pans, RIGHT-drag
+  rotates (swapped per user).
+
 - 2026-08-17 (session 4, THE EXIT MAP + THE ENERGY LEDGER - the
   user's exit-heatmap proposal built, validated, wired; the final-
   ramp energy question ANSWERED in numbers): NEW MACHINERY:

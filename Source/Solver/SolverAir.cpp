@@ -61,7 +61,7 @@ namespace Air {
 			? t.aim_tick : horizon;
 		SearchLog::Sink* lg = SearchLog::g_sink;
 		if (lg)
-			lg->StartTraj(s.pos);
+			lg->StartTraj(s.pos, Len(s.vel));
 		r.yaw.reserve(horizon);
 		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
@@ -127,7 +127,7 @@ namespace Air {
 			TickEvents ev;
 			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, hold, &ev);
 			if (lg)
-				lg->Point(s.pos);
+				lg->Point(s.pos, Len(s.vel));
 			r.yaw.push_back(yaw_deg);
 			r.fmove.push_back(fmove);
 			r.smove.push_back(smove);

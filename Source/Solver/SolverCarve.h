@@ -134,6 +134,21 @@ namespace Carve {
 		std::vector<float> yaw, fmove, smove;
 	};
 
+	// ENGINE-TRUTH EXIT RECORDS (exitbench): when g_exit_rec is set,
+	// every evaluated candidate that separates from the ridden face
+	// appends its FIRST exit state and its final outcome - the data
+	// that grades exit-map models against the exact engine instead of
+	// against any reference run.
+	struct ExitRec {
+		Vec3  xpos, xvel;      // first separation state (the exit)
+		int   xtick = 0;
+		int   outcome = 0;     // SearchLog::Outcome values
+		float e_end = 0.f;     // v^2 + 2g*z at the end of the sim
+		float graze2 = 0.f;    // total graze dot^2 after the exit
+		int   end_tick = 0;
+	};
+	extern std::vector<ExitRec>* g_exit_rec;
+
 	// effort: optional per-knot duty cycle in [0,1] (same knot spacing
 	// as the heading spline). A carve at effort < 1 COASTS a fraction
 	// of its ticks (zero wish): the expert's speed control - slow rides

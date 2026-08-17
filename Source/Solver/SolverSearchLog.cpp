@@ -47,7 +47,7 @@ namespace SearchLog {
 		cur_ctx_ = static_cast<int>(contexts_.size()) - 1;
 	}
 
-	void Sink::StartTraj(const Vec3& p0) {
+	void Sink::StartTraj(const Vec3& p0, float s0) {
 		CommitPending();
 		if (cur_stage_ < 0)
 			return;
@@ -57,14 +57,17 @@ namespace SearchLog {
 		pending_.stage = cur_stage_;
 		pending_.ctx = cur_ctx_;
 		pending_.pts.push_back(p0);
+		pending_.spd.push_back(s0);
 	}
 
-	void Sink::Point(const Vec3& p) {
+	void Sink::Point(const Vec3& p, float s) {
 		if (!open_)
 			return;
 		tick_++;
-		if (tick_ % keep_every_ == 0)
+		if (tick_ % keep_every_ == 0) {
 			pending_.pts.push_back(p);
+			pending_.spd.push_back(s);
+		}
 	}
 
 	void Sink::EndTraj(int outcome) {
@@ -88,7 +91,8 @@ namespace SearchLog {
 	}
 
 	void Sink::AddRef(const std::string& name,
-	                  const std::vector<Vec3>& pts) {
+	                  const std::vector<Vec3>& pts,
+	                  const std::vector<float>* spds) {
 		CommitPending();
 		const int st = BeginStage(name);
 		Traj t;
@@ -97,6 +101,8 @@ namespace SearchLog {
 		t.outcome = kRef;
 		t.notable = true;
 		t.pts = pts;
+		if (spds && spds->size() == pts.size())
+			t.spd = *spds;
 		stages_[st].total++;
 		trajs_.push_back(t);
 		cur_stage_ = -1;
@@ -247,9 +253,10 @@ button:hover{background:#232d40}
 <div id="ovl"></div>
 <div class="sec">Stages</div>
 <div id="stages"></div>
-<div class="hint">drag rotate &middot; right-drag / shift-drag pan &middot;
-wheel zoom &middot; click a line to inspect it and the route that fed it
-&middot; the scrub replays the search in eval order</div>
+<div class="hint">drag pan &middot; right-drag rotate &middot;
+wheel zoom &middot; click a line to inspect it (energy at the picked
+point) and the route that fed it &middot; the scrub replays the search
+in eval order</div>
 </div>
 <div id="stats"></div>
 <div id="pick"></div>
@@ -263,6 +270,8 @@ const Q=decodeB64(D.pts);
 const NP=Q.length/3;
 const P=new Float32Array(NP*3);
 for(let i=0;i<NP*3;i++)P[i]=Q[i]*0.25;
+const SP=D.spd?decodeB64(D.spd):null;
+const G2=2*(D.gravity||800);
 const T=D.trajs; // [stage,outcome,notable,score,eval,off,npts,ctx]
 const NT=T.length;
 const OUTNAMES=["miss","grounded","struck","HIT","exited","ZONED","ref"];
@@ -470,14 +479,14 @@ gl.bindBuffer(gl.ARRAY_BUFFER,bC);
 gl.vertexAttribPointer(aC,4,gl.UNSIGNED_BYTE,true,0,0);
 gl.drawArrays(gl.LINES,0,dynN);}
 requestAnimationFrame(draw);}
-// input: L-drag rotate, R/middle/shift-drag PAN (grab the world),
-// small L-click picks a line.
+// input: L-drag PAN (grab the world), R/middle-drag rotate,
+// shift-drag also pans, small L-click picks a line.
 let drag=0,px=0,py=0,moved=0;
 cv.addEventListener("mousedown",e=>{
-drag=(e.shiftKey||e.button===2||e.button===1)?2:1;
+drag=(e.button===2||e.button===1)?1:2;
 px=e.clientX;py=e.clientY;moved=0;});
 window.addEventListener("mouseup",e=>{
-if(drag===1&&moved<5&&e.button===0)pick(e.clientX,e.clientY);
+if(drag===2&&moved<5&&e.button===0)pick(e.clientX,e.clientY);
 drag=0;});
 window.addEventListener("mousemove",e=>{
 if(!drag)return;const dx=e.clientX-px,dy=e.clientY-py;px=e.clientX;py=e.clientY;
@@ -496,10 +505,11 @@ window.addEventListener("keydown",e=>{
 if(e.key==="Escape"&&selId>=0){selId=-1;computeSel();showPick();
 queueRebuild();}});
 // picking: nearest visible line to the click, in screen space
+let selK=-1;
 function pick(mx,my){
 const m=mat();const dpr=window.devicePixelRatio||1;
 const w=cv.width,h=cv.height,sx=mx*dpr,sy=my*dpr;
-let best=-1,bd=(14*dpr)*(14*dpr);
+let best=-1,bestK=-1,bd=(14*dpr)*(14*dpr);
 for(let i=0;i<NT;i++){
 if(!visT(i))continue;
 const t=T[i];const off=t[5],n=t[6];
@@ -512,14 +522,20 @@ if(pw<=0)continue;
 const qx=((m[0]*x+m[4]*y+m[8]*z+m[12])/pw*0.5+0.5)*w;
 const qy=(1-((m[1]*x+m[5]*y+m[9]*z+m[13])/pw*0.5+0.5))*h;
 const d=(qx-sx)*(qx-sx)+(qy-sy)*(qy-sy);
-if(d<bd){bd=d;best=i;}}}
-selId=best;computeSel();showPick();queueRebuild();}
+if(d<bd){bd=d;best=i;bestK=k;}}}
+selId=best;selK=bestK;computeSel();showPick();queueRebuild();}
 function showPick(){
 const el=document.getElementById("pick");
 if(selId<0){el.style.display="none";return;}
 const t=T[selId];
+let en="";
+if(SP&&selK>=0&&selK<t[6]){
+const j=t[5]+selK;const s=SP[j],z=P[j*3+2];
+if(s>0){const e=s*s+G2*z;
+en=" &middot; E "+(e/1000).toFixed(0)+"k ("+s+" u/s @ z "+
+z.toFixed(0)+")";}}
 el.innerHTML="<b>"+D.stages[t[0]].name+"</b> &middot; "+OUTNAMES[t[1]]+
-" &middot; score "+t[3]+" &middot; eval #"+t[4]+
+" &middot; score "+t[3]+" &middot; eval #"+t[4]+en+
 (t[2]?" &middot; <b>best-so-far</b>":"")+
 (t[7]>=0&&D.ctx[t[7]]?'<div class="ctx">fed by: '+D.ctx[t[7]]+"</div>":"")+
 '<div style="color:#5b667a">esc to deselect</div>';
@@ -596,12 +612,14 @@ rebuild();draw();
 		std::sort(trajs.begin(), trajs.end(),
 			[](const Traj& a, const Traj& b) { return a.eval < b.eval; });
 
-		// Point blob (int16, 0.25u quantization).
-		std::string b64;
+		// Point blob (int16, 0.25u quantization) + parallel speed
+		// blob (int16 u/s, one per point; 0 where unrecorded).
+		std::string b64, s64;
 		{
-			std::vector<int16_t> q;
-			for (const Traj& t : trajs)
-				for (const Vec3& p : t.pts) {
+			std::vector<int16_t> q, sq;
+			for (const Traj& t : trajs) {
+				for (size_t pi = 0; pi < t.pts.size(); ++pi) {
+					const Vec3& p = t.pts[pi];
 					auto qz = [](float v) -> int16_t {
 						float s = v * 4.f;
 						if (s > 32767.f) s = 32767.f;
@@ -611,11 +629,20 @@ rebuild();draw();
 					q.push_back(qz(p.X));
 					q.push_back(qz(p.Y));
 					q.push_back(qz(p.Z));
+					float sv = pi < t.spd.size() ? t.spd[pi] : 0.f;
+					if (sv > 32767.f) sv = 32767.f;
+					if (sv < 0.f) sv = 0.f;
+					sq.push_back(static_cast<int16_t>(sv));
 				}
+			}
 			if (!q.empty())
 				AppendB64(&b64,
 					reinterpret_cast<const unsigned char*>(q.data()),
 					q.size() * 2);
+			if (!sq.empty())
+				AppendB64(&s64,
+					reinterpret_cast<const unsigned char*>(sq.data()),
+					sq.size() * 2);
 		}
 
 		std::string js = "{";
@@ -661,7 +688,9 @@ rebuild();draw();
 				h.a.Z, h.b.X, h.b.Y, h.b.Z, h.c.X, h.c.Y, h.c.Z,
 				h.v);
 		}
-		js += "],\"pts\":\"" + b64 + "\",\"geo\":{";
+		js += "],\"pts\":\"" + b64 + "\",\"spd\":\"" + s64 + "\",";
+		AppendF(&js, "\"gravity\":%.0f,", sink.gravity);
+		js += "\"geo\":{";
 		js += "\"boxes\":[";
 		for (size_t i = 0; i < w.brushes.size(); ++i) {
 			const WorldBrush& b = w.brushes[i];

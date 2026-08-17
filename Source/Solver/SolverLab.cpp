@@ -2919,10 +2919,11 @@ namespace {
 		}
 		SearchLog::Sink viz_sink;
 		SearchLog::g_sink = &viz_sink;
-		// Reference replays for the report overlay.
+		// Reference replays for the report overlay (+ speeds for the
+		// energy readout).
 		auto CollectRef = [&](const TapeAnchor& anchor,
 			const std::vector<TapeFrame>& frames,
-			std::vector<Vec3>* pts) {
+			std::vector<Vec3>* pts, std::vector<float>* spds) {
 			PlayerState s;
 			s.pos = anchor.origin;
 			s.vel = anchor.velocity;
@@ -2939,13 +2940,16 @@ namespace {
 				s.ground_brush = tr.brush;
 			}
 			pts->push_back(s.pos);
+			if (spds) spds->push_back(Len(s.vel));
 			for (size_t t = 0; t < frames.size(); ++t) {
 				const TapeFrame& fr = frames[t];
 				TickEvents ev;
 				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
 					fr.smove, fr.umove, fr.buttons, &ev);
-				if (t % 2 == 0)
+				if (t % 2 == 0) {
 					pts->push_back(s.pos);
+					if (spds) spds->push_back(Len(s.vel));
+				}
 			}
 		};
 		const clock_t c0 = clock();
@@ -2956,13 +2960,16 @@ namespace {
 		{
 			SearchLog::g_sink = nullptr;
 			viz_sink.Flush();
+			viz_sink.gravity = o.params.gravity;
 			std::vector<Vec3> ref;
-			CollectRef(at.start, at.frames, &ref);
-			viz_sink.AddRef("REF reference tape", ref);
+			std::vector<float> refs;
+			CollectRef(at.start, at.frames, &ref, &refs);
+			viz_sink.AddRef("REF reference tape", ref, &refs);
 			if (solved) {
 				std::vector<Vec3> res;
-				CollectRef(at.start, rr.frames, &res);
-				viz_sink.AddRef("RESULT solved line", res);
+				std::vector<float> ress;
+				CollectRef(at.start, rr.frames, &res, &ress);
+				viz_sink.AddRef("RESULT solved line", res, &ress);
 			}
 			std::string verr;
 			if (SearchLog::WriteHtml(viz_path, w, g, viz_sink,
@@ -4015,7 +4022,9 @@ namespace {
 				}
 			}
 			std::vector<Vec3> refpts;
+			std::vector<float> refspd;
 			refpts.push_back(s.pos);
+			refspd.push_back(Len(s.vel));
 			// PASS 1: replay, collect BOARD events (long-air arrivals
 			// on graph faces) + the separation that starts each long
 			// stretch (the ride's actual EXIT).
@@ -4041,8 +4050,10 @@ namespace {
 				TickEvents ev;
 				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
 					fr.smove, fr.umove, fr.buttons, &ev);
-				if (t % 2 == 0)
+				if (t % 2 == 0) {
 					refpts.push_back(s.pos);
+					refspd.push_back(Len(s.vel));
+				}
 				if (ev.ncontacts > 0) {
 					int fidx = -1;
 					for (size_t fi = 0; fi < g.faces.size(); ++fi)
@@ -4078,7 +4089,8 @@ namespace {
 					air = 0;
 				}
 			}
-			sink.AddRef("REF " + tname, refpts);
+			sink.gravity = o.params.gravity;
+			sink.AddRef("REF " + tname, refpts, &refspd);
 			// PASS 2: one exit map per RIDE (board k -> exit toward
 			// board k+1's face, or the zone for the last ride).
 			for (size_t k = 0; k < events.size(); ++k) {
@@ -4497,6 +4509,762 @@ namespace {
 			printf("exitgate: report -> %s\n", vp.c_str());
 		else
 			printf("exitgate: VIZ WRITE FAILED: %s\n", verr.c_str());
+		fflush(stdout);
+		return 0;
+	}
+
+	// boardproof: THE BOARD-HEATMAP PROOF (user 2026-08-17: "I want
+	// proof of effective, perfect, and inexpensive board heatmaps as
+	// they were described originally"). Three claims, each measured
+	// against the exact engine:
+	//   PERFECT (bounds hold): probe-fly cells with the air primitive;
+	//     at every strike the field's constituent laws must hold -
+	//     arrival speed under the gain bound, |dot| at or above the
+	//     tangency-law minimum, post-board total energy under the
+	//     field's formula at the actual arrival. Cells the field calls
+	//     UNREACHABLE are probed for falsification (a hit = a broken
+	//     bound; the turn cap's 0.5 brake factor is the known suspect).
+	//   EFFECTIVE: hit-rate by heat tier + correlation of cell energy
+	//     vs achieved post-board energy.
+	//   INEXPENSIVE: wall time per map at grids 48/32/24.
+	int CmdBoardProof(const std::string& map_path, const ReplayOpts& o,
+	                  const std::string& tape_path, int probe_evals) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("boardproof: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("boardproof: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<int> zreds;
+		w.FindZoneBrushes(nullptr, &zreds);
+		PlayerState s;
+		s.pos = tape.start.origin;
+		s.vel = tape.start.velocity;
+		s.ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
+		s.stamina = tape.start.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		struct FEvent {
+			int tick = 0;
+			int fidx = -1;
+			PlayerState sep;
+			Vec3 cp;
+		};
+		std::vector<FEvent> events;
+		int air = 0;
+		PlayerState sep;
+		for (size_t t = 0; t < tape.frames.size(); ++t) {
+			const TapeFrame& fr = tape.frames[t];
+			TickEvents ev;
+			MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+				fr.smove, fr.umove, fr.buttons, &ev);
+			if (ev.ncontacts > 0) {
+				int fidx = -1;
+				for (size_t fi = 0; fi < g.faces.size(); ++fi)
+					if (g.faces[fi].brush == ev.contact_brush[0]
+						&& g.faces[fi].side == ev.contact_plane[0])
+						fidx = static_cast<int>(fi);
+				if (fidx >= 0 && air >= 8) {
+					FEvent fe;
+					fe.tick = static_cast<int>(t);
+					fe.fidx = fidx;
+					fe.sep = sep;
+					fe.cp = ev.contact_pos[0];
+					events.push_back(fe);
+				}
+				air = 0;
+			} else if (!s.on_ground) {
+				if (air == 0)
+					sep = s;
+				air++;
+			} else {
+				air = 0;
+			}
+		}
+		// INEXPENSIVE: cost at three grids on the first event.
+		if (!events.empty()) {
+			const FEvent& fe = events[0];
+			const float grids[3] = { 48.f, 32.f, 24.f };
+			for (int gi = 0; gi < 3; ++gi) {
+				const clock_t c0 = clock();
+				int cells = 0;
+				for (int rep = 0; rep < 20; ++rep) {
+					Field::FaceMap fm = Field::Compute(fe.sep.pos,
+						fe.sep.vel, g.faces[fe.fidx], o.params,
+						fe.sep.ducked, grids[gi], 300);
+					cells = static_cast<int>(fm.samples.size());
+				}
+				const double ms = 1000.0
+					* static_cast<double>(clock() - c0)
+					/ CLOCKS_PER_SEC / 20.0;
+				printf("boardproof: COST grid %.0f = %.2f ms/map "
+					"(%d cells, %.1f us/cell)\n", grids[gi], ms,
+					cells, cells > 0 ? ms * 1000.0 / cells : 0.0);
+			}
+		}
+		int probes = 0, hits = 0;
+		int v_speed = 0, v_loss = 0, v_energy = 0;
+		int fals_probe = 0, fals_hit = 0;
+		std::vector<float> ce, me;   // cell e_eff vs measured E (hits)
+		int tier_hit[3] = { 0, 0, 0 }, tier_try[3] = { 0, 0, 0 };
+		for (const FEvent& fe : events) {
+			const Route::Face& fc = g.faces[fe.fidx];
+			Field::FaceMap fm = Field::Compute(fe.sep.pos, fe.sep.vel,
+				fc, o.params, fe.sep.ducked, 32.f, 300);
+			std::vector<int> reach;
+			for (size_t i = 0; i < fm.samples.size(); ++i)
+				if (fm.samples[i].reachable)
+					reach.push_back(static_cast<int>(i));
+			if (reach.empty())
+				continue;
+			std::sort(reach.begin(), reach.end(),
+				[&](int a, int b) {
+					return fm.samples[a].e_eff > fm.samples[b].e_eff;
+				});
+			// Probe set: hottest, 25/50/75 percentile, nearest to the
+			// human strike, and three stride-spread cells.
+			std::vector<int> pick;
+			auto add_unique = [&](int idx) {
+				for (int p2 : pick)
+					if (p2 == idx)
+						return;
+				pick.push_back(idx);
+			};
+			add_unique(reach[0]);
+			add_unique(reach[reach.size() / 4]);
+			add_unique(reach[reach.size() / 2]);
+			add_unique(reach[(reach.size() * 3) / 4]);
+			{
+				int ni = reach[0];
+				float nd = 1e30f;
+				for (int i : reach) {
+					const float d = Len(fm.samples[i].q - fe.cp);
+					if (d < nd) {
+						nd = d;
+						ni = i;
+					}
+				}
+				add_unique(ni);
+			}
+			for (size_t k = 1; k + 1 < reach.size() && pick.size() < 8;
+				k += reach.size() / 4 + 1)
+				add_unique(reach[k]);
+			const float s0 = Len2D(fe.sep.vel);
+			const float vz0 = fe.sep.vel.Z;
+			const float g2 = 2.f * o.params.gravity;
+			for (int ci : pick) {
+				const Field::Sample& sm = fm.samples[ci];
+				Air::Target t;
+				t.face = fe.fidx;
+				t.aim = sm.q;
+				t.aim_region = false;
+				t.dot_cap = 2000.f;
+				t.max_ticks = 300;
+				Air::Result ar = Air::SolveTransfer(fe.sep, w,
+					o.params, g, t, 4, probe_evals);
+				probes++;
+				const float rel = fm.e_hi > fm.e_lo
+					? (sm.e_eff - fm.e_lo) / (fm.e_hi - fm.e_lo)
+					: 1.f;
+				const int tier = rel >= 0.85f ? 0
+					: (rel >= 0.5f ? 1 : 2);
+				tier_try[tier]++;
+				if (!ar.hit)
+					continue;
+				hits++;
+				tier_hit[tier]++;
+				const int n_act = ar.tick;
+				const float s_bound = Envelope::SMax(s0, n_act,
+					o.params);
+				if (ar.speed2d > s_bound + 1.f) {
+					v_speed++;
+					printf("boardproof: SPEED BOUND BROKEN f%d "
+						"cell(%.0f,%.0f,%.0f): %.1f > %.1f @ n%d\n",
+						fe.fidx, sm.q.X, sm.q.Y, sm.q.Z, ar.speed2d,
+						s_bound, n_act);
+				}
+				const float min_dot = Board::MinApproachDot(
+					ar.speed2d, ar.v1.Z, fc.n);
+				if (min_dot != FLT_MAX
+					&& fabsf(ar.dot) < min_dot - 0.5f) {
+					v_loss++;
+					printf("boardproof: MIN-LOSS LAW BROKEN f%d: "
+						"|dot| %.2f < law %.2f\n", fe.fidx,
+						fabsf(ar.dot), min_dot);
+				}
+				const float e_post = ar.speed * ar.speed
+					- ar.dot * ar.dot
+					+ g2 * (ar.pos.Z - fc.zmin);
+				const float vz_act = Envelope::VzAfter(vz0, n_act,
+					o.params);
+				const float res_b = Board::MinApproachDot(s_bound,
+					vz_act, fc.n);
+				const float e_bound = s_bound * s_bound
+					+ vz_act * vz_act
+					- (res_b == FLT_MAX ? 0.f : res_b * res_b)
+					+ g2 * (ar.pos.Z - fc.zmin);
+				if (e_post > e_bound + 500.f) {
+					v_energy++;
+					printf("boardproof: ENERGY BOUND BROKEN f%d: "
+						"%.0f > %.0f @ n%d\n", fe.fidx, e_post,
+						e_bound, n_act);
+				}
+				// Effectiveness pair: the STRIKE's own cell.
+				{
+					const Vec3 dq = ar.pos - fm.origin;
+					int iu = static_cast<int>(Dot(dq, fm.ud)
+						/ fm.du + 0.5f);
+					int iv = static_cast<int>(Dot(dq, fm.vd)
+						/ fm.dv + 0.5f);
+					if (iu >= 0 && iu < fm.nu && iv >= 0
+						&& iv < fm.nv) {
+						const Field::Sample& hs = fm.samples[
+							static_cast<size_t>(iv) * fm.nu + iu];
+						if (hs.reachable) {
+							ce.push_back(hs.e_eff);
+							me.push_back(e_post);
+						}
+					}
+				}
+			}
+			// FALSIFICATION: frontier unreachable cells, classified by
+			// the bound that rejected them; probe the falsifiable ones
+			// (distance / turn - apex and no-approach are exact math).
+			int fcount = 0;
+			for (size_t i = 0; i < fm.samples.size() && fcount < 5;
+				++i) {
+				const Field::Sample& sm = fm.samples[i];
+				if (!sm.in_face || sm.reachable)
+					continue;
+				// Adjacent to a reachable cell?
+				const int iu = static_cast<int>(i)
+					% fm.nu;
+				const int iv = static_cast<int>(i) / fm.nu;
+				bool frontier = false;
+				for (int du2 = -1; du2 <= 1 && !frontier; ++du2)
+				for (int dv2 = -1; dv2 <= 1 && !frontier; ++dv2) {
+					const int ju = iu + du2, jv = iv + dv2;
+					if (ju < 0 || ju >= fm.nu || jv < 0
+						|| jv >= fm.nv)
+						continue;
+					if (fm.samples[static_cast<size_t>(jv) * fm.nu
+						+ ju].reachable)
+						frontier = true;
+				}
+				if (!frontier)
+					continue;
+				// Reason: exact-math rejections are not probed.
+				const float dzq = sm.q.Z - fe.sep.pos.Z;
+				const float disc = vz0 * vz0
+					- 2.f * o.params.gravity * dzq;
+				if (disc < 0.f)
+					continue;   // above apex - exact
+				fcount++;
+				fals_probe++;
+				Air::Target t;
+				t.face = fe.fidx;
+				t.aim = sm.q;
+				t.aim_region = false;
+				t.dot_cap = 2000.f;
+				t.max_ticks = 300;
+				Air::Result ar = Air::SolveTransfer(fe.sep, w,
+					o.params, g, t, 4, probe_evals);
+				if (ar.hit && Len(ar.pos - sm.q) < 48.f) {
+					fals_hit++;
+					printf("boardproof: UNREACHABLE CLAIM BROKEN "
+						"f%d cell(%.0f,%.0f,%.0f): engine hit it "
+						"(dot %.1f, %.0fu away)\n", fe.fidx,
+						sm.q.X, sm.q.Y, sm.q.Z, ar.dot,
+						Len(ar.pos - sm.q));
+				}
+			}
+		}
+		// Correlation (effectiveness).
+		float corr = 0.f;
+		if (ce.size() >= 3) {
+			double mc = 0, mm = 0;
+			for (size_t i = 0; i < ce.size(); ++i) {
+				mc += ce[i];
+				mm += me[i];
+			}
+			mc /= ce.size();
+			mm /= me.size();
+			double sc = 0, sm2 = 0, sx = 0;
+			for (size_t i = 0; i < ce.size(); ++i) {
+				sc += (ce[i] - mc) * (ce[i] - mc);
+				sm2 += (me[i] - mm) * (me[i] - mm);
+				sx += (ce[i] - mc) * (me[i] - mm);
+			}
+			if (sc > 0 && sm2 > 0)
+				corr = static_cast<float>(sx / sqrt(sc * sm2));
+		}
+		printf("boardproof: %d probes, %d hits | hit-rate hot %d/%d "
+			"warm %d/%d cold %d/%d\n", probes, hits,
+			tier_hit[0], tier_try[0], tier_hit[1], tier_try[1],
+			tier_hit[2], tier_try[2]);
+		printf("boardproof: BOUNDS speed %d loss %d energy %d "
+			"violations | FALSIFICATION %d/%d unreachable claims "
+			"broken | energy corr %.3f (%d pairs)\n",
+			v_speed, v_loss, v_energy, fals_hit, fals_probe, corr,
+			static_cast<int>(ce.size()));
+		printf("boardproof: %s\n",
+			(v_speed + v_loss + v_energy + fals_hit) == 0
+				? "GATE PASS" : "GATE FAIL");
+		fflush(stdout);
+		return (v_speed + v_loss + v_energy + fals_hit) == 0 ? 0 : 1;
+	}
+
+	// exitbench: EXIT-MAP MODEL COMPARISON ON ENGINE TRUTH (user
+	// 2026-08-17: "a comparison across different ramp exit heatmap
+	// models so we can tune this to actually be helpful as a variable
+	// resolution state space shrinker"). For each ride of the tape,
+	// run the assembler's own carve search from the real post-board
+	// state with the exit collector on - every evaluated candidate
+	// yields (first exit state -> actual fate). Then each model
+	// predicts alive/dead + deliverable energy FROM THE EXIT STATE
+	// ALONE, and is graded against what the engine actually did:
+	//   false-kill  = model says dead, engine boarded CLEAN  (must ~0)
+	//   scrapecatch = model says dead on scraped boards
+	//   deadcatch   = model says dead on grounded/missed
+	//   shrink      = fraction of exit space the model removes
+	//   E bias/MAE/corr on clean boards.
+	// Models: M0 = feasibility only (the shipped map);
+	//         M1 = M0 + flight-arc world clearance;
+	//         M2 = M0 + braking-law turn pricing;
+	//         M3 = M1 + M2.
+	int CmdExitBench(const std::string& map_path, const ReplayOpts& o,
+	                 const std::string& tape_path, int bench_evals) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("exitbench: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("exitbench: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<int> zreds;
+		w.FindZoneBrushes(nullptr, &zreds);
+		PlayerState s;
+		s.pos = tape.start.origin;
+		s.vel = tape.start.velocity;
+		s.ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
+		s.stamina = tape.start.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		struct FEvent {
+			int tick = 0;
+			int fidx = -1;
+			PlayerState at;      // state right after the board tick
+		};
+		std::vector<FEvent> events;
+		int air = 0;
+		for (size_t t = 0; t < tape.frames.size(); ++t) {
+			const TapeFrame& fr = tape.frames[t];
+			TickEvents ev;
+			MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+				fr.smove, fr.umove, fr.buttons, &ev);
+			if (ev.ncontacts > 0) {
+				int fidx = -1;
+				for (size_t fi = 0; fi < g.faces.size(); ++fi)
+					if (g.faces[fi].brush == ev.contact_brush[0]
+						&& g.faces[fi].side == ev.contact_plane[0])
+						fidx = static_cast<int>(fi);
+				if (fidx >= 0 && air >= 8) {
+					FEvent fe;
+					fe.tick = static_cast<int>(t);
+					fe.fidx = fidx;
+					fe.at = s;
+					events.push_back(fe);
+				}
+				air = 0;
+			} else if (!s.on_ground) {
+				air++;
+			} else {
+				air = 0;
+			}
+		}
+		const float wr = o.params.air_speed_cap * o.params.air_speed_cap;
+		const float g2 = 2.f * o.params.gravity;
+		for (size_t k = 0; k < events.size(); ++k) {
+			const FEvent& fe = events[k];
+			const Route::Face& fc = g.faces[fe.fidx];
+			const bool last = k + 1 >= events.size();
+			const Route::Face* ntface = last ? nullptr
+				: &g.faces[events[k + 1].fidx];
+			Carve::Target ct;
+			ct.face = fe.fidx;
+			ct.max_ticks = 320;
+			Field::NextCtx after;
+			Vec3 zmin, zmax;
+			if (!zreds.empty()) {
+				const int zi = w.IndexOfBrushId(zreds[0]);
+				if (zi >= 0)
+					Assemble::ZoneVolume(w.brushes[zi], &zmin, &zmax);
+			}
+			if (!last) {
+				ct.tap_brush = ntface->brush;
+				ct.tap_side = ntface->side;
+				ct.tap_face = events[k + 1].fidx;
+				if (k + 2 < events.size()) {
+					ct.next_face = events[k + 2].fidx;
+					after.has = true;
+					after.pt = g.faces[events[k + 2].fidx].centroid;
+				} else {
+					ct.next_is_zone = true;
+					ct.zone_min = zmin;
+					ct.zone_max = zmax;
+					after.has = true;
+					after.is_zone = true;
+					after.zmin = zmin;
+					after.zmax = zmax;
+				}
+				const Vec3 lnext = ntface->centroid;
+				ct.exit_heading = atan2f(lnext.Y - fe.at.pos.Y,
+					lnext.X - fe.at.pos.X);
+				const float se = Len2D(fe.at.vel);
+				const float es = se > 100.f
+					? Len(lnext - fe.at.pos) / (se * o.params.dt)
+					: 80.f;
+				ct.aim_tick = es < 10.f ? 10
+					: (es > 240.f ? 240 : static_cast<int>(es));
+				ct.tick_w = 0.02f;
+			} else {
+				ct.to_zone = true;
+				ct.zone_min = zmin;
+				ct.zone_max = zmax;
+				Vec3 rim = fe.at.pos;
+				if (rim.X < zmin.X) rim.X = zmin.X;
+				if (rim.X > zmax.X) rim.X = zmax.X;
+				if (rim.Y < zmin.Y) rim.Y = zmin.Y;
+				if (rim.Y > zmax.Y) rim.Y = zmax.Y;
+				ct.exit_heading = atan2f(rim.Y - fe.at.pos.Y,
+					rim.X - fe.at.pos.X);
+				ct.aim_tick = 200;
+			}
+			std::vector<Carve::ExitRec> recs;
+			recs.reserve(65536);
+			Carve::g_exit_rec = &recs;
+			Carve::SolveCarve(fe.at, w, o.params, g, ct, 6,
+				bench_evals);
+			Carve::g_exit_rec = nullptr;
+			// Truth classes.
+			int n_clean = 0, n_scrape = 0, n_dead = 0;
+			auto truth = [&](const Carve::ExitRec& er) -> int {
+				const bool ok = last
+					? er.outcome == SearchLog::kZoned
+					: er.outcome == SearchLog::kHit;
+				if (ok && er.graze2 < 1000.f)
+					return 0;   // CLEAN
+				if (ok)
+					return 1;   // SCRAPED
+				return 2;       // DEAD
+			};
+			for (const auto& er : recs) {
+				const int tc = truth(er);
+				if (tc == 0) n_clean++;
+				else if (tc == 1) n_scrape++;
+				else n_dead++;
+			}
+			printf("exitbench: ride f%d -> %s | %d records: clean %d "
+				"scrape %d dead %d\n", fe.fidx,
+				last ? "ZONE" : ("f" + std::to_string(
+					events[k + 1].fidx)).c_str(),
+				static_cast<int>(recs.size()), n_clean, n_scrape,
+				n_dead);
+			if (recs.empty())
+				continue;
+			// Model evaluation. Per record and model: dead? deliverable?
+			struct MStat {
+				int fk = 0, sc = 0, dc = 0, dead = 0;
+				double be = 0, ae = 0;
+				int ne = 0;
+				std::vector<float> pe, te;
+				double us = 0;
+			};
+			MStat ms[4];
+			for (const auto& er : recs) {
+				const int tc = truth(er);
+				const float s2d = Len2D(er.xvel);
+				// Shared: induced map from the exact exit state.
+				bool alive0 = false;
+				float deliver0 = -1e30f;
+				const Field::Sample* argm = nullptr;
+				Field::FaceMap fm;
+				float zn = -1.f;
+				const clock_t ck0 = clock();
+				if (!last && ntface) {
+					fm = Field::Compute(er.xpos, er.xvel, *ntface,
+						o.params, fe.at.ducked, 32.f, 300, 1.f,
+						&after);
+					// Laddered priced argmax (viability first).
+					for (int tier = 0; tier < 4 && !argm; ++tier) {
+						float best = -1e30f;
+						for (const Field::Sample& sm : fm.samples) {
+							if (!sm.reachable)
+								continue;
+							if (tier == 0 && !(sm.run_viable
+								&& sm.free_turn))
+								continue;
+							if (tier == 1 && !sm.run_viable)
+								continue;
+							if (tier == 2 && !sm.free_turn)
+								continue;
+							const float vp = sm.e_eff - wr * sm.n;
+							if (vp > best) {
+								best = vp;
+								argm = &sm;
+							}
+						}
+						if (argm)
+							deliver0 = best;
+					}
+					alive0 = argm != nullptr;
+				} else {
+					float mz = 0.f;
+					zn = Field::ZoneReach(er.xpos, s2d, er.xvel.Z,
+						zmin, zmax, o.params, 300, &mz);
+					alive0 = zn >= 0.f;
+					deliver0 = alive0 ? g2 * mz : -1e30f;
+				}
+				const double us0 = 1e6
+					* static_cast<double>(clock() - ck0)
+					/ CLOCKS_PER_SEC;
+				// M1: ballistic-arc world clearance toward the
+				// model's own landing pick (modal straight arc).
+				bool clear1 = true;
+				if (alive0) {
+					Vec3 tgt = last
+						? Vec3((zmin.X + zmax.X) * 0.5f,
+							(zmin.Y + zmax.Y) * 0.5f, zmin.Z)
+						: argm->q;
+					if (last) {
+						Vec3 rim = er.xpos;
+						if (rim.X < zmin.X) rim.X = zmin.X;
+						if (rim.X > zmax.X) rim.X = zmax.X;
+						if (rim.Y < zmin.Y) rim.Y = zmin.Y;
+						if (rim.Y > zmax.Y) rim.Y = zmax.Y;
+						tgt = Vec3(rim.X, rim.Y, zmin.Z);
+					}
+					const float dx = tgt.X - er.xpos.X;
+					const float dy = tgt.Y - er.xpos.Y;
+					const float l2d = sqrtf(dx * dx + dy * dy);
+					const float ux = l2d > 1.f ? dx / l2d : 1.f;
+					const float uy = l2d > 1.f ? dy / l2d : 0.f;
+					const float nmax = !last && argm
+						? argm->n + 6.f
+						: (zn > 0.f ? zn + 6.f : 120.f);
+					Vec3 prev = er.xpos;
+					for (float n = 4.f; n <= nmax && clear1;
+						n += 4.f) {
+						const float d = s2d * n * o.params.dt;
+						Vec3 pt(er.xpos.X + ux * (d < l2d
+								? d : l2d),
+							er.xpos.Y + uy * (d < l2d ? d : l2d),
+							Envelope::ZAfter(er.xpos.Z, er.xvel.Z,
+								static_cast<int>(n), o.params));
+						TraceResult tr;
+						const float f2 = w.TraceHull(prev, pt,
+							fe.at.ducked, &tr);
+						if (f2 < 1.f) {
+							const bool is_tgt = !last && ntface
+								&& tr.brush == ntface->brush
+								&& tr.plane == ntface->side;
+							if (!is_tgt)
+								clear1 = false;
+							break;   // reached something - done
+						}
+						prev = pt;
+						if (d >= l2d)
+							break;
+					}
+				}
+				// M2: braking-law price for turn beyond the free
+				// budget (certified NewSpeed2 - no fitted numbers).
+				float deliver2 = deliver0;
+				bool alive2 = alive0;
+				if (alive0 && !last && argm && s2d > 1.f) {
+					const float h0 = atan2f(er.xvel.Y, er.xvel.X);
+					const float theta = atan2f(
+						argm->q.Y - er.xpos.Y,
+						argm->q.X - er.xpos.X);
+					const float need = Field::TurnNeed(h0, theta,
+						argm->phi);
+					const float free = Field::FreeTurnBudget(s2d,
+						argm->n, o.params, fe.at.ducked);
+					float excess = need - free;
+					if (excess > 0.f) {
+						float v = s2d;
+						int it = 0;
+						while (excess > 0.f && it++ < 300
+							&& v > 100.f) {
+							Strafe::TickLaw law = Strafe::Law(
+								o.params, v, 1.f, fe.at.ducked);
+							float btr = 0.f, bc = 0.f;
+							for (int ci = 1; ci <= 16; ++ci) {
+								const float c = -static_cast<float>(
+									ci) / 16.f;
+								const float s2 = 1.f - c * c;
+								const float tr2 = law.TurnRad(c,
+									s2 > 0.f ? sqrtf(s2) : 0.f);
+								if (tr2 > btr) {
+									btr = tr2;
+									bc = c;
+								}
+							}
+							if (btr <= 1e-5f)
+								break;
+							excess -= btr;
+							const float v2 = law.NewSpeed2(bc);
+							v = v2 > 0.f ? sqrtf(v2) : 0.f;
+						}
+						deliver2 = deliver0 - (s2d * s2d - v * v);
+						alive2 = v > 100.f;
+					}
+				}
+				const double us1 = 1e6
+					* static_cast<double>(clock() - ck0)
+					/ CLOCKS_PER_SEC;
+				const bool dead_m[4] = {
+					!alive0,
+					!alive0 || !clear1,
+					!alive2,
+					!alive2 || !clear1 };
+				const float del_m[4] = { deliver0, deliver0,
+					deliver2, deliver2 };
+				for (int m = 0; m < 4; ++m) {
+					MStat& st = ms[m];
+					st.us += m == 0 ? us0 : us1;
+					if (dead_m[m]) {
+						st.dead++;
+						if (tc == 0) st.fk++;
+						else if (tc == 1) st.sc++;
+						else st.dc++;
+					}
+					if (tc == 0 && !dead_m[m] && !last) {
+						const double e = del_m[m] - er.e_end;
+						st.be += e;
+						st.ae += e < 0 ? -e : e;
+						st.ne++;
+						st.pe.push_back(del_m[m]);
+						st.te.push_back(er.e_end);
+					}
+				}
+			}
+			const char* mn[4] = { "M0-feas ", "M1-clear", "M2-turn ",
+				"M3-both " };
+			printf("exitbench:   model     falsekill scrapecatch "
+				"deadcatch shrink  Ebias   EMAE  corr  us/rec\n");
+			for (int m = 0; m < 4; ++m) {
+				MStat& st = ms[m];
+				float corr = 0.f;
+				if (st.pe.size() >= 3) {
+					double mp = 0, mt = 0;
+					for (size_t i = 0; i < st.pe.size(); ++i) {
+						mp += st.pe[i];
+						mt += st.te[i];
+					}
+					mp /= st.pe.size();
+					mt /= st.te.size();
+					double sp = 0, st2 = 0, sx = 0;
+					for (size_t i = 0; i < st.pe.size(); ++i) {
+						sp += (st.pe[i] - mp) * (st.pe[i] - mp);
+						st2 += (st.te[i] - mt) * (st.te[i] - mt);
+						sx += (st.pe[i] - mp) * (st.te[i] - mt);
+					}
+					if (sp > 0 && st2 > 0)
+						corr = static_cast<float>(
+							sx / sqrt(sp * st2));
+				}
+				printf("exitbench:   %s  %5.1f%%    %5.1f%%     "
+					"%5.1f%%   %5.1f%%  %+5.0fk  %5.0fk  %.2f  "
+					"%5.0f\n", mn[m],
+					n_clean > 0 ? 100.f * st.fk / n_clean : 0.f,
+					n_scrape > 0 ? 100.f * st.sc / n_scrape : 0.f,
+					n_dead > 0 ? 100.f * st.dc / n_dead : 0.f,
+					!recs.empty()
+						? 100.f * st.dead / recs.size() : 0.f,
+					st.ne > 0 ? st.be / st.ne / 1000.0 : 0.0,
+					st.ne > 0 ? st.ae / st.ne / 1000.0 : 0.0,
+					corr,
+					!recs.empty() ? st.us / recs.size() : 0.0);
+			}
+			// Resolution validity: how pure are coarse exit bins in
+			// TRUTH (a pure bin can be represented by one sample).
+			for (int rz = 0; rz < 2; ++rz) {
+				const float cell = rz == 0 ? 64.f : 128.f;
+				const float db = rz == 0 ? 30.f : 45.f;
+				std::map<long long, int[3]> bins;
+				for (const auto& er : recs) {
+					const int tc = truth(er);
+					const long long bx = static_cast<long long>(
+						floorf(er.xpos.X / cell)) + 4096;
+					const long long by = static_cast<long long>(
+						floorf(er.xpos.Y / cell)) + 4096;
+					const float az = atan2f(er.xvel.Y, er.xvel.X)
+						* 57.29578f + 180.f;
+					const long long bd = static_cast<long long>(
+						az / db);
+					bins[(bx << 32) | (by << 16) | bd][tc]++;
+				}
+				long long tot = 0, maj = 0;
+				int nb = 0;
+				for (auto& kv : bins) {
+					const int n = kv.second[0] + kv.second[1]
+						+ kv.second[2];
+					if (n < 3)
+						continue;
+					int mx = kv.second[0];
+					if (kv.second[1] > mx) mx = kv.second[1];
+					if (kv.second[2] > mx) mx = kv.second[2];
+					tot += n;
+					maj += mx;
+					nb++;
+				}
+				printf("exitbench:   bin purity %.0fu/%.0fdeg: "
+					"%.0f%% (%d bins)\n", cell, db,
+					tot > 0 ? 100.0 * maj / tot : 0.0, nb);
+			}
+		}
 		fflush(stdout);
 		return 0;
 	}
@@ -7254,6 +8022,31 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdFieldGate(argv[2], o, tapes);
+	}
+	if (cmd == "boardproof" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdBoardProof(argv[2], o, argv[3], 1200);
+	}
+	if (cmd == "exitbench" && argc >= 4) {
+		ReplayOpts o;
+		int ev = 24000;
+		std::vector<char*> rest;
+		for (int j = 0; j < argc; ++j) {
+			if (j >= 4 && std::string(argv[j]) == "--evals"
+				&& j + 1 < argc) {
+				ev = atoi(argv[j + 1]);
+				++j;
+				continue;
+			}
+			rest.push_back(argv[j]);
+		}
+		int ri = 4;
+		if (!ParseCommon(static_cast<int>(rest.size()), rest.data(),
+			ri, o))
+			return 1;
+		return CmdExitBench(argv[2], o, argv[3], ev);
 	}
 	if (cmd == "exitgate" && argc >= 4) {
 		ReplayOpts o;
