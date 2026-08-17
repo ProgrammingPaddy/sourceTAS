@@ -24,6 +24,8 @@ namespace Assemble {
 		// Carve init-family win counts across a solve (win-rate data
 		// for pruning; single-threaded).
 		int g_fam_wins[32] = { 0 };
+		// Board-heatmap report rendering: once per tap face per solve.
+		bool g_heat_done[64] = { false };
 
 		PlayerState SpawnState(const World& w, const MoveParams& p,
 		                       const TapeAnchor& a) {
@@ -502,12 +504,12 @@ namespace Assemble {
 						ct.exit_heading = atan2f(
 							lnext.Y - entry.pos.Y,
 							lnext.X - entry.pos.X);
-						// Field-guided aim: the ENTRY (board) heatmap's
-						// runway-aware best landing on the tap face
-						// (guidance - families still compete). The
-						// exit map is DELIBERATELY not wired here: it
-						// steers nothing until it passes the engine-
-						// truth model comparison (exitbench).
+						// THE BOARD HEATMAP CONTROLS CONTACT (user):
+						// hot cells scheduled 3x, warm 1x, cold and
+						// non-viable never - the search's density IS
+						// the map's density. Also renders the map
+						// into the solve report (once per face).
+						Field::FaceMap fmap;
 						{
 							Field::NextCtx fctx;
 							if (lidx + 2 < shape.size()) {
@@ -520,7 +522,7 @@ namespace Assemble {
 								ZoneVolume(eb, &fctx.zmin,
 									&fctx.zmax);
 							}
-							Field::FaceMap fmap = Field::Compute(
+							fmap = Field::Compute(
 								entry.pos, entry.vel, nf, p,
 								entry.ducked, 32.f, 300, 1.f,
 								&fctx);
@@ -533,6 +535,63 @@ namespace Assemble {
 								ct.field_n =
 									fmap.samples[fmap.best].n;
 								ct.have_field_arr = true;
+								for (int pass = 0; pass < 2
+									&& ct.cells.empty(); ++pass)
+								for (const Field::Sample& sm
+									: fmap.samples) {
+									if (!sm.reachable
+										|| sm.e_eff <= 0.f)
+										continue;
+									if (pass == 0 && !sm.run_viable)
+										continue;
+									const float rel = fmap.e_hi > 0.f
+										? sm.e_eff / fmap.e_hi : 0.f;
+									const int rep = rel >= 0.85f ? 3
+										: (rel >= 0.6f ? 1 : 0);
+									for (int rp = 0; rp < rep
+										&& ct.cells.size() < 192;
+										++rp) {
+										Carve::Target::Cell cc;
+										cc.q = sm.q;
+										cc.phi = sm.phi;
+										cc.n = sm.n;
+										ct.cells.push_back(cc);
+									}
+								}
+							}
+							if (SearchLog::g_sink
+								&& shape[lidx + 1] < 64
+								&& !g_heat_done[shape[lidx + 1]]
+								&& fmap.best >= 0) {
+								g_heat_done[shape[lidx + 1]] = true;
+								for (const Field::Sample& sm
+									: fmap.samples) {
+									if (!sm.reachable)
+										continue;
+									float v01 = fmap.e_hi > fmap.e_lo
+										? (sm.e_eff - fmap.e_lo)
+											/ (fmap.e_hi - fmap.e_lo)
+										: 1.f;
+									if (!sm.run_viable)
+										v01 *= 0.35f;
+									const Vec3 lift =
+										Scale(nf.n, 2.f);
+									const Vec3 c00 = sm.q + lift
+										- Scale(fmap.ud,
+											fmap.du * 0.5f)
+										- Scale(fmap.vd,
+											fmap.dv * 0.5f);
+									const Vec3 c10 = c00
+										+ Scale(fmap.ud, fmap.du);
+									const Vec3 c01 = c00
+										+ Scale(fmap.vd, fmap.dv);
+									const Vec3 c11 = c10
+										+ Scale(fmap.vd, fmap.dv);
+									SearchLog::g_sink->AddHeat(
+										c00, c10, c11, v01);
+									SearchLog::g_sink->AddHeat(
+										c00, c11, c01, v01);
+								}
 							}
 						}
 						std::vector<Carve::Result> calts;
@@ -549,6 +608,32 @@ namespace Assemble {
 								&& c.struck_plane == ct.tap_side;
 							if (!tp)
 								return 1e6f + c.miss_dist;
+							// COLD STRIKES ARE NOT BOARDS (user):
+							// a landing below the warm threshold of
+							// the board heatmap fails outright -
+							// the map's coldness is a bound on the
+							// energy that landing can keep.
+							if (fmap.best >= 0 && fmap.e_hi > 0.f) {
+								const Vec3 dq = c.end_state.pos
+									- fmap.origin;
+								int iu = static_cast<int>(
+									Dot(dq, fmap.ud) / fmap.du
+									+ 0.5f);
+								int iv = static_cast<int>(
+									Dot(dq, fmap.vd) / fmap.dv
+									+ 0.5f);
+								if (iu < 0) iu = 0;
+								if (iu >= fmap.nu) iu = fmap.nu - 1;
+								if (iv < 0) iv = 0;
+								if (iv >= fmap.nv) iv = fmap.nv - 1;
+								const Field::Sample& hs =
+									fmap.samples[static_cast<size_t>(
+										iv) * fmap.nu + iu];
+								if (!hs.reachable
+									|| hs.e_eff / fmap.e_hi < 0.6f)
+									return 8e5f
+										+ fabsf(c.strike_dot);
+							}
 							// SELECTION prices by ENERGY (potential-
 							// ledger units), separate from the
 							// search-shaping score inside SolveCarve
@@ -1009,6 +1094,8 @@ namespace Assemble {
 		printf("\n");
 		for (int i = 0; i < 32; ++i)
 			g_fam_wins[i] = 0;
+		for (int i = 0; i < 64; ++i)
+			g_heat_done[i] = false;
 		if (!any) {
 			if (err) *err = "no shape assembled to the zone";
 			return false;

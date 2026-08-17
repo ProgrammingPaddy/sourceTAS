@@ -74,6 +74,14 @@ namespace Carve {
 		float field_phi = 0.f;
 		float field_n = 0.f;
 		bool  have_field_arr = false;
+		// HEAT-DENSITY CELL SCHEDULE (user: "hot areas targeted
+		// densely, warm less densely, cold not candidates at all").
+		// The assembler fills this from the board heatmap: hot cells
+		// repeated 3x, warm 1x, cold and non-viable excluded. Each
+		// evaluation pulls toward ITS OWN scheduled cell (the flight
+		// gradient), so the map's density IS the search density.
+		struct Cell { Vec3 q; float phi = 0.f; float n = 0.f; };
+		std::vector<Cell> cells;
 		// Allow the DUCK-OFF exit move: pressing duck while riding
 		// applies the +8.5 air-duck origin shift and pops the hull off
 		// the face, separating with the in-plane velocity intact (the

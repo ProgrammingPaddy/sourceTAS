@@ -284,25 +284,33 @@ namespace Carve {
 				if (da < r.miss_dist)
 					r.miss_dist = da;
 			} else if (tapf) {
-				// Closest approach to the tap face REGION - the
-				// no-strike gradient (air primitive's aim_region).
-				// FRONT SIDE ONLY: a clip strikes from off > 0 with
-				// v·n < 0; positions behind the plane (threading a
-				// corridor past the face, diving under it) can never
-				// convert to a strike and must not read as progress.
+				// The no-strike gradient. FRONT SIDE ONLY: a clip
+				// strikes from off > 0 with v·n < 0; positions
+				// behind the plane can never convert to a strike
+				// and must not read as progress.
 				const float off = Dot(tapf->n, s.pos) - tapf->d;
 				if (off > 0.f) {
-					// Aim the SAFE interior, not the marginal edge:
-					// a hull-center at the raw polygon boundary is
-					// still kHullCenterSlack away from a guaranteed
-					// strike (M1.2), and 20-50u edge-skim misses
-					// were exactly what the chains died of.
-					const float eo = Board::EdgeDistOut(*tapf, s.pos)
-						+ Board::kHullCenterSlack;
-					const float da = sqrtf(off * off
-						+ (eo > 0.f ? eo * eo : 0.f));
-					if (da < r.miss_dist)
-						r.miss_dist = da;
+					if (t.have_field_aim) {
+						// THE MAP CONTROLS CONTACT (user): pull to
+						// THIS candidate's scheduled heat cell -
+						// never to the nearest face point (nearest
+						// = the cold-edge attractor whose optimum
+						// was a perpendicular slam).
+						const float da = Len(s.pos - t.field_aim);
+						if (da < r.miss_dist)
+							r.miss_dist = da;
+					} else {
+						// Fallback (no field): closest approach to
+						// the SAFE interior of the face region -
+						// hull-center at the raw boundary is still
+						// kHullCenterSlack from a guaranteed strike.
+						const float eo = Board::EdgeDistOut(*tapf,
+							s.pos) + Board::kHullCenterSlack;
+						const float da = sqrtf(off * off
+							+ (eo > 0.f ? eo * eo : 0.f));
+						if (da < r.miss_dist)
+							r.miss_dist = da;
+					}
 				}
 			} else if (t.pos_w > 0.f) {
 				const float da = Len(s.pos - t.aim_pos);
@@ -901,10 +909,24 @@ namespace Carve {
 		// composition: best result per END-POSITION cluster (48u).
 		struct PR { Result r; float sc; };
 		std::vector<PR> pool;
+		// Heat-density scheduling: each evaluation is assigned the
+		// next cell in the schedule (hot cells appear 3x as often),
+		// and its flight gradient pulls to THAT cell.
+		Target tcell = t;
+		size_t cell_i = 0;
 		auto EvalOne = [&](const std::vector<float>& th,
 			const std::vector<float>& ef, int duck, float* sc_out)
 			-> Result {
-			Result rr = RideHeadingSpline(entry, w, p, t, g, th, &ef,
+			const Target* tp = &t;
+			if (!t.cells.empty()) {
+				const Target::Cell& c =
+					t.cells[cell_i++ % t.cells.size()];
+				tcell.aim_tick = t.aim_tick;
+				tcell.field_aim = c.q;
+				tcell.have_field_aim = true;
+				tp = &tcell;
+			}
+			Result rr = RideHeadingSpline(entry, w, p, *tp, g, th, &ef,
 				t.max_ticks, duck);
 			used++;
 			const float sc = Score(rr, t);
