@@ -84,12 +84,19 @@ namespace Air {
 				// still a marginal strike). FRONT SIDE ONLY - a
 				// strike comes from off > 0 (same law as the carve
 				// tap gradient); behind-the-plane closeness is not
-				// approach.
+				// approach. Below the polygon's BOTTOM EDGE the
+				// expansion bevel wall owns the band - no strike
+				// lives there, so the gradient lifts above it.
 				const float off = Dot(face.n, s.pos) - face.d;
 				const float eo = Board::EdgeDistOut(face, s.pos)
 					+ Board::kHullCenterSlack;
+				float dz_low = face.zmin
+					+ Board::kHullCenterSlack - s.pos.Z;
+				if (dz_low < 0.f)
+					dz_low = 0.f;
 				da = off > 0.f
-					? sqrtf(off * off + (eo > 0.f ? eo * eo : 0.f))
+					? sqrtf(off * off + (eo > 0.f ? eo * eo : 0.f)
+						+ dz_low * dz_low)
 					: 1e9f;
 			} else {
 				const float dxa = s.pos.X - t.aim.X;

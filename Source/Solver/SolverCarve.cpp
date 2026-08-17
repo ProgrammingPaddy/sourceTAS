@@ -177,8 +177,20 @@ namespace Carve {
 					// were exactly what the chains died of.
 					const float eo = Board::EdgeDistOut(*tapf, s.pos)
 						+ Board::kHullCenterSlack;
+					// BELOW THE BOTTOM EDGE there is no face to
+					// strike - the brush's expansion bevel (the
+					// vertical border) owns that band and kills
+					// approaches dead (user-observed: arrivals
+					// below the surfable plane dying on the bottom
+					// border). The gradient lifts approaches above
+					// it instead of steering into it.
+					float dz_low = tapf->zmin
+						+ Board::kHullCenterSlack - s.pos.Z;
+					if (dz_low < 0.f)
+						dz_low = 0.f;
 					const float da = sqrtf(off * off
-						+ (eo > 0.f ? eo * eo : 0.f));
+						+ (eo > 0.f ? eo * eo : 0.f)
+						+ dz_low * dz_low);
 					if (da < r.miss_dist)
 						r.miss_dist = da;
 				}
