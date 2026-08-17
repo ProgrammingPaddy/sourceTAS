@@ -5,6 +5,8 @@
 #include <time.h>
 
 #include <algorithm>
+#include <map>
+#include <utility>
 
 #include "SolverAir.h"
 #include "SolverCarve.h"
@@ -251,7 +253,9 @@ namespace Assemble {
 		bool AssembleShape(const World& w, const Route::Graph& g,
 		                   const MoveParams& p, const TapeAnchor& anchor,
 		                   const std::vector<int>& shape,
-		                   const Opts& o, RunResult* out) {
+		                   const Opts& o, RunResult* out,
+		                   std::map<std::pair<int, int>, StartPlan>*
+		                       start_cache) {
 			const WorldBrush& eb = w.brushes[g.end_brush];
 			const Vec3 zone_c(0.5f * (eb.bmin.X + eb.bmax.X),
 				0.5f * (eb.bmin.Y + eb.bmax.Y), eb.bmax.Z);
@@ -280,7 +284,22 @@ namespace Assemble {
 			// whose flight produces the SOFTEST first board - launch
 			// speed toward the face is exactly the head-on setup that
 			// plunges; the board is the objective, so score plans by
-			// a quick air solve each.
+			// a quick air solve each. The choice depends only on the
+			// first TWO faces, so it is CACHED across shapes (the
+			// repeated searches were eating the wall budget before
+			// the deep shapes ran).
+			const std::pair<int, int> skey(shape[0],
+				shape.size() > 1 ? shape[1] : -1);
+			const auto sc_it = start_cache->find(skey);
+			if (sc_it != start_cache->end() && !sc_it->second.ok) {
+				printf("assemble: shape[0]=%d START PLAN FAILED "
+					"(cached)\n", shape[0]);
+				return false;
+			}
+			StartPlan sp;
+			if (sc_it != start_cache->end()) {
+				sp = sc_it->second;
+			} else {
 			const Route::Face& f0 = g.faces[shape[0]];
 			const PlayerState spawn = SpawnState(w, p, anchor);
 			const float b0 = atan2f(f0.centroid.Y - spawn.pos.Y,
@@ -317,6 +336,7 @@ namespace Assemble {
 			if (cands.empty()) {
 				printf("assemble: shape[0]=%d START PLAN FAILED\n",
 					shape[0]);
+				(*start_cache)[skey] = StartPlan();
 				return false;
 			}
 			std::sort(cands.begin(), cands.end(),
@@ -328,7 +348,7 @@ namespace Assemble {
 			// first transfer and choose the start by its strike -
 			// the first board of the map serves the whole chain,
 			// not its own dot.
-			StartPlan sp = cands[0].sp;
+			sp = cands[0].sp;
 			if (shape.size() > 1) {
 				Stage("start deep");
 				float best_deep = FLT_MAX;
@@ -388,6 +408,8 @@ namespace Assemble {
 						sp = cands[ci].sp;
 					}
 				}
+			}
+			(*start_cache)[skey] = sp;
 			}
 			RunResult rr;
 			rr.shape = shape;
@@ -818,13 +840,15 @@ namespace Assemble {
 			shapes.resize(o.max_shapes);
 		bool any = false;
 		RunResult best;
+		std::map<std::pair<int, int>, StartPlan> start_cache;
 		for (const std::vector<int>& shape : shapes) {
 			const double spent = static_cast<double>(clock() - c0)
 				/ CLOCKS_PER_SEC;
 			if (spent > o.wall_budget_s)
 				break;
 			RunResult rr;
-			if (!AssembleShape(w, g, p, anchor, shape, o, &rr))
+			if (!AssembleShape(w, g, p, anchor, shape, o, &rr,
+				&start_cache))
 				continue;
 			printf("assemble: shape");
 			for (int fidx : shape)

@@ -449,6 +449,24 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-16 (session 2g, user re-reference to testimony 2.1): the
+  arrival-parallelism idea IS the original boarding law - "velocity
+  tangent to the ramp face normal IN THE APPROACH DIRECTION ...
+  closer to parallel with the ramp" - and the AIR primitive already
+  implements it (its init families come from the M1.2 tangent-arrival
+  headings). The tap transfer never got the same construction; its
+  family end-headings were all objective-derived. ADDED: az_tan =
+  the tap face's face-parallel direction (psi +/- 90, the M1.2 dot
+  line at flat arrival) signed to CONTINUE the approach motion, as
+  two families (straight-in, via-objective-side) - the same
+  geometric init the air solver uses, no seeding, no prescription.
+  Also: START-PLAN CACHE keyed by (first, second) face - the
+  repeated identical start searches were eating the wall budget
+  before deep shapes ran; with the cache the pool completes and
+  [0 1 2 3] reaches all four legs again. Current chain quality:
+  0->1 -191..-200 @ 898-943, 1->2 -131.2 @ 919, 2->3 still the weak
+  transfer (-606 direct / -713 deep in-chain vs human -142).
+  Gates green (airsolve 12/12, carve 10/10).
 - 2026-08-16 (session 2f, TRIED AND REVERTED - recorded per the
   standing rule): pure energy-currency tap scoring. Hypothesis (from
   the user's "preserve more energy into the board" + the observation

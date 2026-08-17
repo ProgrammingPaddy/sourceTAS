@@ -519,6 +519,23 @@ namespace Carve {
 		// ascending (the tape transfers' measured shape).
 		const float s_az = WrapPi(az_aim
 			+ 0.5f * WrapPi(up_az - az_aim));
+		// TANGENT ARRIVAL at the tap face - testimony 2.1, the
+		// original boarding law: "velocity tangent to the ramp face
+		// normal IN THE APPROACH DIRECTION ... closer to parallel
+		// with the ramp." The flat-arrival tangent headings are the
+		// two face-parallel directions (psi +/- 90, the M1.2 dot line
+		// at vz->0); pick the one that CONTINUES the approach motion
+		// - the same geometric init the air primitive already uses.
+		float az_tan = az_aim;
+		if (t.tap_face >= 0
+			&& t.tap_face < static_cast<int>(g.faces.size())) {
+			const Route::Face& tf2 = g.faces[t.tap_face];
+			const float tpsi = atan2f(tf2.n.Y, tf2.n.X);
+			const float ta = WrapPi(tpsi + kPi * 0.5f);
+			const float tb = WrapPi(tpsi - kPi * 0.5f);
+			az_tan = fabsf(WrapPi(ta - h0)) <= fabsf(WrapPi(tb - h0))
+				? ta : tb;
+		}
 		// ZONE endings: "use the space available on the ramp" (user
 		// testimony) - the runway azimuth points at the ride face's
 		// FARTHEST vert, so a family can ride the whole face gaining
@@ -547,7 +564,7 @@ namespace Carve {
 			}
 		}
 		struct FamD { Fam f; int duck; };
-		const FamD fams[15] = {
+		const FamD fams[17] = {
 			{ { h0, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },    // hold, full effort
 			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },  // linear
 			{ { t.exit_heading, 2.f, 0.f, 1.f, 0.f, 0 }, -1 },  // late turn
@@ -571,6 +588,12 @@ namespace Carve {
 			// that serves the leg-after target (momentum-ahead).
 			{ { az_obj, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },
 			{ { az_obj, 1.f, 0.f, 1.f, 0.6f, 2 }, -1 },
+			// TANGENT-ARRIVAL families (testimony 2.1): end heading
+			// = face-parallel continuing the approach, so the strike
+			// lands along the plane instead of banking into the
+			// normal - straight in, and via the objective side.
+			{ { az_tan, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },
+			{ { az_tan, 1.f, 0.f, 1.f, 0.6f, 2 }, -1 },
 		};
 		int used = 0;
 		// Tap transfers: the ride doubles the speed, so the estimate
@@ -584,8 +607,8 @@ namespace Carve {
 			dom_alt = t.max_ticks;
 		const int dom_half = dom_alt;
 		const int ndom = dom_half != dom_full ? 2 : 1;
-		const int per_fam = evals / (16 * ndom) > 8
-			? evals / (16 * ndom) : 8;
+		const int per_fam = evals / (18 * ndom) > 8
+			? evals / (18 * ndom) : 8;
 		float best_score = FLT_MAX;
 		std::vector<float> best_th, best_ef;
 		int best_duck = -1;
@@ -716,7 +739,7 @@ namespace Carve {
 		t.aim_tick = di == 0 ? dom_full : dom_half;
 		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
 			: t.max_ticks / 2;
-		for (int fam = 0; fam < 15 && used < evals; ++fam) {
+		for (int fam = 0; fam < 17 && used < evals; ++fam) {
 			std::vector<float> th(knots_n), ef(knots_n,
 				fams[fam].f.eff);
 			int duck = fams[fam].duck == 0 ? duck_guess : -1;
