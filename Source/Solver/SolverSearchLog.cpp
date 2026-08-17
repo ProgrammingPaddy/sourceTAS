@@ -341,7 +341,16 @@ gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(geoC),gl.STATIC_DRAW);
 const geoN=geoP.length/3;
 let showGeo=true;
 // UI state
-let evCut=maxEval,pctCut=1.0,alpha=0.22,selId=-1;
+let evCut=maxEval,pctCut=1.0,alpha=0.22,selId=-1,selDesc=null;
+// Selection lineage: contexts are chain prefixes, so descendants of
+// the selected line's committed chain = contexts that start with it.
+function computeSel(){
+selDesc=null;
+if(selId<0)return;
+const sc=T[selId][7];
+if(sc<0)return;
+const pref=D.ctx[sc];
+selDesc=D.ctx.map(c=>c===pref||c.indexOf(pref)===0);}
 function visT(i){
 const t=T[i];const st=t[0],oc=t[1],nb=t[2];
 if(!stageOn[st])return false;
@@ -361,10 +370,15 @@ const ref=oc===6;
 visKept++;
 const col=stageColor[st];
 let r=col[0]*255,g2=col[1]*255,b=col[2]*255,a=ref?255:(nb?235:90);
-if(i===selId){r=255;g2=255;b=255;a=255;}
-else if(nb&&!ref){r=Math.min(255,r*1.35+40);g2=Math.min(255,g2*1.35+40);
+if(nb&&!ref){r=Math.min(255,r*1.35+40);g2=Math.min(255,g2*1.35+40);
 b=Math.min(255,b*1.35+40);}
 else if(!ref){const q=1.0-0.65*rank[i];r*=q;g2*=q;b*=q;}
+if(selId>=0){
+if(i===selId){r=255;g2=255;b=255;a=255;}
+else{
+const fam=t[7]>=0&&selDesc&&selDesc[t[7]];
+if(fam||ref){a=255;}
+else{const gy=(r+g2+b)/3*0.3+26;r=gy;g2=gy;b=gy+6;a=Math.min(a,24);}}}
 const off=t[5],n=t[6];
 for(let k2=0;k2<n-1;k2++){
 const i1=(off+k2)*3,i2=(off+k2+1)*3;
@@ -446,7 +460,8 @@ dist*=Math.pow(1.0016,e.deltaY);dist=Math.max(60,Math.min(40000,dist));},
 {passive:false});
 cv.addEventListener("contextmenu",e=>e.preventDefault());
 window.addEventListener("keydown",e=>{
-if(e.key==="Escape"&&selId>=0){selId=-1;showPick();queueRebuild();}});
+if(e.key==="Escape"&&selId>=0){selId=-1;computeSel();showPick();
+queueRebuild();}});
 // picking: nearest visible line to the click, in screen space
 function pick(mx,my){
 const m=mat();const dpr=window.devicePixelRatio||1;
@@ -465,7 +480,7 @@ const qx=((m[0]*x+m[4]*y+m[8]*z+m[12])/pw*0.5+0.5)*w;
 const qy=(1-((m[1]*x+m[5]*y+m[9]*z+m[13])/pw*0.5+0.5))*h;
 const d=(qx-sx)*(qx-sx)+(qy-sy)*(qy-sy);
 if(d<bd){bd=d;best=i;}}}
-selId=best;showPick();queueRebuild();}
+selId=best;computeSel();showPick();queueRebuild();}
 function showPick(){
 const el=document.getElementById("pick");
 if(selId<0){el.style.display="none";return;}

@@ -414,13 +414,17 @@ namespace Carve {
 		// rides TOWARD the aim position until fraction b of the ride,
 		// then turns to the exit heading - the natural carve structure
 		// (position first, heading last) for curvy rides.
-		// Tap-mode pursuit aim: the point on the tap face that SERVES
-		// THE NEXT OBJECTIVE (user testimony: boarding is choosing
-		// how the space left on the ramp gets you to the next
-		// objective) - centroid blended toward the face vert nearest
-		// the leg-after target, so a rotated face is approached on
-		// the side that leaves runway.
+		// Tap-mode pursuit aims. az_aim = the face centroid (neutral).
+		// az_obj = the centroid slid along the face's LATERAL axis
+		// toward the momentum-ahead vert nearest the leg-after target
+		// (user testimony: boarding chooses how the space left on the
+		// ramp serves the next objective; land AHEAD of your motion).
+		// az_obj is a FAMILY variant, not the default - forcing it as
+		// the only aim measurably biased every solve to one side; as
+		// one basin among many, carry/tangency scoring picks the side
+		// per situation.
 		float az_aim = t.exit_heading;
+		float az_obj = t.exit_heading;
 		if (t.tap_face >= 0
 			&& t.tap_face < static_cast<int>(g.faces.size())) {
 			const Route::Face& tf = g.faces[t.tap_face];
@@ -444,21 +448,61 @@ namespace Carve {
 				have_next = true;
 			}
 			if (have_next) {
+				// "Land AHEAD of your motion, serving the
+				// objective" (user 2026-08-16: they all turn RIGHT
+				// into the last ramp instead of LEFT - more space
+				// to launch off of means a smoother landing and
+				// better conversion). Only verts DOWN-STREAM of the
+				// entry heading qualify - a landing you turn back
+				// for is a slam; among those, nearest the leg-after
+				// target. Falls back to all verts if none is ahead.
+				const float hx = cosf(h0), hy = sinf(h0);
 				Vec3 best_v = tf.centroid;
 				float bd = FLT_MAX;
-				for (const Vec3& v : tf.verts) {
-					const float dx = v.X - next_pt.X;
-					const float dy = v.Y - next_pt.Y;
-					const float d = dx * dx + dy * dy;
-					if (d < bd) {
-						bd = d;
-						best_v = v;
+				bool found = false;
+				for (int pass = 0; pass < 2 && !found; ++pass) {
+					for (const Vec3& v : tf.verts) {
+						if (pass == 0) {
+							const float ax = v.X - entry.pos.X;
+							const float ay = v.Y - entry.pos.Y;
+							if (ax * hx + ay * hy <= 0.f)
+								continue;
+						}
+						const float dx = v.X - next_pt.X;
+						const float dy = v.Y - next_pt.Y;
+						const float d = dx * dx + dy * dy;
+						if (d < bd) {
+							bd = d;
+							best_v = v;
+							found = true;
+						}
 					}
 				}
-				aim_pt = Scale(tf.centroid + best_v, 0.5f);
+				// Slide the objective aim along the face's LATERAL
+				// (contour) axis only - the side choice is one-
+				// dimensional, and blending toward a vert in full
+				// 3D drags the pursuit beyond the strike plane
+				// (measured: 1->2 taps overshot and grounded on
+				// the brush top).
+				const float nh = sqrtf(tf.n.X * tf.n.X
+					+ tf.n.Y * tf.n.Y);
+				Vec3 obj_pt = tf.centroid;
+				if (nh > 1e-4f) {
+					const float lax = -tf.n.Y / nh;
+					const float lay = tf.n.X / nh;
+					const float lat =
+						(best_v.X - tf.centroid.X) * lax
+						+ (best_v.Y - tf.centroid.Y) * lay;
+					obj_pt.X += lax * 0.5f * lat;
+					obj_pt.Y += lay * 0.5f * lat;
+				}
+				az_obj = atan2f(obj_pt.Y - entry.pos.Y,
+					obj_pt.X - entry.pos.X);
 			}
 			az_aim = atan2f(aim_pt.Y - entry.pos.Y,
 				aim_pt.X - entry.pos.X);
+			if (!have_next)
+				az_obj = az_aim;
 		} else if (t.pos_w > 0.f) {
 			az_aim = atan2f(t.aim_pos.Y - entry.pos.Y,
 				t.aim_pos.X - entry.pos.X);
@@ -466,7 +510,8 @@ namespace Carve {
 		struct Fam {
 			float end; float pow; float bulge; float eff; float b;
 			int via;   // two-phase pursuit: 0 = the aim point,
-			           // 1 = the runway (face's far end)
+			           // 1 = the runway (face's far end),
+			           // 2 = the objective-side point
 		};
 		const float up_az = WrapPi(dh_az + kPi);   // up-slope azimuth
 		// The S-carve exit: the aim direction rotated halfway toward
@@ -482,19 +527,27 @@ namespace Carve {
 		// crest launch lacks) before turning out.
 		float az_far = t.exit_heading;
 		if (t.to_zone) {
+			// The runway is DOWN-STREAM of the motion too: the far
+			// end of the face ahead of the entry heading (riding
+			// back against the approach is not a runway).
+			const float hx0 = cosf(h0), hy0 = sinf(h0);
 			float bd2 = -1.f;
-			for (const Vec3& v : face.verts) {
-				const float dx = v.X - entry.pos.X;
-				const float dy = v.Y - entry.pos.Y;
-				const float d = dx * dx + dy * dy;
-				if (d > bd2) {
-					bd2 = d;
-					az_far = atan2f(dy, dx);
+			for (int pass = 0; pass < 2 && bd2 < 0.f; ++pass) {
+				for (const Vec3& v : face.verts) {
+					const float dx = v.X - entry.pos.X;
+					const float dy = v.Y - entry.pos.Y;
+					if (pass == 0 && dx * hx0 + dy * hy0 <= 0.f)
+						continue;
+					const float d = dx * dx + dy * dy;
+					if (d > bd2) {
+						bd2 = d;
+						az_far = atan2f(dy, dx);
+					}
 				}
 			}
 		}
 		struct FamD { Fam f; int duck; };
-		const FamD fams[13] = {
+		const FamD fams[15] = {
 			{ { h0, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },    // hold, full effort
 			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },  // linear
 			{ { t.exit_heading, 2.f, 0.f, 1.f, 0.f, 0 }, -1 },  // late turn
@@ -514,6 +567,10 @@ namespace Carve {
 			// gaining wish work, then turn out to the exit.
 			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.6f, 1 }, -1 },
 			{ { s_az, 1.f, 0.f, 1.f, 0.6f, 1 }, -1 },
+			// OBJECTIVE-SIDE families: land on the side of the face
+			// that serves the leg-after target (momentum-ahead).
+			{ { az_obj, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },
+			{ { az_obj, 1.f, 0.f, 1.f, 0.6f, 2 }, -1 },
 		};
 		int used = 0;
 		// Tap transfers: the ride doubles the speed, so the estimate
@@ -527,8 +584,8 @@ namespace Carve {
 			dom_alt = t.max_ticks;
 		const int dom_half = dom_alt;
 		const int ndom = dom_half != dom_full ? 2 : 1;
-		const int per_fam = evals / (14 * ndom) > 8
-			? evals / (14 * ndom) : 8;
+		const int per_fam = evals / (16 * ndom) > 8
+			? evals / (16 * ndom) : 8;
 		float best_score = FLT_MAX;
 		std::vector<float> best_th, best_ef;
 		int best_duck = -1;
@@ -659,11 +716,12 @@ namespace Carve {
 		t.aim_tick = di == 0 ? dom_full : dom_half;
 		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
 			: t.max_ticks / 2;
-		for (int fam = 0; fam < 13 && used < evals; ++fam) {
+		for (int fam = 0; fam < 15 && used < evals; ++fam) {
 			std::vector<float> th(knots_n), ef(knots_n,
 				fams[fam].f.eff);
 			int duck = fams[fam].duck == 0 ? duck_guess : -1;
-			const float via_az = fams[fam].f.via ? az_far : az_aim;
+			const float via_az = fams[fam].f.via == 1 ? az_far
+				: (fams[fam].f.via == 2 ? az_obj : az_aim);
 			for (int i = 0; i < knots_n; ++i) {
 				float f = static_cast<float>(i)
 					/ static_cast<float>(knots_n - 1);

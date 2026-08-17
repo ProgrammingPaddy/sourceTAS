@@ -449,6 +449,31 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-16 (session 2e, expert steer round 2): the user read the
+  report and called the defect: candidates turn RIGHT into the last
+  ramp instead of LEFT ("more space to launch off of = smoother
+  landing, better conversion"). Root-caused in two steps: (1) the
+  objective-vert tie on face 3 (its centroid y equals the zone rim's
+  clamp point, so north/south top corners are EQUIDISTANT) broke
+  south by vert order and dragged every aim across the approach
+  momentum - a right-turn slam by construction; (2) forcing the
+  momentum-ahead vert as THE aim overcorrected (1->2 taps overshot
+  the strike plane and grounded on the brush top - the side choice
+  is one-dimensional, so the objective offset must slide along the
+  face's LATERAL/contour axis only). FINAL FORM: az_aim reverts to
+  the neutral centroid; the momentum-ahead + lateral-slid objective
+  point becomes az_obj, offered as FAMILY VARIANTS (linear-to-obj,
+  via-obj-then-out) competing with all others - carry/tangency
+  scoring picks the side per situation instead of a global bias.
+  MEASURED after: leg0 0->2 committed -187.8 @ 916 (was -400);
+  0->1->2 chain at -200 / -115.2 @ 918 landing at the BOTTOM of
+  face 2 (the user's called-for bottom-to-bottom 1->2 transition,
+  at speed, whole face left as runway). REMAINING: the ending leg
+  only (zone solve still short of the bank-wish-work-then-crest
+  line). REPORT: click-to-select now GRAYS all unrelated lines
+  (ghost alpha) and keeps the selected line white + its committed
+  chain's descendants and the references bright (contexts are chain
+  prefixes, so descendants = prefix matches). Gates green.
 - 2026-08-16 (session 2d, expert steer applied): TESTIMONY ADDITIONS
   (user): (a) the end platform has NO boarding requirement - the
   finish = make it ON TOP of the brush -> ZoneVolume is now hull-
