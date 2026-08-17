@@ -586,6 +586,145 @@ namespace Assemble {
 									}
 								}
 							}
+							// THE BALLISTIC PAIR (v2 post-mortem, the
+							// piece worth keeping): on adjoining
+							// faces the crossing flight is pure
+							// ballistics - from each candidate
+							// exit the landing point, arrival
+							// velocity, and exact board dot are
+							// COMPUTED, not searched. The best
+							// pair (landing in-polygon, kept
+							// energy over the map-best bar,
+							// maximal) replaces the optimistic
+							// argmax as the aim; its exit
+							// direction becomes the exit heading;
+							// its true tangent heading feeds the
+							// arrival gradient.
+							{
+								Field::NextTarget bnt;
+								bnt.face = &nf;
+								bnt.face_idx = shape[lidx + 1];
+								if (lidx + 2 < shape.size()) {
+									bnt.after.has = true;
+									bnt.after.pt =
+										g.faces[shape[lidx + 2]]
+										.centroid;
+								} else {
+									bnt.after.has = true;
+									bnt.after.is_zone = true;
+									ZoneVolume(eb, &bnt.after.zmin,
+										&bnt.after.zmax);
+								}
+								Field::ExitMap bem =
+									Field::ComputeExit(entry.pos,
+									entry.vel, lfc, bnt, p,
+									entry.ducked, 48.f, 12, 64.f,
+									300);
+								float bkept = -1e30f;
+								for (const Field::ExitSample& ex
+									: bem.samples) {
+									// Ballistic crossing: straight
+									// xy at exit speed, exact z; the
+									// first front-side plane
+									// crossing is the landing.
+									const float s2d = ex.pv
+										* Len2D(ex.dir);
+									if (s2d < 100.f)
+										continue;
+									const float vz0 = ex.pv
+										* ex.dir.Z;
+									const float off0 = Dot(nf.n,
+										ex.pt) - nf.d;
+									if (off0 <= 0.f)
+										continue;
+									bool landed = false;
+									Vec3 lp, lv;
+									for (int n2 = 1; n2 <= 60;
+										++n2) {
+										const float t2 = p.dt
+											* static_cast<float>(
+												n2);
+										Vec3 q2(ex.pt.X + ex.dir.X
+											* ex.pv * t2,
+											ex.pt.Y + ex.dir.Y
+											* ex.pv * t2, 0.f);
+										q2.Z = ex.pt.Z + vz0 * t2
+											- 0.5f * p.gravity * t2
+											* t2;
+										const float off = Dot(nf.n,
+											q2) - nf.d;
+										if (off <= 0.f) {
+											lp = q2;
+											lv = Vec3(ex.dir.X
+												* ex.pv, ex.dir.Y
+												* ex.pv, vz0
+												- p.gravity * t2);
+											landed = true;
+											break;
+										}
+									}
+									if (!landed)
+										continue;
+									if (Board::EdgeDistOut(nf, lp)
+										> 0.f)
+										continue;
+									const float dot2 = Dot(lv,
+										nf.n);
+									if (dot2 >= 0.f)
+										continue;
+									const float kept = Dot(lv, lv)
+										- dot2 * dot2
+										+ 2.f * p.gravity
+										* (lp.Z - nf.zmin);
+									if (fmap.best >= 0
+										&& fmap.e_hi > 0.f
+										&& kept < 0.6f * fmap.e_hi)
+										continue;
+									if (kept > bkept) {
+										bkept = kept;
+										ct.field_aim = lp;
+										ct.have_field_aim = true;
+										// True tangent heading at
+										// the computed arrival.
+										const float hn3 = sqrtf(
+											nf.n.X * nf.n.X
+											+ nf.n.Y * nf.n.Y);
+										const float s3 = Len2D(lv);
+										float cph = s3 * hn3 > 1e-4f
+											? -lv.Z * nf.n.Z
+											/ (s3 * hn3) : 0.f;
+										if (cph > 1.f) cph = 1.f;
+										if (cph < -1.f) cph = -1.f;
+										const float ps3 = atan2f(
+											nf.n.Y, nf.n.X);
+										const float ha = atan2f(
+											lv.Y, lv.X);
+										const float pa2 =
+											Steer::WrapPi(ps3
+											+ acosf(cph));
+										const float pb2 =
+											Steer::WrapPi(ps3
+											- acosf(cph));
+										ct.field_phi = fabsf(
+											Steer::WrapPi(pa2 - ha))
+											<= fabsf(Steer::WrapPi(
+												pb2 - ha))
+											? pa2 : pb2;
+										ct.have_field_arr = true;
+										ct.exit_heading = atan2f(
+											ex.dir.Y, ex.dir.X);
+									}
+								}
+								if (bkept > -1e29f)
+									printf("assemble: leg %d "
+										"BALLISTIC PAIR kept %.0fk "
+										"aim (%.0f,%.0f,%.0f)\n",
+										static_cast<int>(lidx),
+										bkept / 1000.f,
+										ct.field_aim.X,
+										ct.field_aim.Y,
+										ct.field_aim.Z);
+							}
 							if (SearchLog::g_sink
 								&& shape[lidx + 1] < 64
 								&& !g_heat_done[shape[lidx + 1]]
