@@ -2900,11 +2900,24 @@ namespace {
 			printf("msolvegate: %s\n", err.c_str());
 			return 1;
 		}
-		// --viz: record every evaluated candidate for the search-
-		// space report (density of REAL lines, replayable in time).
+		// Search-space report: ALWAYS recorded (user 2026-08-16:
+		// "save the solver runs so we can look back over
+		// iterations") - timestamped under Output\reports unless
+		// --viz names a path.
+		std::string viz_path = o.viz;
+		if (viz_path.empty()) {
+			CreateDirectoryA("Output", nullptr);
+			CreateDirectoryA("Output\\reports", nullptr);
+			time_t now = time(nullptr);
+			struct tm tmv;
+			localtime_s(&tmv, &now);
+			char st[64];
+			strftime(st, sizeof(st), "%m%d-%H%M%S", &tmv);
+			viz_path = "Output\\reports\\msolve_" + at.map + "_" + st
+				+ ".html";
+		}
 		SearchLog::Sink viz_sink;
-		if (!o.viz.empty())
-			SearchLog::g_sink = &viz_sink;
+		SearchLog::g_sink = &viz_sink;
 		// Reference replays for the report overlay.
 		auto CollectRef = [&](const TapeAnchor& anchor,
 			const std::vector<TapeFrame>& frames,
@@ -2939,7 +2952,7 @@ namespace {
 		Assemble::RunResult rr;
 		const bool solved = Assemble::SolveMap(w, g, o.params,
 			at.start, ao, &rr, &err);
-		if (!o.viz.empty()) {
+		{
 			SearchLog::g_sink = nullptr;
 			viz_sink.Flush();
 			std::vector<Vec3> ref;
@@ -2951,10 +2964,10 @@ namespace {
 				viz_sink.AddRef("RESULT solved line", res);
 			}
 			std::string verr;
-			if (SearchLog::WriteHtml(o.viz, w, g, viz_sink,
+			if (SearchLog::WriteHtml(viz_path, w, g, viz_sink,
 				"msolvegate search space - " + at.map, &verr))
 				printf("msolvegate: search report -> %s\n",
-					o.viz.c_str());
+					viz_path.c_str());
 			else
 				printf("msolvegate: VIZ WRITE FAILED: %s\n",
 					verr.c_str());
@@ -3391,11 +3404,14 @@ namespace {
 		if (zone_mode) {
 			const WorldBrush& zb = w.brushes[zone_idx];
 			ct.to_zone = true;
-			ct.zone_min = Vec3(zb.bmin.X, zb.bmin.Y, zb.bmin.Z - 4.f);
-			ct.zone_max = Vec3(zb.bmax.X, zb.bmax.Y,
-				zb.bmax.Z + 120.f);
-			aim_at = Vec3(0.5f * (zb.bmin.X + zb.bmax.X),
-				0.5f * (zb.bmin.Y + zb.bmax.Y), zb.bmax.Z);
+			Assemble::ZoneVolume(zb, &ct.zone_min, &ct.zone_max);
+			// Nearest rim, not the sprawling platform's center.
+			aim_at = s.pos;
+			if (aim_at.X < ct.zone_min.X) aim_at.X = ct.zone_min.X;
+			if (aim_at.X > ct.zone_max.X) aim_at.X = ct.zone_max.X;
+			if (aim_at.Y < ct.zone_min.Y) aim_at.Y = ct.zone_min.Y;
+			if (aim_at.Y > ct.zone_max.Y) aim_at.Y = ct.zone_max.Y;
+			aim_at.Z = ct.zone_min.Z;
 			printf("tapprobe: entry t%d pos(%.1f,%.1f,%.1f) v(%.1f,"
 				"%.1f,%.1f) s2d %.1f | ride face %d (brush %d) -> "
 				"ZONE brush %d vol (%.0f,%.0f,%.0f)..(%.0f,%.0f,"

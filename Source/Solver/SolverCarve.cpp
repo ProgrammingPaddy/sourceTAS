@@ -344,11 +344,15 @@ namespace Carve {
 				if (t.tap_brush >= 0
 					&& r.struck_brush == t.tap_brush
 					&& r.struck_plane == t.tap_side)
-					// Strike loss + the climb the landing owes the
-					// next leg - both u/s, same weight (the whole
-					// transfer pays, not just the touch).
-					return 0.6f * (fabsf(r.strike_dot) + r.next_cost)
-						- 0.01f * Len2D(r.end_state.vel);
+					// Strike loss, minus the speed the landing
+					// actually CARRIES after its obligation to the
+					// next leg (v - next_cost = exact post-climb
+					// speed). Charging the climb additively let a
+					// dead slam look cheaper than a fast landing
+					// that owes a climb - carry inverts correctly.
+					return 0.6f * fabsf(r.strike_dot)
+						- 0.01f * (Len2D(r.end_state.vel)
+							- r.next_cost);
 				// A non-exit CLOSE to the aim must be able to
 				// outscore an exit FAR from it, or the search can
 				// never walk through the stall region bordering a
@@ -410,16 +414,59 @@ namespace Carve {
 		// rides TOWARD the aim position until fraction b of the ride,
 		// then turns to the exit heading - the natural carve structure
 		// (position first, heading last) for curvy rides.
-		const float az_aim = t.tap_face >= 0
-			&& t.tap_face < static_cast<int>(g.faces.size())
-			? atan2f(g.faces[t.tap_face].centroid.Y - entry.pos.Y,
-				g.faces[t.tap_face].centroid.X - entry.pos.X)
-			: (t.pos_w > 0.f
-				? atan2f(t.aim_pos.Y - entry.pos.Y,
-					t.aim_pos.X - entry.pos.X)
-				: t.exit_heading);
+		// Tap-mode pursuit aim: the point on the tap face that SERVES
+		// THE NEXT OBJECTIVE (user testimony: boarding is choosing
+		// how the space left on the ramp gets you to the next
+		// objective) - centroid blended toward the face vert nearest
+		// the leg-after target, so a rotated face is approached on
+		// the side that leaves runway.
+		float az_aim = t.exit_heading;
+		if (t.tap_face >= 0
+			&& t.tap_face < static_cast<int>(g.faces.size())) {
+			const Route::Face& tf = g.faces[t.tap_face];
+			Vec3 aim_pt = tf.centroid;
+			Vec3 next_pt;
+			bool have_next = false;
+			if (t.next_face >= 0
+				&& t.next_face < static_cast<int>(g.faces.size())) {
+				next_pt = g.faces[t.next_face].centroid;
+				have_next = true;
+			} else if (t.next_is_zone) {
+				// A zone's honest aim point is its NEAREST RIM from
+				// the tap face - the AABB center of a sprawling
+				// platform drags aims toward its far overhang.
+				next_pt = tf.centroid;
+				if (next_pt.X < t.zone_min.X) next_pt.X = t.zone_min.X;
+				if (next_pt.X > t.zone_max.X) next_pt.X = t.zone_max.X;
+				if (next_pt.Y < t.zone_min.Y) next_pt.Y = t.zone_min.Y;
+				if (next_pt.Y > t.zone_max.Y) next_pt.Y = t.zone_max.Y;
+				next_pt.Z = t.zone_min.Z;
+				have_next = true;
+			}
+			if (have_next) {
+				Vec3 best_v = tf.centroid;
+				float bd = FLT_MAX;
+				for (const Vec3& v : tf.verts) {
+					const float dx = v.X - next_pt.X;
+					const float dy = v.Y - next_pt.Y;
+					const float d = dx * dx + dy * dy;
+					if (d < bd) {
+						bd = d;
+						best_v = v;
+					}
+				}
+				aim_pt = Scale(tf.centroid + best_v, 0.5f);
+			}
+			az_aim = atan2f(aim_pt.Y - entry.pos.Y,
+				aim_pt.X - entry.pos.X);
+		} else if (t.pos_w > 0.f) {
+			az_aim = atan2f(t.aim_pos.Y - entry.pos.Y,
+				t.aim_pos.X - entry.pos.X);
+		}
 		struct Fam {
 			float end; float pow; float bulge; float eff; float b;
+			int via;   // two-phase pursuit: 0 = the aim point,
+			           // 1 = the runway (face's far end)
 		};
 		const float up_az = WrapPi(dh_az + kPi);   // up-slope azimuth
 		// The S-carve exit: the aim direction rotated halfway toward
@@ -427,23 +474,46 @@ namespace Carve {
 		// ascending (the tape transfers' measured shape).
 		const float s_az = WrapPi(az_aim
 			+ 0.5f * WrapPi(up_az - az_aim));
+		// ZONE endings: "use the space available on the ramp" (user
+		// testimony) - the runway azimuth points at the ride face's
+		// FARTHEST vert, so a family can ride the whole face gaining
+		// wish work (the measured human ending banks ~54k of wish
+		// work over its 60-tick climb - the energy the short direct
+		// crest launch lacks) before turning out.
+		float az_far = t.exit_heading;
+		if (t.to_zone) {
+			float bd2 = -1.f;
+			for (const Vec3& v : face.verts) {
+				const float dx = v.X - entry.pos.X;
+				const float dy = v.Y - entry.pos.Y;
+				const float d = dx * dx + dy * dy;
+				if (d > bd2) {
+					bd2 = d;
+					az_far = atan2f(dy, dx);
+				}
+			}
+		}
 		struct FamD { Fam f; int duck; };
-		const FamD fams[11] = {
-			{ { h0, 1.f, 0.f, 1.f, 0.f }, -1 },       // hold, full effort
-			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.f }, -1 },  // linear
-			{ { t.exit_heading, 2.f, 0.f, 1.f, 0.f }, -1 },  // late turn
-			{ { t.exit_heading, 1.f, 0.5f, 1.f, 0.f }, -1 }, // bulge
-			{ { t.exit_heading, 1.f, 0.f, 0.35f, 0.f }, -1 },// slow
-			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.7f }, -1 }, // via aim
-			{ { t.exit_heading, 1.f, 0.f, 0.3f, 0.7f }, -1 },// slow via
-			{ { up_az, 1.f, 0.f, 0.6f, 0.f }, -1 },   // climb (crest)
+		const FamD fams[13] = {
+			{ { h0, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },    // hold, full effort
+			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },  // linear
+			{ { t.exit_heading, 2.f, 0.f, 1.f, 0.f, 0 }, -1 },  // late turn
+			{ { t.exit_heading, 1.f, 0.5f, 1.f, 0.f, 0 }, -1 }, // bulge
+			{ { t.exit_heading, 1.f, 0.f, 0.35f, 0.f, 0 }, -1 },// slow
+			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.7f, 0 }, -1 }, // via aim
+			{ { t.exit_heading, 1.f, 0.f, 0.3f, 0.7f, 0 }, -1 },// slow via
+			{ { up_az, 1.f, 0.f, 0.6f, 0.f, 0 }, -1 },// climb (crest)
 			// The DUCK-OFF family: slow pursuit of the aim, pop off at
 			// the end (the solved12 crest exit pattern).
-			{ { t.exit_heading, 1.f, 0.f, 0.4f, 0.7f }, 0 },
+			{ { t.exit_heading, 1.f, 0.f, 0.4f, 0.7f, 0 }, 0 },
 			// S-carves: bulge deep toward downhill (the dive), end
 			// with an up-slope component (the ascending separation).
-			{ { s_az, 1.f, 0.7f, 1.f, 0.f }, -1 },
-			{ { s_az, 2.f, 0.5f, 1.f, 0.f }, -1 },    // later up-turn
+			{ { s_az, 1.f, 0.7f, 1.f, 0.f, 0 }, -1 },
+			{ { s_az, 2.f, 0.5f, 1.f, 0.f, 0 }, -1 }, // later up-turn
+			// RUNWAY families (zone endings): ride the face's length
+			// gaining wish work, then turn out to the exit.
+			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.6f, 1 }, -1 },
+			{ { s_az, 1.f, 0.f, 1.f, 0.6f, 1 }, -1 },
 		};
 		int used = 0;
 		// Tap transfers: the ride doubles the speed, so the estimate
@@ -457,8 +527,8 @@ namespace Carve {
 			dom_alt = t.max_ticks;
 		const int dom_half = dom_alt;
 		const int ndom = dom_half != dom_full ? 2 : 1;
-		const int per_fam = evals / (12 * ndom) > 8
-			? evals / (12 * ndom) : 8;
+		const int per_fam = evals / (14 * ndom) > 8
+			? evals / (14 * ndom) : 8;
 		float best_score = FLT_MAX;
 		std::vector<float> best_th, best_ef;
 		int best_duck = -1;
@@ -589,21 +659,22 @@ namespace Carve {
 		t.aim_tick = di == 0 ? dom_full : dom_half;
 		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
 			: t.max_ticks / 2;
-		for (int fam = 0; fam < 11 && used < evals; ++fam) {
+		for (int fam = 0; fam < 13 && used < evals; ++fam) {
 			std::vector<float> th(knots_n), ef(knots_n,
 				fams[fam].f.eff);
 			int duck = fams[fam].duck == 0 ? duck_guess : -1;
+			const float via_az = fams[fam].f.via ? az_far : az_aim;
 			for (int i = 0; i < knots_n; ++i) {
 				float f = static_cast<float>(i)
 					/ static_cast<float>(knots_n - 1);
 				if (fams[fam].f.b > 0.f) {
-					// Two-phase: pursue the aim position, then turn
-					// out to the exit heading.
+					// Two-phase: pursue the via point (aim or
+					// runway), then turn out to the exit heading.
 					if (f <= fams[fam].f.b)
-						th[i] = az_aim;
+						th[i] = via_az;
 					else
-						th[i] = az_aim
-							+ WrapPi(fams[fam].f.end - az_aim)
+						th[i] = via_az
+							+ WrapPi(fams[fam].f.end - via_az)
 							* (f - fams[fam].f.b)
 							/ (1.f - fams[fam].f.b);
 					continue;

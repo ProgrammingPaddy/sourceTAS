@@ -46,7 +46,10 @@ namespace Assemble {
 	};
 
 	// The shared zone test (same proxy for solver lines and reference
-	// tapes, so comparisons are fair).
+	// tapes, so comparisons are fair). The finish = ON TOP of the end
+	// brush: hull-expanded xy, z from just under the top (no boarding
+	// requirement, no side-entry finishes).
+	void ZoneVolume(const WorldBrush& eb, Vec3* zmin, Vec3* zmax);
 	bool InZone(const World& w, int end_brush, const Vec3& pos);
 
 	// Solve the map: enumerate shapes, assemble each under the budget,

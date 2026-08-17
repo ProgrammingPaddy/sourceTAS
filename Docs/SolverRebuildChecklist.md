@@ -449,6 +449,39 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-16 (session 2d, expert steer applied): TESTIMONY ADDITIONS
+  (user): (a) the end platform has NO boarding requirement - the
+  finish = make it ON TOP of the brush -> ZoneVolume is now hull-
+  expanded xy with z from just under the TOP (side entries below the
+  top no longer count; shared by InZone/carve zone mode/tapprobe);
+  (b) [0 1 2] can probably zone with enough energy preserved - keep
+  it live, perfect the 1->2 bottom-to-bottom transition; (c) boarding
+  = choosing how the SPACE LEFT ON THE RAMP serves the next
+  objective (face 3 is rotated relative to the others). Encoded:
+  carry-speed scoring (tap score now credits sqrt(v^2-2g*shortfall),
+  the speed actually kept after the next-leg obligation - the old
+  additive climb cost let dead slams look cheaper than fast landings
+  that owe a climb); objective-serving pursuit aims (tap families
+  aim at centroid blended toward the vert nearest the LEG-AFTER
+  target; zones aim at their NEAREST RIM, never the sprawling AABB
+  center); RUNWAY families (ride the face's length banking wish
+  work, then turn out) + runway-spanning zone spline domains.
+  MEASURED: 2->3 improved -728 -> -221/-267 @ 714-734 striking
+  higher (z +7 vs -63); 1->2 hit -64 @ 898 in an earlier beam run.
+  ENDING PHYSICS PINNED DOWN (closed forms + human tape): the
+  platform arrival needs crest state ~(s2d 316, vz +200); from our
+  y~-720 entries the direct crest launch tops out ~296 total - the
+  human's extra energy is EXACTLY the wish work banked over their
+  60-tick northward runway ride (~54k = the gap). The machinery to
+  find it now exists (runway families/domains) but the zone solve
+  still converges short of it - next lever: zone-solve budget/
+  domain sweep or seeding zone families from the depth-2 probe's
+  best ride prefix. REPORT V2 (all user asks): pan fixed (right/
+  shift-drag, correct camera basis), outcome tooltips, CLICK-TO-
+  INSPECT with committed-chain lineage ("fed by: [0 2] from spawn |
+  start jump | L0 board f0 -62 | ..."), and msolvegate now ALWAYS
+  saves a timestamped report under Output/reports (iteration
+  history). Gates green throughout.
 - 2026-08-16 (session 2c): THE SEARCH-SPACE RECORDER (user directive:
   "I want to actually see the routes being searched... a density
   state space based on real lines"). New module SolverSearchLog.h/

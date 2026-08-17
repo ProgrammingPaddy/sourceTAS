@@ -174,14 +174,26 @@ namespace Assemble {
 
 	} // namespace
 
+	// The finish is ON TOP of the end brush (user 2026-08-16: "all it
+	// needs to do is make it on top of the brush, there is no boarding
+	// requirement") - hull-expanded xy so standing on the edge counts,
+	// z from just under the TOP so side approaches below the top are
+	// NOT a finish.
+	void ZoneVolume(const WorldBrush& eb, Vec3* zmin, Vec3* zmax) {
+		*zmin = Vec3(eb.bmin.X - 16.f, eb.bmin.Y - 16.f,
+			eb.bmax.Z - 4.f);
+		*zmax = Vec3(eb.bmax.X + 16.f, eb.bmax.Y + 16.f,
+			eb.bmax.Z + 120.f);
+	}
+
 	bool InZone(const World& w, int end_brush, const Vec3& pos) {
 		if (end_brush < 0)
 			return false;
-		const WorldBrush& eb = w.brushes[end_brush];
-		return pos.X >= eb.bmin.X && pos.X <= eb.bmax.X
-			&& pos.Y >= eb.bmin.Y && pos.Y <= eb.bmax.Y
-			&& pos.Z >= eb.bmin.Z - 4.f
-			&& pos.Z <= eb.bmax.Z + 120.f;
+		Vec3 zmin, zmax;
+		ZoneVolume(w.brushes[end_brush], &zmin, &zmax);
+		return pos.X >= zmin.X && pos.X <= zmax.X
+			&& pos.Y >= zmin.Y && pos.Y <= zmax.Y
+			&& pos.Z >= zmin.Z && pos.Z <= zmax.Z;
 	}
 
 	int ZoneTick(const World& w, const Route::Graph& g,
@@ -255,6 +267,15 @@ namespace Assemble {
 				if (SearchLog::g_sink)
 					SearchLog::g_sink->BeginStage(tag + " " + what);
 			};
+			// The COMMITTED chain so far - every evaluated candidate
+			// is stamped with it, so a picked line in the report
+			// answers "what route fed into this".
+			std::string chain_ctx = tag + " from spawn";
+			auto Ctx = [&]() {
+				if (SearchLog::g_sink)
+					SearchLog::g_sink->SetContext(chain_ctx);
+			};
+			Ctx();
 			// START: pick the (bearing offset, spin rate, jump tick)
 			// whose flight produces the SOFTEST first board - launch
 			// speed toward the face is exactly the head-on setup that
@@ -372,6 +393,8 @@ namespace Assemble {
 			rr.shape = shape;
 			rr.frames = sp.frames;
 			PlayerState cur = sp.entry;
+			chain_ctx += " | start jump";
+			Ctx();
 			bool skip_air = false;   // set by a TAP transfer: the
 			                         // carve boarded the next face
 			for (size_t li = 0; li < shape.size(); ++li) {
@@ -430,10 +453,8 @@ namespace Assemble {
 							ct.next_face = shape[lidx + 2];
 						else {
 							ct.next_is_zone = true;
-							ct.zone_min = Vec3(eb.bmin.X,
-								eb.bmin.Y, eb.bmin.Z - 4.f);
-							ct.zone_max = Vec3(eb.bmax.X,
-								eb.bmax.Y, eb.bmax.Z + 120.f);
+							ZoneVolume(eb, &ct.zone_min,
+								&ct.zone_max);
 						}
 						ct.exit_heading = atan2f(
 							lnext.Y - entry.pos.Y,
@@ -447,10 +468,13 @@ namespace Assemble {
 							const bool tp = !c.exited
 								&& c.struck_brush == ct.tap_brush
 								&& c.struck_plane == ct.tap_side;
+							// CARRY speed after the next-leg
+							// obligation (see Carve::Score).
 							return tp
-								? 0.6f * (fabsf(c.strike_dot)
-									+ c.next_cost) - 0.01f
-									* Len2D(c.end_state.vel)
+								? 0.6f * fabsf(c.strike_dot)
+									- 0.01f
+									* (Len2D(c.end_state.vel)
+										- c.next_cost)
 								: 1e6f + c.miss_dist;
 						};
 						lo.sc = TapScore(lo.cr);
@@ -467,13 +491,57 @@ namespace Assemble {
 						}
 					} else {
 						ct.to_zone = true;
-						ct.zone_min = Vec3(eb.bmin.X, eb.bmin.Y,
-							eb.bmin.Z - 4.f);
-						ct.zone_max = Vec3(eb.bmax.X, eb.bmax.Y,
-							eb.bmax.Z + 120.f);
+						ZoneVolume(eb, &ct.zone_min, &ct.zone_max);
+						// Aim at the zone's NEAREST RIM from here -
+						// the center of a sprawling platform is a
+						// misleading target.
+						Vec3 rim = entry.pos;
+						if (rim.X < ct.zone_min.X)
+							rim.X = ct.zone_min.X;
+						if (rim.X > ct.zone_max.X)
+							rim.X = ct.zone_max.X;
+						if (rim.Y < ct.zone_min.Y)
+							rim.Y = ct.zone_min.Y;
+						if (rim.Y > ct.zone_max.Y)
+							rim.Y = ct.zone_max.Y;
 						ct.exit_heading = atan2f(
-							zone_c.Y - entry.pos.Y,
-							zone_c.X - entry.pos.X);
+							rim.Y - entry.pos.Y,
+							rim.X - entry.pos.X);
+						// The ending's spline domain spans the
+						// RUNWAY PATH (ride the face's length
+						// banking wish work, then fly) - a straight
+						// line to the rim cuts the long ride's
+						// knots dead.
+						float far_d = 0.f;
+						Vec3 farv = lfc.centroid;
+						for (const Vec3& v : lfc.verts) {
+							const float dx = v.X - entry.pos.X;
+							const float dy = v.Y - entry.pos.Y;
+							const float d = sqrtf(dx * dx
+								+ dy * dy);
+							if (d > far_d) {
+								far_d = d;
+								farv = v;
+							}
+						}
+						Vec3 rim2 = farv;
+						if (rim2.X < ct.zone_min.X)
+							rim2.X = ct.zone_min.X;
+						if (rim2.X > ct.zone_max.X)
+							rim2.X = ct.zone_max.X;
+						if (rim2.Y < ct.zone_min.Y)
+							rim2.Y = ct.zone_min.Y;
+						if (rim2.Y > ct.zone_max.Y)
+							rim2.Y = ct.zone_max.Y;
+						const float fdx = rim2.X - farv.X;
+						const float fdy = rim2.Y - farv.Y;
+						const float path = far_d
+							+ sqrtf(fdx * fdx + fdy * fdy);
+						const float ez = s_est > 100.f
+							? path / (s_est * p.dt) : 120.f;
+						ct.aim_tick = ez < 10.f ? 10
+							: (ez > 240.f ? 240
+								: static_cast<int>(ez));
 						std::vector<Carve::Result> calts;
 						lo.cr = Carve::SolveCarve(entry, w, p, g,
 							ct, knots, evals,
@@ -637,6 +705,11 @@ namespace Assemble {
 					rr.board_loss2 += ba.dot * ba.dot;
 					leg_board_dot = ba.dot;
 					cur = ba.end_state;
+					char cb[64];
+					snprintf(cb, sizeof(cb), " | L%d board f%d %.0f",
+						static_cast<int>(li), fi, ba.dot);
+					chain_ctx += cb;
+					Ctx();
 				}
 				Carve::Result& cr = lo.cr;
 				const Carve::Target& ct = lo.ct;
@@ -668,6 +741,7 @@ namespace Assemble {
 				}
 				AppendCarve(&rr.frames, cr, cur.ducked);
 				cur = cr.end_state;
+				char cb[96];
 				if (tapped(cr)) {
 					rr.board_loss2 += cr.strike_dot
 						* cr.strike_dot;
@@ -677,12 +751,24 @@ namespace Assemble {
 						static_cast<int>(li), shape[li + 1],
 						cr.strike_dot, cur.pos.X, cur.pos.Y,
 						cur.pos.Z, Len2D(cur.vel));
+					snprintf(cb, sizeof(cb),
+						" | L%d tap f%d %.0f @(%.0f,%.0f,%.0f) "
+						"v%.0f", static_cast<int>(li),
+						shape[li + 1], cr.strike_dot, cur.pos.X,
+						cur.pos.Y, cur.pos.Z, Len2D(cur.vel));
+					chain_ctx += cb;
+					Ctx();
 				} else {
 					printf("assemble: leg %d carve exit (%.0f,%.0f,"
 						"%.0f) v(%.0f,%.0f,%.0f)\n",
 						static_cast<int>(li), cur.pos.X, cur.pos.Y,
 						cur.pos.Z, cur.vel.X, cur.vel.Y,
 						cur.vel.Z);
+					snprintf(cb, sizeof(cb),
+						" | L%d exit v%.0f", static_cast<int>(li),
+						Len2D(cur.vel));
+					chain_ctx += cb;
+					Ctx();
 				}
 			}
 			const int zk = FlyToZone(w, g, p, cur, &rr.frames);

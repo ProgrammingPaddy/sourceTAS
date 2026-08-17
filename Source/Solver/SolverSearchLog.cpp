@@ -33,6 +33,20 @@ namespace SearchLog {
 		return cur_stage_;
 	}
 
+	void Sink::SetContext(const std::string& ctx) {
+		if (ctx.empty()) {
+			cur_ctx_ = -1;
+			return;
+		}
+		for (size_t i = 0; i < contexts_.size(); ++i)
+			if (contexts_[i] == ctx) {
+				cur_ctx_ = static_cast<int>(i);
+				return;
+			}
+		contexts_.push_back(ctx);
+		cur_ctx_ = static_cast<int>(contexts_.size()) - 1;
+	}
+
 	void Sink::StartTraj(const Vec3& p0) {
 		CommitPending();
 		if (cur_stage_ < 0)
@@ -41,6 +55,7 @@ namespace SearchLog {
 		tick_ = 0;
 		pending_ = Traj();
 		pending_.stage = cur_stage_;
+		pending_.ctx = cur_ctx_;
 		pending_.pts.push_back(p0);
 	}
 
@@ -192,6 +207,11 @@ input[type=range]{width:100%}
 .sw{display:inline-block;width:10px;height:10px;border-radius:2px}
 #stats{position:absolute;right:10px;top:8px;text-align:right;color:#8fa1bd;
 background:rgba(10,13,20,.75);padding:6px 10px;border-radius:4px}
+#pick{position:absolute;right:10px;bottom:10px;max-width:430px;
+background:rgba(10,13,20,.92);border:1px solid #2c3549;border-radius:5px;
+padding:8px 12px;display:none;color:#c8d0dc}
+#pick b{color:#e8eef8}
+#pick .ctx{color:#9fe8b0;margin-top:4px;word-break:break-word}
 button{background:#1a2230;color:#c8d0dc;border:1px solid #2c3549;
 border-radius:3px;cursor:pointer;font:inherit;padding:2px 10px}
 button:hover{background:#232d40}
@@ -217,10 +237,12 @@ button:hover{background:#232d40}
 <div id="ovl"></div>
 <div class="sec">Stages</div>
 <div id="stages"></div>
-<div class="hint">drag rotate &middot; shift-drag pan &middot; wheel zoom
+<div class="hint">drag rotate &middot; right-drag / shift-drag pan &middot;
+wheel zoom &middot; click a line to inspect it and the route that fed it
 &middot; the scrub replays the search in eval order</div>
 </div>
 <div id="stats"></div>
+<div id="pick"></div>
 <script>
 "use strict";
 const D=/*__DATA__*/null;
@@ -231,9 +253,17 @@ const Q=decodeB64(D.pts);
 const NP=Q.length/3;
 const P=new Float32Array(NP*3);
 for(let i=0;i<NP*3;i++)P[i]=Q[i]*0.25;
-const T=D.trajs; // [stage,outcome,notable,score,eval,off,npts]
+const T=D.trajs; // [stage,outcome,notable,score,eval,off,npts,ctx]
 const NT=T.length;
 const OUTNAMES=["miss","grounded","struck","HIT","exited","ZONED","ref"];
+const OUTTIPS=[
+"ran to the horizon without reaching anything",
+"landed on walkable ground (the ride/flight died there)",
+"ended on a strike that was NOT the target face",
+"board/tap strike ON the target face (a transfer)",
+"clean-air exit (carve handed off to a flight)",
+"entered the end-zone volume (a finish)",
+"reference overlay"];
 const OUTON=[true,true,true,true,true,true,true];
 // per-stage score percentile ranks
 const rank=new Float32Array(NT);
@@ -311,23 +341,28 @@ gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(geoC),gl.STATIC_DRAW);
 const geoN=geoP.length/3;
 let showGeo=true;
 // UI state
-let evCut=maxEval,pctCut=1.0,alpha=0.22;
+let evCut=maxEval,pctCut=1.0,alpha=0.22,selId=-1;
+function visT(i){
+const t=T[i];const st=t[0],oc=t[1],nb=t[2];
+if(!stageOn[st])return false;
+if(!OUTON[oc])return false;
+if(oc!==6){
+if(t[4]>evCut)return false;
+if(rank[i]>pctCut&&!nb)return false;}
+return true;}
 // rebuild filtered buffer
 let visKept=0,visTotal=0;
 function rebuild(){
 let o=0;visKept=0;
 for(let i=0;i<NT;i++){
+if(!visT(i))continue;
 const t=T[i];const st=t[0],oc=t[1],nb=t[2];
-if(!stageOn[st])continue;
-if(!OUTON[oc])continue;
 const ref=oc===6;
-if(!ref){
-if(t[4]>evCut)continue;
-if(rank[i]>pctCut&&!nb)continue;}
 visKept++;
 const col=stageColor[st];
 let r=col[0]*255,g2=col[1]*255,b=col[2]*255,a=ref?255:(nb?235:90);
-if(nb&&!ref){r=Math.min(255,r*1.35+40);g2=Math.min(255,g2*1.35+40);
+if(i===selId){r=255;g2=255;b=255;a=255;}
+else if(nb&&!ref){r=Math.min(255,r*1.35+40);g2=Math.min(255,g2*1.35+40);
 b=Math.min(255,b*1.35+40);}
 else if(!ref){const q=1.0-0.65*rank[i];r*=q;g2*=q;b*=q;}
 const off=t[5],n=t[6];
@@ -388,24 +423,59 @@ gl.bindBuffer(gl.ARRAY_BUFFER,bC);
 gl.vertexAttribPointer(aC,4,gl.UNSIGNED_BYTE,true,0,0);
 gl.drawArrays(gl.LINES,0,dynN);}
 requestAnimationFrame(draw);}
-// input
-let drag=0,px=0,py=0;
-cv.addEventListener("mousedown",e=>{drag=e.shiftKey||e.button===2?2:1;
-px=e.clientX;py=e.clientY;});
-window.addEventListener("mouseup",()=>drag=0);
+// input: L-drag rotate, R/middle/shift-drag PAN (grab the world),
+// small L-click picks a line.
+let drag=0,px=0,py=0,moved=0;
+cv.addEventListener("mousedown",e=>{
+drag=(e.shiftKey||e.button===2||e.button===1)?2:1;
+px=e.clientX;py=e.clientY;moved=0;});
+window.addEventListener("mouseup",e=>{
+if(drag===1&&moved<5&&e.button===0)pick(e.clientX,e.clientY);
+drag=0;});
 window.addEventListener("mousemove",e=>{
 if(!drag)return;const dx=e.clientX-px,dy=e.clientY-py;px=e.clientX;py=e.clientY;
+moved+=Math.abs(dx)+Math.abs(dy);
 if(drag===1){yaw-=dx*0.006;pitch=Math.max(-1.5,Math.min(1.5,pitch+dy*0.006));}
-else{const cp=Math.cos(pitch);
+else{const sp2=Math.sin(pitch),cp=Math.cos(pitch);
 const rx=-Math.sin(yaw),ry=Math.cos(yaw);
-const ux=-Math.cos(yaw)*Math.sin(pitch),uy=-Math.sin(yaw)*Math.sin(pitch),
-uz=Math.cos(pitch);
-const s2=dist*0.0016;
-tgt[0]+=(rx*dx+ux*dy)*s2;tgt[1]+=(ry*dx+uy*dy)*s2;tgt[2]+=uz*dy*s2;}});
+const ux=-sp2*Math.cos(yaw),uy=-sp2*Math.sin(yaw),uz=cp;
+const s2=dist*0.0014;
+tgt[0]+=(-rx*dx+ux*dy)*s2;tgt[1]+=(-ry*dx+uy*dy)*s2;tgt[2]+=uz*dy*s2;}});
 cv.addEventListener("wheel",e=>{e.preventDefault();
 dist*=Math.pow(1.0016,e.deltaY);dist=Math.max(60,Math.min(40000,dist));},
 {passive:false});
 cv.addEventListener("contextmenu",e=>e.preventDefault());
+window.addEventListener("keydown",e=>{
+if(e.key==="Escape"&&selId>=0){selId=-1;showPick();queueRebuild();}});
+// picking: nearest visible line to the click, in screen space
+function pick(mx,my){
+const m=mat();const dpr=window.devicePixelRatio||1;
+const w=cv.width,h=cv.height,sx=mx*dpr,sy=my*dpr;
+let best=-1,bd=(14*dpr)*(14*dpr);
+for(let i=0;i<NT;i++){
+if(!visT(i))continue;
+const t=T[i];const off=t[5],n=t[6];
+const step=n>24?Math.ceil(n/24):1;
+for(let k=0;k<n;k+=step){
+const j=(off+k)*3;
+const x=P[j],y=P[j+1],z=P[j+2];
+const pw=m[3]*x+m[7]*y+m[11]*z+m[15];
+if(pw<=0)continue;
+const qx=((m[0]*x+m[4]*y+m[8]*z+m[12])/pw*0.5+0.5)*w;
+const qy=(1-((m[1]*x+m[5]*y+m[9]*z+m[13])/pw*0.5+0.5))*h;
+const d=(qx-sx)*(qx-sx)+(qy-sy)*(qy-sy);
+if(d<bd){bd=d;best=i;}}}
+selId=best;showPick();queueRebuild();}
+function showPick(){
+const el=document.getElementById("pick");
+if(selId<0){el.style.display="none";return;}
+const t=T[selId];
+el.innerHTML="<b>"+D.stages[t[0]].name+"</b> &middot; "+OUTNAMES[t[1]]+
+" &middot; score "+t[3]+" &middot; eval #"+t[4]+
+(t[2]?" &middot; <b>best-so-far</b>":"")+
+(t[7]>=0&&D.ctx[t[7]]?'<div class="ctx">fed by: '+D.ctx[t[7]]+"</div>":"")+
+'<div style="color:#5b667a">esc to deselect</div>';
+el.style.display="block";}
 // UI build
 document.getElementById("gen").textContent=D.generated;
 const evS=document.getElementById("ev");evS.max=maxEval;evS.value=maxEval;
@@ -431,6 +501,7 @@ if(evCut>=maxEval){playing=false;playBtn.innerHTML="&#9654; play";}},33);
 const outsDiv=document.getElementById("outs");
 for(let i=0;i<7;i++){if(i===6)continue;
 const l=document.createElement("label");
+l.title=OUTTIPS[i];
 l.innerHTML='<input type="checkbox" checked><span class="n">'+
 OUTNAMES[i]+'</span>';
 l.firstChild.addEventListener("change",e=>{OUTON[i]=e.target.checked;
@@ -511,15 +582,19 @@ rebuild();draw();
 			AppendF(&js, "%s{\"name\":\"%s\",\"total\":%d}",
 				i ? "," : "", JsonEscape(st.name).c_str(), st.total);
 		}
+		js += "],\"ctx\":[";
+		for (size_t i = 0; i < sink.ContextsRef().size(); ++i)
+			AppendF(&js, "%s\"%s\"", i ? "," : "",
+				JsonEscape(sink.ContextsRef()[i]).c_str());
 		js += "],\"trajs\":[";
 		{
 			int off = 0;
 			for (size_t i = 0; i < trajs.size(); ++i) {
 				const Traj& t = trajs[i];
-				AppendF(&js, "%s[%d,%d,%d,%.1f,%d,%d,%d]",
+				AppendF(&js, "%s[%d,%d,%d,%.1f,%d,%d,%d,%d]",
 					i ? "," : "", t.stage, t.outcome,
 					t.notable ? 1 : 0, t.score, t.eval, off,
-					static_cast<int>(t.pts.size()));
+					static_cast<int>(t.pts.size()), t.ctx);
 				off += static_cast<int>(t.pts.size());
 			}
 		}

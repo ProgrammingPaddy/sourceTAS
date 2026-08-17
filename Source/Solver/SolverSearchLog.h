@@ -48,6 +48,7 @@ namespace SearchLog {
 
 	struct Traj {
 		int   stage = 0;
+		int   ctx = -1;        // committed-chain context (lineage)
 		int   eval = 0;        // global chronological index
 		unsigned char outcome = 0;
 		bool  notable = false; // best-so-far improvement (or ref)
@@ -69,6 +70,13 @@ namespace SearchLog {
 		// Caller (assembler/probe) names the phases of the search.
 		int BeginStage(const std::string& name);
 
+		// The COMMITTED-CHAIN context: what route decisions fed the
+		// candidates being evaluated right now (e.g. "[0 1 2] start
+		// b-114 | L0 tap f1 -199 | L1 ..."). Every trajectory stores
+		// it, so a picked line in the report answers "what route fed
+		// into this". Deduplicated; empty clears.
+		void SetContext(const std::string& ctx);
+
 		// Sim side: one candidate = StartTraj .. Point.. .. EndTraj.
 		void StartTraj(const Vec3& p0);
 		void Point(const Vec3& p);
@@ -87,6 +95,9 @@ namespace SearchLog {
 
 		const std::vector<Stage>& StagesRef() const { return stages_; }
 		const std::vector<Traj>&  TrajsRef()  const { return trajs_; }
+		const std::vector<std::string>& ContextsRef() const {
+			return contexts_;
+		}
 
 	private:
 		void CommitPending();
@@ -94,6 +105,8 @@ namespace SearchLog {
 		int cap_;
 		int keep_every_;
 		int cur_stage_ = -1;
+		int cur_ctx_ = -1;
+		std::vector<std::string> contexts_;
 		int tick_ = 0;
 		int eval_counter_ = 0;
 		bool open_ = false;
