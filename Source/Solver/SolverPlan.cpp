@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include <algorithm>
+#include <map>
 #include <vector>
 
 #include "SolverAir.h"
@@ -152,6 +153,16 @@ namespace Plan {
 		Assemble::ZoneVolume(eb, &zmin, &zmax);
 		bool any = false;
 		Assemble::RunResult best;
+		// One heat render per face per solve; one start solve per
+		// first-face (the per-shape re-solve was most of the wall).
+		bool heat_done[64] = { false };
+		struct StartSol {
+			bool have = false;
+			float e = -1e30f;
+			Air::Result fly;
+			Assemble::StartCand sc;
+		};
+		std::map<int, StartSol> start_cache;
 		for (const std::vector<int>& shape : shapes) {
 			const double spent = static_cast<double>(clock() - c0)
 				/ CLOCKS_PER_SEC;
@@ -174,77 +185,72 @@ namespace Plan {
 			}
 			Assemble::RunResult rr;
 			rr.shape = shape;
-			// START: prestrafe candidates ranked by the CONSTRUCTED
-			// first board (fly to the first face's best cell under
-			// its cap; delivered energy decides).
-			Stage("v2 start");
-			const PlayerState spawn = Assemble::Spawn(w, p, anchor);
-			const Route::Face& f0 = g.faces[shape[0]];
-			const float b0 = atan2f(f0.centroid.Y - spawn.pos.Y,
-				f0.centroid.X - spawn.pos.X) * 57.29578f;
-			PlayerState state;
-			bool have_start = false;
-			float start_e = -1e30f;
-			Air::Result start_fly;
-			Assemble::StartCand start_sc;
-			const float offs[3] = { 0.f, -35.f, 35.f };
-			const float rates[4] = { 3.f, 4.5f, 6.f, 8.f };
-			const int holds[2] = { 45, 75 };
-			for (int oi = 0; oi < 3; ++oi)
-			for (int ri = 0; ri < 4; ++ri)
-			for (int di = -1; di <= 1; di += 2)
-			for (int hi = 0; hi < 2; ++hi) {
-				Assemble::StartCand sc = Assemble::StartOne(w, p,
-					spawn, b0 + offs[oi],
-					rates[ri] * static_cast<float>(di), holds[hi]);
-				if (!sc.ok)
-					continue;
-				Field::NextCtx fctx;
-				fctx.has = true;
-				if (shape.size() > 1)
-					fctx.pt = g.faces[shape[1]].centroid;
-				else {
-					fctx.is_zone = true;
-					fctx.zmin = zmin;
-					fctx.zmax = zmax;
-				}
-				Field::FaceMap fm = Field::Compute(sc.entry.pos,
-					sc.entry.vel, f0, p, sc.entry.ducked, 32.f,
-					300, 1.f, &fctx);
-				std::vector<CellPick> cells;
-				PickCells(fm, 4, &cells);
-				for (const CellPick& c : cells) {
-					Air::Target at;
-					at.face = shape[0];
-					at.aim = c.q;
-					at.aim_region = false;
-					at.dot_cap = c.cap;
-					at.max_ticks = 240;
-					Air::Result ar = Air::SolveTransfer(sc.entry,
-						w, p, g, at, 4, 500);
-					if (!ar.hit || fabsf(ar.dot) > c.cap)
+			// START: one solve per first-face, cached across shapes.
+			StartSol& ss = start_cache[shape[0]];
+			if (!ss.have && ss.e > -1e29f) {
+				// (cached failure)
+			} else if (!ss.have) {
+				Stage("v2 start");
+				const PlayerState spawn = Assemble::Spawn(w, p,
+					anchor);
+				const Route::Face& f0 = g.faces[shape[0]];
+				const float b0 = atan2f(
+					f0.centroid.Y - spawn.pos.Y,
+					f0.centroid.X - spawn.pos.X) * 57.29578f;
+				const float offs[3] = { 0.f, -35.f, 35.f };
+				const float rates[4] = { 3.f, 4.5f, 6.f, 8.f };
+				const int holds[2] = { 45, 75 };
+				for (int oi = 0; oi < 3; ++oi)
+				for (int ri = 0; ri < 4; ++ri)
+				for (int di = -1; di <= 1; di += 2)
+				for (int hi = 0; hi < 2; ++hi) {
+					Assemble::StartCand sc = Assemble::StartOne(w,
+						p, spawn, b0 + offs[oi],
+						rates[ri] * static_cast<float>(di),
+						holds[hi]);
+					if (!sc.ok)
 						continue;
-					const float e = EnergyAt(ar.end_state,
-						f0.zmin, p);
-					if (e > start_e) {
-						start_e = e;
-						start_fly = ar;
-						start_sc = sc;
-						have_start = true;
+					Field::FaceMap fm = Field::Compute(
+						sc.entry.pos, sc.entry.vel, f0, p,
+						sc.entry.ducked, 32.f, 300);
+					std::vector<CellPick> cells;
+					PickCells(fm, 4, &cells);
+					for (const CellPick& c : cells) {
+						Air::Target at;
+						at.face = shape[0];
+						at.aim = c.q;
+						at.aim_region = false;
+						at.dot_cap = c.cap;
+						at.max_ticks = 240;
+						Air::Result ar = Air::SolveTransfer(
+							sc.entry, w, p, g, at, 4, 500);
+						if (!ar.hit || fabsf(ar.dot) > c.cap)
+							continue;
+						const float e = EnergyAt(ar.end_state,
+							f0.zmin, p);
+						if (e > ss.e) {
+							ss.e = e;
+							ss.fly = ar;
+							ss.sc = sc;
+							ss.have = true;
+						}
 					}
 				}
+				if (!ss.have)
+					ss.e = -1e28f;   // cached failure marker
 			}
-			if (!have_start) {
+			if (!ss.have) {
 				printf("plan: no start board under cap for shape\n");
 				continue;
 			}
-			rr.frames = start_sc.frames;
-			Assemble::AppendAirFrames(&rr.frames, start_fly,
-				start_sc.entry.ducked);
-			state = start_fly.end_state;
-			rr.board_loss2 += start_fly.dot * start_fly.dot;
+			PlayerState state;
+			rr.frames = ss.sc.frames;
+			Assemble::AppendAirFrames(&rr.frames, ss.fly,
+				ss.sc.entry.ducked);
+			state = ss.fly.end_state;
+			rr.board_loss2 += ss.fly.dot * ss.fly.dot;
 			printf("plan: start board f%d dot %.1f E %.0fk (%.0f "
-				"u/s)\n", shape[0], start_fly.dot, start_e / 1000.f,
+				"u/s)\n", shape[0], ss.fly.dot, ss.e / 1000.f,
 				Len(state.vel));
 			bool dead = false;
 			for (size_t li = 0; li < shape.size() && !dead; ++li) {
@@ -254,7 +260,25 @@ namespace Plan {
 				char sb[48];
 				// ===== RIDE on face fi =====
 				if (last) {
-					// ENDING: zone-mode carve (objective = clock).
+					// ENDING: provably-unreachable check first (a
+					// millisecond of closed forms vs 24k wasted
+					// evals from faces that can never reach).
+					{
+						Field::NextTarget znt;
+						znt.is_zone = true;
+						znt.zmin = zmin;
+						znt.zmax = zmax;
+						Field::ExitMap zem = Field::ComputeExit(
+							state.pos, state.vel, fc, znt, p,
+							state.ducked, 64.f, 12, 64.f, 300);
+						if (zem.best_pot < 0) {
+							printf("plan: ending provably "
+								"unreachable from f%d - skipped\n",
+								fi);
+							dead = true;
+							break;
+						}
+					}
 					snprintf(sb, sizeof(sb), "v2 leg%d zone",
 						static_cast<int>(li));
 					Stage(sb);
@@ -389,8 +413,10 @@ namespace Plan {
 					if (fm.best < 0)
 						continue;
 					mapped++;
-					if (li == 0)
+					if (nfi < 64 && !heat_done[nfi]) {
+						heat_done[nfi] = true;
 						RenderHeat(fm, nf);
+					}
 					std::vector<CellPick> cells;
 					// The exit's OWN induced landing first - the
 					// (exit, cell) pair the exit map constructed
