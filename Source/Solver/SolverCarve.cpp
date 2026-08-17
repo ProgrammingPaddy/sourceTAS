@@ -191,17 +191,32 @@ namespace Carve {
 		// crossing's tangent heading.
 		bool arc_on = false;
 		int arc_k = 0, arc_n = 0;
-		float arc_h0 = 0.f, arc_phi = 0.f;
+		float arc_h0 = 0.f, arc_phi = 0.f, arc_cur = 0.f;
 		const float tap_hn = tapf ? sqrtf(tapf->n.X * tapf->n.X
 			+ tapf->n.Y * tapf->n.Y) : 0.f;
 		for (int k = 0; k < horizon; ++k) {
 			float theta = SplineEval(knots, k, sh);
 			if (arc_on) {
-				// Execute the planned arc: linear heading ramp to
-				// the crossing's tangent heading.
-				theta = arc_h0 + WrapPi(arc_phi - arc_h0)
-					* static_cast<float>(arc_k + 1)
-					/ static_cast<float>(arc_n > 0 ? arc_n : 1);
+				// OSCULATING ARRIVAL (user's definition: tangent =
+				// the approach CURVE's direction at a single touch
+				// point, never a late crank): advance the heading
+				// toward the arrival tangent at the FREE turn rate,
+				// as early as possible, then HOLD - the final ticks
+				// fly in-plane into the touch. A ramp timed to end
+				// exactly at contact could demand above-free rates
+				// and braked; the free rate is now the ceiling by
+				// construction, and whatever it cannot absorb in
+				// the available ticks shows honestly as residual
+				// dot (an exit-choice problem, not an arc problem).
+				const float sv2 = Len2D(s.vel);
+				Strafe::TickLaw tl2 = Strafe::Law(p,
+					sv2 > 1.f ? sv2 : 1.f, 1.f, s.ducked);
+				const float w2 = tl2.TurnRad(0.f, 1.f);
+				const float d2 = WrapPi(arc_phi - arc_cur);
+				const float st = d2 > w2 ? w2
+					: (d2 < -w2 ? -w2 : d2);
+				arc_cur = WrapPi(arc_cur + st);
+				theta = arc_cur;
 				arc_k++;
 				if (arc_k > arc_n + 8)
 					arc_on = false;
@@ -399,6 +414,21 @@ namespace Carve {
 								r.struck_brush = ev.contact_brush[0];
 								r.struck_plane = ev.contact_plane[0];
 							}
+							// SINGLE-TOUCH LAW: a graze during an
+							// engaged arc breaks the smooth curve -
+							// the candidate is done (the crease-
+							// scrape multi-touch "boards" stop
+							// being representable).
+							if (arc_on) {
+								r.doomed = true;
+								r.reach_short = ReachShort(exit_s);
+								r.end_pos = s.pos;
+								r.flips = ctl.flips;
+								RecExit(SearchLog::kDoomed, k + 1);
+								if (lg)
+									lg->EndTraj(SearchLog::kDoomed);
+								return r;
+							}
 							// Grazes dissipate dot^2 like any clip -
 							// account them (the energy ledger's
 							// -712k crease-scrape was invisible).
@@ -431,6 +461,22 @@ namespace Carve {
 								+ Scale(s.vel, 3.f * p.dt);
 							if (Board::EdgeDistOut(*tapf, proj)
 								> 0.f) {
+								// SINGLE-TOUCH LAW: an exiting-
+								// branch touch during an engaged
+								// arc = the curve failed.
+								if (arc_on) {
+									r.doomed = true;
+									r.reach_short =
+										ReachShort(exit_s);
+									r.end_pos = s.pos;
+									r.flips = ctl.flips;
+									RecExit(SearchLog::kDoomed,
+										k + 1);
+									if (lg)
+										lg->EndTraj(
+											SearchLog::kDoomed);
+									return r;
+								}
 								const Vec3& gn =
 									w.brushes[t.tap_brush]
 									.n[t.tap_side];
@@ -602,7 +648,45 @@ namespace Carve {
 										WrapPi(pa - ha))
 										<= fabsf(WrapPi(pb - ha))
 										? pa : pb;
+									// TANGENT-CLOSURE LAW (user: a
+									// non-tangent board loses more
+									// energy every time - it must
+									// not be REPRESENTABLE): if the
+									// free rate provably cannot
+									// reach the tangent heading
+									// before the touch, the
+									// candidate ends here, not at
+									// a slam.
+									const float need2 = fabsf(
+										WrapPi(arc_phi - ha));
+									const float tfb =
+										Field::FreeTurnBudget(s2d,
+										static_cast<float>(n2), p,
+										s.ducked);
+									if (need2 > tfb) {
+										r.doomed = true;
+										const float eo2 =
+											Board::EdgeDistOut(
+											*tapf, s.pos)
+											+ Board::
+											kHullCenterSlack;
+										r.miss_dist = sqrtf(
+											off0 * off0
+											+ (eo2 > 0.f
+												? eo2 * eo2 : 0.f));
+										r.reach_short =
+											ReachShort(exit_s);
+										r.end_pos = s.pos;
+										r.flips = ctl.flips;
+										RecExit(SearchLog::kDoomed,
+											k + 1);
+										if (lg)
+											lg->EndTraj(SearchLog::
+												kDoomed);
+										return r;
+									}
 									arc_h0 = ha;
+									arc_cur = ha;
 									arc_n = n2;
 									arc_k = 0;
 									arc_on = true;
