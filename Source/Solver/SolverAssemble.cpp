@@ -608,29 +608,23 @@ namespace Assemble {
 								&& c.struck_plane == ct.tap_side;
 							if (!tp)
 								return 1e6f + c.miss_dist;
-							// COLD STRIKES ARE NOT BOARDS (user):
-							// a landing below the warm threshold of
-							// the board heatmap fails outright -
-							// the map's coldness is a bound on the
-							// energy that landing can keep.
+							// A BOARD MUST KEEP THE WARM RATIO OF
+							// THE MAP'S BEST (user: non-smooth
+							// boards are not an option, period).
+							// Judged against e_hi, not the local
+							// cell - a low-promise cell cannot
+							// launder a slam through its own small
+							// threshold, and cold cells are
+							// subsumed (their bound sits below the
+							// bar by definition). 0.6 = the
+							// standing fieldgate warm ratio.
 							if (fmap.best >= 0 && fmap.e_hi > 0.f) {
-								const Vec3 dq = c.end_state.pos
-									- fmap.origin;
-								int iu = static_cast<int>(
-									Dot(dq, fmap.ud) / fmap.du
-									+ 0.5f);
-								int iv = static_cast<int>(
-									Dot(dq, fmap.vd) / fmap.dv
-									+ 0.5f);
-								if (iu < 0) iu = 0;
-								if (iu >= fmap.nu) iu = fmap.nu - 1;
-								if (iv < 0) iv = 0;
-								if (iv >= fmap.nv) iv = fmap.nv - 1;
-								const Field::Sample& hs =
-									fmap.samples[static_cast<size_t>(
-										iv) * fmap.nu + iu];
-								if (!hs.reachable
-									|| hs.e_eff / fmap.e_hi < 0.6f)
+								const float kept =
+									Dot(c.end_state.vel,
+										c.end_state.vel)
+									+ 2.f * p.gravity
+									* (c.end_state.pos.Z - nf.zmin);
+								if (kept < 0.6f * fmap.e_hi)
 									return 8e5f
 										+ fabsf(c.strike_dot);
 							}
