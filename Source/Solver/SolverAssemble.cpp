@@ -1052,6 +1052,33 @@ namespace Assemble {
 
 	} // namespace
 
+	PlayerState Spawn(const World& w, const MoveParams& p,
+	                  const TapeAnchor& a) {
+		return SpawnState(w, p, a);
+	}
+
+	StartCand StartOne(const World& w, const MoveParams& p,
+	                   const PlayerState& spawn, float launch_deg,
+	                   float rate, int hold) {
+		const StartPlan sp = PlanStartOne(w, p, spawn, launch_deg,
+			rate, hold);
+		StartCand c;
+		c.ok = sp.ok;
+		c.entry = sp.entry;
+		c.frames = sp.frames;
+		return c;
+	}
+
+	void AppendAirFrames(std::vector<TapeFrame>* frames,
+	                     const Air::Result& r, bool ducked) {
+		AppendAir(frames, r, ducked);
+	}
+
+	void AppendCarveFrames(std::vector<TapeFrame>* frames,
+	                       const Carve::Result& r, bool ducked) {
+		AppendCarve(frames, r, ducked);
+	}
+
 	bool SolveMap(const World& w, const Route::Graph& g,
 	              const MoveParams& p, const TapeAnchor& anchor,
 	              const Opts& o, RunResult* out, std::string* err,

@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "SolverAir.h"
+#include "SolverCarve.h"
 #include "SolverMove.h"
 #include "SolverRoute.h"
 #include "SolverTape.h"
@@ -70,6 +72,24 @@ namespace Assemble {
 	int ZoneTick(const World& w, const Route::Graph& g,
 	             const MoveParams& p, const TapeAnchor& anchor,
 	             const std::vector<TapeFrame>& frames);
+
+	// Shared building blocks (exposed for the v2 constructed planner,
+	// SolverPlan): the spawn state, one prestrafe+jump candidate, and
+	// the frame appenders for primitive results.
+	struct StartCand {
+		bool ok = false;
+		PlayerState entry;       // first airborne state
+		std::vector<TapeFrame> frames;
+	};
+	PlayerState Spawn(const World& w, const MoveParams& p,
+	                  const TapeAnchor& a);
+	StartCand StartOne(const World& w, const MoveParams& p,
+	                   const PlayerState& spawn, float launch_deg,
+	                   float rate, int hold);
+	void AppendAirFrames(std::vector<TapeFrame>* frames,
+	                     const Air::Result& r, bool ducked);
+	void AppendCarveFrames(std::vector<TapeFrame>* frames,
+	                       const Carve::Result& r, bool ducked);
 
 } // namespace Assemble
 } // namespace Solver

@@ -28,6 +28,7 @@
 #include "SolverLedger.h"
 #include "SolverRouteSearch.h"
 #include "SolverAssemble.h"
+#include "SolverPlan.h"
 #include "SolverField.h"
 #include "SolverParams.h"
 #include "SolverSearchLog.h"
@@ -8303,6 +8304,91 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdFieldGate(argv[2], o, tapes);
+	}
+	if (cmd == "msolve2" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(argv[2], o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("msolve2: %s\n", err.c_str());
+			return 1;
+		}
+		Tape at;
+		if (!LoadTas(argv[3], at, &err) || !at.start.valid) {
+			printf("msolve2: anchor tape: %s\n", err.c_str());
+			return 1;
+		}
+		const int end_id = DetectEndZone(w, o.params, at, "msolve2");
+		if (!Route::AnchorZones(w, &g, at.start.origin,
+			at.start.ducked, end_id, 2000.f, &err)) {
+			printf("msolve2: %s\n", err.c_str());
+			return 1;
+		}
+		CreateDirectoryA("Output", nullptr);
+		CreateDirectoryA("Output\\reports", nullptr);
+		time_t now = time(nullptr);
+		struct tm tmv;
+		localtime_s(&tmv, &now);
+		char st[64];
+		strftime(st, sizeof(st), "%m%d-%H%M%S", &tmv);
+		SearchLog::Sink sink;
+		sink.gravity = o.params.gravity;
+		SearchLog::g_sink = &sink;
+		Plan::Opts po;
+		Assemble::RunResult rr, part;
+		const bool ok = Plan::SolveMap(w, g, o.params, at.start, po,
+			&rr, &err, &part);
+		SearchLog::g_sink = nullptr;
+		sink.Flush();
+		const std::string vp = std::string(
+			"Output\\reports\\msolve2_") + at.map + "_" + st
+			+ ".html";
+		std::string verr;
+		if (SearchLog::WriteHtml(vp, w, g, sink,
+			"v2 constructed planner - " + at.map, &verr))
+			printf("msolve2: report -> %s\n", vp.c_str());
+		if (!ok) {
+			printf("msolve2: SOLVE FAILED: %s\n", err.c_str());
+			if (!part.frames.empty()) {
+				std::string dir = argv[3];
+				const size_t ds = dir.find_last_of("\\/");
+				dir = ds == std::string::npos ? std::string()
+					: dir.substr(0, ds + 1);
+				std::string shp;
+				for (int fidx : part.shape)
+					shp += (shp.empty() ? "" : "-")
+						+ std::to_string(fidx);
+				const std::string pp = dir + at.map
+					+ "_V2PARTIAL_shape" + shp + "_legs"
+					+ std::to_string(part.legs_done) + "_" + st
+					+ ".tas";
+				std::string perr;
+				if (WriteTas(pp, at.start, at.map, part.frames,
+					&perr))
+					printf("msolve2: partial (%d legs) -> %s\n",
+						part.legs_done, pp.c_str());
+			}
+			return 2;
+		}
+		printf("msolve2: FINISHED zone tick %d, board loss2 %.0f\n",
+			rr.zone_tick, rr.board_loss2);
+		std::string dir = argv[3];
+		const size_t ds = dir.find_last_of("\\/");
+		dir = ds == std::string::npos ? std::string()
+			: dir.substr(0, ds + 1);
+		const std::string sp = dir + at.map + "_V2SOLVED_" + st
+			+ ".tas";
+		if (WriteTas(sp, at.start, at.map, rr.frames, &err))
+			printf("msolve2: wrote %s\n", sp.c_str());
+		return 0;
 	}
 	if (cmd == "autopsy" && argc >= 4) {
 		ReplayOpts o;
