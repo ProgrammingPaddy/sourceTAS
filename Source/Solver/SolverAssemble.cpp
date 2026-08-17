@@ -526,6 +526,33 @@ namespace Assemble {
 								entry.pos, entry.vel, nf, p,
 								entry.ducked, 32.f, 300, 1.f,
 								&fctx);
+							// BLIND-ENTRY FIX: when the raw entry
+							// cannot ballistically see the tap face
+							// (the ride must climb first), the map
+							// comes from the EXIT MAP's best
+							// departure - its ride bookkeeping sees
+							// the climb the entry cannot. Without
+							// this, the leg silently loses cells,
+							// bar, and aim (the -545 slam's path).
+							if (fmap.best < 0) {
+								Field::NextTarget xnt;
+								xnt.face = &nf;
+								xnt.face_idx = shape[lidx + 1];
+								xnt.after = fctx;
+								Field::ExitMap em =
+									Field::ComputeExit(entry.pos,
+									entry.vel, lfc, xnt, p,
+									entry.ducked, 64.f, 12, 64.f,
+									300);
+								if (em.best_pot >= 0) {
+									const Field::ExitSample& bs =
+										em.samples[em.best_pot];
+									fmap = Field::Compute(bs.pt,
+										Scale(bs.dir, bs.pv), nf,
+										p, entry.ducked, 32.f, 300,
+										1.f, &fctx);
+								}
+							}
 							if (fmap.best >= 0) {
 								ct.field_aim =
 									fmap.samples[fmap.best].q;
