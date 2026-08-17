@@ -255,12 +255,15 @@ namespace Assemble {
 			return -1;
 		}
 
+		// keep_partial: called at every failure exit so the deepest
+		// playable chain survives even when the shape never finishes.
 		bool AssembleShape(const World& w, const Route::Graph& g,
 		                   const MoveParams& p, const TapeAnchor& anchor,
 		                   const std::vector<int>& shape,
 		                   const Opts& o, RunResult* out,
 		                   std::map<std::pair<int, int>, StartPlan>*
-		                       start_cache) {
+		                       start_cache,
+		                   RunResult* partial = nullptr) {
 			const WorldBrush& eb = w.brushes[g.end_brush];
 			const Vec3 zone_c(0.5f * (eb.bmin.X + eb.bmax.X),
 				0.5f * (eb.bmin.Y + eb.bmax.Y), eb.bmax.Z);
@@ -424,9 +427,22 @@ namespace Assemble {
 			Ctx();
 			bool skip_air = false;   // set by a TAP transfer: the
 			                         // carve boarded the next face
+			auto keep_partial = [&](int legs) {
+				if (!partial)
+					return;
+				if (legs > partial->legs_done
+					|| (legs == partial->legs_done
+						&& rr.frames.size() > partial->frames.size())) {
+					*partial = rr;
+					partial->legs_done = legs;
+					partial->finished = false;
+					partial->zone_tick = -1;
+				}
+			};
 			for (size_t li = 0; li < shape.size(); ++li) {
 				const int fi = shape[li];
 				const Route::Face& fc = g.faces[fi];
+				const PlayerState leg_in = cur;
 				// Rolling context: the aim blends the approach side,
 				// the face center, and the side facing the NEXT
 				// target (face or zone).
@@ -486,29 +502,70 @@ namespace Assemble {
 						ct.exit_heading = atan2f(
 							lnext.Y - entry.pos.Y,
 							lnext.X - entry.pos.X);
-						// Field-guided aim: the hotspot map's
-						// runway-aware best landing on the tap
-						// face (guidance - families still compete).
+						// EXIT-MAP guidance (validated by exitgate:
+						// the human's exits sit at fpot ratio 1.000):
+						// the best time-priced exit sets the exit
+						// heading, and ITS induced argmax on the tap
+						// face becomes the pursuit aim. Fallback:
+						// the plain board field from the entry
+						// state. GUIDANCE only - families compete.
+						// Exit map on COMMITTING calls only (multi !=
+						// null): depth-2 probes price, they don't
+						// steer - the map per probe call halved
+						// shape depth inside the wall budget.
 						{
-							Field::NextCtx fctx;
-							if (lidx + 2 < shape.size()) {
-								fctx.has = true;
-								fctx.pt = g.faces[shape[lidx + 2]]
-									.centroid;
-							} else {
-								fctx.has = true;
-								fctx.is_zone = true;
-								ZoneVolume(eb, &fctx.zmin,
-									&fctx.zmax);
+							if (multi) {
+								Field::NextTarget xnt;
+								xnt.face = &nf;
+								xnt.face_idx = shape[lidx + 1];
+								if (lidx + 2 < shape.size()) {
+									xnt.after.has = true;
+									xnt.after.pt =
+										g.faces[shape[lidx + 2]]
+										.centroid;
+								} else {
+									xnt.after.has = true;
+									xnt.after.is_zone = true;
+									ZoneVolume(eb, &xnt.after.zmin,
+										&xnt.after.zmax);
+								}
+								Field::ExitMap em =
+									Field::ComputeExit(entry.pos,
+									entry.vel, lfc, xnt, p,
+									entry.ducked, 64.f, 12, 64.f,
+									300);
+								if (em.best_pot >= 0) {
+									const Field::ExitSample& bs =
+										em.samples[em.best_pot];
+									ct.exit_heading = atan2f(bs.dir.Y,
+										bs.dir.X);
+									if (bs.q.have_argmax) {
+										ct.field_aim = bs.q_argmax;
+										ct.have_field_aim = true;
+									}
+								}
 							}
-							Field::FaceMap fmap = Field::Compute(
-								entry.pos, entry.vel, nf, p,
-								entry.ducked, 32.f, 300, 1.f,
-								&fctx);
-							if (fmap.best >= 0) {
-								ct.field_aim =
-									fmap.samples[fmap.best].q;
-								ct.have_field_aim = true;
+							if (!ct.have_field_aim) {
+								Field::NextCtx fctx;
+								if (lidx + 2 < shape.size()) {
+									fctx.has = true;
+									fctx.pt = g.faces[shape[lidx + 2]]
+										.centroid;
+								} else {
+									fctx.has = true;
+									fctx.is_zone = true;
+									ZoneVolume(eb, &fctx.zmin,
+										&fctx.zmax);
+								}
+								Field::FaceMap fmap = Field::Compute(
+									entry.pos, entry.vel, nf, p,
+									entry.ducked, 32.f, 300, 1.f,
+									&fctx);
+								if (fmap.best >= 0) {
+									ct.field_aim =
+										fmap.samples[fmap.best].q;
+									ct.have_field_aim = true;
+								}
 							}
 						}
 						std::vector<Carve::Result> calts;
@@ -568,6 +625,25 @@ namespace Assemble {
 						ct.exit_heading = atan2f(
 							rim.Y - entry.pos.Y,
 							rim.X - entry.pos.X);
+						// EXIT-MAP guidance for the ending: the
+						// earliest-arrival exit (ztime) sets the
+						// heading - typically the crest departure,
+						// not the straight rim bearing. GUIDANCE
+						// only; domains/families unchanged.
+						{
+							Field::NextTarget xnt;
+							xnt.is_zone = true;
+							ZoneVolume(eb, &xnt.zmin, &xnt.zmax);
+							Field::ExitMap em = Field::ComputeExit(
+								entry.pos, entry.vel, lfc, xnt, p,
+								entry.ducked, 64.f, 12, 64.f, 300);
+							if (em.best_pot >= 0) {
+								const Field::ExitSample& bs =
+									em.samples[em.best_pot];
+								ct.exit_heading = atan2f(bs.dir.Y,
+									bs.dir.X);
+							}
+						}
 						// The ending's spline domain spans the
 						// RUNWAY PATH (ride the face's length
 						// banking wish work, then fly) - a straight
@@ -746,6 +822,7 @@ namespace Assemble {
 							ar.grounded ? "grounded " : "struck ",
 							ar.struck_brush, cur.pos.X, cur.pos.Y,
 							cur.pos.Z, Len2D(cur.vel));
+						keep_partial(static_cast<int>(li));
 						return false;
 					}
 					for (size_t ai = 0; ai < alts.size(); ++ai) {
@@ -763,6 +840,7 @@ namespace Assemble {
 				if (cpool.empty()) {
 					printf("assemble: leg %d NO CANDIDATES\n",
 						static_cast<int>(li));
+					keep_partial(static_cast<int>(li));
 					return false;
 				}
 				std::sort(cpool.begin(), cpool.end(),
@@ -837,6 +915,7 @@ namespace Assemble {
 						static_cast<int>(li), fi,
 						cr.grounded ? "grounded " : "struck ",
 						cr.struck_brush, cr.miss_dist);
+					keep_partial(static_cast<int>(li));
 					return false;
 				}
 				AppendCarve(&rr.frames, cr, cur.ducked);
@@ -872,12 +951,43 @@ namespace Assemble {
 					chain_ctx += cb;
 					Ctx();
 				}
+				// THE LEG ENERGY LEDGER (user 2026-08-17: report in
+				// energy, and show where it goes). Total mechanical
+				// energy E = v^2 + 2g*z; losses attributed to the
+				// entry board, the ride's clips, and the tap out; the
+				// residual is wish work banked MINUS anything
+				// unattributed - a strongly NEGATIVE resid means
+				// unpriced loss (flight grazes, or ground friction:
+				// the measured valley-walk signature was -712k).
+				{
+					const float g2 = 2.f * p.gravity;
+					const float e_in = Dot(leg_in.vel, leg_in.vel)
+						+ g2 * leg_in.pos.Z;
+					const float e_out = Dot(cur.vel, cur.vel)
+						+ g2 * cur.pos.Z;
+					const float b2 = leg_board_dot * leg_board_dot;
+					const float t2 = tapped(cr)
+						? cr.strike_dot * cr.strike_dot : 0.f;
+					const float wish = e_out - e_in + b2
+						+ cr.ride_loss2 + cr.graze_loss2 + t2;
+					printf("assemble: leg %d ENERGY in %.0fk (%.0f "
+						"u/s @ z%.0f) -> out %.0fk (%.0f @ z%.0f) | "
+						"board -%.1fk | clips -%.1fk | grazes -%.1fk "
+						"| tap -%.1fk | resid %+.1fk\n",
+						static_cast<int>(li), e_in / 1000.f,
+						Len(leg_in.vel), leg_in.pos.Z,
+						e_out / 1000.f, Len(cur.vel), cur.pos.Z,
+						b2 / 1000.f, cr.ride_loss2 / 1000.f,
+						cr.graze_loss2 / 1000.f, t2 / 1000.f,
+						wish / 1000.f);
+				}
 			}
 			const int zk = FlyToZone(w, g, p, cur, &rr.frames);
 			if (zk < 0) {
 				printf("assemble: FLY-TO-ZONE FAILED from "
 					"(%.0f,%.0f,%.0f v %.0f)\n", cur.pos.X,
 					cur.pos.Y, cur.pos.Z, Len2D(cur.vel));
+				keep_partial(static_cast<int>(shape.size()));
 				return false;
 			}
 			rr.finished = true;
@@ -890,7 +1000,8 @@ namespace Assemble {
 
 	bool SolveMap(const World& w, const Route::Graph& g,
 	              const MoveParams& p, const TapeAnchor& anchor,
-	              const Opts& o, RunResult* out, std::string* err) {
+	              const Opts& o, RunResult* out, std::string* err,
+	              RunResult* partial) {
 		const clock_t c0 = clock();
 		RouteSearch::Opts ro;
 		ro.top_k = 60;
@@ -928,7 +1039,7 @@ namespace Assemble {
 				break;
 			RunResult rr;
 			if (!AssembleShape(w, g, p, anchor, shape, o, &rr,
-				&start_cache))
+				&start_cache, partial))
 				continue;
 			printf("assemble: shape");
 			for (int fidx : shape)

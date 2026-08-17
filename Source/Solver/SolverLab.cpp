@@ -2950,9 +2950,9 @@ namespace {
 		};
 		const clock_t c0 = clock();
 		Assemble::Opts ao;
-		Assemble::RunResult rr;
+		Assemble::RunResult rr, partial;
 		const bool solved = Assemble::SolveMap(w, g, o.params,
-			at.start, ao, &rr, &err);
+			at.start, ao, &rr, &err, &partial);
 		{
 			SearchLog::g_sink = nullptr;
 			viz_sink.Flush();
@@ -2975,6 +2975,40 @@ namespace {
 		}
 		if (!solved) {
 			printf("msolvegate: SOLVE FAILED: %s\n", err.c_str());
+			// The deepest partial chain still exports, clearly named,
+			// beside the anchor tape (playable in-game like any
+			// recording; it will NOT finish - it is the best
+			// assembled prefix for eyes-on review).
+			if (!partial.frames.empty()) {
+				std::string dir = anchor_tas;
+				const size_t ds = dir.find_last_of("\\/");
+				dir = ds == std::string::npos ? std::string()
+					: dir.substr(0, ds + 1);
+				std::string shp;
+				for (int fidx : partial.shape)
+					shp += (shp.empty() ? "" : "-")
+						+ std::to_string(fidx);
+				time_t pn = time(nullptr);
+				struct tm ptm;
+				localtime_s(&ptm, &pn);
+				char pst[64];
+				strftime(pst, sizeof(pst), "%m%d-%H%M", &ptm);
+				const std::string pp = dir + at.map + "_PARTIAL_shape"
+					+ shp + "_legs"
+					+ std::to_string(partial.legs_done) + "_" + pst
+					+ ".tas";
+				std::string perr;
+				if (WriteTas(pp, at.start, at.map, partial.frames,
+					&perr))
+					printf("msolvegate: partial chain (%d/%d legs) "
+						"-> %s (%d frames)\n", partial.legs_done,
+						static_cast<int>(partial.shape.size()),
+						pp.c_str(),
+						static_cast<int>(partial.frames.size()));
+				else
+					printf("msolvegate: PARTIAL WRITE FAILED: %s\n",
+						perr.c_str());
+			}
 			return 2;
 		}
 		const double secs = static_cast<double>(clock() - c0)
@@ -3920,6 +3954,549 @@ namespace {
 			printf("fieldgate: heat report -> %s\n", vp.c_str());
 		else
 			printf("fieldgate: VIZ WRITE FAILED: %s\n", verr.c_str());
+		fflush(stdout);
+		return 0;
+	}
+
+	// exitgate: validate THE EXIT MAP against real runs (tapes are
+	// VALIDATION ONLY, never seeding). For every RIDE in each tape
+	// (board event -> next separation), compute the exit map from the
+	// post-board state and rank the ACTUAL exit the player took under
+	// each candidate functional (fmax / farea / fmass - which one
+	// matches expert play is the open question this gate answers).
+	// Also validates the ride energy bookkeeping (predicted exit speed
+	// vs actual) and quantifies the doom cull (exits reaching nothing).
+	// --bmap renders the B-overlay (marginal landing robustness across
+	// exits) INSTEAD of the exit heat - report-only, per the user's
+	// "careful with B" directive.
+	int CmdExitGate(const std::string& map_path, const ReplayOpts& o,
+	                const std::vector<std::string>& tapes, bool bmap) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("exitgate: %s\n", err.c_str());
+			return 1;
+		}
+		SearchLog::Sink sink;
+		std::vector<int> zreds;
+		w.FindZoneBrushes(nullptr, &zreds);
+		int heat_rides = 0;
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("exitgate: %s: %s\n", tp.c_str(), err.c_str());
+				continue;
+			}
+			std::string tname = tp;
+			const size_t sl = tname.find_last_of("\\/");
+			if (sl != std::string::npos)
+				tname = tname.substr(sl + 1);
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			std::vector<Vec3> refpts;
+			refpts.push_back(s.pos);
+			// PASS 1: replay, collect BOARD events (long-air arrivals
+			// on graph faces) + the separation that starts each long
+			// stretch (the ride's actual EXIT).
+			struct FEvent {
+				int tick = 0;
+				int fidx = -1;
+				int sep_tick = 0;
+				PlayerState sep;
+				Vec3 cp, v1;
+				bool ducked = false;
+			};
+			std::vector<FEvent> events;
+			// Every separation that starts a LONG (>= 8 tick) airborne
+			// stretch - the ride exits. The k-th ride's exit is the
+			// FIRST of these after its board tick (a post-finish hop
+			// must never be mistaken for the ending flight).
+			struct SepRec { int tick; PlayerState st; };
+			std::vector<SepRec> seps;
+			int air = 0, sep_tick = 0;
+			PlayerState sep;
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& fr = tape.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+					fr.smove, fr.umove, fr.buttons, &ev);
+				if (t % 2 == 0)
+					refpts.push_back(s.pos);
+				if (ev.ncontacts > 0) {
+					int fidx = -1;
+					for (size_t fi = 0; fi < g.faces.size(); ++fi)
+						if (g.faces[fi].brush == ev.contact_brush[0]
+							&& g.faces[fi].side
+								== ev.contact_plane[0])
+							fidx = static_cast<int>(fi);
+					if (fidx >= 0 && air >= 8) {
+						FEvent fe;
+						fe.tick = static_cast<int>(t);
+						fe.fidx = fidx;
+						fe.sep_tick = sep_tick;
+						fe.sep = sep;
+						fe.cp = ev.contact_pos[0];
+						fe.v1 = ev.contact_vel[0];
+						fe.ducked = s.ducked;
+						events.push_back(fe);
+					}
+					air = 0;
+				} else if (!s.on_ground) {
+					if (air == 0) {
+						sep = s;
+						sep_tick = static_cast<int>(t);
+					}
+					air++;
+					if (air == 8) {
+						SepRec sr;
+						sr.tick = sep_tick;
+						sr.st = sep;
+						seps.push_back(sr);
+					}
+				} else {
+					air = 0;
+				}
+			}
+			sink.AddRef("REF " + tname, refpts);
+			// PASS 2: one exit map per RIDE (board k -> exit toward
+			// board k+1's face, or the zone for the last ride).
+			for (size_t k = 0; k < events.size(); ++k) {
+				const FEvent& fe = events[k];
+				const Route::Face& fc = g.faces[fe.fidx];
+				const bool last = k + 1 >= events.size();
+				Field::NextTarget nt;
+				if (!last) {
+					nt.face = &g.faces[events[k + 1].fidx];
+					nt.face_idx = events[k + 1].fidx;
+					if (k + 2 < events.size()) {
+						nt.after.has = true;
+						nt.after.pt = g.faces[events[k + 2].fidx]
+							.centroid;
+					} else if (!zreds.empty()) {
+						const int zi = w.IndexOfBrushId(zreds[0]);
+						if (zi >= 0) {
+							nt.after.has = true;
+							nt.after.is_zone = true;
+							Assemble::ZoneVolume(w.brushes[zi],
+								&nt.after.zmin, &nt.after.zmax);
+						}
+					}
+				} else {
+					if (zreds.empty())
+						continue;
+					const int zi = w.IndexOfBrushId(zreds[0]);
+					if (zi < 0)
+						continue;
+					nt.is_zone = true;
+					Assemble::ZoneVolume(w.brushes[zi], &nt.zmin,
+						&nt.zmax);
+				}
+				// The board state: contact point + POST-CLIP velocity.
+				Vec3 bv;
+				Fn::ClipVelocity(fe.v1, fc.n, &bv);
+				const clock_t ck0 = clock();
+				Field::ExitMap em = Field::ComputeExit(fe.cp, bv, fc,
+					nt, o.params, fe.ducked, 48.f, 12, 48.f, 300);
+				const double ck = static_cast<double>(clock() - ck0)
+					/ CLOCKS_PER_SEC;
+				int doomed = 0, tok = 0;
+				for (const Field::ExitSample& es : em.samples) {
+					if (!es.q.any) doomed++;
+					if (es.turn_ok) tok++;
+				}
+				const int ns = static_cast<int>(em.samples.size());
+				printf("exitgate: %s ride f%d (t%d..%s) -> %s | %d "
+					"exits (%.1fs) | doomed %d%% | turn_ok %d%%\n",
+					tname.c_str(), fe.fidx, fe.tick,
+					last ? "end" : std::to_string(
+						events[k + 1].sep_tick).c_str(),
+					last ? "ZONE" : ("f" + std::to_string(
+						nt.face_idx)).c_str(),
+					ns, ck,
+					ns > 0 ? doomed * 100 / ns : 0,
+					ns > 0 ? tok * 100 / ns : 0);
+				if (ns == 0)
+					continue;
+				// The HUMAN's actual exit: the separation that starts
+				// the next long stretch (first one after this board -
+				// never a later post-finish hop).
+				bool have_hx = false;
+				PlayerState hx;
+				int hx_tick = -1;
+				if (!last) {
+					hx = events[k + 1].sep;
+					hx_tick = events[k + 1].sep_tick;
+					have_hx = true;
+				} else {
+					for (const auto& sr : seps) {
+						if (sr.tick > fe.tick) {
+							hx = sr.st;
+							hx_tick = sr.tick;
+							have_hx = true;
+							break;
+						}
+					}
+				}
+				// The human's exit scored BESPOKE in the map's own
+				// currency: their exact departure point (projected to
+				// the plane) + exact in-plane direction, run through
+				// the same EvalExitSample as every map sample - no
+				// nearest-bucket distortion (30-degree direction
+				// buckets shift vz by hundreds of u/s).
+				Field::ExitSample hes;
+				bool have_hes = false;
+				if (have_hx) {
+					const Vec3 hv = hx.vel;
+					const Vec3 hpp = hx.pos - Scale(fc.n,
+						Dot(hx.pos - fc.centroid, fc.n));
+					Vec3 hvp = hv - Scale(fc.n, Dot(hv, fc.n));
+					const float hvl = Len(hvp);
+					if (hvl > 1.f)
+						have_hes = Field::EvalExitSample(fe.cp, bv,
+							fc, nt, o.params, fe.ducked, hpp,
+							Scale(hvp, 1.f / hvl), 48.f, 300, &hes);
+					const float g2 = 2.f * o.params.gravity;
+					const float he = Dot(hv, hv)
+						+ g2 * (hx.pos.Z - fc.zmin);
+					printf("exitgate:   human exit t%d (%.0f,%.0f,"
+						"%.0f) v(%.0f,%.0f,%.0f) | E %.0fk (%.0f "
+						"u/s @ z%+.0f) | ride %d ticks\n",
+						hx_tick, hx.pos.X, hx.pos.Y, hx.pos.Z,
+						hv.X, hv.Y, hv.Z, he / 1000.f, Len(hv),
+						hx.pos.Z - fc.zmin, hx_tick - fe.tick);
+					if (have_hes)
+						printf("exitgate:   bookkeeping: pred exit "
+							"%.0f u/s vs actual %.0f (d%+.0f) | pred "
+							"ride %.0f ticks vs actual %d | turn_ok "
+							"%d\n",
+							hes.pv, Len(hv), hes.pv - Len(hv),
+							hes.ride_ticks, hx_tick - fe.tick,
+							hes.turn_ok ? 1 : 0);
+				}
+				// BASELINE: the induced quality from the human's
+				// ACTUAL exit state (their real position + velocity,
+				// no discretization) - the honest field check, and
+				// the diagnostic when the matched sample disagrees.
+				if (have_hx) {
+					if (!last && nt.face) {
+						Field::FaceMap afm = Field::Compute(hx.pos,
+							hx.vel, *nt.face, o.params, hx.ducked,
+							48.f, 300, 1.f, &nt.after);
+						Field::Quality aq = Field::MapQuality(afm,
+							o.params);
+						if (aq.any)
+							printf("exitgate:   actual-state "
+								"induced: qmax %.0fk qpot %.0fk "
+								"area %.0f | argmax (%.0f,%.0f,"
+								"%.0f)\n",
+								aq.q_max / 1000.f, aq.q_pot / 1000.f,
+								aq.area, aq.argmax.X, aq.argmax.Y,
+								aq.argmax.Z);
+						else
+							printf("exitgate:   actual-state "
+								"induced: DOOMED (field says their "
+								"real exit reaches nothing - FIELD "
+								"BUG, investigate)\n");
+					} else if (last) {
+						float mz = 0.f;
+						const float azn = Field::ZoneReach(hx.pos,
+							Len2D(hx.vel), hx.vel.Z, nt.zmin,
+							nt.zmax, o.params, 300, &mz);
+						if (azn >= 0.f)
+							printf("exitgate:   actual-state zone "
+								"reach: fly %.0f ticks, margin "
+								"%.0fk (%.0f z)\n", azn,
+								2.f * o.params.gravity * mz / 1000.f,
+								mz);
+						else
+							printf("exitgate:   actual-state zone "
+								"reach: DOOMED (their real ending "
+								"flight says no - BOUND BUG)\n");
+					}
+				}
+				// Functional report: the human's rank under each.
+				auto pct = [&](float v, int which) {
+					int below = 0, tot = 0;
+					for (const Field::ExitSample& es : em.samples) {
+						if (!es.q.any)
+							continue;
+						tot++;
+						const float x = which == 0 ? es.q.q_max
+							: (which == 1 ? es.q.area
+							: (which == 2 ? es.q.mass : es.fpot));
+						if (x <= v)
+							below++;
+					}
+					return tot > 0 ? below * 100 / tot : 0;
+				};
+				if (!last) {
+					const char* fn[4] = { "fmax ", "farea", "fmass",
+						"fpot " };
+					const int bi[4] = { em.best_max, em.best_area,
+						em.best_mass, em.best_pot };
+					for (int f = 0; f < 4; ++f) {
+						if (bi[f] < 0) {
+							printf("exitgate:   [%s] ALL DOOMED\n",
+								fn[f]);
+							continue;
+						}
+						const Field::ExitSample& bs =
+							em.samples[bi[f]];
+						const float bv2 = f == 0 ? bs.q.q_max
+							: (f == 1 ? bs.q.area
+							: (f == 2 ? bs.q.mass : bs.fpot));
+						float hv2 = -1.f;
+						int hp = -1;
+						if (have_hes && hes.q.any) {
+							hv2 = f == 0 ? hes.q.q_max
+								: (f == 1 ? hes.q.area
+								: (f == 2 ? hes.q.mass : hes.fpot));
+							hp = pct(hv2, f);
+						}
+						const float dscale = (f == 0 || f == 3)
+							? 1000.f : (f == 2 ? 1e6f : 1.f);
+						printf("exitgate:   [%s] human %.0f "
+							"(pct %d%%, ratio %.3f) | best %.0f "
+							"@(%.0f,%.0f,%.0f) az%.0f spd %.0f "
+							"rt %.0f\n",
+							fn[f], hv2 / dscale, hp,
+							bv2 != 0.f ? hv2 / bv2 : 0.f,
+							bv2 / dscale, bs.pt.X, bs.pt.Y,
+							bs.pt.Z, atan2f(bs.dir.Y, bs.dir.X)
+								* 57.3f, bs.pv, bs.ride_ticks);
+					}
+					if (have_hes && !hes.q.any)
+						printf("exitgate:   human bespoke sample "
+							"DOOMED - the map's own currency rejects "
+							"their real exit, investigate\n");
+				} else {
+					// Zone target: TIME is the functional.
+					if (em.best_max >= 0) {
+						const Field::ExitSample& bs =
+							em.samples[em.best_max];
+						printf("exitgate:   [ztime] best est %.0f "
+							"ticks (ride %.0f + fly %.0f) @(%.0f,"
+							"%.0f,%.0f) az%.0f spd %.0f | E_exit "
+							"%.0fk (%.0f u/s @ z%+.0f)\n",
+							bs.ride_ticks + bs.zn, bs.ride_ticks,
+							bs.zn, bs.pt.X, bs.pt.Y, bs.pt.Z,
+							atan2f(bs.dir.Y, bs.dir.X) * 57.3f,
+							bs.pv, bs.e_exit / 1000.f, bs.pv,
+							bs.pt.Z - fc.zmin);
+						if (have_hes) {
+							if (hes.q.any)
+								printf("exitgate:   [ztime] human "
+									"bespoke est %.0f ticks (ride "
+									"%.0f + fly %.0f)\n",
+									hes.ride_ticks + hes.zn,
+									hes.ride_ticks, hes.zn);
+							else
+								printf("exitgate:   [ztime] human "
+									"bespoke DOOMED (reach says no) "
+									"- bound too tight?\n");
+						}
+					} else {
+						printf("exitgate:   [ztime] ALL EXITS "
+							"DOOMED\n");
+					}
+				}
+				// Render: exit heat (best fmass over dirs per cell,
+				// dimmed when only non-turn_ok dirs) or the B-overlay.
+				if (heat_rides < 4 && !bmap) {
+					// Heat = the time-priced functional (fpot) per
+					// departure cell, best over directions.
+					std::vector<float> cell(static_cast<size_t>(
+						em.nu) * em.nv, -1e30f);
+					std::vector<char> cok(static_cast<size_t>(
+						em.nu) * em.nv, 0);
+					float hi_v = -1e30f, lo_v = 1e30f;
+					for (const Field::ExitSample& es : em.samples) {
+						if (!es.q.any)
+							continue;
+						const size_t ci = static_cast<size_t>(
+							es.iv) * em.nu + es.iu;
+						const float v = es.fpot;
+						if (v > cell[ci]) {
+							cell[ci] = v;
+							cok[ci] = es.turn_ok ? 1 : 0;
+						}
+						if (v > hi_v) hi_v = v;
+						if (v < lo_v) lo_v = v;
+					}
+					for (int cv = 0; cv < em.nv; ++cv)
+					for (int cu = 0; cu < em.nu; ++cu) {
+						const size_t ci = static_cast<size_t>(cv)
+							* em.nu + cu;
+						if (cell[ci] < -1e29f)
+							continue;
+						float v01 = hi_v > lo_v
+							? (cell[ci] - lo_v) / (hi_v - lo_v)
+							: 1.f;
+						if (!cok[ci])
+							v01 *= 0.4f;
+						const Vec3 q = em.origin
+							+ Scale(em.ud, static_cast<float>(cu)
+								* em.du)
+							+ Scale(em.vd, static_cast<float>(cv)
+								* em.dv);
+						const Vec3 lift = Scale(fc.n, 2.f);
+						const Vec3 c00 = q + lift
+							- Scale(em.ud, em.du * 0.5f)
+							- Scale(em.vd, em.dv * 0.5f);
+						const Vec3 c10 = c00
+							+ Scale(em.ud, em.du);
+						const Vec3 c01 = c00
+							+ Scale(em.vd, em.dv);
+						const Vec3 c11 = c10
+							+ Scale(em.vd, em.dv);
+						sink.AddHeat(c00, c10, c11, v01);
+						sink.AddHeat(c00, c11, c01, v01);
+					}
+					heat_rides++;
+				}
+				// B-overlay (report-only, --bmap): mean induced heat
+				// per landing cell on the NEXT face across exits -
+				// "landing zones that stay hot no matter how you
+				// leave" (marginal robustness).
+				if (bmap && !last && nt.face && heat_rides < 4) {
+					std::vector<float> bsum;
+					std::vector<int> bcnt;
+					Field::FaceMap frame;
+					bool have_frame = false;
+					int used = 0;
+					const int stride = ns > 120 ? ns / 120 : 1;
+					for (int i = 0; i < ns; i += stride) {
+						const Field::ExitSample& es = em.samples[i];
+						if (!es.q.any)
+							continue;
+						Field::FaceMap fm = Field::Compute(es.pt,
+							Scale(es.dir, es.pv), *nt.face,
+							o.params, fe.ducked, 48.f, 300, 1.f,
+							&nt.after);
+						if (!have_frame) {
+							frame = fm;
+							bsum.assign(fm.samples.size(), 0.f);
+							bcnt.assign(fm.samples.size(), 0);
+							have_frame = true;
+						}
+						for (size_t j = 0; j < fm.samples.size()
+							&& j < bsum.size(); ++j) {
+							if (fm.samples[j].reachable) {
+								bsum[j] += fm.samples[j].e_eff;
+								bcnt[j]++;
+							}
+						}
+						used++;
+					}
+					if (have_frame && used > 0) {
+						float bhi = 0.f;
+						for (size_t j = 0; j < bsum.size(); ++j)
+							if (bcnt[j] > 0
+								&& bsum[j] / bcnt[j] > bhi)
+								bhi = bsum[j] / bcnt[j];
+						for (int cv = 0; cv < frame.nv; ++cv)
+						for (int cu = 0; cu < frame.nu; ++cu) {
+							const size_t j = static_cast<size_t>(
+								cv) * frame.nu + cu;
+							if (bcnt[j] == 0 || bhi <= 0.f)
+								continue;
+							const float v01 = (bsum[j] / bcnt[j])
+								/ bhi;
+							const Vec3 q = frame.origin
+								+ Scale(frame.ud,
+									static_cast<float>(cu)
+									* frame.du)
+								+ Scale(frame.vd,
+									static_cast<float>(cv)
+									* frame.dv);
+							const Vec3 lift =
+								Scale(nt.face->n, 2.f);
+							const Vec3 c00 = q + lift
+								- Scale(frame.ud, frame.du * 0.5f)
+								- Scale(frame.vd, frame.dv * 0.5f);
+							const Vec3 c10 = c00
+								+ Scale(frame.ud, frame.du);
+							const Vec3 c01 = c00
+								+ Scale(frame.vd, frame.dv);
+							const Vec3 c11 = c10
+								+ Scale(frame.vd, frame.dv);
+							sink.AddHeat(c00, c10, c11, v01);
+							sink.AddHeat(c00, c11, c01, v01);
+						}
+						printf("exitgate:   B-overlay: %d exits "
+							"averaged onto f%d\n", used,
+							nt.face_idx);
+						heat_rides++;
+					}
+				}
+				// Markers: human exit cross + per-functional best
+				// exit arrows.
+				if (have_hx) {
+					std::vector<Vec3> cross;
+					cross.push_back(hx.pos + Vec3(-14.f, 0.f, 0.f));
+					cross.push_back(hx.pos + Vec3(14.f, 0.f, 0.f));
+					cross.push_back(hx.pos);
+					cross.push_back(hx.pos + Vec3(0.f, -14.f, 0.f));
+					cross.push_back(hx.pos + Vec3(0.f, 14.f, 0.f));
+					cross.push_back(hx.pos);
+					cross.push_back(hx.pos + Vec3(0.f, 0.f, -14.f));
+					cross.push_back(hx.pos + Vec3(0.f, 0.f, 14.f));
+					sink.AddRef("human exit r" + std::to_string(k),
+						cross);
+				}
+				const int bl[4] = { em.best_max, em.best_area,
+					em.best_mass, em.best_pot };
+				const char* bn[4] = { "best fmax r", "best farea r",
+					"best fmass r", "best fpot r" };
+				for (int f = 0; f < (last ? 1 : 4); ++f) {
+					if (bl[f] < 0)
+						continue;
+					const Field::ExitSample& bs = em.samples[bl[f]];
+					std::vector<Vec3> arrow;
+					arrow.push_back(bs.pt);
+					arrow.push_back(bs.pt + Scale(bs.dir, 150.f));
+					sink.AddRef(std::string(last ? "best ztime r"
+						: bn[f]) + std::to_string(k), arrow);
+				}
+			}
+		}
+		CreateDirectoryA("Output", nullptr);
+		CreateDirectoryA("Output\\reports", nullptr);
+		time_t now = time(nullptr);
+		struct tm tmv;
+		localtime_s(&tmv, &now);
+		char st[64];
+		strftime(st, sizeof(st), "%m%d-%H%M%S", &tmv);
+		const std::string vp = std::string("Output\\reports\\exit_")
+			+ (bmap ? "B_" : "") + st + ".html";
+		std::string verr;
+		if (SearchLog::WriteHtml(vp, w, g, sink,
+			bmap ? "exit map B-overlay (marginal landing robustness)"
+				: "exit map validation", &verr))
+			printf("exitgate: report -> %s\n", vp.c_str());
+		else
+			printf("exitgate: VIZ WRITE FAILED: %s\n", verr.c_str());
 		fflush(stdout);
 		return 0;
 	}
@@ -6677,6 +7254,27 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdFieldGate(argv[2], o, tapes);
+	}
+	if (cmd == "exitgate" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		bool bmap = false;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		std::vector<char*> rest;
+		for (int j = 0; j < argc; ++j) {
+			if (j >= i && std::string(argv[j]) == "--bmap") {
+				bmap = true;
+				continue;
+			}
+			rest.push_back(argv[j]);
+		}
+		int ri = i;
+		if (!ParseCommon(static_cast<int>(rest.size()), rest.data(),
+			ri, o))
+			return 1;
+		return CmdExitGate(argv[2], o, tapes, bmap);
 	}
 	if (cmd == "tapprobe" && argc >= 7) {
 		ReplayOpts o;

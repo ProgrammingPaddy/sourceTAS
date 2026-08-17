@@ -327,6 +327,76 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 ## Change log
 
+- 2026-08-17 (session 4, THE EXIT MAP + THE ENERGY LEDGER - the
+  user's exit-heatmap proposal built, validated, wired; the final-
+  ramp energy question ANSWERED in numbers): NEW MACHINERY:
+  `Field::ComputeExit`/`EvalExitSample` (exit = point on face x
+  in-plane direction from a post-board state, valued by the BOARD
+  MAP IT INDUCES on the next target; in-plane exits per the measured
+  duck-off physics - mid-face departures must ascend, descending
+  dirs depart at the boundary; ride bookkeeping = 2g + cap^2/tick
+  wish + free-turn check), `Field::MapQuality` (functionals over an
+  induced map), `Field::ZoneReach` (earliest platform arrival
+  bound), `exitgate` (validation vs real tapes: bespoke human
+  sample scored in the map's own currency - nearest-bucket matching
+  distorts vz by hundreds of u/s and once flagged the human's real
+  exit DOOMED; --bmap renders the B marginal-robustness overlay,
+  report-only per the user's "careful with B").
+  FUNCTIONAL VERDICT (the user's tuning question, settled by their
+  own run): FPOT = potential-priced induced max (induced e_eff -
+  cap^2*(flight n + ride ticks), the M2 telescoping currency) rates
+  the human's exact exits ratio 1.000 on BOTH face rides; unpriced
+  max 0.94-0.95 (its argmax is a ride-backward wish-credit
+  artifact); hot-AREA functionals 0.09-0.22 (the speed run does NOT
+  maximize margin area - area = margin overlay, matching runway
+  2.8b). Doom cull: 32%/16%/60% of exits provably dead before
+  departure. ZoneReach passes both real endings (human margin 61z,
+  old line 9z). Bookkeeping optimism +65..+114 u/s = unpriced ride
+  dissipation (admissible; also a measurement of ride quality).
+  MapQuality argmax honors the RUNWAY LADDER (viable+free > viable
+  > free > any) - without it the induced argmax picked energetic
+  descending-bottom landings that strand the next leg.
+  WIRED (guidance only, committing calls only - the map per
+  depth-2 probe call halved shape depth in the wall budget): tap
+  legs get exit_heading + the best exit's induced argmax as
+  field_aim; zone legs get the earliest-arrival exit heading.
+  Measured effect: leg-0 taps improved outright (0->1 dot -60.6 @
+  946 u/s carrying 903k vs the prior -202 @ 953).
+  THE LEG ENERGY LEDGER (user: report in energy; show where it
+  goes): per-leg print E_in -> E_out (u^2/s^2 with u/s + z) split
+  board / ride clips / GRAZES / tap / resid. Graze dot^2 was NEVER
+  ACCOUNTED (flight-section clips continue silently) - now
+  accumulated (Carve::Result.graze_loss2) and the ledger closes
+  (resid ~ +0..70k wish everywhere). THE HEADLINE FINDING: the
+  soft "-7.5" taps the prior session celebrated are CREASE-SCRAPES
+  - the flight rides the valley crease between faces and is sanded
+  down by grazes before arriving: measured 1->2 grazes -570k
+  (903k -> 337k) and 2->3 grazes -363k (337k -> -33k relative);
+  a variant line grazed -712k. Ride clips run -30..-81k per face.
+  Boards/taps themselves are small (-3..-48k). SO: the final-ramp
+  energy deficit = crease grazes (dominant, previously invisible,
+  actively selected FOR by the 0.6|dot| softness pressure - the
+  crease is a |dot| minimizer) + ride clip bleed. NEXT LEVER (probe
+  first, search-score changes regressed twice): a graze_loss2
+  regularizer in the SEARCH score (arrival-shape family, like
+  0.6|dot|, NOT energy currency) and/or crease-avoiding aim
+  construction; selection already prices the outcome.
+  EXPORTS (user ask): partial chains now export on failed solves,
+  clearly named beside the anchor tape - this session produced
+  surf_basictest_PARTIAL_shape0-1-2_legs3_0817-0427.tas and
+  surf_basictest_PARTIAL_shape0-1-2-3_legs4_0817-0433.tas (the
+  full four-face chain, 1167 frames, playable in-game; it will not
+  finish - review artifact). RunResult.legs_done + SolveMap
+  partial out-param. route_features.csv untracked (accidental
+  commit debris). Reports: exit_*.html (exit heat + human/best
+  markers), exit_B_*.html (B overlay), msolve_*.html per run.
+  Gates green after every change (airsolve 12/12, carve 10/10;
+  exitgate human ratios re-verified 1.000 after the ladder).
+  ENDING STATE: still open - the true blocker is now measured as
+  upstream energy destruction, not ending-search capability; the
+  last [0 2 3] variant rode f3 to an ascending crest exit but flew
+  from 409 u/s (nothing left after -234k of grazes).
+
 - 2026-08-16: Created. M0.1–0.3 done (design doc; strafe law proven
   float-ULP vs certified mirror; extractor v0 with 4 faces + 12
   candidate edges on basictest). NOW = M0.4 face coverage.

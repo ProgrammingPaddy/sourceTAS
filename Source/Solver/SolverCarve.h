@@ -98,6 +98,11 @@ namespace Carve {
 		float speed2d = 0.f;
 		int   flips = 0;
 		float ride_loss2 = 0.f;  // sum of clip dot^2 over the ride
+		float graze_loss2 = 0.f; // sum of clip dot^2 over flight
+		                         // GRAZES (non-target contacts that
+		                         // continue) - the measured valley-
+		                         // crease scrape was -712k of these,
+		                         // invisible until accounted
 		int   ride_ticks = 0;    // ticks with face contact
 		int   struck_brush = -1; // ended by striking something else
 		int   struck_plane = -1;

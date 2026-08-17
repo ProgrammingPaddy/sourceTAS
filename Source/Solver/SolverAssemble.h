@@ -46,6 +46,7 @@ namespace Assemble {
 		int  zone_tick = -1;         // frame index of end-zone entry
 		std::vector<int> shape;
 		float board_loss2 = 0.f;     // sum of leg board dot^2
+		int  legs_done = 0;          // legs completed (partial chains)
 	};
 
 	// The shared zone test (same proxy for solver lines and reference
@@ -56,10 +57,13 @@ namespace Assemble {
 	bool InZone(const World& w, int end_brush, const Vec3& pos);
 
 	// Solve the map: enumerate shapes, assemble each under the budget,
-	// return the fastest finisher.
+	// return the fastest finisher. partial (optional) receives the
+	// deepest assembled chain even when no shape finishes - the
+	// playable in-game export for unfinished campaigns.
 	bool SolveMap(const World& w, const Route::Graph& g,
 	              const MoveParams& p, const TapeAnchor& anchor,
-	              const Opts& o, RunResult* out, std::string* err);
+	              const Opts& o, RunResult* out, std::string* err,
+	              RunResult* partial = nullptr);
 
 	// Zone-entry tick of an arbitrary frame list from the anchor
 	// (-1 = never enters).

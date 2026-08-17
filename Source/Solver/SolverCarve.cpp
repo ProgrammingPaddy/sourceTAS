@@ -279,6 +279,20 @@ namespace Carve {
 								r.struck_brush = ev.contact_brush[0];
 								r.struck_plane = ev.contact_plane[0];
 							}
+							// Grazes dissipate dot^2 like any clip -
+							// account them (the energy ledger's
+							// -712k crease-scrape was invisible).
+							for (int c = 0; c < ev.ncontacts; ++c) {
+								if (ev.contact_brush[c] < 0
+									|| ev.contact_plane[c] < 0)
+									continue;
+								const Vec3& gn =
+									w.brushes[ev.contact_brush[c]]
+									.n[ev.contact_plane[c]];
+								const float gd = Dot(
+									ev.contact_vel[c], gn);
+								r.graze_loss2 += gd * gd;
+							}
 							air_streak = 0;
 							have_exit = false;
 							continue;
@@ -296,6 +310,12 @@ namespace Carve {
 								+ Scale(s.vel, 3.f * p.dt);
 							if (Board::EdgeDistOut(*tapf, proj)
 								> 0.f) {
+								const Vec3& gn =
+									w.brushes[t.tap_brush]
+									.n[t.tap_side];
+								const float gd = Dot(
+									ev.contact_vel[tc], gn);
+								r.graze_loss2 += gd * gd;
 								air_streak = 0;
 								have_exit = false;
 								continue;

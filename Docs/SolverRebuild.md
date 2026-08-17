@@ -186,6 +186,55 @@ action still completes - EXCEPT where extra runway is net-faster
 because banked energy repays the ticks (the potential-ledger
 exchange rate 900/tick prices exactly this trade).
 
+### 2.9 EXIT HEATMAPS (added 2026-08-17 from the user; preserve near-verbatim)
+High-quality runs are combinations of very good or perfect decisions;
+bad decisions DISQUALIFY a line. Some are measurable BEFORE they
+resolve: flying off a ramp bottom into the void with no reachable
+ramp is a disqualification the moment the exit is taken; slams are
+instant failure or major time loss. Use heatmap-style representations
+at varying resolutions to represent every combination of high-quality
+decisions and choose the fastest start-to-end combination.
+- THE THEORY: an optimal ramp EXIT is one that produces a
+  higher-quality BOARD heatmap on the NEXT ramp. The tuning question
+  is what "optimal board heatmap" means - candidate definitions the
+  user named: (a) the average of many board heatmaps from many exits
+  scored by heat quality, (b) large hot surface area, (c) higher
+  energy-preserving/creating landings. Use the human run for
+  data-driven theories.
+- Exit heatmaps may also be driven by the ramp TRAVERSAL (smooth /
+  energy-gaining moves preferred over snappy flicks or very fast
+  dismounts), but the next-board value has more potential than
+  general ride rules - dismount thinking is about the next ramp.
+- Heatmaps represent huge state spaces approximately for cheap,
+  guide higher-resolution heatmaps in selective areas, and LIMIT THE
+  SEARCH SPACE.
+- Follow-ups (user): BOTH readings intended - (A) score exits by the
+  board map each induces (the decision layer) and (B) score landing
+  zones by how hot they stay across many exits (marginal robustness)
+  - but "don't hurt our entry heatmaps, be careful with B" (B ships
+  report-only). The primary exit axis is WHERE: where to exit decides
+  when, and where relates directly to the landing on the next ramp
+  (and which ramp is targeted, on complex maps).
+
+MEASURED VERDICT (exitgate vs the human run, 2026-08-17 - the
+functional question settled by data, not argument): the validated
+functional is FPOT = the potential-priced induced maximum (induced
+best e_eff minus cap^2 per tick of flight, minus cap^2 per tick of
+ride - the M2 telescoping-anchor currency). The human's exact exits
+score fpot ratio 1.000 on BOTH face rides (they sit precisely on the
+priced field's flat top). Raw induced-max (unpriced) rates them
+0.94-0.95 but its argmax is a wish-credit artifact (ride backward
+for free energy credit - pricing kills it). Hot-AREA functionals
+rate their exits 0.09-0.22: this speed run does NOT maximize margin
+area, matching 2.8b (speed mode narrows margins) - area stays a
+margin OVERLAY, not the value. Doom culling is real and free: 32% /
+16% / 60% of candidate exits per ride are provably dead before
+departure. ZoneReach validates both real endings (human margin 61z,
+old solver 9z). The ride bookkeeping is optimistic by +65..+114 u/s
+(unpriced ride clip dissipation - real rides bleed); admissible by
+doctrine, and the overshoot is itself a measurement of ride
+execution quality.
+
 ### 2.8 Skill tells / the loss patterns to kill
 The user can tell a player's skill level immediately from: (1) how
 smoothly they move in the air, (2) how cleanly and efficiently they
