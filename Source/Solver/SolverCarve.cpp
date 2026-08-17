@@ -602,13 +602,17 @@ namespace Carve {
 							lg->EndTraj(SearchLog::kDoomed);
 						return r;
 					}
-					// PLAN THE TERMINAL ARC from THIS state: first
-					// ballistic crossing of the tap face; if it
-					// lands in-polygon, command one smooth ramp
-					// into its law-derived tangent heading -
-					// computed once per separation, executed
-					// deterministically. Tangent arrivals become
-					// the only way a tap flight ends.
+					// PLAN THE TERMINAL CURVE from THIS state (the
+					// complete form): sweep candidate ARRIVAL
+					// headings across the free-turn fan; trace each
+					// turn-at-free-rate-then-hold curve to its
+					// ballistic crossing (pure arithmetic); keep
+					// in-polygon crossings; fly the one arriving
+					// most tangent. If NO free-rate curve reaches
+					// the face, the candidate is provably unable
+					// to board - it ends here (the straight-only
+					// plan left a loophole: unplanned flights flew
+					// free and slammed at -539/-855).
 					if (t.pair_flight && tapf && tap_hn > 1e-4f) {
 						const float s2d = Len2D(s.vel);
 						const float off0 = Dot(tapf->n, s.pos)
@@ -616,82 +620,94 @@ namespace Carve {
 						if (s2d > 100.f && off0 > 0.f) {
 							const float gs = p.gravity
 								* s.gravity_scale;
-							for (int n2 = 1; n2 <= 60; ++n2) {
-								const float t2 = p.dt
-									* static_cast<float>(n2);
-								Vec3 q2(s.pos.X + s.vel.X * t2,
-									s.pos.Y + s.vel.Y * t2,
-									s.pos.Z + s.vel.Z * t2
-									- 0.5f * gs * t2 * t2);
-								if (Dot(tapf->n, q2) - tapf->d
-									> 0.f)
-									continue;
-								if (Board::EdgeDistOut(*tapf, q2)
-									<= Board::kHullCenterSlack) {
-									const float lvz = s.vel.Z
-										- gs * t2;
-									float cph = s2d * tap_hn
-										> 1e-4f
-										? -lvz * tapf->n.Z
-										/ (s2d * tap_hn) : 0.f;
-									if (cph > 1.f) cph = 1.f;
-									if (cph < -1.f) cph = -1.f;
-									const float ps = atan2f(
-										tapf->n.Y, tapf->n.X);
-									const float ha = atan2f(
-										s.vel.Y, s.vel.X);
-									const float pa = WrapPi(ps
-										+ acosf(cph));
-									const float pb = WrapPi(ps
-										- acosf(cph));
-									arc_phi = fabsf(
-										WrapPi(pa - ha))
-										<= fabsf(WrapPi(pb - ha))
-										? pa : pb;
-									// TANGENT-CLOSURE LAW (user: a
-									// non-tangent board loses more
-									// energy every time - it must
-									// not be REPRESENTABLE): if the
-									// free rate provably cannot
-									// reach the tangent heading
-									// before the touch, the
-									// candidate ends here, not at
-									// a slam.
-									const float need2 = fabsf(
-										WrapPi(arc_phi - ha));
-									const float tfb =
-										Field::FreeTurnBudget(s2d,
-										static_cast<float>(n2), p,
-										s.ducked);
-									if (need2 > tfb) {
-										r.doomed = true;
-										const float eo2 =
-											Board::EdgeDistOut(
-											*tapf, s.pos)
-											+ Board::
-											kHullCenterSlack;
-										r.miss_dist = sqrtf(
-											off0 * off0
-											+ (eo2 > 0.f
-												? eo2 * eo2 : 0.f));
-										r.reach_short =
-											ReachShort(exit_s);
-										r.end_pos = s.pos;
-										r.flips = ctl.flips;
-										RecExit(SearchLog::kDoomed,
-											k + 1);
-										if (lg)
-											lg->EndTraj(SearchLog::
-												kDoomed);
-										return r;
+							const float ha = atan2f(s.vel.Y,
+								s.vel.X);
+							Strafe::TickLaw tl3 = Strafe::Law(p,
+								s2d, 1.f, s.ducked);
+							const float w3 = tl3.TurnRad(0.f, 1.f);
+							const float fan = w3 * 50.f;
+							float best_adot = FLT_MAX;
+							for (int ti = -8; ti <= 8; ++ti) {
+								const float th3 = WrapPi(ha
+									+ fan * static_cast<float>(ti)
+									/ 8.f);
+								float h3 = ha;
+								float x3 = s.pos.X, y3 = s.pos.Y;
+								for (int n2 = 1; n2 <= 60; ++n2) {
+									const float d3 = WrapPi(th3
+										- h3);
+									h3 = WrapPi(h3 + (d3 > w3 ? w3
+										: (d3 < -w3 ? -w3 : d3)));
+									x3 += cosf(h3) * s2d * p.dt;
+									y3 += sinf(h3) * s2d * p.dt;
+									const float t2 = p.dt
+										* static_cast<float>(n2);
+									const float z3 = s.pos.Z
+										+ s.vel.Z * t2
+										- 0.5f * gs * t2 * t2;
+									const Vec3 q2(x3, y3, z3);
+									const float offq = Dot(tapf->n,
+										q2) - tapf->d;
+									if (offq > 0.f)
+										continue;
+									if (Board::EdgeDistOut(*tapf,
+										q2)
+										<= Board::kHullCenterSlack) {
+										const float lvz = s.vel.Z
+											- gs * t2;
+										const float adot = s2d
+											* tap_hn * cosf(WrapPi(
+											h3 - atan2f(tapf->n.Y,
+												tapf->n.X)))
+											+ lvz * tapf->n.Z;
+										// Engage ONLY tangent-class
+										// plans: within one fan
+										// step of the tangency
+										// law's minimum at this
+										// arrival. A least-bad
+										// perpendicular is not a
+										// plan.
+										const float mind = fabsf(
+											lvz * tapf->n.Z)
+											- s2d * tap_hn;
+										const float lawmin = mind
+											> 0.f ? mind : 0.f;
+										const float slack = s2d
+											* tap_hn * (fan / 8.f);
+										if (adot < 0.f
+											&& fabsf(adot)
+												< best_adot
+											&& fabsf(adot)
+												<= lawmin + slack) {
+											best_adot = fabsf(adot);
+											arc_phi = th3;
+											arc_h0 = ha;
+											arc_cur = ha;
+											arc_n = n2;
+											arc_k = 0;
+											arc_on = true;
+										}
 									}
-									arc_h0 = ha;
-									arc_cur = ha;
-									arc_n = n2;
-									arc_k = 0;
-									arc_on = true;
+									break;   // first crossing only
 								}
-								break;   // first crossing only
+							}
+							if (!arc_on) {
+								// No free-rate curve reaches the
+								// face: provably no board exists
+								// on this branch.
+								r.doomed = true;
+								const float eo2 =
+									Board::EdgeDistOut(*tapf,
+									s.pos) + Board::kHullCenterSlack;
+								r.miss_dist = sqrtf(off0 * off0
+									+ (eo2 > 0.f ? eo2 * eo2 : 0.f));
+								r.reach_short = ReachShort(exit_s);
+								r.end_pos = s.pos;
+								r.flips = ctl.flips;
+								RecExit(SearchLog::kDoomed, k + 1);
+								if (lg)
+									lg->EndTraj(SearchLog::kDoomed);
+								return r;
 							}
 						}
 					}
