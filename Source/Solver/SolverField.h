@@ -39,6 +39,17 @@
 namespace Solver {
 namespace Field {
 
+	// The LEG-AFTER context: what the ride at this face must set up.
+	// Enables RUNWAY (testimony 2.8b): per landing point, the space
+	// remaining on the face toward the departure serving this target
+	// vs the space the required action needs.
+	struct NextCtx {
+		bool has = false;
+		bool is_zone = false;
+		Vec3 pt;                 // next face centroid (is_zone=false)
+		Vec3 zmin, zmax;         // zone volume (is_zone=true)
+	};
+
 	struct Sample {
 		Vec3  q;                 // landing point (on the face plane)
 		bool  in_face = false;   // inside the polygon (grid cells
@@ -47,6 +58,12 @@ namespace Field {
 		bool  free_turn = false; // tangent arrival within the free-
 		                         // turn budget (no braking needed)
 		bool  ascending = false; // arrives before apex
+		// RUNWAY (with a NextCtx): in-plane space from Q toward the
+		// next objective vs the space the action needs (turn arc +
+		// climb distance, law-derived). viable = enough room.
+		float run_avail = 0.f;
+		float run_req = 0.f;
+		bool  run_viable = true; // true when no ctx (nothing owed)
 		float n = 0.f;           // flight ticks (real-valued root)
 		float s_arr = 0.f;       // gain-law arrival speed bound (2D)
 		float vz_arr = 0.f;
@@ -110,6 +127,33 @@ namespace Field {
 		return total;
 	}
 
+	// In-plane distance from Q along direction u (unit, in-plane) to
+	// the face polygon boundary - the raw RUNWAY ray. Winding-
+	// agnostic (edge normals oriented outward against the centroid).
+	inline float RunwayRay(const Route::Face& f, const Vec3& q,
+	                       const Vec3& u) {
+		float best = FLT_MAX;
+		const size_t nv = f.verts.size();
+		for (size_t i = 0; i < nv; ++i) {
+			const Vec3& a = f.verts[i];
+			const Vec3& b = f.verts[(i + 1) % nv];
+			Vec3 m = Cross(b - a, f.n);
+			const float ml = Len(m);
+			if (ml < 1e-6f)
+				continue;
+			m = Scale(m, 1.f / ml);
+			if (Dot(m, f.centroid - a) > 0.f)
+				m = Scale(m, -1.f);
+			const float denom = Dot(m, u);
+			if (denom <= 1e-6f)
+				continue;   // ray moves away from this edge
+			const float t = (Dot(m, a) - Dot(m, q)) / denom;
+			if (t >= 0.f && t < best)
+				best = t;
+		}
+		return best == FLT_MAX ? 0.f : best;
+	}
+
 	// The braking-turn per-tick ceiling at speed s (peak of the
 	// cosa < 0 branch of the certified turn curve).
 	inline float BrakeTurnPeak(float s, const MoveParams& p,
@@ -131,7 +175,8 @@ namespace Field {
 	                       const Route::Face& face, const MoveParams& p,
 	                       bool ducked, float grid = 32.f,
 	                       int max_ticks = 300,
-	                       float gravity_scale = 1.f) {
+	                       float gravity_scale = 1.f,
+	                       const NextCtx* ctx = nullptr) {
 		FaceMap m;
 		m.face = -1;
 		// In-plane frame: ud = horizontal lateral (contour), vd = the
@@ -263,17 +308,116 @@ namespace Field {
 					sm.e_eff = e;
 				}
 			}
+			// RUNWAY (testimony 2.8b): space from Q toward the next
+			// objective vs the space the required action needs -
+			// turn arc at the free rate + climb distance at the
+			// face slope, both law-derived. Non-viable landings
+			// leave no room to do what's needed.
+			if (sm.reachable && ctx && ctx->has) {
+				Vec3 tgt = ctx->pt;
+				float z_t = ctx->pt.Z;
+				if (ctx->is_zone) {
+					tgt = sm.q;
+					if (tgt.X < ctx->zmin.X) tgt.X = ctx->zmin.X;
+					if (tgt.X > ctx->zmax.X) tgt.X = ctx->zmax.X;
+					if (tgt.Y < ctx->zmin.Y) tgt.Y = ctx->zmin.Y;
+					if (tgt.Y > ctx->zmax.Y) tgt.Y = ctx->zmax.Y;
+					tgt.Z = ctx->zmin.Z;
+					z_t = ctx->zmin.Z;
+				}
+				Vec3 dip = tgt - sm.q;
+				dip = dip - Scale(face.n, Dot(dip, face.n));
+				const float dl = Len(dip);
+				if (dl > 1.f) {
+					const Vec3 u = Scale(dip, 1.f / dl);
+					sm.run_avail = RunwayRay(face, sm.q, u);
+					const float post = sqrtf(
+						sm.s_arr * sm.s_arr
+						+ sm.vz_arr * sm.vz_arr
+						- sm.residual * sm.residual > 0.f
+						? sm.s_arr * sm.s_arr
+							+ sm.vz_arr * sm.vz_arr
+							- sm.residual * sm.residual : 0.f);
+					const float pv = post > 1.f ? post : 1.f;
+					// Turn arc: arrival heading -> departure
+					// heading at the free-turn rate.
+					const float az_dep = atan2f(u.Y, u.X);
+					const float turn = fabsf(
+						Steer::WrapPi(az_dep - sm.phi));
+					Strafe::TickLaw tl = Strafe::Law(p, pv, 1.f,
+						ducked);
+					const float rate = tl.TurnRad(0.f, 1.f);
+					const float turn_dist = rate > 1e-5f
+						? turn / rate * pv * p.dt : 1e9f;
+					// Climb: the ride TRAVELS the runway first -
+					// the departure is at the far boundary along
+					// the action direction, so the ballistic
+					// altitude requirement is measured from THERE
+					// (flat-exit bound), and the climb is priced
+					// at the face's max climb rate (hn per unit
+					// in-plane distance - the up-slope Z).
+					const Vec3 dp = sm.q
+						+ Scale(u, sm.run_avail);
+					const float dx2 = tgt.X - dp.X;
+					const float dy2 = tgt.Y - dp.Y;
+					const float l2d = sqrtf(dx2 * dx2 + dy2 * dy2);
+					// Flat exit overstates the requirement: a
+					// departure may ascend up to the in-plane
+					// limit (vz <= pv*hn), which buys hn*L of
+					// effective altitude over the flight.
+					const float need_z = z_t
+						+ 0.5f * g * (l2d * l2d) / (pv * pv)
+						- hn * l2d;
+					const float dz_req = need_z - dp.Z > 0.f
+						? need_z - dp.Z : 0.f;
+					float climb_dist = 0.f;
+					if (dz_req > 0.f) {
+						climb_dist = hn > 0.02f
+							? dz_req / hn : 1e9f;
+					}
+					sm.run_req = turn_dist + climb_dist;
+					sm.run_viable = sm.run_avail >= sm.run_req;
+				}
+			}
 			if (sm.reachable) {
 				if (sm.e_eff < m.e_lo) m.e_lo = sm.e_eff;
 				if (sm.e_eff > m.e_hi) m.e_hi = sm.e_eff;
 				const int idx = iv * m.nu + iu;
-				if (sm.free_turn && sm.e_eff > best_e) {
+				// Selection: viable+free-turn first (runway decides
+				// among energy-equivalent hot points); fallback
+				// ladder below.
+				if (sm.run_viable && sm.free_turn
+					&& sm.e_eff > best_e) {
 					best_e = sm.e_eff;
 					best_i = idx;
 				}
 				if (sm.e_eff > best_e_any) {
 					best_e_any = sm.e_eff;
 					best_i_any = idx;
+				}
+			}
+		}
+		// Fallback ladder when no viable+free-turn sample exists:
+		// best viable, then best free-turn, then best overall.
+		if (best_i < 0) {
+			float be = -1e30f;
+			for (size_t i = 0; i < m.samples.size(); ++i) {
+				const Sample& sm = m.samples[i];
+				if (sm.reachable && sm.run_viable
+					&& sm.e_eff > be) {
+					be = sm.e_eff;
+					best_i = static_cast<int>(i);
+				}
+			}
+		}
+		if (best_i < 0) {
+			float be = -1e30f;
+			for (size_t i = 0; i < m.samples.size(); ++i) {
+				const Sample& sm = m.samples[i];
+				if (sm.reachable && sm.free_turn
+					&& sm.e_eff > be) {
+					be = sm.e_eff;
+					best_i = static_cast<int>(i);
 				}
 			}
 		}

@@ -11,6 +11,7 @@
 #include "SolverAir.h"
 #include "SolverCarve.h"
 #include "SolverEnvelope.h"
+#include "SolverField.h"
 #include "SolverRouteSearch.h"
 #include "SolverSearchLog.h"
 #include "SolverSteer.h"
@@ -19,6 +20,10 @@ namespace Solver {
 namespace Assemble {
 
 	namespace {
+
+		// Carve init-family win counts across a solve (win-rate data
+		// for pruning; single-threaded).
+		int g_fam_wins[32] = { 0 };
 
 		PlayerState SpawnState(const World& w, const MoveParams& p,
 		                       const TapeAnchor& a) {
@@ -481,10 +486,38 @@ namespace Assemble {
 						ct.exit_heading = atan2f(
 							lnext.Y - entry.pos.Y,
 							lnext.X - entry.pos.X);
+						// Field-guided aim: the hotspot map's
+						// runway-aware best landing on the tap
+						// face (guidance - families still compete).
+						{
+							Field::NextCtx fctx;
+							if (lidx + 2 < shape.size()) {
+								fctx.has = true;
+								fctx.pt = g.faces[shape[lidx + 2]]
+									.centroid;
+							} else {
+								fctx.has = true;
+								fctx.is_zone = true;
+								ZoneVolume(eb, &fctx.zmin,
+									&fctx.zmax);
+							}
+							Field::FaceMap fmap = Field::Compute(
+								entry.pos, entry.vel, nf, p,
+								entry.ducked, 32.f, 300, 1.f,
+								&fctx);
+							if (fmap.best >= 0) {
+								ct.field_aim =
+									fmap.samples[fmap.best].q;
+								ct.have_field_aim = true;
+							}
+						}
 						std::vector<Carve::Result> calts;
 						lo.cr = Carve::SolveCarve(entry, w, p, g,
 							ct, knots, evals,
 							multi ? &calts : nullptr, 3);
+						if (lo.cr.family >= 0
+							&& lo.cr.family < 32)
+							g_fam_wins[lo.cr.family]++;
 						auto TapScore =
 							[&](const Carve::Result& c) -> float {
 							const bool tp = !c.exited
@@ -653,6 +686,26 @@ namespace Assemble {
 					at.aim_region = true;
 					at.dot_cap = 300.f;
 					at.max_ticks = 240;
+					// Field-guided aim: runway-aware hotspot best
+					// for this entry (guidance only - the region
+					// gradient and families still govern).
+					{
+						Field::NextCtx fctx;
+						fctx.has = true;
+						if (li + 1 < shape.size()) {
+							fctx.pt =
+								g.faces[shape[li + 1]].centroid;
+						} else {
+							fctx.is_zone = true;
+							ZoneVolume(eb, &fctx.zmin,
+								&fctx.zmax);
+						}
+						Field::FaceMap fmap = Field::Compute(
+							cur.pos, cur.vel, fc, p, cur.ducked,
+							32.f, 300, 1.f, &fctx);
+						if (fmap.best >= 0)
+							at.aim = fmap.samples[fmap.best].q;
+					}
 					Air::Result ar = Air::SolveTransfer(cur, w, p,
 						g, at, 4, o.air_evals, &alts, 3);
 					if (!ar.hit) {
@@ -861,6 +914,15 @@ namespace Assemble {
 				any = true;
 			}
 		}
+		// Family win-rate readout (the dilution law: families must
+		// earn their budget share; prune from this data).
+		printf("assemble: carve family wins:");
+		for (int i = 0; i < 32; ++i)
+			if (g_fam_wins[i] > 0)
+				printf(" f%d:%d", i, g_fam_wins[i]);
+		printf("\n");
+		for (int i = 0; i < 32; ++i)
+			g_fam_wins[i] = 0;
 		if (!any) {
 			if (err) *err = "no shape assembled to the zone";
 			return false;

@@ -61,6 +61,11 @@ namespace Carve {
 		// 2.1 as construction). OFF by default (gate rows verify
 		// tape reproduction); the solver turns it on.
 		bool  terminal_tangent = false;
+		// Field-guided pursuit aim (the hotspot map's runway-aware
+		// best sample): replaces the centroid as the family aim
+		// point when set. GUIDANCE only - families still compete.
+		Vec3  field_aim;
+		bool  have_field_aim = false;
 		// Allow the DUCK-OFF exit move: pressing duck while riding
 		// applies the +8.5 air-duck origin shift and pops the hull off
 		// the face, separating with the in-plane velocity intact (the
@@ -115,6 +120,8 @@ namespace Carve {
 		                         // the climb the landing still owes
 		                         // toward the leg-after target (u/s).
 		int   duck_at = -1;      // duck-off press tick used (-1 = none)
+		int   family = -1;       // init family that produced the win
+		                         // (win-rate data for pruning)
 		// The full state at the first airborne tick (= the next air
 		// leg's entry). On exit the first `tick` control entries are
 		// the ride's frames.

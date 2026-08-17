@@ -449,6 +449,33 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-17 (session 3c, RUNWAY IN CODE + field-guided aims +
+  family win-rate data): Field::Sample now carries run_avail /
+  run_req / run_viable with a NextCtx (next face centroid or zone
+  volume). Laws: available = in-plane ray from the landing toward
+  the objective to the face boundary; required = turn arc at the
+  free rate + climb priced at the face's max climb rate (hn),
+  measured FROM THE DEPARTURE EDGE (the ride travels the runway
+  first - measuring from the landing overstated 10x), with the
+  ascending-exit allowance (vz up to pv*hn buys hn*L altitude).
+  Selection tiers: viable+free-turn > viable > free-turn > any;
+  heat overlay dims runway-short samples. VALIDATION state: face-2
+  event near-exact (human spot 444/471, field best 25u away and
+  viable 444/435 - their real ride was ~450u); face-0/face-3
+  required still overstates (flat-exit + straight-ray crudeness) -
+  runway stays GUIDANCE + rendering, never a hard cull; iterate
+  with expert eyes on the dimmed maps. WIRED: tap and air targets
+  aim at the field's runway-aware best sample (fallback to blends);
+  guidance only, families still compete. FAMILY WIN-RATE
+  instrumentation (Carve::Result.family + per-solve histogram):
+  first data - f13 az_obj-straight 14 wins (top), f15 az_tan 7,
+  f10 S-late 8, f1 linear 7; ZERO wins in solve context: f0 hold,
+  f6 slow-via, f7 climb, f8 duck-off, f11 runway-via-exit, f16
+  az_tan-via. PRUNING DEFERRED: gate rows exercise different
+  contexts (duck-off wins the solved12 crest row) - collect gate-
+  context histograms before cutting. CHAIN STATE: 2->3 improved
+  again to -296.5 @ 759 ([0 2 3]); 1->2 at -187.9 @ 931; endings
+  still open. Gates green.
 - 2026-08-17 (session 3b, RUNWAY - new testimony, recorded in
   SolverRebuild.md 2.8b near-verbatim + priority hierarchy #4):
   runway = usable ramp space after the board point for the action

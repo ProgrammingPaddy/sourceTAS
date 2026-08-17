@@ -479,7 +479,8 @@ namespace Carve {
 		if (t.tap_face >= 0
 			&& t.tap_face < static_cast<int>(g.faces.size())) {
 			const Route::Face& tf = g.faces[t.tap_face];
-			Vec3 aim_pt = tf.centroid;
+			Vec3 aim_pt = t.have_field_aim ? t.field_aim
+				: tf.centroid;
 			Vec3 next_pt;
 			bool have_next = false;
 			if (t.next_face >= 0
@@ -647,6 +648,7 @@ namespace Carve {
 			{ { az_tan, 1.f, 0.f, 1.f, 0.6f, 2 }, -1 },
 		};
 		int used = 0;
+		int cur_fam = -1;   // family provenance for win-rate data
 		// Tap transfers: the ride doubles the speed, so the estimate
 		// runs LONG - pair it with its half. Zone endings: ride+arc
 		// runs LONGER than the straight line - pair with 1.7x.
@@ -694,6 +696,7 @@ namespace Carve {
 				best_duck = duck;
 				best_dom = t.aim_tick;
 				best_r = rr;
+				best_r.family = cur_fam;
 				if (SearchLog::g_sink)
 					SearchLog::g_sink->MarkBest();
 			}
@@ -791,6 +794,7 @@ namespace Carve {
 		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
 			: t.max_ticks / 2;
 		for (int fam = 0; fam < 17 && used < evals; ++fam) {
+			cur_fam = fam;
 			std::vector<float> th(knots_n), ef(knots_n,
 				fams[fam].f.eff);
 			int duck = fams[fam].duck == 0 ? duck_guess : -1;
@@ -844,6 +848,7 @@ namespace Carve {
 		}
 		}
 		t.aim_tick = best_dom;   // polish in the winning domain
+		cur_fam = best_r.family; // polish keeps the winner's lineage
 		while (used < evals && !best_th.empty()) {
 			std::vector<float> hth = best_th, hef = best_ef;
 			int hduck = best_duck;

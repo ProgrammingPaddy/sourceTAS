@@ -3565,6 +3565,15 @@ namespace {
 			}
 			std::vector<Vec3> refpts;
 			refpts.push_back(s.pos);
+			// PASS 1: replay, collect transfer events (the leg-after
+			// context needs the NEXT event, so process afterward).
+			struct FEvent {
+				int tick = 0;
+				int fidx = -1;
+				PlayerState sep;
+				Vec3 cp, v1;
+			};
+			std::vector<FEvent> events;
 			int air = 0;
 			PlayerState sep;
 			for (size_t t = 0; t < tape.frames.size(); ++t) {
@@ -3582,13 +3591,54 @@ namespace {
 								== ev.contact_plane[0])
 							fidx = static_cast<int>(fi);
 					if (fidx >= 0 && air >= 8) {
+						FEvent fe;
+						fe.tick = static_cast<int>(t);
+						fe.fidx = fidx;
+						fe.sep = sep;
+						fe.cp = ev.contact_pos[0];
+						fe.v1 = ev.contact_vel[0];
+						events.push_back(fe);
+					}
+					air = 0;
+				} else if (!s.on_ground) {
+					if (air == 0)
+						sep = s;
+					air++;
+				} else {
+					air = 0;
+				}
+			}
+			// PASS 2: field + runway per event, leg-after context
+			// from the following event (or the end zone).
+			std::vector<int> zreds;
+			w.FindZoneBrushes(nullptr, &zreds);
+			for (size_t ei = 0; ei < events.size(); ++ei) {
+				const FEvent& fe = events[ei];
+				const int fidx = fe.fidx;
+				const PlayerState& fsep = fe.sep;
+				{
 						const Route::Face& fc = g.faces[fidx];
-						Field::FaceMap fm = Field::Compute(sep.pos,
-							sep.vel, fc, o.params, sep.ducked,
-							24.f);
-						const Vec3& cp = ev.contact_pos[0];
-						const float adot = Dot(ev.contact_vel[0],
-							fc.n);
+						Field::NextCtx nctx;
+						if (ei + 1 < events.size()) {
+							nctx.has = true;
+							nctx.is_zone = false;
+							nctx.pt = g.faces[events[ei + 1].fidx]
+								.centroid;
+						} else if (!zreds.empty()) {
+							const int zi =
+								w.IndexOfBrushId(zreds[0]);
+							if (zi >= 0) {
+								nctx.has = true;
+								nctx.is_zone = true;
+								Assemble::ZoneVolume(w.brushes[zi],
+									&nctx.zmin, &nctx.zmax);
+							}
+						}
+						Field::FaceMap fm = Field::Compute(fsep.pos,
+							fsep.vel, fc, o.params, fsep.ducked,
+							24.f, 300, 1.f, &nctx);
+						const Vec3& cp = fe.cp;
+						const float adot = Dot(fe.v1, fc.n);
 						std::string klass = "NO-MAP";
 						float ratio = -1.f;
 						if (fm.best >= 0
@@ -3619,21 +3669,21 @@ namespace {
 							else if (klass == "WARM") warm++;
 							else cold++;
 							printf("fieldgate: %s t%4d face %d | "
-								"sep (%.0f,%.0f,%.0f) v(%.0f,"
-								"%.0f,%.0f) | strike (%.0f,%.0f,"
-								"%.0f) dot %.1f | field ratio "
-								"%.2f freeturn %d | best e %.0f "
-								"@(%.0f,%.0f,%.0f) res %.1f | "
-								"%s\n", tname.c_str(),
-								static_cast<int>(t), fidx,
-								sep.pos.X, sep.pos.Y, sep.pos.Z,
-								sep.vel.X, sep.vel.Y, sep.vel.Z,
+								"strike (%.0f,%.0f,%.0f) dot %.1f "
+								"| ratio %.2f freeturn %d | RUNWAY "
+								"have %.0f need %.0f %s | best e "
+								"%.0f @(%.0f,%.0f,%.0f) res %.1f "
+								"rwy %.0f/%.0f | %s\n",
+								tname.c_str(), fe.tick, fidx,
 								cp.X, cp.Y, cp.Z, adot, ratio,
 								hs.free_turn ? 1 : 0,
+								hs.run_avail, hs.run_req,
+								hs.run_viable ? "OK" : "SHORT",
 								sqrtf(bs.e_eff > 0.f
 									? bs.e_eff : 0.f),
 								bs.q.X, bs.q.Y, bs.q.Z,
-								bs.residual, klass.c_str());
+								bs.residual, bs.run_avail,
+								bs.run_req, klass.c_str());
 							// Heat overlay for the first few maps.
 							if (ev_total < 8) {
 								for (int qv = 0; qv < fm.nv; ++qv)
@@ -3651,6 +3701,10 @@ namespace {
 										: 1.f;
 									if (!sm.free_turn)
 										v01 *= 0.4f;
+									// Runway-short landings render
+									// dim: energy without room.
+									if (!sm.run_viable)
+										v01 *= 0.35f;
 									const Vec3 lift =
 										Scale(fc.n, 2.f);
 									const Vec3 c00 = sm.q + lift
@@ -3690,14 +3744,6 @@ namespace {
 							}
 							ev_total++;
 						}
-					}
-					air = 0;
-				} else if (!s.on_ground) {
-					if (air == 0)
-						sep = s;
-					air++;
-				} else {
-					air = 0;
 				}
 			}
 			sink.AddRef("REF " + tname, refpts);
