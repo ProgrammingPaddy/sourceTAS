@@ -186,8 +186,26 @@ namespace Carve {
 		// engagement condition chatters as turning reduces closing).
 		bool term_latch = false;
 		float term_phi = 0.f;
+		// THE PLANNED TERMINAL ARC (pair_flight): computed once per
+		// separation, executed as a fixed heading ramp to the
+		// crossing's tangent heading.
+		bool arc_on = false;
+		int arc_k = 0, arc_n = 0;
+		float arc_h0 = 0.f, arc_phi = 0.f;
+		const float tap_hn = tapf ? sqrtf(tapf->n.X * tapf->n.X
+			+ tapf->n.Y * tapf->n.Y) : 0.f;
 		for (int k = 0; k < horizon; ++k) {
 			float theta = SplineEval(knots, k, sh);
+			if (arc_on) {
+				// Execute the planned arc: linear heading ramp to
+				// the crossing's tangent heading.
+				theta = arc_h0 + WrapPi(arc_phi - arc_h0)
+					* static_cast<float>(arc_k + 1)
+					/ static_cast<float>(arc_n > 0 ? arc_n : 1);
+				arc_k++;
+				if (arc_k > arc_n + 8)
+					arc_on = false;
+			}
 			if (t.terminal_tangent && tapf && have_exit
 				&& t_hn > 1e-4f) {
 				const float off = Dot(tapf->n, s.pos) - tapf->d;
@@ -396,6 +414,7 @@ namespace Carve {
 								r.graze_loss2 += gd * gd;
 							}
 							air_streak = 0;
+				arc_on = false;
 							have_exit = false;
 							continue;
 						}
@@ -419,6 +438,7 @@ namespace Carve {
 									ev.contact_vel[tc], gn);
 								r.graze_loss2 += gd * gd;
 								air_streak = 0;
+				arc_on = false;
 								have_exit = false;
 								continue;
 							}
@@ -473,6 +493,7 @@ namespace Carve {
 					return r;
 				}
 				air_streak = 0;
+				arc_on = false;
 				have_exit = false;
 				r.ride_ticks++;
 				for (int c = 0; c < ev.ncontacts; ++c) {
@@ -534,6 +555,61 @@ namespace Carve {
 						if (lg)
 							lg->EndTraj(SearchLog::kDoomed);
 						return r;
+					}
+					// PLAN THE TERMINAL ARC from THIS state: first
+					// ballistic crossing of the tap face; if it
+					// lands in-polygon, command one smooth ramp
+					// into its law-derived tangent heading -
+					// computed once per separation, executed
+					// deterministically. Tangent arrivals become
+					// the only way a tap flight ends.
+					if (t.pair_flight && tapf && tap_hn > 1e-4f) {
+						const float s2d = Len2D(s.vel);
+						const float off0 = Dot(tapf->n, s.pos)
+							- tapf->d;
+						if (s2d > 100.f && off0 > 0.f) {
+							const float gs = p.gravity
+								* s.gravity_scale;
+							for (int n2 = 1; n2 <= 60; ++n2) {
+								const float t2 = p.dt
+									* static_cast<float>(n2);
+								Vec3 q2(s.pos.X + s.vel.X * t2,
+									s.pos.Y + s.vel.Y * t2,
+									s.pos.Z + s.vel.Z * t2
+									- 0.5f * gs * t2 * t2);
+								if (Dot(tapf->n, q2) - tapf->d
+									> 0.f)
+									continue;
+								if (Board::EdgeDistOut(*tapf, q2)
+									<= Board::kHullCenterSlack) {
+									const float lvz = s.vel.Z
+										- gs * t2;
+									float cph = s2d * tap_hn
+										> 1e-4f
+										? -lvz * tapf->n.Z
+										/ (s2d * tap_hn) : 0.f;
+									if (cph > 1.f) cph = 1.f;
+									if (cph < -1.f) cph = -1.f;
+									const float ps = atan2f(
+										tapf->n.Y, tapf->n.X);
+									const float ha = atan2f(
+										s.vel.Y, s.vel.X);
+									const float pa = WrapPi(ps
+										+ acosf(cph));
+									const float pb = WrapPi(ps
+										- acosf(cph));
+									arc_phi = fabsf(
+										WrapPi(pa - ha))
+										<= fabsf(WrapPi(pb - ha))
+										? pa : pb;
+									arc_h0 = ha;
+									arc_n = n2;
+									arc_k = 0;
+									arc_on = true;
+								}
+								break;   // first crossing only
+							}
+						}
 					}
 				}
 				air_streak++;

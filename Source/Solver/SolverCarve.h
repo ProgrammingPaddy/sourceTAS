@@ -82,6 +82,16 @@ namespace Carve {
 		// gradient), so the map's density IS the search density.
 		struct Cell { Vec3 q; float phi = 0.f; float n = 0.f; };
 		std::vector<Cell> cells;
+		// THE PLANNED TERMINAL ARC (default ON; tap flights only):
+		// at every separation the candidate's OWN state computes its
+		// ballistic crossing of the tap face (first intersection,
+		// in-polygon); the controller then flies one smooth heading
+		// ramp into that landing's law-derived tangent heading -
+		// plan once, execute deterministically. Faceplants cannot be
+		// flown where a valid crossing exists: the arc ends tangent
+		// by construction. (Distinct from the retired greedy
+		// tracker, which re-chased a moving target per tick.)
+		bool  pair_flight = true;
 		// Allow the DUCK-OFF exit move: pressing duck while riding
 		// applies the +8.5 air-duck origin shift and pops the hull off
 		// the face, separating with the in-plane velocity intact (the
