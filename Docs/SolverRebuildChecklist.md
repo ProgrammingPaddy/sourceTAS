@@ -449,6 +449,28 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-16 (session 2f, TRIED AND REVERTED - recorded per the
+  standing rule): pure energy-currency tap scoring. Hypothesis (from
+  the user's "preserve more energy into the board" + the observation
+  that v_post^2 = v_pre^2 - dot^2 makes a separate |dot| charge a
+  double-count): score taps by -carry + time at the gain law's rate,
+  no dot term. RESULT: measurably worse both ways. 2D carry has a
+  plunge-conversion exploit (a hard board converts vz INTO horizontal
+  - 2D speed rises while total energy burns); 3D carry still produced
+  harder strikes and shorter chains (-433/-779 vs -187/-115).
+  CONCLUSION: the 0.6|dot| term is not redundant - it is the arrival-
+  shape regularizer that creates good search basins (tangent-arrival
+  pressure); carry alone tolerates rushed strikes wherever speed
+  survives. Reverted to 0.6|dot| - 0.01*(2D carry). The reverted
+  build reproduces the good chains and set a new best 2->3:
+  -360.8 @ 728 ([0 2 3]), alongside 0->1->2 at -200/-115.2 @ 918.
+  How the human 2->3 boards (the target, measured): SHORT LEVEL ride
+  across face 2 (874->854, slight climb, wish-banking), ascending
+  pop-off +202 vz, 32-tick flight, arrival nearly PARALLEL to face 3
+  (post-board v (-88, 850, -116) - almost pure +y) at dot -142.
+  Candidate next lever: an arrival-PARALLELISM preference (the
+  in-plane component of arrival velocity vs the face's lateral axis)
+  as a family/score experiment, and the ending's ride-prefix seeding.
 - 2026-08-16 (session 2e, expert steer round 2): the user read the
   report and called the defect: candidates turn RIGHT into the last
   ramp instead of LEFT ("more space to launch off of = smoother
