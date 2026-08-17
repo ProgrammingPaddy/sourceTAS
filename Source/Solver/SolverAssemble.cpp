@@ -528,6 +528,11 @@ namespace Assemble {
 								ct.field_aim =
 									fmap.samples[fmap.best].q;
 								ct.have_field_aim = true;
+								ct.field_phi =
+									fmap.samples[fmap.best].phi;
+								ct.field_n =
+									fmap.samples[fmap.best].n;
+								ct.have_field_arr = true;
 							}
 						}
 						std::vector<Carve::Result> calts;

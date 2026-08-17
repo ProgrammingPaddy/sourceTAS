@@ -66,6 +66,14 @@ namespace Carve {
 		// point when set. GUIDANCE only - families still compete.
 		Vec3  field_aim;
 		bool  have_field_aim = false;
+		// Field ARRIVAL PLAN (testimony 2.1, the agreed approach
+		// model): the chosen cell's tangent arrival heading (vz-
+		// corrected, both branches derivable) + predicted flight
+		// ticks. Families spread the required turn across the arc -
+		// never a last-moment snap.
+		float field_phi = 0.f;
+		float field_n = 0.f;
+		bool  have_field_arr = false;
 		// Allow the DUCK-OFF exit move: pressing duck while riding
 		// applies the +8.5 air-duck origin shift and pops the hull off
 		// the face, separating with the in-plane velocity intact (the

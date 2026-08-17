@@ -776,6 +776,13 @@ namespace Carve {
 		// at vz->0); pick the one that CONTINUES the approach motion
 		// - the same geometric init the air primitive already uses.
 		float az_tan = az_aim;
+		// ARRIVAL headings (the agreed approach model): az_arr = the
+		// field cell's vz-corrected tangent heading (falls back to
+		// the flat nearest branch), az_arr2 = the MIRROR branch (the
+		// other-handed board - never offered before, so right-handed
+		// tangents monopolized the inits even where the runway is on
+		// the left).
+		float az_arr = az_aim, az_arr2 = az_aim;
 		if (t.tap_face >= 0
 			&& t.tap_face < static_cast<int>(g.faces.size())) {
 			const Route::Face& tf2 = g.faces[t.tap_face];
@@ -784,6 +791,8 @@ namespace Carve {
 			const float tb = WrapPi(tpsi - kPi * 0.5f);
 			az_tan = fabsf(WrapPi(ta - h0)) <= fabsf(WrapPi(tb - h0))
 				? ta : tb;
+			az_arr = t.have_field_arr ? t.field_phi : az_tan;
+			az_arr2 = WrapPi(2.f * tpsi - az_arr);
 		}
 		// ZONE endings: "use the space available on the ramp" (user
 		// testimony) - the runway azimuth points at the ride face's
@@ -813,7 +822,7 @@ namespace Carve {
 			}
 		}
 		struct FamD { Fam f; int duck; };
-		const FamD fams[19] = {
+		const FamD fams[20] = {
 			{ { h0, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },    // hold, full effort
 			{ { t.exit_heading, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },  // linear
 			{ { t.exit_heading, 2.f, 0.f, 1.f, 0.f, 0 }, -1 },  // late turn
@@ -845,11 +854,14 @@ namespace Carve {
 			{ { az_tan, 1.f, 0.f, 1.f, 0.6f, 2 }, -1 },
 			// SNAKE families (user 2026-08-17: "curving strafes like
 			// a snake to land tangent"): swing WIDE mid-flight (the
-			// bulge, both sides) and come back through the tangent
-			// line at arrival - the curve-to-tangent basin the
-			// straight-to-tangent inits never enter.
-			{ { az_tan, 1.f, 0.7f, 1.f, 0.f, 0 }, -1 },
-			{ { az_tan, 1.f, -0.7f, 1.f, 0.f, 0 }, -1 },
+			// bulge, both sides) and come back through the ARRIVAL
+			// heading - the field cell's own vz-corrected tangent,
+			// spread across the arc, never a last-moment snap.
+			{ { az_arr, 1.f, 0.7f, 1.f, 0.f, 0 }, -1 },
+			{ { az_arr, 1.f, -0.7f, 1.f, 0.f, 0 }, -1 },
+			// The MIRROR-BRANCH board (other-handed tangent):
+			// straight arc to it - runway selection decides.
+			{ { az_arr2, 1.f, 0.f, 1.f, 0.f, 0 }, -1 },
 		};
 		int used = 0;
 		int cur_fam = -1;   // family provenance for win-rate data
@@ -868,7 +880,7 @@ namespace Carve {
 		// without one they duplicate the bulge families and dilute
 		// every row's budget - the family-dilution law, re-measured
 		// by an immediate carve-gate failure).
-		const int nfam_div = t.tap_face >= 0 ? 20 : 18;
+		const int nfam_div = t.tap_face >= 0 ? 21 : 18;
 		const int per_fam = evals / (nfam_div * ndom) > 8
 			? evals / (nfam_div * ndom) : 8;
 		float best_score = FLT_MAX;
@@ -1002,9 +1014,9 @@ namespace Carve {
 		t.aim_tick = di == 0 ? dom_full : dom_half;
 		const int duck_guess = t.aim_tick > 0 ? t.aim_tick - 1
 			: t.max_ticks / 2;
-		for (int fam = 0; fam < 19 && used < evals; ++fam) {
+		for (int fam = 0; fam < 20 && used < evals; ++fam) {
 			if (fam >= 17 && t.tap_face < 0)
-				continue;   // snake families: tap transfers only
+				continue;   // arrival families: tap transfers only
 			cur_fam = fam;
 			std::vector<float> th(knots_n), ef(knots_n,
 				fams[fam].f.eff);
