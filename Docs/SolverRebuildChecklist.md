@@ -449,6 +449,16 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-16 (session 2h, TRIED AND REVERTED at user direction):
+  interpreted the report observation "arrivals below the surfable
+  plane dying on the bottom vertical border" as a geometric dead
+  band and added a z floor (zmin + slack) to both region gradients.
+  WORSE results (2->3 fell to -590 @ 409 from -360 @ 728) and the
+  user judged the framing inaccurate. Reverted fully (git revert
+  f24b19f). The observation itself STANDS UNEXPLAINED - low
+  arrivals dying on the bottom border is a symptom to understand
+  from data (probe-from-state instrument), not a constraint to
+  impose on the gradient. Do not re-add altitude floors.
 - 2026-08-16 (session 2g, user re-reference to testimony 2.1): the
   arrival-parallelism idea IS the original boarding law - "velocity
   tangent to the ramp face normal IN THE APPROACH DIRECTION ...
