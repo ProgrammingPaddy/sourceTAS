@@ -33,9 +33,9 @@ namespace Solver {
 namespace Plan {
 
 	struct Opts {
-		int    cells_per_leg = 20;   // distinct target cells per board
-		int    exits_per_leg = 4;    // departures tried per ride
-		int    air_evals = 900;      // per cell boundary-value budget
+		int    cells_per_leg = 16;   // distinct target cells per board
+		int    exits_per_leg = 6;    // departures tried per ride
+		int    air_evals = 1500;     // per cell boundary-value budget
 		int    ride_evals = 6000;    // per departure ride budget
 		int    zone_evals = 24000;   // ending budget
 		double wall_budget_s = 170.0;

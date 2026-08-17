@@ -336,12 +336,23 @@ namespace Plan {
 					float e = -1e30f;
 				};
 				Best bestleg;
-				int tried = 0;
+				int tried = 0, exited = 0, mapped = 0, celled = 0,
+					hitc = 0, capped = 0;
+				std::vector<Vec3> tried_pts;
 				for (int xi : xs) {
 					if (tried >= o.exits_per_leg)
 						break;
 					const Field::ExitSample& ex = em.samples[xi];
-					// Skip exits clustered on an already-tried spot.
+					// Spatial diversity: the priced ranking clusters
+					// at one departure spot; distinct exits (mid-
+					// face AND crest) must each get their flight.
+					bool close = false;
+					for (const Vec3& tp2 : tried_pts)
+						if (Len(ex.pt - tp2) < 96.f)
+							close = true;
+					if (close)
+						continue;
+					tried_pts.push_back(ex.pt);
 					tried++;
 					Carve::Target ct;
 					ct.face = fi;
@@ -359,19 +370,65 @@ namespace Plan {
 						w, p, g, ct, 5, o.ride_evals);
 					if (!ride.exited)
 						continue;
+					exited++;
 					// FLIGHT: boundary-value solves to the next
-					// face's cells from the REAL exit state.
+					// face's cells from the REAL exit state. When
+					// the exit state cannot see the face directly
+					// (a climb still ahead), the intended exit
+					// sample's own bookkeeping supplies the map.
 					Field::NextCtx fctx2 = xnt.after;
 					Field::FaceMap fm = Field::Compute(
 						ride.end_state.pos, ride.end_state.vel,
 						nf, p, ride.end_state.ducked, 32.f, 300,
 						1.f, &fctx2);
 					if (fm.best < 0)
+						fm = Field::Compute(ex.pt,
+							Scale(ex.dir, ex.pv), nf, p,
+							ride.end_state.ducked, 32.f, 300, 1.f,
+							&fctx2);
+					if (fm.best < 0)
 						continue;
+					mapped++;
 					if (li == 0)
 						RenderHeat(fm, nf);
 					std::vector<CellPick> cells;
+					// The exit's OWN induced landing first - the
+					// (exit, cell) pair the exit map constructed
+					// (mid-face exits serve base cells with short
+					// direct crossings; re-picking cells blind to
+					// the pairing sent every flight at the crest
+					// line's far targets).
+					if (ex.q.have_argmax) {
+						const Vec3 dq = ex.q_argmax - fm.origin;
+						int iu = static_cast<int>(Dot(dq, fm.ud)
+							/ fm.du + 0.5f);
+						int iv = static_cast<int>(Dot(dq, fm.vd)
+							/ fm.dv + 0.5f);
+						if (iu >= 0 && iu < fm.nu && iv >= 0
+							&& iv < fm.nv) {
+							const Field::Sample& sm = fm.samples[
+								static_cast<size_t>(iv) * fm.nu
+								+ iu];
+							if (sm.reachable && fm.e_hi > 0.f
+								&& sm.e_eff / fm.e_hi >= 0.6f) {
+								const float cap2 = sm.e_eff
+									+ sm.residual * sm.residual
+									- 0.6f * fm.e_hi;
+								if (cap2 > 0.f) {
+									CellPick c;
+									c.q = sm.q;
+									c.phi = sm.phi;
+									c.n = sm.n;
+									c.e_eff = sm.e_eff;
+									c.cap = sqrtf(cap2);
+									cells.push_back(c);
+								}
+							}
+						}
+					}
 					PickCells(fm, o.cells_per_leg, &cells);
+					if (!cells.empty())
+						celled++;
 					char fb[48];
 					snprintf(fb, sizeof(fb), "v2 leg%d fly",
 						static_cast<int>(li));
@@ -386,8 +443,13 @@ namespace Plan {
 						Air::Result ar = Air::SolveTransfer(
 							ride.end_state, w, p, g, at, 4,
 							o.air_evals);
-						if (!ar.hit || fabsf(ar.dot) > c.cap)
+						if (!ar.hit)
 							continue;
+						hitc++;
+						if (fabsf(ar.dot) > c.cap) {
+							capped++;
+							continue;
+						}
 						const float e = EnergyAt(ar.end_state,
 							nf.zmin, p);
 						if (e > bestleg.e) {
@@ -398,14 +460,134 @@ namespace Plan {
 						}
 					}
 				}
+				bool via_tap = false;
+				Carve::Result tapr;
+				if (!bestleg.ok) {
+					// ADJOINING-FACE FORM (measured M3 fact: no
+					// clean-air exit exists toward the target
+					// between valley faces - the ride flows into
+					// the strike). Cells still come from the map
+					// (the carve's heat-density schedule + arrival
+					// gradient); ACCEPTANCE is the planner's alone:
+					// kept energy >= the warm ratio of the map's
+					// best. No emergent slam can pass.
+					snprintf(sb, sizeof(sb), "v2 leg%d tap",
+						static_cast<int>(li));
+					Stage(sb);
+					Field::NextCtx fctx3 = xnt.after;
+					Field::FaceMap fme = Field::Compute(state.pos,
+						state.vel, nf, p, state.ducked, 32.f, 300,
+						1.f, &fctx3);
+					if (fme.best < 0 && em.best_pot >= 0) {
+						const Field::ExitSample& bs =
+							em.samples[em.best_pot];
+						fme = Field::Compute(bs.pt,
+							Scale(bs.dir, bs.pv), nf, p,
+							state.ducked, 32.f, 300, 1.f, &fctx3);
+					}
+					Carve::Target ct;
+					ct.face = fi;
+					ct.max_ticks = 320;
+					ct.tap_brush = nf.brush;
+					ct.tap_side = nf.side;
+					ct.tap_face = nfi;
+					if (li + 2 < shape.size())
+						ct.next_face = shape[li + 2];
+					else {
+						ct.next_is_zone = true;
+						ct.zone_min = zmin;
+						ct.zone_max = zmax;
+					}
+					ct.exit_heading = atan2f(
+						nf.centroid.Y - state.pos.Y,
+						nf.centroid.X - state.pos.X);
+					const float s_est = Len2D(state.vel);
+					const float est = s_est > 100.f
+						? Len(nf.centroid - state.pos)
+							/ (s_est * p.dt) : 80.f;
+					ct.aim_tick = est < 10.f ? 10
+						: (est > 240.f ? 240
+							: static_cast<int>(est));
+					ct.tick_w = 0.02f;
+					if (fme.best >= 0) {
+						ct.field_aim = fme.samples[fme.best].q;
+						ct.have_field_aim = true;
+						ct.field_phi = fme.samples[fme.best].phi;
+						ct.field_n = fme.samples[fme.best].n;
+						ct.have_field_arr = true;
+						for (int pass = 0; pass < 2
+							&& ct.cells.empty(); ++pass)
+						for (const Field::Sample& sm
+							: fme.samples) {
+							if (!sm.reachable || sm.e_eff <= 0.f)
+								continue;
+							if (pass == 0 && !sm.run_viable)
+								continue;
+							const float rel = fme.e_hi > 0.f
+								? sm.e_eff / fme.e_hi : 0.f;
+							const int rep = rel >= 0.85f ? 3
+								: (rel >= 0.6f ? 1 : 0);
+							for (int rp = 0; rp < rep
+								&& ct.cells.size() < 192; ++rp) {
+								Carve::Target::Cell cc;
+								cc.q = sm.q;
+								cc.phi = sm.phi;
+								cc.n = sm.n;
+								ct.cells.push_back(cc);
+							}
+						}
+					}
+					std::vector<Carve::Result> alts;
+					Carve::Result cr = Carve::SolveCarve(state, w,
+						p, g, ct, 6, o.zone_evals, &alts, 6);
+					float bke = -1e30f;
+					for (const Carve::Result& a : alts) {
+						const bool tp = !a.exited && a.tick > 0
+							&& a.struck_brush == ct.tap_brush
+							&& a.struck_plane == ct.tap_side;
+						if (!tp)
+							continue;
+						const float kept = Dot(a.end_state.vel,
+							a.end_state.vel) + 2.f * p.gravity
+							* (a.end_state.pos.Z - nf.zmin);
+						if (fme.best >= 0 && fme.e_hi > 0.f
+							&& kept < 0.6f * fme.e_hi)
+							continue;   // below the bar = not a board
+						if (kept > bke) {
+							bke = kept;
+							tapr = a;
+							via_tap = true;
+						}
+					}
+					if (via_tap) {
+						bestleg.ok = true;
+						bestleg.e = bke;
+					}
+				}
 				if (!bestleg.ok) {
 					printf("plan: leg %d NO BOARD UNDER CAP "
-						"(f%d -> f%d, %d exits tried)\n",
-						static_cast<int>(li), fi, nfi, tried);
+						"(f%d -> f%d): exits %d/%d rode out, "
+						"maps %d, cells %d, hits %d, cap-fails "
+						"%d\n", static_cast<int>(li), fi, nfi,
+						exited, tried, mapped, celled, hitc,
+						capped);
 					dead = true;
 					break;
 				}
 				const float e_in = EnergyAt(state, nf.zmin, p);
+				if (via_tap) {
+					Assemble::AppendCarveFrames(&rr.frames, tapr,
+						state.ducked);
+					state = tapr.end_state;
+					rr.board_loss2 += tapr.strike_dot
+						* tapr.strike_dot;
+					rr.legs_done = static_cast<int>(li) + 1;
+					printf("plan: leg %d TAP board f%d dot %.1f | "
+						"E in %.0fk out %.0fk (%.0f u/s @ z%.0f)\n",
+						static_cast<int>(li), nfi, tapr.strike_dot,
+						e_in / 1000.f, bestleg.e / 1000.f,
+						Len(state.vel), state.pos.Z);
+				} else {
 				Assemble::AppendCarveFrames(&rr.frames, bestleg.ride,
 					state.ducked);
 				Assemble::AppendAirFrames(&rr.frames, bestleg.fly,
@@ -420,6 +602,7 @@ namespace Plan {
 					bestleg.fly.dot, e_in / 1000.f,
 					bestleg.e / 1000.f, Len(state.vel),
 					state.pos.Z);
+				}
 			}
 			if (partial) {
 				if (rr.legs_done > partial->legs_done

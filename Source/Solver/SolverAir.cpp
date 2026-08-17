@@ -155,13 +155,22 @@ namespace Air {
 			if (da < r.miss_dist)
 				r.miss_dist = da;
 			if (ev.ncontacts > 0) {
-				if (ev.ncontacts == 1
-					&& ev.contact_brush[0] == face.brush
-					&& ev.contact_plane[0] == face.side) {
+				// The target counts as hit whenever it is AMONG the
+				// tick's contacts (the hull near a face base clips
+				// two planes in one tick - the crease; demanding a
+				// single contact made every base-cell arrival read
+				// as a graze and the boundary-value solves went
+				// hitless there).
+				int tc = -1;
+				for (int c = 0; c < ev.ncontacts; ++c)
+					if (ev.contact_brush[c] == face.brush
+						&& ev.contact_plane[c] == face.side)
+						tc = c;
+				if (tc >= 0) {
 					r.hit = true;
 					r.tick = k + 1;
-					r.pos = ev.contact_pos[0];
-					r.v1 = ev.contact_vel[0];
+					r.pos = ev.contact_pos[tc];
+					r.v1 = ev.contact_vel[tc];
 					r.dot = Dot(r.v1, face.n);
 					r.edge = Board::EdgeDistOut(face, r.pos);
 					r.speed = Len(r.v1);
