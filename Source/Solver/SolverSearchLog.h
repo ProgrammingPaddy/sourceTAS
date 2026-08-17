@@ -89,6 +89,13 @@ namespace SearchLog {
 		// Full-weight overlays (references, the chosen result).
 		void AddRef(const std::string& name, const std::vector<Vec3>& pts);
 
+		// Energy-field heat triangles (the hotspot maps): v01 in [0,1]
+		// colors cold->hot; rendered as translucent surface overlay.
+		struct HeatTri { Vec3 a, b, c; float v = 0.f; };
+		void AddHeat(const Vec3& a, const Vec3& b, const Vec3& c,
+		             float v01);
+		const std::vector<HeatTri>& HeatRef() const { return heat_; }
+
 		// Commit the pending candidate (also called on BeginStage /
 		// StartTraj / at write time).
 		void Flush();
@@ -107,6 +114,7 @@ namespace SearchLog {
 		int cur_stage_ = -1;
 		int cur_ctx_ = -1;
 		std::vector<std::string> contexts_;
+		std::vector<HeatTri> heat_;
 		int tick_ = 0;
 		int eval_counter_ = 0;
 		bool open_ = false;

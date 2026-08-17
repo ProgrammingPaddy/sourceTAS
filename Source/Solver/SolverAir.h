@@ -26,6 +26,13 @@ namespace Solver {
 namespace Air {
 
 	struct Target {
+		// Terminal tangent tracking (testimony 2.1 as construction):
+		// when contact is ballistically imminent the commanded
+		// heading becomes the closed-form tangent-arrival heading.
+		// OFF by default - the gate rows verify tape REPRODUCTION,
+		// which forced-optimal arrivals intentionally diverge from;
+		// the solver turns it on.
+		bool  terminal_tangent = false;
 		int   face = -1;        // Route::Graph face index
 		Vec3  aim;              // point on (or near) the face to reach
 		float dot_cap = 100.f;  // success ceiling on arrival |dot|

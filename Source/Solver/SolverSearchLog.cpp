@@ -102,6 +102,16 @@ namespace SearchLog {
 		cur_stage_ = -1;
 	}
 
+	void Sink::AddHeat(const Vec3& a, const Vec3& b, const Vec3& c,
+	                   float v01) {
+		HeatTri t;
+		t.a = a;
+		t.b = b;
+		t.c = c;
+		t.v = v01 < 0.f ? 0.f : (v01 > 1.f ? 1.f : v01);
+		heat_.push_back(t);
+	}
+
 	void Sink::Flush() {
 		CommitPending();
 	}
@@ -339,7 +349,24 @@ gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(geoP),gl.STATIC_DRAW);
 gl.bindBuffer(gl.ARRAY_BUFFER,gC);
 gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(geoC),gl.STATIC_DRAW);
 const geoN=geoP.length/3;
-let showGeo=true;
+let showGeo=true,showHeat=true;
+// Energy heat triangles: cold blue -> yellow -> hot red.
+function heatColor(v){
+if(v<0.5){const t=v*2;return [40+40*t,60+150*t,200-90*t];}
+const t=(v-0.5)*2;return [80+175*t,210-140*t,110-80*t];}
+const heatP=[],heatC=[];
+for(const h of (D.heat||[])){
+const col=heatColor(h[9]);
+const a=Math.round(90+120*h[9]);
+for(let k=0;k<3;k++){
+heatP.push(h[k*3],h[k*3+1],h[k*3+2]);
+heatC.push(col[0],col[1],col[2],a);}}
+const hP=gl.createBuffer(),hC=gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,hP);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(heatP),gl.STATIC_DRAW);
+gl.bindBuffer(gl.ARRAY_BUFFER,hC);
+gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(heatC),gl.STATIC_DRAW);
+const heatN=heatP.length/3;
 // UI state
 let evCut=maxEval,pctCut=1.0,alpha=0.22,selId=-1,selDesc=null;
 // Selection lineage: contexts are chain prefixes, so descendants of
@@ -424,6 +451,12 @@ if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
 gl.viewport(0,0,w,h);
 gl.clearColor(0.043,0.055,0.078,1);gl.clear(gl.COLOR_BUFFER_BIT);
 const m=mat();gl.uniformMatrix4fv(uM,false,m);
+if(showHeat&&heatN){gl.uniform1f(uA,0.55);
+gl.bindBuffer(gl.ARRAY_BUFFER,hP);
+gl.vertexAttribPointer(aP,3,gl.FLOAT,false,0,0);
+gl.bindBuffer(gl.ARRAY_BUFFER,hC);
+gl.vertexAttribPointer(aC,4,gl.UNSIGNED_BYTE,true,0,0);
+gl.drawArrays(gl.TRIANGLES,0,heatN);}
 if(showGeo&&geoN){gl.uniform1f(uA,1.0);
 gl.bindBuffer(gl.ARRAY_BUFFER,gP);
 gl.vertexAttribPointer(aP,3,gl.FLOAT,false,0,0);
@@ -528,6 +561,13 @@ l.innerHTML='<input type="checkbox" checked><span class="n">map geometry'+
 '</span>';
 l.firstChild.addEventListener("change",e=>{showGeo=e.target.checked;});
 ovlDiv.appendChild(l);}
+if(heatN){const l=document.createElement("label");
+l.title="hotspot field: effective energy of the best possible board at "+
+"each landing point (cold blue = poor, red = hot)";
+l.innerHTML='<input type="checkbox" checked><span class="n">energy heat'+
+'</span>';
+l.firstChild.addEventListener("change",e=>{showHeat=e.target.checked;});
+ovlDiv.appendChild(l);}
 const stDiv=document.getElementById("stages");
 const kept=D.stages.map(()=>0);
 for(let i=0;i<NT;i++)kept[T[i][0]]++;
@@ -612,6 +652,14 @@ rebuild();draw();
 					static_cast<int>(t.pts.size()), t.ctx);
 				off += static_cast<int>(t.pts.size());
 			}
+		}
+		js += "],\"heat\":[";
+		for (size_t i = 0; i < sink.HeatRef().size(); ++i) {
+			const Sink::HeatTri& h = sink.HeatRef()[i];
+			AppendF(&js, "%s[%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,"
+				"%.0f,%.0f,%.2f]", i ? "," : "", h.a.X, h.a.Y,
+				h.a.Z, h.b.X, h.b.Y, h.b.Z, h.c.X, h.c.Y, h.c.Z,
+				h.v);
 		}
 		js += "],\"pts\":\"" + b64 + "\",\"geo\":{";
 		js += "\"boxes\":[";

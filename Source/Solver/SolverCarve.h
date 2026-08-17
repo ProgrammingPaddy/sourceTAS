@@ -57,6 +57,10 @@ namespace Carve {
 		// ill-conditioned - and stage 3 chains the full vector anyway.
 		Vec3  aim_vel;
 		float vel_w = 0.f;
+		// Terminal tangent tracking for the tap flight (testimony
+		// 2.1 as construction). OFF by default (gate rows verify
+		// tape reproduction); the solver turns it on.
+		bool  terminal_tangent = false;
 		// Allow the DUCK-OFF exit move: pressing duck while riding
 		// applies the +8.5 air-duck origin shift and pops the hull off
 		// the face, separating with the in-plane velocity intact (the

@@ -103,8 +103,59 @@ namespace Carve {
 		r.yaw.reserve(horizon);
 		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
+		// Terminal tangent tracking for the tap flight (testimony 2.1
+		// as construction - same law as the air primitive).
+		const float t_hn = tapf ? sqrtf(tapf->n.X * tapf->n.X
+			+ tapf->n.Y * tapf->n.Y) : 0.f;
+		const float t_psi = tapf ? atan2f(tapf->n.Y, tapf->n.X) : 0.f;
+		// LATCHED terminal tracking (see SolverAir - a naive
+		// engagement condition chatters as turning reduces closing).
+		bool term_latch = false;
+		float term_phi = 0.f;
 		for (int k = 0; k < horizon; ++k) {
-			const float theta = SplineEval(knots, k, sh);
+			float theta = SplineEval(knots, k, sh);
+			if (t.terminal_tangent && tapf && have_exit
+				&& t_hn > 1e-4f) {
+				const float off = Dot(tapf->n, s.pos) - tapf->d;
+				const float closing = -Dot(tapf->n, s.vel);
+				if (off > 0.f && closing > 1.f) {
+					const float n_hit = off / (closing * p.dt);
+					if (n_hit < 90.f) {
+						const float s2dn = Len2D(s.vel);
+						const float vz_hit = s.vel.Z
+							- p.gravity * s.gravity_scale * p.dt
+							* n_hit;
+						float cphi = s2dn * t_hn > 1e-4f
+							? -vz_hit * tapf->n.Z / (s2dn * t_hn)
+							: 0.f;
+						if (cphi > 1.f) cphi = 1.f;
+						if (cphi < -1.f) cphi = -1.f;
+						const float po = acosf(cphi);
+						const float hcur = s2dn > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : theta;
+						const float ca = WrapPi(t_psi + po);
+						const float cb = WrapPi(t_psi - po);
+						const float phi_t =
+							fabsf(WrapPi(ca - hcur))
+								<= fabsf(WrapPi(cb - hcur))
+							? ca : cb;
+						const float need =
+							fabsf(WrapPi(phi_t - hcur));
+						Strafe::TickLaw tl = Strafe::Law(p, s2dn,
+							1.f, s.ducked);
+						const float rate = tl.TurnRad(0.f, 1.f);
+						if (!term_latch && rate > 1e-5f
+							&& n_hit <= need / rate + 1.f)
+							term_latch = true;
+						if (term_latch)
+							term_phi = phi_t;
+					}
+				}
+			} else if (!have_exit) {
+				term_latch = false;   // back on the face: reset
+			}
+			if (term_latch && have_exit)
+				theta = term_phi;
 			float yaw_deg = 0.f, fmove = 0.f, smove = 0.f;
 			bool strafe_tick = true;
 			if (effort) {

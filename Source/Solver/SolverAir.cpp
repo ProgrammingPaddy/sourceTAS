@@ -65,8 +65,63 @@ namespace Air {
 		r.yaw.reserve(horizon);
 		r.fmove.reserve(horizon);
 		r.smove.reserve(horizon);
+		// Terminal tangent tracking (testimony 2.1 as CONSTRUCTION):
+		// when contact is ballistically imminent, the commanded
+		// heading becomes the closed-form tangent-arrival heading for
+		// the CURRENT state - the arrival attitude stops being a
+		// searched dimension. Engages inside the law-derived turn
+		// horizon (ticks needed at the free-turn rate + 1).
+		const float t_hn = sqrtf(face.n.X * face.n.X
+			+ face.n.Y * face.n.Y);
+		const float t_psi = atan2f(face.n.Y, face.n.X);
+		// LATCHED: turning toward tangent reduces the closing rate,
+		// which grows the predicted impact time, which would
+		// disengage a naive condition - bang-bang chatter that lands
+		// mid-hard (measured -381 vs -162). Once inside the turn
+		// horizon, track the (moving) tangent target until contact.
+		bool term_latch = false;
+		float term_phi = 0.f;
 		for (int k = 0; k < horizon; ++k) {
-			const float theta = SplineEval(knots, k, sh);
+			float theta = SplineEval(knots, k, sh);
+			if (t.terminal_tangent && t_hn > 1e-4f) {
+				const float off = Dot(face.n, s.pos) - face.d;
+				const float closing = -Dot(face.n, s.vel);
+				if (off > 0.f && closing > 1.f) {
+					const float n_hit = off / (closing * p.dt);
+					if (n_hit < 90.f) {
+						const float s2dn = Len2D(s.vel);
+						const float vz_hit = s.vel.Z
+							- p.gravity * s.gravity_scale * p.dt
+							* n_hit;
+						float cphi = s2dn * t_hn > 1e-4f
+							? -vz_hit * face.n.Z / (s2dn * t_hn)
+							: 0.f;
+						if (cphi > 1.f) cphi = 1.f;
+						if (cphi < -1.f) cphi = -1.f;
+						const float po = acosf(cphi);
+						const float hcur = s2dn > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : theta;
+						const float ca = WrapPi(t_psi + po);
+						const float cb = WrapPi(t_psi - po);
+						const float phi_t =
+							fabsf(WrapPi(ca - hcur))
+								<= fabsf(WrapPi(cb - hcur))
+							? ca : cb;
+						const float need =
+							fabsf(WrapPi(phi_t - hcur));
+						Strafe::TickLaw tl = Strafe::Law(p, s2dn,
+							1.f, s.ducked);
+						const float rate = tl.TurnRad(0.f, 1.f);
+						if (!term_latch && rate > 1e-5f
+							&& n_hit <= need / rate + 1.f)
+							term_latch = true;
+						if (term_latch)
+							term_phi = phi_t;
+					}
+				}
+			}
+			if (term_latch)
+				theta = term_phi;
 			float yaw_deg, fmove, smove;
 			ctl.Tick(s, p, theta, k, &yaw_deg, &fmove, &smove);
 			TickEvents ev;

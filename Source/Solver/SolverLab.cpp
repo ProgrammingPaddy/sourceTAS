@@ -28,6 +28,7 @@
 #include "SolverLedger.h"
 #include "SolverRouteSearch.h"
 #include "SolverAssemble.h"
+#include "SolverField.h"
 #include "SolverParams.h"
 #include "SolverSearchLog.h"
 #include "SolverSmooth.h"
@@ -3512,6 +3513,216 @@ namespace {
 		return tap_hit ? 0 : 2;
 	}
 
+	// fieldgate: validate THE HOTSPOT FIELD against real runs (tapes
+	// are VALIDATION ONLY, never seeding). For every transfer in each
+	// tape (airborne stretch >= 8 ticks ending on a graph surf face),
+	// compute the field from the separation state and rank the ACTUAL
+	// strike point inside it. A correct field lights up where a good
+	// player actually boards and stays cold where the old solver
+	// slammed. Writes a heat-overlay report beside the run reports.
+	int CmdFieldGate(const std::string& map_path, const ReplayOpts& o,
+	                 const std::vector<std::string>& tapes) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("fieldgate: %s\n", err.c_str());
+			return 1;
+		}
+		SearchLog::Sink sink;
+		int ev_total = 0, hot = 0, warm = 0, cold = 0;
+		for (const std::string& tp : tapes) {
+			Tape tape;
+			if (!LoadTas(tp, tape, &err)) {
+				printf("fieldgate: %s: %s\n", tp.c_str(), err.c_str());
+				continue;
+			}
+			std::string tname = tp;
+			const size_t sl = tname.find_last_of("\\/");
+			if (sl != std::string::npos)
+				tname = tname.substr(sl + 1);
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			{
+				TraceResult tr;
+				const float gf = w.TraceHull(s.pos,
+					s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+				if (gf < 1.f && tr.brush >= 0
+					&& tr.normal.Z >= o.params.walkable_z) {
+					s.pos.Z -= 2.f * gf;
+					s.on_ground = true;
+					s.ground_brush = tr.brush;
+				}
+			}
+			std::vector<Vec3> refpts;
+			refpts.push_back(s.pos);
+			int air = 0;
+			PlayerState sep;
+			for (size_t t = 0; t < tape.frames.size(); ++t) {
+				const TapeFrame& fr = tape.frames[t];
+				TickEvents ev;
+				MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+					fr.smove, fr.umove, fr.buttons, &ev);
+				if (t % 2 == 0)
+					refpts.push_back(s.pos);
+				if (ev.ncontacts > 0) {
+					int fidx = -1;
+					for (size_t fi = 0; fi < g.faces.size(); ++fi)
+						if (g.faces[fi].brush == ev.contact_brush[0]
+							&& g.faces[fi].side
+								== ev.contact_plane[0])
+							fidx = static_cast<int>(fi);
+					if (fidx >= 0 && air >= 8) {
+						const Route::Face& fc = g.faces[fidx];
+						Field::FaceMap fm = Field::Compute(sep.pos,
+							sep.vel, fc, o.params, sep.ducked,
+							24.f);
+						const Vec3& cp = ev.contact_pos[0];
+						const float adot = Dot(ev.contact_vel[0],
+							fc.n);
+						std::string klass = "NO-MAP";
+						float ratio = -1.f;
+						if (fm.best >= 0
+							&& !fm.samples.empty()) {
+							const Vec3 dq = cp - fm.origin;
+							int iu = static_cast<int>(
+								Dot(dq, fm.ud) / fm.du + 0.5f);
+							int iv = static_cast<int>(
+								Dot(dq, fm.vd) / fm.dv + 0.5f);
+							if (iu < 0) iu = 0;
+							if (iu >= fm.nu) iu = fm.nu - 1;
+							if (iv < 0) iv = 0;
+							if (iv >= fm.nv) iv = fm.nv - 1;
+							const Field::Sample& hs =
+								fm.samples[static_cast<size_t>(
+									iv) * fm.nu + iu];
+							const Field::Sample& bs =
+								fm.samples[fm.best];
+							if (hs.reachable && bs.e_eff > 0.f) {
+								ratio = hs.e_eff / bs.e_eff;
+								klass = ratio >= 0.85f ? "HOT"
+									: (ratio >= 0.6f ? "WARM"
+										: "COLD");
+							} else {
+								klass = "UNREACHABLE";
+							}
+							if (klass == "HOT") hot++;
+							else if (klass == "WARM") warm++;
+							else cold++;
+							printf("fieldgate: %s t%4d face %d | "
+								"sep (%.0f,%.0f,%.0f) v(%.0f,"
+								"%.0f,%.0f) | strike (%.0f,%.0f,"
+								"%.0f) dot %.1f | field ratio "
+								"%.2f freeturn %d | best e %.0f "
+								"@(%.0f,%.0f,%.0f) res %.1f | "
+								"%s\n", tname.c_str(),
+								static_cast<int>(t), fidx,
+								sep.pos.X, sep.pos.Y, sep.pos.Z,
+								sep.vel.X, sep.vel.Y, sep.vel.Z,
+								cp.X, cp.Y, cp.Z, adot, ratio,
+								hs.free_turn ? 1 : 0,
+								sqrtf(bs.e_eff > 0.f
+									? bs.e_eff : 0.f),
+								bs.q.X, bs.q.Y, bs.q.Z,
+								bs.residual, klass.c_str());
+							// Heat overlay for the first few maps.
+							if (ev_total < 8) {
+								for (int qv = 0; qv < fm.nv; ++qv)
+								for (int qu = 0; qu < fm.nu;
+									++qu) {
+									const Field::Sample& sm =
+										fm.samples[
+										static_cast<size_t>(qv)
+										* fm.nu + qu];
+									if (!sm.reachable)
+										continue;
+									float v01 = fm.e_hi > fm.e_lo
+										? (sm.e_eff - fm.e_lo)
+											/ (fm.e_hi - fm.e_lo)
+										: 1.f;
+									if (!sm.free_turn)
+										v01 *= 0.4f;
+									const Vec3 lift =
+										Scale(fc.n, 2.f);
+									const Vec3 c00 = sm.q + lift
+										- Scale(fm.ud,
+											fm.du * 0.5f)
+										- Scale(fm.vd,
+											fm.dv * 0.5f);
+									const Vec3 c10 = c00
+										+ Scale(fm.ud, fm.du);
+									const Vec3 c01 = c00
+										+ Scale(fm.vd, fm.dv);
+									const Vec3 c11 = c10
+										+ Scale(fm.vd, fm.dv);
+									sink.AddHeat(c00, c10, c11,
+										v01);
+									sink.AddHeat(c00, c11, c01,
+										v01);
+								}
+								// Strike marker: a small cross.
+								std::vector<Vec3> cross;
+								cross.push_back(cp
+									+ Vec3(-14.f, 0.f, 0.f));
+								cross.push_back(cp
+									+ Vec3(14.f, 0.f, 0.f));
+								cross.push_back(cp);
+								cross.push_back(cp
+									+ Vec3(0.f, -14.f, 0.f));
+								cross.push_back(cp
+									+ Vec3(0.f, 14.f, 0.f));
+								cross.push_back(cp);
+								cross.push_back(cp
+									+ Vec3(0.f, 0.f, -14.f));
+								cross.push_back(cp
+									+ Vec3(0.f, 0.f, 14.f));
+								sink.AddRef("strike markers",
+									cross);
+							}
+							ev_total++;
+						}
+					}
+					air = 0;
+				} else if (!s.on_ground) {
+					if (air == 0)
+						sep = s;
+					air++;
+				} else {
+					air = 0;
+				}
+			}
+			sink.AddRef("REF " + tname, refpts);
+		}
+		printf("fieldgate: %d events | HOT %d WARM %d COLD %d\n",
+			ev_total, hot, warm, cold);
+		CreateDirectoryA("Output", nullptr);
+		CreateDirectoryA("Output\\reports", nullptr);
+		time_t now = time(nullptr);
+		struct tm tmv;
+		localtime_s(&tmv, &now);
+		char st[64];
+		strftime(st, sizeof(st), "%m%d-%H%M%S", &tmv);
+		const std::string vp = std::string("Output\\reports\\field_")
+			+ st + ".html";
+		std::string verr;
+		if (SearchLog::WriteHtml(vp, w, g, sink,
+			"hotspot field validation", &verr))
+			printf("fieldgate: heat report -> %s\n", vp.c_str());
+		else
+			printf("fieldgate: VIZ WRITE FAILED: %s\n", verr.c_str());
+		fflush(stdout);
+		return 0;
+	}
+
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
 	// Replay certified tapes through the exact sim, collect every SURF
 	// contact (contacted plane normal.z < walkable), and verify each
@@ -6237,6 +6448,16 @@ int main(int argc, char** argv) {
 		return CmdMapInfo(argv[2]);
 	if (cmd == "tapeinfo")
 		return CmdTapeInfo(argc >= 3 ? argv[2] : nullptr);
+	if (cmd == "fieldgate" && argc >= 4) {
+		ReplayOpts o;
+		std::vector<std::string> tapes;
+		int i = 3;
+		for (; i < argc && argv[i][0] != '-'; ++i)
+			tapes.push_back(argv[i]);
+		if (!ParseCommon(argc, argv, i, o))
+			return 1;
+		return CmdFieldGate(argv[2], o, tapes);
+	}
 	if (cmd == "tapprobe" && argc >= 7) {
 		ReplayOpts o;
 		int evals = 4000;

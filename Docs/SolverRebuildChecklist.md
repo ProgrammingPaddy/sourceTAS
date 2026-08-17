@@ -449,6 +449,39 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-17 (session 3a, THE HOTSPOT FIELD - user's framework
+  observation, built + validated): `SolverField.h` computes, from
+  any state and target face, the EFFECTIVE ENERGY of every landing
+  point under best approach + optimal board - closed forms only
+  (M1.1 ballistic roots both branches, DMax reachability, gain-law
+  arrival speed, M1.2 tangency residual + tangent heading, turn
+  need vs the certified free-turn budget + brake ceiling). LESSON
+  BAKED IN: the currency must be TOTAL mechanical energy (kinetic +
+  2g*(z - zmin)); kinetic-only wrongly sent every best point to the
+  face bottom (fall speed looked free; a high tangent board keeps
+  its potential for the ride to convert losslessly). VALIDATION
+  (`fieldgate`, tapes as validation only): the human's three boards
+  rate 1.00 / 1.00 / 0.99 - face 0's argmax lands within ~20u of
+  the human's actual strike. DISCOVERY from the negative control:
+  solved12's slams also sit at HOT positions - their failures were
+  EXECUTION (arrival attitude), not placement; on this map position
+  is broadly forgiving and attitude is the binding constraint. The
+  field renders as a HEAT OVERLAY in the reports (AddHeat + energy
+  heat toggle; fieldgate writes field_*.html with strike markers).
+  TERMINAL TANGENT CONTROLLER v1 (testimony 2.1 as construction):
+  built latched (naive engagement chatters - turning lowers closing
+  which grows predicted impact time); A/B on the 0->2 probe shows
+  the greedy override is NET NEGATIVE (-381 vs -162 free search:
+  rate-limited tracking lags the MOVING tangent target while the
+  free search plans the whole final arc). Flag `terminal_tangent`
+  stays in both primitives, enables OFF everywhere; the next form
+  should PLAN the final arc backward from the arrival, not track
+  greedily. FAMILY-DILUTION LAW (measured): probe quality follows
+  PER-FAMILY budget - the -162 0->2 recovers exactly at 27k evals
+  with 18 families (= the old 500/family that found it at 12 fams).
+  Family count is not free; NEXT: prune families by win-rate data,
+  then re-express budgets. Gates green throughout (airsolve 12/12
+  with terminal off by default, carve 10/10).
 - 2026-08-16 (session 2h, TRIED AND REVERTED at user direction):
   interpreted the report observation "arrivals below the surfable
   plane dying on the bottom vertical border" as a geometric dead
