@@ -28,12 +28,15 @@ namespace Solver {
 namespace Assemble {
 
 	struct Opts {
-		double wall_budget_s = 110.0;
+		double wall_budget_s = 170.0;
 		int    air_evals = 3000;
-		int    carve_evals = 12000;  // the unified transfer needs the
-		                             // arrival-shaping budget (probe-
-		                             // measured: dot -395 at 4k evals,
-		                             // -163 at 12k on the 0->2 case)
+		int    carve_evals = 24000;  // the family-dilution law: solve
+		                             // quality tracks PER-FAMILY
+		                             // budget (probe-measured: the
+		                             // 0->2 -162 needs ~500/family =
+		                             // 24k at 18 families x 2 domains;
+		                             // 12k found only -390s). Prune
+		                             // families to bring this down.
 		int    max_shapes = 10;
 	};
 

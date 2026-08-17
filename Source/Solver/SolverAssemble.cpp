@@ -1,4 +1,4 @@
-﻿#include "SolverAssemble.h"
+#include "SolverAssemble.h"
 
 #include <float.h>
 #include <math.h>
@@ -397,7 +397,7 @@ namespace Assemble {
 					ct0.tick_w = 0.02f;
 					Carve::Result c0 = Carve::SolveCarve(
 						ar.end_state, w, p, g, ct0, 6, 8000);
-					const bool tap0 = !c0.exited
+					const bool tap0 = !c0.exited && c0.tick > 0
 						&& c0.struck_brush == ct0.tap_brush
 						&& c0.struck_plane == ct0.tap_side;
 					const float dsc = tap0
@@ -520,17 +520,23 @@ namespace Assemble {
 							g_fam_wins[lo.cr.family]++;
 						auto TapScore =
 							[&](const Carve::Result& c) -> float {
-							const bool tp = !c.exited
+							const bool tp = !c.exited && c.tick > 0
 								&& c.struck_brush == ct.tap_brush
 								&& c.struck_plane == ct.tap_side;
-							// CARRY speed after the next-leg
-							// obligation (see Carve::Score).
-							return tp
-								? 0.6f * fabsf(c.strike_dot)
-									- 0.01f
-									* (Len2D(c.end_state.vel)
-										- c.next_cost)
-								: 1e6f + c.miss_dist;
+							if (!tp)
+								return 1e6f + c.miss_dist;
+							// SELECTION prices by ENERGY (potential-
+							// ledger units), separate from the
+							// search-shaping score inside SolveCarve
+							// (softness+carry, which finds diverse
+							// rideable strikes). Measured: the soft
+							// -7.5 tap carries 440 where the ending
+							// needs ~850; the energy pick keeps the
+							// fast rideable alternative.
+							const float cv = Len(c.end_state.vel)
+								- c.next_cost;
+							return -(cv * cv) * 0.001f + 0.9f
+								* static_cast<float>(c.tick);
 						};
 						lo.sc = TapScore(lo.cr);
 						if (multi) {
@@ -590,12 +596,31 @@ namespace Assemble {
 							rim2.Y = ct.zone_max.Y;
 						const float fdx = rim2.X - farv.X;
 						const float fdy = rim2.Y - farv.Y;
-						const float path = far_d
-							+ sqrtf(fdx * fdx + fdy * fdy);
-						const float ez = s_est > 100.f
-							? path / (s_est * p.dt) : 120.f;
+						const float fly_d = sqrtf(fdx * fdx
+							+ fdy * fdy);
+						// The climbing ride DECELERATES (2g*dz of
+						// speed^2 spent to the crest) - an entry-
+						// speed estimate halves the real domain
+						// and the runway families turn out
+						// mid-face. Crest speed from the energy
+						// law prices the ride; the flight flies
+						// at crest speed.
+						float zmax_f = lfc.centroid.Z;
+						for (const Vec3& v : lfc.verts)
+							if (v.Z > zmax_f)
+								zmax_f = v.Z;
+						const float dzc = zmax_f - entry.pos.Z;
+						const float sc2 = s_est * s_est
+							- 2.f * p.gravity
+							* (dzc > 0.f ? dzc : 0.f);
+						const float s_crest = sc2 > 10000.f
+							? sqrtf(sc2) : 100.f;
+						const float ride_t = far_d
+							/ (0.5f * (s_est + s_crest));
+						const float fly_t = fly_d / s_crest;
+						const float ez = (ride_t + fly_t) / p.dt;
 						ct.aim_tick = ez < 10.f ? 10
-							: (ez > 240.f ? 240
+							: (ez > 300.f ? 300
 								: static_cast<int>(ez));
 						std::vector<Carve::Result> calts;
 						lo.cr = Carve::SolveCarve(entry, w, p, g,
@@ -789,7 +814,7 @@ namespace Assemble {
 				Carve::Result& cr = lo.cr;
 				const Carve::Target& ct = lo.ct;
 				auto tapped = [&](const Carve::Result& c) {
-					return !c.exited && ct.tap_brush >= 0
+					return !c.exited && c.tick > 0 && ct.tap_brush >= 0
 						&& c.struck_brush == ct.tap_brush
 						&& c.struck_plane == ct.tap_side;
 				};
@@ -822,10 +847,12 @@ namespace Assemble {
 						* cr.strike_dot;
 					skip_air = true;
 					printf("assemble: leg %d TRANSFER -> face %d "
-						"dot %.1f at (%.0f,%.0f,%.0f v %.0f)\n",
+						"dot %.1f at (%.0f,%.0f,%.0f) v(%.0f,"
+						"%.0f,%.0f)\n",
 						static_cast<int>(li), shape[li + 1],
 						cr.strike_dot, cur.pos.X, cur.pos.Y,
-						cur.pos.Z, Len2D(cur.vel));
+						cur.pos.Z, cur.vel.X, cur.vel.Y,
+						cur.vel.Z);
 					snprintf(cb, sizeof(cb),
 						" | L%d tap f%d %.0f @(%.0f,%.0f,%.0f) "
 						"v%.0f", static_cast<int>(li),

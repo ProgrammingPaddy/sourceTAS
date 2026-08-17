@@ -3513,6 +3513,161 @@ namespace {
 		return tap_hit ? 0 : 2;
 	}
 
+	// stateprobe: the tap/zone transfer solve from an EXPLICIT state
+	// (position + velocity) - the fast iteration loop for mid-chain
+	// entries the tape probes cannot reach. tap_face -1 = zone mode.
+	int CmdStateProbe(const std::string& map_path, const ReplayOpts& o,
+	                  const Vec3& pos, const Vec3& vel, int ride_face,
+	                  int tap_face, int evals) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("stateprobe: %s\n", err.c_str());
+			return 1;
+		}
+		const bool zone_mode = tap_face < 0;
+		if (ride_face < 0
+			|| ride_face >= static_cast<int>(g.faces.size())
+			|| (!zone_mode
+				&& tap_face >= static_cast<int>(g.faces.size()))) {
+			printf("stateprobe: face out of range\n");
+			return 1;
+		}
+		int zone_idx = -1;
+		if (zone_mode) {
+			std::vector<int> reds;
+			w.FindZoneBrushes(nullptr, &reds);
+			if (reds.empty()) {
+				printf("stateprobe: no red end zone\n");
+				return 1;
+			}
+			zone_idx = w.IndexOfBrushId(reds[0]);
+		}
+		PlayerState s;
+		s.pos = pos;
+		s.vel = vel;
+		Carve::Target ct;
+		ct.face = ride_face;
+		ct.max_ticks = 320;
+		Vec3 aim_at;
+		if (zone_mode) {
+			const WorldBrush& zb = w.brushes[zone_idx];
+			ct.to_zone = true;
+			Assemble::ZoneVolume(zb, &ct.zone_min, &ct.zone_max);
+			aim_at = s.pos;
+			if (aim_at.X < ct.zone_min.X) aim_at.X = ct.zone_min.X;
+			if (aim_at.X > ct.zone_max.X) aim_at.X = ct.zone_max.X;
+			if (aim_at.Y < ct.zone_min.Y) aim_at.Y = ct.zone_min.Y;
+			if (aim_at.Y > ct.zone_max.Y) aim_at.Y = ct.zone_max.Y;
+			aim_at.Z = ct.zone_min.Z;
+			// The ending's spline domain spans the runway path.
+			const Route::Face& rf = g.faces[ride_face];
+			float far_d = 0.f;
+			Vec3 farv = rf.centroid;
+			for (const Vec3& v : rf.verts) {
+				const float dx = v.X - s.pos.X;
+				const float dy = v.Y - s.pos.Y;
+				const float d = sqrtf(dx * dx + dy * dy);
+				if (d > far_d) {
+					far_d = d;
+					farv = v;
+				}
+			}
+			Vec3 rim2 = farv;
+			if (rim2.X < ct.zone_min.X) rim2.X = ct.zone_min.X;
+			if (rim2.X > ct.zone_max.X) rim2.X = ct.zone_max.X;
+			if (rim2.Y < ct.zone_min.Y) rim2.Y = ct.zone_min.Y;
+			if (rim2.Y > ct.zone_max.Y) rim2.Y = ct.zone_max.Y;
+			const float fdx = rim2.X - farv.X;
+			const float fdy = rim2.Y - farv.Y;
+			const float fly_d = sqrtf(fdx * fdx + fdy * fdy);
+			// Crest-decelerated domain estimate (see assembler).
+			float zmax_f = rf.centroid.Z;
+			for (const Vec3& v : rf.verts)
+				if (v.Z > zmax_f)
+					zmax_f = v.Z;
+			const float s2d0 = Len2D(s.vel);
+			const float dzc = zmax_f - s.pos.Z;
+			const float sc2 = s2d0 * s2d0
+				- 2.f * o.params.gravity * (dzc > 0.f ? dzc : 0.f);
+			const float s_crest = sc2 > 10000.f ? sqrtf(sc2) : 100.f;
+			const float ride_t = far_d / (0.5f * (s2d0 + s_crest));
+			const float fly_t = fly_d / s_crest;
+			const float ez = (ride_t + fly_t) / o.params.dt;
+			ct.aim_tick = ez < 10.f ? 10
+				: (ez > 300.f ? 300 : static_cast<int>(ez));
+		} else {
+			const Route::Face& nf = g.faces[tap_face];
+			ct.tap_brush = nf.brush;
+			ct.tap_side = nf.side;
+			ct.tap_face = tap_face;
+			aim_at = nf.centroid;
+			const float s2d0 = Len2D(s.vel);
+			const float ez = s2d0 > 100.f
+				? Len(aim_at - s.pos) / (s2d0 * o.params.dt) : 80.f;
+			ct.aim_tick = ez < 10.f ? 10
+				: (ez > 240.f ? 240 : static_cast<int>(ez));
+		}
+		ct.exit_heading = atan2f(aim_at.Y - s.pos.Y,
+			aim_at.X - s.pos.X);
+		ct.tick_w = 0.02f;
+		printf("stateprobe: entry (%.0f,%.0f,%.0f) v(%.0f,%.0f,%.0f) "
+			"s2d %.0f | ride face %d -> %s | aim_tick %d\n",
+			s.pos.X, s.pos.Y, s.pos.Z, s.vel.X, s.vel.Y, s.vel.Z,
+			Len2D(s.vel), ride_face,
+			zone_mode ? "ZONE" : "tap", ct.aim_tick);
+		Carve::Result cr = Carve::SolveCarve(s, w, o.params, g, ct, 6,
+			evals);
+		const bool ok = cr.zoned || (!zone_mode && !cr.exited
+			&& cr.struck_brush == ct.tap_brush
+			&& cr.struck_plane == ct.tap_side);
+		printf("stateprobe: %s | tick %d | dot %.1f | end (%.0f,%.0f,"
+			"%.0f) v(%.0f,%.0f,%.0f) | miss %.1f reach %.1f | "
+			"grounded %d struck %d | family %d\n",
+			cr.zoned ? "ZONE ENTRY" : (ok ? "TAP STRIKE"
+				: "FAIL"), cr.tick, cr.strike_dot, cr.end_pos.X,
+			cr.end_pos.Y, cr.end_pos.Z, cr.end_state.vel.X,
+			cr.end_state.vel.Y, cr.end_state.vel.Z, cr.miss_dist,
+			cr.reach_short, cr.grounded ? 1 : 0, cr.struck_brush,
+			cr.family);
+		// The winner, tick by tick (every 4th + endings).
+		PlayerState rs = s;
+		const int nfr = static_cast<int>(cr.yaw.size());
+		for (int k = 0; k < nfr; ++k) {
+			TickEvents ev;
+			MoveTick(rs, w, o.params, 0.f, cr.yaw[k], cr.fmove[k],
+				cr.smove[k], 0.f,
+				(s.ducked ? IN_DUCK : 0)
+					| (cr.duck_at >= 0 && k >= cr.duck_at
+						? IN_DUCK : 0), &ev);
+			int cb = -1;
+			float dot = 0.f;
+			if (ev.ncontacts > 0) {
+				cb = w.brushes[ev.contact_brush[0]].id;
+				dot = Dot(ev.contact_vel[0],
+					w.brushes[ev.contact_brush[0]]
+						.n[ev.contact_plane[0]]);
+			}
+			if (k % 4 == 0 || ev.ncontacts > 0 || rs.on_ground
+				|| k + 1 == nfr)
+				printf("  k%4d pos(%7.1f,%7.1f,%6.1f) v(%6.1f,"
+					"%6.1f,%6.1f) s2d %5.1f | c%d dot %6.1f%s\n",
+					k, rs.pos.X, rs.pos.Y, rs.pos.Z, rs.vel.X,
+					rs.vel.Y, rs.vel.Z, Len2D(rs.vel), cb, dot,
+					rs.on_ground ? " GROUND" : "");
+			if (rs.on_ground)
+				break;
+		}
+		fflush(stdout);
+		return ok ? 0 : 2;
+	}
+
 	// fieldgate: validate THE HOTSPOT FIELD against real runs (tapes
 	// are VALIDATION ONLY, never seeding). For every transfer in each
 	// tape (airborne stretch >= 8 ticks ending on a graph surf face),
@@ -6494,6 +6649,25 @@ int main(int argc, char** argv) {
 		return CmdMapInfo(argv[2]);
 	if (cmd == "tapeinfo")
 		return CmdTapeInfo(argc >= 3 ? argv[2] : nullptr);
+	if (cmd == "stateprobe" && argc >= 11) {
+		ReplayOpts o;
+		int evals = 12000;
+		int next = 11;
+		if (argc >= 12 && argv[11][0] != '-') {
+			evals = atoi(argv[11]);
+			next = 12;
+		}
+		if (!ParseCommon(argc, argv, next, o))
+			return 1;
+		const Vec3 pp(static_cast<float>(atof(argv[3])),
+			static_cast<float>(atof(argv[4])),
+			static_cast<float>(atof(argv[5])));
+		const Vec3 vv(static_cast<float>(atof(argv[6])),
+			static_cast<float>(atof(argv[7])),
+			static_cast<float>(atof(argv[8])));
+		return CmdStateProbe(argv[2], o, pp, vv, atoi(argv[9]),
+			atoi(argv[10]), evals);
+	}
 	if (cmd == "fieldgate" && argc >= 4) {
 		ReplayOpts o;
 		std::vector<std::string> tapes;

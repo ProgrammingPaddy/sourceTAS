@@ -283,6 +283,24 @@ namespace Carve {
 							have_exit = false;
 							continue;
 						}
+						// RIDEABILITY: a tap that lands on the
+						// exiting branch (off the polygon within
+						// the 3-tick catch window) is a GRAZE,
+						// not a board - the next leg cannot ride
+						// it (measured: -4.7 tangent touches at
+						// the bottom lip bouncing straight off).
+						// Do NOT record it as the struck face -
+						// that poisons the caller's tap check.
+						if (tapf) {
+							const Vec3 proj = s.pos
+								+ Scale(s.vel, 3.f * p.dt);
+							if (Board::EdgeDistOut(*tapf, proj)
+								> 0.f) {
+								air_streak = 0;
+								have_exit = false;
+								continue;
+							}
+						}
 					}
 					r.struck_brush = ev.contact_brush[tc];
 					r.struck_plane = ev.contact_plane[tc];
@@ -392,15 +410,16 @@ namespace Carve {
 				// A strike on the TAP face is the transfer itself:
 				// scored by its own board loss (soft taps beat any
 				// lob that still has a board ahead of it).
-				if (t.tap_brush >= 0
+				if (t.tap_brush >= 0 && r.tick > 0
 					&& r.struck_brush == t.tap_brush
 					&& r.struck_plane == t.tap_side)
-					// Strike loss, minus the speed the landing
-					// actually CARRIES after its obligation to the
-					// next leg (v - next_cost = exact post-climb
-					// speed). Charging the climb additively let a
-					// dead slam look cheaper than a fast landing
-					// that owes a climb - carry inverts correctly.
+					// Strike softness + carry (the energy-currency
+					// form was retried WITH the rideability law
+					// 2026-08-17 and STILL regressed to hard taps -
+					// the score shapes the search trajectory, not
+					// just the pick; this weighting produced the
+					// best measured transfers: -7.5/-54 rideable
+					// landings).
 					return 0.6f * fabsf(r.strike_dot)
 						- 0.01f * (Len2D(r.end_state.vel)
 							- r.next_cost);

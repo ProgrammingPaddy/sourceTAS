@@ -449,6 +449,40 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-17 (session 3d, THE FINISH CAMPAIGN - chains reach human+
+  quality end to end; the ending is one leg away): instruments
+  added: `stateprobe` (tap/zone solve from an EXPLICIT state - the
+  fast loop for mid-chain entries) + full entry-vector TRANSFER
+  prints. THE RIDEABILITY LAW (measured root cause): tangent taps
+  were landing on the EXITING branch of the tangent cone - touch
+  the downhill lip, bounce off; a board the next leg cannot ride is
+  a graze, so tap acceptance now requires the landing to stay on
+  the polygon through the 3-tick catch window (the codebase's own
+  streak constant; rejected touches continue as grazes WITHOUT
+  poisoning the struck record - a first version did and produced
+  phantom zero-state transfers, fixed + tick>0 hardening).
+  SPLIT SCORES (measured resolution of the softness-vs-carry war):
+  the SEARCH keeps 0.6|dot|-0.01*carry (it finds diverse rideable
+  strikes; two energy-currency attempts regressed the search
+  landscape both times), while the assembler's SELECTION among
+  alts/depth-2 prices by ENERGY in potential-ledger units
+  (-carry^2/1000 + 0.9*tick) - soft-but-slow no longer beats
+  fast-and-clean where the route needs the speed.
+  RESULT CHAIN ([0 1 2 3], 24k evals budget 170s): 0->1 -202 @ 953,
+  1->2 -7.5 @ 920, 2->3 -7.5 @ 778 landing (628,-382) north-mid
+  ascending - every transfer at-or-beyond the human's (-115/-206/
+  -142), speed preserved, rideable. THE ENDING (face 3 -> zone)
+  remains the one unfinished leg: probe-characterized as feasible
+  from ~850 entries (the human's 854 crests ~500; our 778 crests
+  ~310; the gap IS the entry speed), so the finish route is either
+  +70 u/s through the chain or a better-banking ending ride.
+  OPEN CRASH (repro catalogued, debug next session):
+  `stateprobe <map> 628 -382 -60 73 771 85 3 -1 36000` dies
+  0xC0000005 before any output; neighboring states (y +382, y
+  -791) run clean; the same entry inside msolvegate does NOT crash.
+  Zone-leg evals note: probe identical at 24k vs 72k pre-crash
+  states - the ending search is landscape-limited, not budget-
+  limited, from sub-850 entries. Gates green all session.
 - 2026-08-17 (session 3c, RUNWAY IN CODE + field-guided aims +
   family win-rate data): Field::Sample now carries run_avail /
   run_req / run_viable with a NextCtx (next face centroid or zone
