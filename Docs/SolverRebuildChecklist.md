@@ -449,6 +449,22 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
+- 2026-08-17 (session 3b, RUNWAY - new testimony, recorded in
+  SolverRebuild.md 2.8b near-verbatim + priority hierarchy #4):
+  runway = usable ramp space after the board point for the action
+  the ride must perform. It is the SELECTOR within the field's
+  energy-equivalent hot areas (the field says where energy
+  survives; runway decides where to land among those). Explains
+  two measured facts retroactively: the human ending's ~60-tick
+  ride (runway as free-energy bank, ~54k wish work) and their
+  face-3 board at the hot area's far edge (space to convert into
+  the climb). Formalization hook written into the doc: per field
+  sample, runway_available (in-plane extent toward the departure
+  region) vs runway_required (law-derived from the action: climb
+  distance / turn arc / energy-bank ticks), ratio = the margin
+  dial, priced at the potential-ledger exchange rate. BUILD NEXT
+  with the field-guided aim wiring. ALSO recorded (user): old
+  solver runs (pre-restructure) are negative comparisons only.
 - 2026-08-17 (session 3a, THE HOTSPOT FIELD - user's framework
   observation, built + validated): `SolverField.h` computes, from
   any state and target face, the EFFECTIVE ENERGY of every landing

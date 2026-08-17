@@ -141,6 +141,51 @@ first ramp that maximizes energy through the rest of the map is MORE
 important than a few extra ticks of falling speed-gain in the zone.**
 The free energy of the start jump must always be taken.
 
+### 2.8b RUNWAY (added 2026-08-17 from the user; preserve near-verbatim)
+Runway = the usable space remaining on the ramp after the board
+point, in the direction of the action the ride must perform. It
+straddles making hard maps easier and making runs faster.
+- A high-level player who simply wants the best chance of beating a
+  map very often (context dependent, like most of surf) chooses the
+  board that provides the MOST runway for the given ramp to perform
+  the action they need. This loosens the margins: more time to build
+  speed on the ramp, a smoother transition from the entry angle to
+  the exit angle, and more precise planning of the next motion.
+- Faster runs sometimes optimize that runway away: it would be
+  easier to have more of the ramp, but less runway gives less room
+  for error and may sacrifice energy in the moment.
+- Runway works IN CONJUNCTION with the energy field (the hotspot
+  map): the field says where energy survives; among energy-
+  equivalent hot points, RUNWAY IS OFTEN THE DECIDING FACTOR.
+  Concrete case read off the validated field (face 3, basictest):
+  the hot area is broad, and the human boards at its far edge
+  specifically to keep enough runway to convert speed into the
+  upward velocity the ending needs — boarding at the other end of
+  the hot area would leave no space remaining to do what's needed.
+- The ratio matters in both directions: the landing needs the
+  optimal ratio of room to make the move to the next target ramp,
+  but giving too much runway takes more ticks and can be slower in
+  some contexts. In other contexts using MORE runway is faster,
+  since it offers the opportunity to build more energy up for free
+  (the measured human ending: ~60 extra ride ticks banking ~54k of
+  wish work the direct crest launch lacks).
+- Once a landing that preserves energy is decided, runway is one of
+  the biggest considerations for WHY a high-level player lands
+  where they land.
+
+FORMALIZATION HOOK (proposal, to build with the field): per field
+sample Q, runway_available = in-plane extent from Q along the
+projected ride direction to the face boundary (toward the departure
+region serving the next objective); runway_required = space the
+KNOWN action needs, derived from laws (climb: dz / face slope;
+entry->exit turn: heading change / free-turn rate x speed x dt;
+energy target: ticks to bank the deficit at the wish-work rate).
+The ratio available/required is the margin dial: consistency mode
+maximizes it, speed mode drives it toward the smallest ratio whose
+action still completes - EXCEPT where extra runway is net-faster
+because banked energy repays the ticks (the potential-ledger
+exchange rate 900/tick prices exactly this trade).
+
 ### 2.8 Skill tells / the loss patterns to kill
 The user can tell a player's skill level immediately from: (1) how
 smoothly they move in the air, (2) how cleanly and efficiently they
@@ -230,6 +275,10 @@ solve time down hard.
 
 ## 6. Validation
 
+- OLD SOLVER RUNS (anything before the big restructure) are to be
+  IGNORED except as negative comparisons - a way to understand what
+  not to do (user, 2026-08-17). The positive references are the
+  human tape(s) and the expert demos.
 - Exact-engine replay + tape verification with existing instruments
   (battery/diff/playback); batch in-game checks into rare sessions —
   the design loop is offline (the user is DONE with relaunch grind).
@@ -260,7 +309,10 @@ contact-anchored random mutation, dissipation-bias heuristics.
    unboardable-fast cases).
 4. Route context: flick targets the next board SUCH THAT it sets up the
    one after (rolling 2-4); skips are first-class options; more energy
-   = more options, so efficiency compounds.
+   = more options, so efficiency compounds. WITHIN energy-equivalent
+   board choices, RUNWAY decides (2.8b): enough room on the ramp to
+   perform the required action, priced against the ticks it costs and
+   the free energy it banks.
 5. Time is the only terminal objective; everything above is
    instrumental to it.
 
