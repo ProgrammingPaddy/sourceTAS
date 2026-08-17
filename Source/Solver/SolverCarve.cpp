@@ -490,6 +490,22 @@ namespace Carve {
 							}
 						}
 					}
+					// AN UNPLANNED TOUCH IS NOT A BOARD (user: a
+					// non-tangent board must not be representable):
+					// tap contact without an engaged tangent-class
+					// arc is refused.
+					if (t.pair_flight && tapf && !arc_on
+						&& ev.contact_brush[tc] == t.tap_brush
+						&& ev.contact_plane[tc] == t.tap_side) {
+						r.doomed = true;
+						r.reach_short = ReachShort(exit_s);
+						r.end_pos = s.pos;
+						r.flips = ctl.flips;
+						RecExit(SearchLog::kDoomed, k + 1);
+						if (lg)
+							lg->EndTraj(SearchLog::kDoomed);
+						return r;
+					}
 					r.struck_brush = ev.contact_brush[tc];
 					r.struck_plane = ev.contact_plane[tc];
 					if (r.struck_brush >= 0 && r.struck_plane >= 0) {
@@ -660,25 +676,22 @@ namespace Carve {
 											h3 - atan2f(tapf->n.Y,
 												tapf->n.X)))
 											+ lvz * tapf->n.Z;
-										// Engage ONLY tangent-class
-										// plans: within one fan
-										// step of the tangency
-										// law's minimum at this
-										// arrival. A least-bad
-										// perpendicular is not a
-										// plan.
-										const float mind = fabsf(
-											lvz * tapf->n.Z)
-											- s2d * tap_hn;
-										const float lawmin = mind
-											> 0.f ? mind : 0.f;
-										const float slack = s2d
-											* tap_hn * (fan / 8.f);
+										// Engage only plans that KEEP
+										// the warm ratio of their
+										// arrival energy (the
+										// standing 0.6 - the same
+										// constant selection uses;
+										// admits the human-class
+										// -200s, refuses -920s; a
+										// least-bad perpendicular
+										// is not a plan).
+										const float earr = s2d * s2d
+											+ lvz * lvz;
 										if (adot < 0.f
 											&& fabsf(adot)
 												< best_adot
-											&& fabsf(adot)
-												<= lawmin + slack) {
+											&& adot * adot
+												<= 0.4f * earr) {
 											best_adot = fabsf(adot);
 											arc_phi = th3;
 											arc_h0 = ha;
@@ -691,24 +704,10 @@ namespace Carve {
 									break;   // first crossing only
 								}
 							}
-							if (!arc_on) {
-								// No free-rate curve reaches the
-								// face: provably no board exists
-								// on this branch.
-								r.doomed = true;
-								const float eo2 =
-									Board::EdgeDistOut(*tapf,
-									s.pos) + Board::kHullCenterSlack;
-								r.miss_dist = sqrtf(off0 * off0
-									+ (eo2 > 0.f ? eo2 * eo2 : 0.f));
-								r.reach_short = ReachShort(exit_s);
-								r.end_pos = s.pos;
-								r.flips = ctl.flips;
-								RecExit(SearchLog::kDoomed, k + 1);
-								if (lg)
-									lg->EndTraj(SearchLog::kDoomed);
-								return r;
-							}
+							// No tangent-class plan here: fly on under
+							// the spline (a later separation may
+							// plan); the UNPLANNED TOUCH below is
+							// what gets refused.
 						}
 					}
 				}
