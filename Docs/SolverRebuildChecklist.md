@@ -449,23 +449,6 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
-- 2026-08-16 (session 2h, user report reading): "a bunch are
-  actually below the surfable surface plane and are on the bottom
-  vertical border" - mechanically exact. Below a face polygon's
-  BOTTOM EDGE the brush's hull-expansion bevel (the vertical border)
-  owns the band: no strike can exist there, approaches die on the
-  wall with their speed clipped. The region gradient measured
-  perpendicular plane distance, so points in the dead band looked
-  like satisfied approaches and the search steered INTO them. FIX:
-  a z floor in both region gradients (carve tap + air aim_region):
-  dz_low = max(0, face.zmin + kHullCenterSlack - z) joins the miss
-  metric - the gradient lifts approaches above the bevel shadow.
-  VERIFIED: the [0 1 2 3] chain's 2->3 strike moved from z -2..-63
-  (dead band edge) to z +97, mid-face. Still hard (-590) and south;
-  the parallel-arrival convergence from real chain entries remains
-  the open search problem (probe-from-state instrument queued).
-  Gates green after the gradient change (airsolve 12/12 re-run -
-  its gradient changed too - and carve 10/10).
 - 2026-08-16 (session 2g, user re-reference to testimony 2.1): the
   arrival-parallelism idea IS the original boarding law - "velocity
   tangent to the ramp face normal IN THE APPROACH DIRECTION ...
