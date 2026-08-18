@@ -163,6 +163,15 @@ namespace Entrance {
 		std::vector<signed char> wside;
 		std::vector<float> wcosa;
 		int   horizon = 0;
+		// FASTEST TANGENT from the SAME terminal-heading frontier
+		// (ruling: one frontier yields both solves) - the max-energy
+		// arrival with |dot| <= kTanEps.
+		bool  tan_ok = false;
+		float tan_H = -1e30f;
+		Air::Result tan_flight;
+		std::vector<signed char> tan_wside;
+		std::vector<float> tan_wcosa;
+		int   tan_horizon = 0;
 		int   evals = 0;              // engine flights spent
 		int   contact_assisted = 0;   // clean-air-law rejections seen
 	};
@@ -170,6 +179,10 @@ namespace Entrance {
 	// search flies, wherever it lands - the caller may credit its
 	// field ("every valid witness raises the lower bound"). Args:
 	// the flight, the wish schedule (side, cosa), its horizon.
+	// seed_side/seed_cosa (optional, DIAGNOSTIC ONLY - the recovery
+	// ladder): a per-tick wish schedule injected as one extra seed
+	// (compressed to side-runs + knots). Production solves never pass
+	// these; the human witness enters only through the `ladder` gate.
 	RefResult RefSolve(const PlayerState& entry, const World& w,
 	                   const MoveParams& p, const Route::Graph& g,
 	                   int face_idx, const Vec3& q, float radius,
@@ -178,7 +191,10 @@ namespace Entrance {
 	                   const std::function<void(const Air::Result&,
 	                       const std::vector<signed char>&,
 	                       const std::vector<float>&, int)>&
-	                       on_strike = nullptr);
+	                       on_strike = nullptr,
+	                   const std::vector<signed char>* seed_side
+	                       = nullptr,
+	                   const std::vector<float>* seed_cosa = nullptr);
 
 } // namespace Entrance
 } // namespace Solver

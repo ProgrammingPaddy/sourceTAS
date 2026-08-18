@@ -227,6 +227,7 @@ namespace {
 		bool  ef_dwellcost = false;   // also build the no-flip-gap variant
 		bool  ef_witnesscheck = false; // replay every stored witness
 		int   ef_cells = 6;           // fieldexact: sampled cells per event
+		int   ef_event = -1;          // ladder: which flight event (-1 = all)
 		float ef_grid = 32.f;
 		MoveParams params;
 		Hulls hulls;
@@ -421,6 +422,7 @@ namespace {
 			else if (a == "--dwellcost") o.ef_dwellcost = true;
 			else if (a == "--witnesscheck") o.ef_witnesscheck = true;
 			else if (a == "--cells") ok = next_i(&o.ef_cells);
+			else if (a == "--event") ok = next_i(&o.ef_event);
 			else if (a == "--efgrid") ok = next_f(&o.ef_grid);
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
@@ -5992,7 +5994,7 @@ namespace {
 				Field::FaceMap t0 = Field::Compute(fe.sep.pos,
 					fe.sep.vel, fc, o.params, fe.sep.ducked,
 					o.ef_grid, 300);
-				int viol = 0, false_cull = 0;
+				int viol = 0, false_cull = 0, ceil_viol = 0;
 				float worst = 0.f;
 				for (int b2 = 0; b2 < 2; ++b2)
 					for (size_t i = 0; i < ncell; ++i) {
@@ -6004,6 +6006,43 @@ namespace {
 						const Field::Sample& sm = t0.samples[i];
 						if (!sm.reachable) {
 							false_cull++;
+							// CEILING RE-CERT (advisor): the reach
+							// predicate is disproven - verify the ENERGY
+							// ceiling independently on these cells via
+							// the loss-free ballistic closed forms.
+							{
+								const float dzq = r.cp.Z - fe.sep.pos.Z;
+								const float disc = fe.sep.vel.Z
+									* fe.sep.vel.Z
+									- 2.f * o.params.gravity * dzq;
+								float ue = -1e30f;
+								if (disc >= 0.f) {
+									const float sq2 = sqrtf(disc);
+									const float g2 = o.params.gravity
+										* o.params.dt;
+									const float rts[2] = {
+										(fe.sep.vel.Z - sq2) / g2,
+										(fe.sep.vel.Z + sq2) / g2 };
+									const float s02 = Len2D(fe.sep.vel);
+									for (int ri2 = 0; ri2 < 2; ++ri2) {
+										const int nn = static_cast<int>(
+											rts[ri2]);
+										if (nn < 1 || nn > 400)
+											continue;
+										const float sa2 = Envelope::SMax(
+											s02, nn, o.params);
+										const float va2 = Envelope::VzAfter(
+											fe.sep.vel.Z, nn, o.params);
+										const float e2 = sa2 * sa2 + va2 * va2
+											+ 2.f * o.params.gravity
+											* (r.cp.Z - fc.zmin);
+										if (e2 > ue)
+											ue = e2;
+									}
+								}
+								if (ue < -1e29f || r.H > ue + 2000.f)
+									ceil_viol++;
+							}
 							continue;
 						}
 						const float over = r.H - sm.e_eff;
@@ -6014,11 +6053,12 @@ namespace {
 						}
 					}
 				printf("efield:   bound sandwich: %d over-bound "
-					"(worst +%.0fk) | %d verified-but-bound-"
-					"unreachable%s\n", viol, worst / 1e3f,
-					false_cull, viol || false_cull
-						? " <- TIER-0 CONTRADICTION" : "");
-				if (viol || false_cull)
+					"(worst +%.0fk) | %d bound-unreachable (reach "
+					"predicate uncertified) | ceiling re-cert on "
+					"those: %d violations%s\n", viol, worst / 1e3f,
+					false_cull, ceil_viol, viol || ceil_viol
+						? " <- CEILING BROKEN" : "");
+				if (viol || ceil_viol)
 					red_flags++;
 			}
 			// (3) THE TANGENT SURVEY: counterexamples, not averages.
@@ -6412,6 +6452,52 @@ namespace {
 			printf("humanexact: no flight events in tape\n");
 			return 1;
 		}
+		// THE WITNESS BANK (monotonic law: H_found may never
+		// regress - the legal f3 847k class becomes a permanent
+		// floor). One file per tape; every entry is replayed through
+		// the CURRENT engine each run - a replay below its recorded
+		// H is a MONOTONICITY BREAK, loudly.
+		struct BankEntry {
+			float H = -1e30f;
+			int horizon = 0;
+			std::vector<signed char> side;
+			std::vector<float> cosa;
+		};
+		std::map<std::string, BankEntry> bank;
+		const std::string bank_path = tape_path + ".bank";
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, bank_path.c_str(), "r") == 0 && f) {
+				char key[64];
+				float H;
+				int hz, n;
+				while (fscanf_s(f, "%63s %f %d %d", key,
+					static_cast<unsigned>(sizeof(key)), &H, &hz,
+					&n) == 4 && n >= 0 && n < 4096) {
+					BankEntry be;
+					be.H = H;
+					be.horizon = hz;
+					be.side.resize(static_cast<size_t>(n));
+					be.cosa.resize(static_cast<size_t>(n));
+					bool ok2 = true;
+					for (int i = 0; i < n; ++i) {
+						int sv;
+						float cv;
+						if (fscanf_s(f, "%d %f", &sv, &cv) != 2) {
+							ok2 = false;
+							break;
+						}
+						be.side[static_cast<size_t>(i)] =
+							static_cast<signed char>(sv);
+						be.cosa[static_cast<size_t>(i)] = cv;
+					}
+					if (!ok2)
+						break;
+					bank[key] = be;
+				}
+				fclose(f);
+			}
+		}
 		const int min_gap = static_cast<int>(
 			ceilf((1.f / o.params.dt) / o.params.strafe_rate_max));
 		int rows = 0, pass = 0, na = 0;
@@ -6423,13 +6509,12 @@ namespace {
 				+ 2.f * o.params.gravity
 				* (fe.cp.Z - fc.zmin);
 			const int n_h = fe.tick - fe.sep_tick;
-			int flights = 0, tfl = 0;
+			int flights = 0;
+			// One frontier solve yields BOTH BestBoard and
+			// FastestTangent (the ruling's one-frontier design).
 			Entrance::RefResult rr = Entrance::RefSolve(fe.sep, w,
-				o.params, g, fe.fidx, fe.cp, 16.f, n_h, 1500,
+				o.params, g, fe.fidx, fe.cp, 16.f, n_h, 2000,
 				false, &flights, fc.zmin);
-			Entrance::RefResult rt = Entrance::RefSolve(fe.sep, w,
-				o.params, g, fe.fidx, fe.cp, 16.f, n_h, 800,
-				true, &tfl, fc.zmin);
 			// The human's own reversal cadence vs the dwell law.
 			int reversals = 0, viol = 0, mind = 100000;
 			{
@@ -6489,11 +6574,22 @@ namespace {
 					"strike within 16u) | %s\n",
 					fe.tick, fe.fidx, eh / 1e3f,
 					Dot(fe.v1, fc.n), flights, verdict);
-			if (rt.ok)
-				printf("humanexact:   tangent at Q_h: %.0fk (dot "
-					"%.1f) | delta_tan %+.0fk\n", rt.H / 1e3f,
-					rt.flight.dot, ((rr.ok ? rr.H : eh) - rt.H)
-					/ 1e3f);
+			// Near/exact split (advisor: a 7u-near strike is QC,
+			// not the literal H(Q_h) >= E_h floor test).
+			if (rr.ok) {
+				const float doff = Len(rr.flight.pos - fe.cp);
+				printf("humanexact:   near-contact (<=16u): %.0fk"
+					" | exact-point (<=4u): %s\n", rr.H / 1e3f,
+					doff <= 4.f ? "RESOLVED at the literal "
+						"coordinate" : "floor unresolved (best "
+						"strike off by more than 4u)");
+			}
+			if (rr.tan_ok)
+				printf("humanexact:   tangent at Q_h (same "
+					"frontier): %.0fk (dot %.1f) | delta_tan "
+					"%+.0fk\n", rr.tan_H / 1e3f,
+					rr.tan_flight.dot,
+					((rr.ok ? rr.H : eh) - rr.tan_H) / 1e3f);
 			else
 				printf("humanexact:   tangent at Q_h: none found "
 					"(CANDIDATE Case D at this point - not "
@@ -6504,6 +6600,77 @@ namespace {
 					: "n/a", viol, min_gap, viol
 					? " <- the human uses controls outside the "
 					  "solver's restriction" : "");
+			// Bank: replay the stored floor, verify monotonicity,
+			// absorb improvements.
+			{
+				char bkey[64];
+				snprintf(bkey, sizeof(bkey), "t%d_f%d", fe.tick,
+					fe.fidx);
+				float bank_floor = -1e30f;
+				auto bit = bank.find(bkey);
+				if (bit != bank.end()) {
+					Air::Target bt;
+					bt.face = fe.fidx;
+					bt.dot_cap = 3000.f;
+					bt.aim = fe.cp;
+					bt.max_ticks = bit->second.horizon;
+					Air::Result br2 = Air::FlyWishSchedule(fe.sep,
+						w, o.params, bt, g, bit->second.side,
+						bit->second.cosa, bit->second.horizon);
+					if (br2.hit && br2.dot < 0.f
+						&& br2.struck_brush < 0) {
+						bank_floor = Dot(br2.end_state.vel,
+							br2.end_state.vel) + 2.f
+							* o.params.gravity
+							* (br2.pos.Z - fc.zmin);
+						if (bank_floor < bit->second.H - 1000.f)
+							printf("humanexact:   BANK "
+								"MONOTONICITY BREAK: replay %.0fk"
+								" < recorded %.0fk\n",
+								bank_floor / 1e3f,
+								bit->second.H / 1e3f);
+					} else {
+						printf("humanexact:   BANK MONOTONICITY "
+							"BREAK: stored witness no longer "
+							"strikes\n");
+					}
+				}
+				if (rr.ok && rr.H > bank_floor + 1.f
+					&& (bit == bank.end()
+						|| rr.H > bit->second.H + 1.f)) {
+					BankEntry nb;
+					nb.H = rr.H;
+					nb.horizon = rr.horizon;
+					nb.side = rr.wside;
+					nb.cosa = rr.wcosa;
+					bank[bkey] = nb;
+					printf("humanexact:   bank: new floor %.0fk "
+						"recorded\n", rr.H / 1e3f);
+				} else if (bank_floor > -1e29f) {
+					printf("humanexact:   bank: floor %.0fk "
+						"stands\n", bank_floor / 1e3f);
+				}
+			}
+		}
+		{
+			FILE* f = nullptr;
+			if (fopen_s(&f, bank_path.c_str(), "w") == 0 && f) {
+				for (const auto& kv : bank) {
+					fprintf(f, "%s %.1f %d %d\n",
+						kv.first.c_str(), kv.second.H,
+						kv.second.horizon,
+						static_cast<int>(kv.second.side.size()));
+					for (size_t i = 0; i < kv.second.side.size();
+						++i)
+						fprintf(f, "%d %.6f\n",
+							static_cast<int>(kv.second.side[i]),
+							kv.second.cosa[i]);
+				}
+				fclose(f);
+				printf("humanexact: witness bank -> %s (%d "
+					"entries)\n", bank_path.c_str(),
+					static_cast<int>(bank.size()));
+			}
 		}
 		printf("humanexact: %d/%d mandatory exact points covered "
 			"(%d N/A outside the control law) | %s\n",
@@ -6832,6 +6999,235 @@ namespace {
 		printf("repfit: %d/%d flights representable in the wish "
 			"basis (exact row AND segment row reproduce)\n",
 			reps, rows);
+		fflush(stdout);
+		return 0;
+	}
+
+	// ladder: THE RECOVERY LADDER (advisor 2026-08-18) - the
+	// controlled diagnostic around a known-admissible human witness.
+	// DIAGNOSTIC ONLY, never a production seed. Steps: (1) how many
+	// cosa knots until the compressed representation reproduces the
+	// witness (resolution test); (2) can the optimizer hold/improve
+	// when handed the exact schedule (basin-stability test); (3)
+	// perturbation radii until recovery fails (local-move strength);
+	// ordinary-seed performance is the global-seeding reference.
+	int CmdLadder(const std::string& map_path, const ReplayOpts& o,
+	              const std::string& tape_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("ladder: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("ladder: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<EFEvent> events;
+		if (!EFReplay(w, g, o, tape, &events, nullptr, nullptr)) {
+			printf("ladder: no flight events in tape\n");
+			return 1;
+		}
+		std::vector<Vec3> vels;
+		{
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+			vels.push_back(s.vel);
+			for (const TapeFrame& fr : tape.frames) {
+				MoveTick(s, w, o.params, fr.pitch, fr.yaw,
+					fr.fmove, fr.smove, fr.umove, fr.buttons,
+					nullptr);
+				vels.push_back(s.vel);
+			}
+		}
+		for (size_t ei = 0; ei < events.size(); ++ei) {
+			if (o.ef_event >= 0
+				&& static_cast<int>(ei) != o.ef_event)
+				continue;
+			const EFEvent& fe = events[ei];
+			const Route::Face& fc = g.faces[fe.fidx];
+			const int t0 = fe.sep_tick + 1;
+			const int t1 = fe.tick;
+			if (t1 - t0 < 6 || t1 >= static_cast<int>(vels.size()))
+				continue;
+			// The human wish schedule (executor-convention
+			// inversion, as validated by repfit).
+			std::vector<signed char> hside;
+			std::vector<float> hcosa;
+			for (int t2 = t0; t2 < t1; ++t2) {
+				const TapeFrame& fr = tape.frames[
+					static_cast<size_t>(t2)];
+				const float yr = fr.yaw * 0.0174532925f;
+				const float wx = cosf(yr) * fr.fmove
+					+ sinf(yr) * fr.smove;
+				const float wy = sinf(yr) * fr.fmove
+					- cosf(yr) * fr.smove;
+				const Vec3& vv = vels[static_cast<size_t>(t2)];
+				if (wx * wx + wy * wy < 1.f || Len2D(vv) < 1.f) {
+					hside.push_back(0);
+					hcosa.push_back(1.f);
+					continue;
+				}
+				const float omega = atan2f(wy, wx);
+				const float h = atan2f(vv.Y, vv.X);
+				const float d = Steer::WrapPi(omega
+					- 3.14159265f - h);
+				hside.push_back(static_cast<signed char>(
+					d >= 0.f ? 1 : -1));
+				hcosa.push_back(cosf(d));
+			}
+			Vec3 vpost;
+			Fn::ClipVelocity(fe.v1, fc.n, &vpost);
+			const float eh = Dot(vpost, vpost)
+				+ 2.f * o.params.gravity
+				* (fe.cp.Z - fc.zmin);
+			printf("ladder: event %d t%4d f%d | E_h %.0fk | window "
+				"%d ticks\n", static_cast<int>(ei), fe.tick,
+				fe.fidx, eh / 1e3f, t1 - t0);
+			Air::Target vt;
+			vt.face = fe.fidx;
+			vt.dot_cap = 3000.f;
+			vt.aim = fe.cp;
+			// (1) THE RESOLUTION LADDER: topology fixed at the
+			// human's side runs; K cosa knots per run.
+			auto fly_fit = [&](int K, float* H_out, float* d_out) {
+				std::vector<signed char> ss;
+				std::vector<float> sc;
+				size_t a = 0;
+				while (a < hside.size()) {
+					size_t b = a;
+					while (b < hside.size()
+						&& hside[b] == hside[a])
+						b++;
+					const int len = static_cast<int>(b - a);
+					const int kk = K > len ? (len < 1 ? 1 : len)
+						: K;
+					for (int i = 0; i < len; ++i) {
+						float c;
+						if (kk <= 1) {
+							c = hcosa[a + static_cast<size_t>(
+								len / 2)];
+						} else {
+							const float x = static_cast<float>(i)
+								/ static_cast<float>(len - 1)
+								* static_cast<float>(kk - 1);
+							int k0 = static_cast<int>(x);
+							if (k0 > kk - 2)
+								k0 = kk - 2;
+							const float frx = x
+								- static_cast<float>(k0);
+							const size_t at0 = a
+								+ static_cast<size_t>((len - 1)
+									* k0 / (kk - 1));
+							const size_t at1 = a
+								+ static_cast<size_t>((len - 1)
+									* (k0 + 1) / (kk - 1));
+							c = hcosa[at0] * (1.f - frx)
+								+ hcosa[at1] * frx;
+						}
+						ss.push_back(hside[a]);
+						sc.push_back(c);
+					}
+					a = b;
+				}
+				vt.max_ticks = static_cast<int>(ss.size()) + 8;
+				Air::Result ar = Air::FlyWishSchedule(fe.sep, w,
+					o.params, vt, g, ss, sc,
+					static_cast<int>(ss.size()) + 8);
+				if (ar.hit && ar.dot < 0.f
+					&& ar.struck_brush < 0) {
+					*H_out = Dot(ar.end_state.vel,
+						ar.end_state.vel) + 2.f
+						* o.params.gravity
+						* (ar.pos.Z - fc.zmin);
+					*d_out = Len(ar.pos - fe.cp);
+					return true;
+				}
+				*H_out = -1e30f;
+				*d_out = ar.miss_dist < 1e8f ? ar.miss_dist
+					: -1.f;
+				return false;
+			};
+			int k_needed = -1;
+			const int Ks[7] = { 1, 2, 3, 5, 9, 17, 9999 };
+			for (int kidx = 0; kidx < 7; ++kidx) {
+				float H2, d2;
+				const bool hit = fly_fit(Ks[kidx], &H2, &d2);
+				const bool rep = hit && d2 <= 24.f
+					&& fabsf(H2 - eh) <= 0.03f * eh;
+				printf("ladder:   K=%2d knots/run: %s H %.0fk, "
+					"%.0fu off%s\n", Ks[kidx],
+					hit ? "strike" : "miss",
+					hit ? H2 / 1e3f : 0.f, d2,
+					rep ? "  <- REPRODUCES" : "");
+				if (rep && k_needed < 0)
+					k_needed = Ks[kidx];
+			}
+			// (2) BASIN STABILITY: optimizer handed the exact
+			// schedule.
+			int fl = 0;
+			Entrance::RefResult r0 = Entrance::RefSolve(fe.sep, w,
+				o.params, g, fe.fidx, fe.cp, 16.f, t1 - t0, 800,
+				false, &fl, fc.zmin, nullptr, &hside, &hcosa);
+			printf("ladder:   optimizer from exact schedule: %s "
+				"%.0fk (dot %.1f) vs E_h %.0fk | %s\n",
+				r0.ok ? "H" : "NONE",
+				r0.ok ? r0.H / 1e3f : 0.f,
+				r0.ok ? r0.flight.dot : 0.f, eh / 1e3f,
+				r0.ok && r0.H >= eh - 2000.f
+					? "HOLDS THE BASIN"
+					: "<- LOSES THE BASIN (destructive moves or "
+					  "compression)");
+			// (3) PERTURBATION RECOVERY.
+			unsigned rng = 0xC0FFEEu
+				+ static_cast<unsigned>(ei) * 977u;
+			auto frand = [&]() {
+				rng = rng * 1664525u + 1013904223u;
+				return static_cast<float>((rng >> 8) & 0xFFFF)
+					/ 65535.f * 2.f - 1.f;
+			};
+			const float radii[4] = { 0.05f, 0.12f, 0.25f, 0.45f };
+			for (int ri = 0; ri < 4; ++ri) {
+				int rec = 0;
+				for (int trial = 0; trial < 2; ++trial) {
+					std::vector<float> pc = hcosa;
+					for (float& c : pc) {
+						c += radii[ri] * frand();
+						if (c > 1.f) c = 1.f;
+						if (c < -1.f) c = -1.f;
+					}
+					int fl2 = 0;
+					Entrance::RefResult rp = Entrance::RefSolve(
+						fe.sep, w, o.params, g, fe.fidx, fe.cp,
+						16.f, t1 - t0, 800, false, &fl2,
+						fc.zmin, nullptr, &hside, &pc);
+					if (rp.ok && rp.H >= eh - 2000.f)
+						rec++;
+				}
+				printf("ladder:   perturb r=%.2f: %d/2 recovered "
+					"to >= E_h\n", radii[ri], rec);
+			}
+		}
 		fflush(stdout);
 		return 0;
 	}
@@ -9613,6 +10009,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 4, o))
 			return 1;
 		return CmdRepFit(argv[2], o, argv[3]);
+	}
+	if (cmd == "ladder" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdLadder(argv[2], o, argv[3]);
 	}
 	if (cmd == "msolve2" && argc >= 4) {
 		ReplayOpts o;

@@ -245,7 +245,9 @@ namespace Entrance {
 	                   const std::function<void(const Air::Result&,
 	                       const std::vector<signed char>&,
 	                       const std::vector<float>&, int)>&
-	                       on_strike) {
+	                       on_strike,
+	                   const std::vector<signed char>* seed_side,
+	                   const std::vector<float>* seed_cosa) {
 		RefResult best;
 		if (face_idx < 0
 			|| face_idx >= static_cast<int>(g.faces.size()))
@@ -266,8 +268,34 @@ namespace Entrance {
 		vt.aim = q;
 		std::vector<signed char> sbuf;
 		std::vector<float> cbuf;
+		// ---- THE TERMINAL-HEADING FRONTIER (ruling 2026-08-18): the
+		// search reconstructs theta -> best witness per terminal-
+		// heading bin - never a global top-k that lets one strong but
+		// badly oriented arrival class evict the others before
+		// refinement. BestBoard = argmax over the frontier (H is
+		// REPLAYED, so the board composition is exact);
+		// FastestTangent = the same frontier's max-energy member with
+		// |dot| <= kTanEps. Every engine flight feeds whatever bin
+		// its arrival lands in. ----
+		constexpr int kBins = 24;
+		struct BinElite {
+			bool  has = false;
+			float sc = -1e30f;
+			float H = -1e30f;
+			float dot = 0.f;
+			std::vector<WishRun> runs;
+		};
+		std::vector<BinElite> bins(kBins);
+		// THE SCOUT: best schedule by RAW score regardless of strike
+		// - the pre-strike guidance the frontier needs (bins only
+		// exist once flights strike; the scout climbs the miss-
+		// distance gradient until they do, then keeps serving as a
+		// diversity lane).
+		BinElite scout;
+		const float kPi2 = 3.14159265f;
 		// One engine flight of a run schedule. Score drives the
-		// search; only clean-air in-radius strikes can WIN.
+		// search; only clean-air in-radius strikes can WIN, and every
+		// such strike updates its landing bin + the tangent slot.
 		auto ev = [&](const std::vector<WishRun>& runs) {
 			int total = 0;
 			for (const WishRun& r : runs)
@@ -281,26 +309,47 @@ namespace Entrance {
 				(*flights_counter)++;
 			Air::Result ar = Air::FlyWishSchedule(entry, w, p, vt,
 				g, sbuf, cbuf, total + 8);
+			auto scouted = [&](float s3) {
+				if (s3 > scout.sc || !scout.has) {
+					scout.has = true;
+					scout.sc = s3;
+					scout.runs = runs;
+				}
+				return s3;
+			};
 			if (!ar.hit || ar.dot >= 0.f)
-				return -(ar.miss_dist < 1e8f ? ar.miss_dist
-					: 1e8f);
+				return scouted(-(ar.miss_dist < 1e8f
+					? ar.miss_dist : 1e8f));
 			if (ar.struck_brush >= 0) {
 				best.contact_assisted++;
-				return -Len(ar.pos - q) - 500.f;
+				return scouted(-Len(ar.pos - q) - 500.f);
 			}
 			if (on_strike)
 				on_strike(ar, sbuf, cbuf, total + 8);
 			const float d = Len(ar.pos - q);
 			if (d > radius)
-				return -d;
+				return scouted(-d);
 			const float H = Dot(ar.end_state.vel,
 				ar.end_state.vel) + 2.f * p.gravity * gs
 				* (ar.pos.Z - zmin);
 			float sc;
-			if (tangent_mode && -ar.dot > kTanEps) {
+			if (tangent_mode && -ar.dot > kTanEps)
 				sc = 1e5f - fabsf(ar.dot);
-			} else {
+			else
 				sc = 1e7f + H;
+			// Frontier bookkeeping.
+			const float th = atan2f(ar.v1.Y, ar.v1.X);
+			int bi = static_cast<int>((th + kPi2)
+				/ (2.f * kPi2) * static_cast<float>(kBins));
+			if (bi < 0) bi = 0;
+			if (bi >= kBins) bi = kBins - 1;
+			BinElite& be = bins[static_cast<size_t>(bi)];
+			if (sc > be.sc || !be.has) {
+				be.has = true;
+				be.sc = sc;
+				be.H = H;
+				be.dot = ar.dot;
+				be.runs = runs;
 			}
 			if (sc >= 1e7f && H > best.H) {
 				best.ok = true;
@@ -310,11 +359,17 @@ namespace Entrance {
 				best.wcosa = cbuf;
 				best.horizon = total + 8;
 			}
-			return sc;
+			if (-ar.dot <= kTanEps && H > best.tan_H) {
+				best.tan_ok = true;
+				best.tan_H = H;
+				best.tan_flight = ar;
+				best.tan_wside = sbuf;
+				best.tan_wcosa = cbuf;
+				best.tan_horizon = total + 8;
+			}
+			return scouted(sc);
 		};
 		// ---- SEED GRID (deterministic) ----
-		// Arrival-heading estimate: the closed-form tangent heading
-		// at the ballistic arrival state, falling back to bearing.
 		const float bear = atan2f(q.Y - entry.pos.Y,
 			q.X - entry.pos.X);
 		float th_arr = bear;
@@ -383,30 +438,50 @@ namespace Entrance {
 			coast[0].ck.push_back(1.f);
 			seeds.push_back(coast);
 		}
-		struct PoolEntry {
-			float sc;
-			std::vector<WishRun> runs;
-		};
-		std::vector<PoolEntry> pool;
 		for (const std::vector<WishRun>& sd : seeds) {
 			if (best.evals >= budget)
 				break;
-			pool.push_back({ ev(sd), sd });
+			ev(sd);
 		}
-		std::sort(pool.begin(), pool.end(),
-			[](const PoolEntry& a, const PoolEntry& b) {
-				return a.sc > b.sc;
-			});
-		if (pool.size() > 3)
-			pool.resize(3);
-		// ---- TOP-K DEEPENING + THE RESOLUTION LADDER ----
-		auto deepen = [&](PoolEntry& pe, float kstep, int lstep) {
+		// DIAGNOSTIC SEED (the recovery ladder): compress the
+		// injected per-tick schedule to side-runs + knots and
+		// evaluate it like any other seed - it feeds the frontier
+		// through ev(). Production solves never pass one.
+		if (seed_side && seed_cosa && !seed_side->empty()) {
+			std::vector<WishRun> runs;
+			size_t i0s = 0;
+			while (i0s < seed_side->size()) {
+				size_t i1s = i0s;
+				while (i1s < seed_side->size()
+					&& (*seed_side)[i1s] == (*seed_side)[i0s])
+					i1s++;
+				WishRun r;
+				r.len = static_cast<int>(i1s - i0s);
+				r.side = (*seed_side)[i0s];
+				// FULL per-tick resolution (the K-ladder measured
+				// interp fits missing at K<=17 - the diagnostic
+				// seed must enter losslessly).
+				const int K = r.len < 2 ? 1 : r.len;
+				for (int k2 = 0; k2 < K; ++k2) {
+					const size_t at = i0s + static_cast<size_t>(
+						(r.len - 1) * k2 / (K > 1 ? K - 1 : 1));
+					r.ck.push_back((*seed_cosa)[at]);
+				}
+				runs.push_back(r);
+				i0s = i1s;
+			}
+			if (best.evals < budget)
+				ev(runs);
+		}
+		// deepen(): local refinement of one bin elite (knot/length
+		// moves, the resolution ladder, reversal insertion). Every
+		// eval also feeds whatever bin its flight lands in.
+		auto deepen = [&](BinElite& pe, float kstep, int lstep) {
 			bool moved = true;
 			int guard = 0;
 			while (moved && best.evals < budget && guard++ < 8) {
 				moved = false;
 				for (size_t j = 0; j < pe.runs.size(); ++j) {
-					// Knot nudges.
 					for (size_t ki = 0; ki < pe.runs[j].ck.size();
 						++ki)
 						for (int sg = -1; sg <= 1; sg += 2) {
@@ -425,8 +500,6 @@ namespace Entrance {
 								moved = true;
 							}
 						}
-					// Length nudges (final run absorbs; interior
-					// runs trade ticks with their neighbor).
 					for (int sg = -1; sg <= 1; sg += 2) {
 						if (best.evals >= budget)
 							return;
@@ -453,12 +526,12 @@ namespace Entrance {
 				}
 				if (moved)
 					continue;
-				// Ladder: refine the longest run's knots
-				// (K -> 2K-1, midpoint inserts, toward per-tick).
 				size_t lj = 0;
 				for (size_t j = 1; j < pe.runs.size(); ++j)
 					if (pe.runs[j].len > pe.runs[lj].len)
 						lj = j;
+				// The resolution ladder: refine the longest run's
+				// cosa knots toward per-tick.
 				if (static_cast<int>(pe.runs[lj].ck.size()) < 17
 					&& static_cast<int>(pe.runs[lj].ck.size())
 						< pe.runs[lj].len) {
@@ -483,7 +556,6 @@ namespace Entrance {
 						moved = true;
 					}
 				}
-				// Reversal insertion: split the longest run.
 				if (!moved && pe.runs.size() < 7
 					&& pe.runs[lj].len >= 2 * min_gap
 					&& best.evals < budget) {
@@ -505,17 +577,11 @@ namespace Entrance {
 				}
 			}
 		};
-		const float ksteps[3] = { 0.3f, 0.12f, 0.05f };
-		const int lsteps[3] = { 6, 2, 2 };
-		for (int rd = 0; rd < 3; ++rd)
-			for (PoolEntry& pe : pool) {
-				if (best.evals >= budget)
-					break;
-				deepen(pe, ksteps[rd], lsteps[rd]);
-			}
-		// ---- DETERMINISTIC RESTARTS until the budget is spent or
-		// improvement dries up (the sandwich gap is the caller's
-		// convergence measure - budget is only the leash). ----
+		// FRONTIER REFINEMENT: rounds over the most promising bins -
+		// top-4 by H plus the softest-|dot| bin (the tangent flank) -
+		// then a deterministic perturb-restart of the leader. Dry
+		// counting is on the GLOBAL best; the caller's convergence
+		// measure remains the sandwich gap, budget is only the leash.
 		unsigned rng = 0x9e3779b9u
 			^ static_cast<unsigned>(face_idx * 7919)
 			^ static_cast<unsigned>(static_cast<int>(q.X) * 131)
@@ -525,28 +591,71 @@ namespace Entrance {
 			return static_cast<float>((rng >> 8) & 0xFFFF)
 				/ 65535.f * 2.f - 1.f;
 		};
+		const float ksteps[3] = { 0.3f, 0.12f, 0.05f };
+		const int lsteps[3] = { 6, 2, 2 };
 		int dry = 0;
-		while (best.evals < budget && dry < 4 && !pool.empty()) {
-			const float before = pool[0].sc;
-			PoolEntry pe = pool[0];
-			for (WishRun& r : pe.runs) {
-				for (float& c : r.ck) {
-					c += 0.25f * frand();
-					if (c > 1.f) c = 1.f;
-					if (c < -1.f) c = -1.f;
-				}
-				const int dl = static_cast<int>(4.f * frand());
-				if (r.len + dl >= min_gap)
-					r.len += dl;
+		float last_best = -1e30f;
+		while (best.evals < budget && dry < 4) {
+			std::vector<int> order;
+			for (int b2 = 0; b2 < kBins; ++b2)
+				if (bins[static_cast<size_t>(b2)].has)
+					order.push_back(b2);
+			if (order.empty()) {
+				// No strikes yet: drive the scout toward the face
+				// on the miss-distance gradient.
+				if (!scout.has)
+					break;
+				deepen(scout, 0.2f, 4);
+				if (best.evals >= budget)
+					break;
+				continue;
 			}
-			pe.sc = ev(pe.runs);
-			deepen(pe, 0.12f, 2);
-			if (pe.sc > pool[0].sc)
-				pool[0] = pe;
-			if (pool[0].sc <= before + 1e-3f)
+			std::sort(order.begin(), order.end(),
+				[&](int a2, int b3) {
+					return bins[static_cast<size_t>(a2)].H
+						> bins[static_cast<size_t>(b3)].H;
+				});
+			int soft = order[0];
+			for (int b2 : order)
+				if (fabsf(bins[static_cast<size_t>(b2)].dot)
+					< fabsf(bins[static_cast<size_t>(soft)].dot))
+					soft = b2;
+			std::vector<int> work(order.begin(), order.begin()
+				+ static_cast<long long>(order.size() > 4 ? 4
+					: order.size()));
+			bool have_soft = false;
+			for (int b2 : work)
+				if (b2 == soft)
+					have_soft = true;
+			if (!have_soft)
+				work.push_back(soft);
+			for (int rd = 0; rd < 3 && best.evals < budget; ++rd)
+				for (int b2 : work) {
+					if (best.evals >= budget)
+						break;
+					deepen(bins[static_cast<size_t>(b2)],
+						ksteps[rd], lsteps[rd]);
+				}
+			if (best.evals < budget && !work.empty()) {
+				BinElite pe = bins[static_cast<size_t>(work[0])];
+				for (WishRun& r : pe.runs) {
+					for (float& c : r.ck) {
+						c += 0.25f * frand();
+						if (c > 1.f) c = 1.f;
+						if (c < -1.f) c = -1.f;
+					}
+					const int dl = static_cast<int>(4.f * frand());
+					if (r.len + dl >= min_gap)
+						r.len += dl;
+				}
+				pe.sc = ev(pe.runs);
+				deepen(pe, 0.12f, 2);
+			}
+			if (best.H <= last_best + 1e-3f)
 				dry++;
 			else
 				dry = 0;
+			last_best = best.H;
 		}
 		return best;
 	}

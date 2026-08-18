@@ -864,6 +864,41 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 9f, THE LADDER VERDICT - f2's basin is a
+  NEEDLE): advisor directives built: (1) `ladder` - the controlled
+  recovery diagnostic around the known-admissible f2 witness
+  (diagnostic only, never a production seed); (2) terminal-heading
+  FRONTIER in RefSolve (24 bins, per-bin elites, every flight feeds
+  its landing bin; one solve now yields BestBoard AND FastestTangent;
+  + a SCOUT lane for pre-strike guidance after the binless loop
+  exited at 14 flights); (3) humanexact near(<=16u)/exact(<=4u)
+  split; (4) THE WITNESS BANK (<tape>.bank - monotonic floors,
+  replayed each run, MONOTONICITY BREAK detection; first floor
+  banked); (5) Tier-0 split: reach predicate UNCERTIFIED vs energy
+  ceiling re-certified independently on the contested cells (efield
+  prints ceiling violations separately). THE LADDER'S DIAGNOSIS
+  (f2, E_h 945k): K-ladder 1->17 interp knots MISS (59->19u,
+  non-monotone: K=1 strikes 885k while K=17 misses - closeness in
+  schedule space is NOT closeness in outcome space); K=per-tick
+  REPRODUCES at 949k, 0u; optimizer FROM the exact schedule HOLDS
+  AND IMPROVES to 951k (> human 945k - the moves are not
+  destructive); perturbation recovery 0/8 at ALL radii incl. 0.05.
+  VERDICT: not resolution, not local moves - BASIN ACCESSIBILITY:
+  the f2 arrival class is a needle under open-loop cosa schedules
+  (per-tick drift compounding), unreachable from seeds or any
+  perturbed start. ALSO HONEST: the frontier restructure REGRESSED
+  point-targeted solves (f0 898k->798k, f3 lost its 847k row within
+  16u; the pre-frontier top-3-by-score deepening was effectively 3
+  full-powered scouts; the new scout runs weaker fixed steps and
+  the bins idle when few flights strike a 16u disc). The banked f0
+  798k floor + the bank machinery would have CAUGHT this regression
+  automatically going forward - which is the point. NEXT: give
+  point-solves the full old deepening treatment on the scout pool
+  (bins remain for field/tangent structure); then the conditioning
+  question the needle-basin finding raises - search coordinates in
+  which the f2 basin is wide (arrival-anchored profiles) WITHOUT
+  reintroducing a heading controller into the definition.
+
 - 2026-08-18 (session 9e, REFSOLVE ON THE WISH BASIS - first human-
   beating number): RefSolve rebuilt on the canonical control space
   per the advisor's two-layer architecture - Layer 0 = per-tick
