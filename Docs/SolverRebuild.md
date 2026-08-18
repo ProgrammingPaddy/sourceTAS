@@ -235,6 +235,55 @@ old solver 9z). The ride bookkeeping is optimistic by +65..+114 u/s
 doctrine, and the overshoot is itself a measurement of ride
 execution quality.
 
+### 2.10 THE EXIT-TO-BOARD DECISION (added 2026-08-17 from the user;
+preserve near-verbatim - the fullest statement of the aerial model)
+"I am riding a ramp, smoothly, and I see my next target in the
+distance. I exit the ramp with a boarding point in mind (this is
+either a general area, which aligns exactly with our board heatmap
+example and runway considerations for that exit tick, or in some
+cases an exact known optimal board - top right corner, bottom right
+corner, etc.). The point that I board will be influenced by my
+aerial approach. I want to land in a spot with the optimal board,
+the optimal approach. This means the approach loses as little
+energy as possible, both throughout the entire exit-to-aerial
+steering (which should be preserving or gaining energy with
+strafing and wish considerations) into the board, which should be
+soft. The board point is then dictated by how much runway I have
+for the next move, and how much energy I am required to expend in
+the air to get a smooth tangent board. If I land too close and am
+required to steer at a higher rate than maximum wish airaccel gain
+allows, I am losing energy in the approach. If I land too far away,
+in a hotspot zone with many good potential high-energy-preserving
+boards, I might not have enough runway left on the ramp for my next
+move. These are case-by-case considerations that have to be made
+for every ramp, and they are dictated by the ramp FOLLOWING the
+board."
+- A high-level player is ALWAYS aiming to land on a ramp. A flight
+  aiming at nothing is not a thing that happens.
+- Every board should try to be smooth. Non-smooth boards in the
+  data may indicate an error in the board heatmap and boarding
+  rules themselves.
+- THE HEATMAP'S TRUE VALUE (user): the maximally efficient board
+  from the EXIT TICK, with consideration for THE PATH TAKEN TO GET
+  THERE's energy preservation. The named disconnect: slamming can
+  technically arrive with higher raw energy, but energy killed on
+  impact IS NOT CONVERTIBLE - arrival magnitude without a
+  convertible direction is worthless.
+CONTEXT (implementation mapping, 2026-08-17): the field's e_eff
+prices the cell's unavoidable clip loss but ASSUMES the ideal board
+is executed; the approach's own cost (steering above the free
+wish-gain rate = braking loss) is currently a FLAG (turn_need vs
+turn_free), not a price, and approach strafe-gain along the path is
+not credited. The measured slams-on-hot-cells discovery is this
+disconnect exactly: hot under the ideal-board assumption, cold
+under the achievable-board-from-this-exit reality. Open model
+questions (being worked through with the user): pricing vs
+disqualifying above-free-rate approaches; convertibility as
+direction/runway alignment of the post-board velocity; corner
+boards as emergent vs named candidates; whether the void test is
+"no ramp reachable" rather than "target unreachable"; the map as
+exit-tick-conditioned (a family over candidate departure moments).
+
 ### 2.8 Skill tells / the loss patterns to kill
 The user can tell a player's skill level immediately from: (1) how
 smoothly they move in the air, (2) how cleanly and efficiently they

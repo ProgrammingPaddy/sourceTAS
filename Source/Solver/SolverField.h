@@ -288,8 +288,62 @@ namespace Field {
 					s_arr, p, ducked) * n * 0.5f;
 				if (need > tmax)
 					continue;   // not absorbable at all
+				// THE PATH PRICE (user: the efficient frontier is
+				// baked into the map as VALUE, reachability stays
+				// physics-true - over-rate approaches stay in,
+				// priced). Turn demanded beyond the free budget is
+				// bought at the certified braking exchange
+				// (max turn per tick vs its exact speed cost);
+				// the energy spent comes off this cell's value.
+				// Straight+snap stays reachable and reads COLD.
+				// (Two exclusion forms were boardproof-falsified:
+				// the engine reaches such cells by braking.)
+				float brake_cost2 = 0.f;
+				if (need > tfree) {
+					float excess = need - tfree;
+					float vb2 = s_arr;
+					int it = 0;
+					while (excess > 0.f && it++ < 120
+						&& vb2 > 100.f) {
+						Strafe::TickLaw lb = Strafe::Law(p, vb2,
+							1.f, ducked);
+						// Cheapest COST PER RADIAN, not fastest
+						// turn - the exchange is convex and a real
+						// approach buys turn at the efficient
+						// angle (pricing at the max-rate point
+						// overcharged the human's own board to
+						// COLD - fieldgate-caught).
+						float btr = 0.f;
+						float beff = FLT_MAX, bcost = 0.f;
+						for (int ci = 1; ci <= 8; ++ci) {
+							const float cc = -static_cast<float>(
+								ci) / 8.f;
+							const float ss = 1.f - cc * cc;
+							const float tr2 = lb.TurnRad(cc,
+								ss > 0.f ? sqrtf(ss) : 0.f);
+							if (tr2 <= 1e-6f)
+								continue;
+							const float nv2 = lb.NewSpeed2(cc);
+							const float c2 = vb2 * vb2 - nv2;
+							const float eff = c2 / tr2;
+							if (eff < beff) {
+								beff = eff;
+								btr = tr2;
+								bcost = c2;
+							}
+						}
+						if (btr <= 1e-5f)
+							break;
+						excess -= btr;
+						const float nvv = vb2 * vb2 - bcost;
+						vb2 = nvv > 0.f ? sqrtf(nvv) : 0.f;
+					}
+					brake_cost2 = s_arr * s_arr - vb2 * vb2;
+					if (brake_cost2 < 0.f)
+						brake_cost2 = 0.f;
+				}
 				const float e = s_arr * s_arr + vz_arr * vz_arr
-					- res * res
+					- res * res - brake_cost2
 					+ 2.f * g * (sm.q.Z - face.zmin);
 				const bool ft = need <= tfree;
 				const bool better = e > sm.e_eff
