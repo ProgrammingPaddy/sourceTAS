@@ -5793,8 +5793,11 @@ namespace {
 		PlayerState sep;
 		// Boundary control-history state at separation (Invariant 9:
 		// the dwell law crosses operator seams) - measured from the
-		// tape's smove stream.
+		// tape's smove stream. Age is capped at the dwell gap (exact
+		// state reduction); raw_age keeps the uncapped value for
+		// legacy-key bank migration.
 		Steer::CtlState sep_ctl;
+		int raw_age = 1000;
 		Vec3 cp, v1;
 	};
 
@@ -5824,6 +5827,7 @@ namespace {
 		PlayerState sep;
 		int sep_t = 0;
 		Steer::CtlState sep_ctl;
+		int sep_raw_age = 1000;
 		signed char sm_sign = 0;
 		int sm_change_t = -1000;
 		if (refpts) {
@@ -5861,6 +5865,7 @@ namespace {
 					fe.fidx = fidx;
 					fe.sep = sep;
 					fe.sep_ctl = sep_ctl;
+					fe.raw_age = sep_raw_age;
 					fe.cp = ev.contact_pos[0];
 					fe.v1 = ev.contact_vel[0];
 					events->push_back(fe);
@@ -5871,8 +5876,16 @@ namespace {
 					sep = s;
 					sep_t = static_cast<int>(t);
 					sep_ctl.side = sm_sign;
-					sep_ctl.age = static_cast<int>(t)
+					// Exact state reduction (advisor): ages at or
+					// beyond the dwell gap are future-equivalent -
+					// cap so equal boundary states hash equal.
+					const int mg = static_cast<int>(ceilf(
+						(1.f / o.params.dt)
+						/ o.params.strafe_rate_max));
+					const int raw_age = static_cast<int>(t)
 						- sm_change_t;
+					sep_ctl.age = raw_age > mg ? mg : raw_age;
+					sep_raw_age = raw_age;
 				}
 				air++;
 			} else {
@@ -6721,6 +6734,29 @@ namespace {
 				const std::string bkey = EFBankKey("air-entry",
 					EFStateHash(fe.sep, fe.sep_ctl), maph, prh,
 					fe.tick, fe.fidx);
+				// LEGACY-KEY MIGRATION (the age-cap change altered
+				// state hashes and orphaned floors - the measured
+				// lesson: key-semantics changes need migration, and
+				// entries should carry their full start state).
+				{
+					Steer::CtlState legacy = fe.sep_ctl;
+					legacy.age = fe.raw_age;
+					const std::string lkey = EFBankKey(
+						"air-entry", EFStateHash(fe.sep,
+							legacy), maph, prh, fe.tick,
+						fe.fidx);
+					auto lit = bank.find(lkey);
+					if (lkey != bkey && lit != bank.end()) {
+						auto cit = bank.find(bkey);
+						if (cit == bank.end()
+							|| lit->second.H > cit->second.H)
+							bank[bkey] = lit->second;
+						bank.erase(lkey);
+						printf("humanexact:   bank: migrated "
+							"legacy-key floor %.0fk\n",
+							bank[bkey].H / 1e3f);
+					}
+				}
 				float bank_floor = -1e30f;
 				auto bit = bank.find(bkey);
 				if (bit != bank.end()) {

@@ -236,32 +236,49 @@ namespace Entrance {
 		}
 
 
-		// THE GUIDED SHOOTER (ruling 2026-08-18): a feedback PROPOSAL
-		// GENERATOR over the canonical wish basis. Per tick it picks
-		// the legal (side, cosa) minimizing a soft-weighted cost -
-		// endpoint residual, terminal-heading error (blended in near
-		// arrival), and gain sacrifice - then advances the REAL
-		// engine. The dwell law is enforced inline (hard); gain
-		// preservation is SOFT (deliberate braking turns stay
-		// reachable - advisor: no hidden control family). The frozen
-		// realized schedule is the only output; the caller replays it
-		// open-loop and trusts nothing else.
+
+		// SEQUENTIAL MULTI-NODE GUIDED SHOOTING (Level A, ruling
+		// 2026-08-18): a GENERIC conditioning transform over the same
+		// canonical wish-schedule problem - never a waypoint family.
+		// Intermediate nodes are free numerical variables the CALLER
+		// searches (neutral interpolation + symmetric lateral
+		// offsets from start/target geometry; nothing map- or
+		// tape-derived). Simulation is continuous (no state resets):
+		// guide toward node 1, then node 2, then the final
+		// (Q, theta). Guidance per tick uses a SHORT-HORIZON
+		// law-model lookahead (hold a candidate wish ~6 ticks, then
+		// straight-run to the active target's tick) instead of pure
+		// one-tick greed - the direct-pull rule cuts corners the
+		// optimum may need. The dwell law is hard inline; gain is
+		// SOFT (deliberate braking stays reachable). Output = the
+		// frozen realized schedule; the caller replays it open-loop
+		// and trusts nothing else.
+		struct GuideTarget {
+			float x = 0.f, y = 0.f;  // horizontal target
+			float theta = 0.f;       // desired terminal heading
+			bool  use_theta = false; // only the final target sets it
+			int   until = 0;         // guide toward this through k < until
+		};
+
 		struct GuideWeights {
 			float wp = 2.f;      // endpoint attraction
 			float wt = 1.f;      // terminal-heading weight
 			float blend = 0.35f; // final fraction where wt engages
-			float we = 0.3f;     // gain-sacrifice reluctance
+			float we = 0.3f;     // gain-sacrifice reluctance (SOFT)
 		};
 
-		void GuidedShoot(const PlayerState& entry, const World& w,
-		                 const MoveParams& p, const Vec3& q,
-		                 float th_tgt, int N, int min_gap,
-		                 const Steer::CtlState& ctl0,
-		                 const GuideWeights& gw,
-		                 std::vector<signed char>* side_out,
-		                 std::vector<float>* cosa_out) {
+		void GuidedShootSeq(const PlayerState& entry, const World& w,
+		                    const MoveParams& p,
+		                    const std::vector<GuideTarget>& targets,
+		                    int N, int min_gap,
+		                    const Steer::CtlState& ctl0,
+		                    const GuideWeights& gw,
+		                    std::vector<signed char>* side_out,
+		                    std::vector<float>* cosa_out) {
 			side_out->clear();
 			cosa_out->clear();
+			if (targets.empty())
+				return;
 			PlayerState s = entry;
 			const int hold = s.ducked ? IN_DUCK : 0;
 			signed char cur = ctl0.side;
@@ -269,62 +286,90 @@ namespace Entrance {
 			const float cap2 = p.air_speed_cap * p.air_speed_cap;
 			static const float cgrid[7] = { 0.97f, 0.8f, 0.5f, 0.2f,
 				0.f, -0.35f, -0.7f };
+			const int kLook = 6;   // lookahead ticks (search knob)
 			for (int k = 0; k < N; ++k) {
+				// Active target: first whose window covers k.
+				size_t ti = 0;
+				while (ti + 1 < targets.size()
+					&& k >= targets[ti].until)
+					ti++;
+				const GuideTarget& tg = targets[ti];
+				const bool final_tg = ti + 1 == targets.size();
+				const int t_end = final_tg ? N : tg.until;
 				const float s2d = Len2D(s.vel);
-				const int rem = N - k;
 				int bs = 0;
 				float bc = 1.f;
 				if (s2d > 1.f) {
 					const float h = atan2f(s.vel.Y, s.vel.X);
-					Strafe::TickLaw law = Strafe::Law(p, s2d, 1.f,
-						s.ducked);
-					const float full2 = s2d * s2d + cap2;
 					float bestJ = FLT_MAX;
 					for (int si = -1; si <= 1; ++si) {
-						if (si != 0 && cur != 0
-							&& si != cur && age < min_gap)
+						if (si != 0 && cur != 0 && si != cur
+							&& age < min_gap)
 							continue;   // illegal flip
 						const int nca = si == 0 ? 1 : 7;
 						for (int ci = 0; ci < nca; ++ci) {
-							float h2, s22;
-							float c = 1.f;
-							if (si == 0) {
-								h2 = h;
-								s22 = s2d;   // null: no gain
-							} else {
-								c = cgrid[ci];
-								const float s2c = 1.f - c * c;
-								const float tr = law.TurnRad(c,
-									s2c > 0.f ? sqrtf(s2c) : 0.f);
-								h2 = Steer::WrapPi(h
-									+ (si > 0 ? tr : -tr));
-								const float nv2 = law.NewSpeed2(c);
-								s22 = nv2 > 0.f ? sqrtf(nv2) : 0.f;
+							const float c = si == 0 ? 1.f
+								: cgrid[ci];
+							// Short-horizon law-model rollout:
+							// hold this wish for kLook ticks.
+							float hh = h, ss = s2d;
+							float px = s.pos.X, py = s.pos.Y;
+							float sac = 0.f;
+							const int lk = kLook < t_end - k
+								? kLook : (t_end - k > 1
+									? t_end - k : 1);
+							for (int j = 0; j < lk; ++j) {
+								if (si != 0) {
+									Strafe::TickLaw law =
+										Strafe::Law(p, ss, 1.f,
+											s.ducked);
+									const float s2c = 1.f - c * c;
+									const float tr = law.TurnRad(
+										c, s2c > 0.f
+											? sqrtf(s2c) : 0.f);
+									hh = Steer::WrapPi(hh
+										+ (si > 0 ? tr : -tr));
+									const float nv2 =
+										law.NewSpeed2(c);
+									const float full2 = ss * ss
+										+ cap2;
+									sac += full2 - (nv2 > 0.f
+										? nv2 : 0.f);
+									ss = nv2 > 0.f ? sqrtf(nv2)
+										: 0.f;
+								} else {
+									sac += cap2;   // null: no gain
+								}
+								px += cosf(hh) * ss * p.dt;
+								py += sinf(hh) * ss * p.dt;
 							}
-							// Straight-run endpoint estimate at T
-							// (guidance only; the engine judges).
-							const float sav = sqrtf(s22 * s22
-								+ cap2 * static_cast<float>(rem)
-								* 0.5f);
-							const float D = sav * p.dt
-								* static_cast<float>(rem);
-							const float ex = s.pos.X
-								+ cosf(h2) * D;
-							const float ey = s.pos.Y
-								+ sinf(h2) * D;
-							const float dxq = q.X - ex;
-							const float dyq = q.Y - ey;
+							// Straight-run remainder to the active
+							// target's tick (guidance estimate
+							// only; the engine judges).
+							const int rem = t_end - k - lk;
+							if (rem > 0) {
+								const float sav = sqrtf(ss * ss
+									+ cap2 * static_cast<float>(
+										rem) * 0.5f);
+								const float D = sav * p.dt
+									* static_cast<float>(rem);
+								px += cosf(hh) * D;
+								py += sinf(hh) * D;
+							}
+							const float dxq = tg.x - px;
+							const float dyq = tg.y - py;
 							float J = gw.wp
 								* (dxq * dxq + dyq * dyq) * 1e-4f;
-							if (static_cast<float>(rem)
-								<= gw.blend
-								* static_cast<float>(N)) {
+							if (final_tg && tg.use_theta
+								&& static_cast<float>(N - k)
+									<= gw.blend
+									* static_cast<float>(N)) {
 								const float dth = Steer::WrapPi(
-									th_tgt - h2);
+									tg.theta - hh);
 								J += gw.wt * dth * dth * 100.f;
 							}
-							J += gw.we * (full2 - s22 * s22)
-								* 1e-3f;
+							J += gw.we * sac * 1e-3f
+								/ static_cast<float>(lk);
 							if (J < bestJ) {
 								bestJ = J;
 								bs = si;
@@ -641,41 +686,87 @@ namespace Entrance {
 		if (seed_side && seed_cosa && !seed_side->empty()
 			&& best.evals < budget)
 			ev_sched(*seed_side, *seed_cosa, nullptr);
-		// ---- GUIDED SHOOTING (the conditioning fix for needle
-		// basins): feedback generates candidates over a small weight
-		// grid x terminal-heading offsets; each frozen schedule
-		// enters the search ONLY through its open-loop replay. The
-		// generation pass itself costs one flight of engine time and
-		// is charged to the budget. ----
+		// ---- GUIDED + SEQUENTIAL MULTI-NODE SHOOTING (ruling
+		// 2026-08-18): a GENERIC conditioning transform. Node
+		// positions come from start/target geometry only - neutral
+		// interpolation plus symmetric lateral offsets, both signs,
+		// several magnitudes (nothing map- or tape-derived; bulges,
+		// S-curves, direct lines all EMERGE). m is adaptive: m=0
+		// single-target shots first, then m=1 with one free node.
+		// Every frozen schedule enters only through open-loop replay;
+		// generation passes are charged to the budget. ----
 		{
 			const int gbudget = budget / 3;
 			const int fl0 = best.evals;
-			const float th_offs[5] = { 0.f, 0.2f, -0.2f, 0.45f,
-				-0.45f };
-			const float wps[3] = { 0.6f, 2.f, 6.f };
-			const float wes[2] = { 0.05f, 0.5f };
 			std::vector<signed char> gsd;
 			std::vector<float> gcs;
-			for (int ti = 0; ti < 5; ++ti)
-				for (int pi2 = 0; pi2 < 3; ++pi2)
-					for (int ei2 = 0; ei2 < 2; ++ei2) {
-						if (best.evals - fl0 >= gbudget
-							|| best.evals >= budget)
-							goto guided_done;
-						GuideWeights gw;
-						gw.wp = wps[pi2];
-						gw.we = wes[ei2];
-						GuidedShoot(entry, w, p, q,
-							Steer::WrapPi(th_arr + th_offs[ti]),
-							N, min_gap, entry_ctl, gw, &gsd,
-							&gcs);
-						best.evals++;   // the generation pass
-						if (flights_counter)
-							(*flights_counter)++;
-						if (!gsd.empty())
-							ev_sched(gsd, gcs, nullptr);
-					}
-			guided_done:;
+			const float rx = q.X - entry.pos.X;
+			const float ry = q.Y - entry.pos.Y;
+			const float rl = sqrtf(rx * rx + ry * ry);
+			const float epy = rl > 1.f ? ry / rl : 0.f;
+			const float epx = rl > 1.f ? rx / rl : 1.f;
+			const float eqx = -epy, eqy = epx;
+			auto shoot = [&](const std::vector<GuideTarget>& tgts,
+				const GuideWeights& gw) {
+				if (best.evals - fl0 >= gbudget
+					|| best.evals >= budget)
+					return;
+				GuidedShootSeq(entry, w, p, tgts, N, min_gap,
+					entry_ctl, gw, &gsd, &gcs);
+				best.evals++;
+				if (flights_counter)
+					(*flights_counter)++;
+				if (!gsd.empty())
+					ev_sched(gsd, gcs, nullptr);
+			};
+			auto final_tgt = [&](float th_off) {
+				GuideTarget t2;
+				t2.x = q.X;
+				t2.y = q.Y;
+				t2.theta = Steer::WrapPi(th_arr + th_off);
+				t2.use_theta = true;
+				t2.until = N;
+				return t2;
+			};
+			{
+				GuideWeights gw;
+				const float offs[3] = { 0.f, 0.3f, -0.3f };
+				for (int ti = 0; ti < 3; ++ti) {
+					std::vector<GuideTarget> tg(1,
+						final_tgt(offs[ti]));
+					gw.wp = 2.f;
+					gw.we = 0.3f;
+					shoot(tg, gw);
+					gw.wp = 6.f;
+					gw.we = 0.05f;
+					shoot(tg, gw);
+				}
+			}
+			{
+				const float lam = 0.45f;
+				const int tau1 = static_cast<int>(lam
+					* static_cast<float>(N));
+				const float bmag[7] = { 0.f, 0.3f, -0.3f, 0.6f,
+					-0.6f, 0.95f, -0.95f };
+				GuideWeights gw;
+				for (int bi2 = 0; bi2 < 7; ++bi2) {
+					GuideTarget n1;
+					n1.x = entry.pos.X + lam * rx
+						+ bmag[bi2] * rl * 0.5f * eqx;
+					n1.y = entry.pos.Y + lam * ry
+						+ bmag[bi2] * rl * 0.5f * eqy;
+					n1.until = tau1;
+					std::vector<GuideTarget> tg;
+					tg.push_back(n1);
+					tg.push_back(final_tgt(0.f));
+					gw.wp = 2.f;
+					gw.we = 0.3f;
+					shoot(tg, gw);
+					gw.wp = 6.f;
+					gw.we = 0.05f;
+					shoot(tg, gw);
+				}
+			}
 		}
 		// deepen(): local refinement of one elite (knot/length moves,
 		// the resolution ladder, reversal insertion).

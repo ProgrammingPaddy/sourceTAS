@@ -1,38 +1,38 @@
-# Solver Rebuild — Build Plan & Living Checklist
+﻿# Solver Rebuild â€” Build Plan & Living Checklist
 
 **This is the status document.** Design and testimony live in
 `Docs/SolverRebuild.md`; the narrative log lives in
 `Docs/FullMapSolver.md`; this file tracks WHAT IS BUILT and WHAT IS
 NEXT, and is updated every working session (change log at the bottom).
 
-Legend: `[x]` done+validated · `[~]` in progress · `[ ]` not started ·
-`(!)` blocked/depends · each milestone ends with its ACCEPTANCE GATE —
+Legend: `[x]` done+validated Â· `[~]` in progress Â· `[ ]` not started Â·
+`(!)` blocked/depends Â· each milestone ends with its ACCEPTANCE GATE â€”
 a measurable pass/fail, never a vibe.
 
-**NOW →** M3 transfer refinement & assembly (IN PROGRESS — see 3.1/3.2
+**NOW â†’** M3 transfer refinement & assembly (IN PROGRESS â€” see 3.1/3.2
 status and the 2026-08-16 changelog tail for exactly where it stands).
 
 ---
 
-## M0 — Foundations
+## M0 â€” Foundations
 
 - [x] 0.1 Design of record + uncompressed expert knowledge base
       (`SolverRebuild.md`, commit c6de8a8)
 - [x] 0.2 Strafe law: closed form (`SolverStrafe.h`) + `strafelaw`
-      prover — 1,120 states vs certified MoveTick, float-ULP exact
-      (max 2.0 in speed² of 11.5M; 8e-9 rad) (d4f6402)
-- [x] 0.3 Feature extractor v0 + `routegraph` command — brush-side
+      prover â€” 1,120 states vs certified MoveTick, float-ULP exact
+      (max 2.0 in speedÂ² of 11.5M; 8e-9 rad) (d4f6402)
+- [x] 0.3 Feature extractor v0 + `routegraph` command â€” brush-side
       polygons, plane/area/extents/downhill, candidate edges (d4f6402)
-- [x] 0.4 Face coverage on basictest — GATE PASSED via the new
+- [x] 0.4 Face coverage on basictest â€” GATE PASSED via the new
       `facecover` command: both certified tapes replayed through the
       exact sim, **483/483 surf contacts map to extracted faces, 0
       missing**. (The spine worry was unfounded: its ridden moments are
       walkable-top GROUND contacts, not surf.) `facecover` stays as the
       standing per-map gate.
-- [x] 0.5 Zone anchoring: `Route::AnchorZones` — start = brush under
+- [x] 0.5 Zone anchoring: `Route::AnchorZones` â€” start = brush under
       the anchor origin; end = --end-brush or DERIVED by replaying the
       anchor tape to its finish (zones are plugin-side on real servers,
-      so a human trace is the honest zone source — the expert demo
+      so a human trace is the honest zone source â€” the expert demo
       traces serve this role per map). basictest: start idx 6, 3
       candidate first boards; end id 10, 2 feeder faces.
 - [x] 0.6 Strafe alternation rate limit: **6 direction changes per
@@ -41,7 +41,7 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       66.67tps. `MoveParams::strafe_rate_max`, params-file loadable;
       becomes the yaw-spline knot cap in M1.3.
 
-## M0.7 — DLL crash hardening (user-blocking, added 2026-08-16)
+## M0.7 â€” DLL crash hardening (user-blocking, added 2026-08-16)
 
 - [x] 7.1 Demo-capture freeze ROOT-CAUSED by the breadcrumb journal
       (last stage = update:democap, EndScene thr != CreateMove thr):
@@ -63,73 +63,73 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       map-load-without-server, wrong-map load, recordings-loaded
       freezes. Do NOT guess - read breadcrumb.log after each.
 
-## M1 — Transfer primitives & the ledger
+## M1 â€” Transfer primitives & the ledger
 
 - [x] 1.1 Reachability envelope (`SolverEnvelope.h` + `envelope` gate
       command): EXACT discrete ballistic z (half-gravity structure:
-      z(n) = z0 + n·dt·vz0 − g·dt²·n²/2), speed bound s(n)² ≤ s0²+900n,
+      z(n) = z0 + nÂ·dtÂ·vz0 âˆ’ gÂ·dtÂ²Â·nÂ²/2), speed bound s(n)Â² â‰¤ s0Â²+900n,
       distance bound (gain-optimal straight line), ZWindow + CanReach
       edge gate. GATE PASSED: 15/15 tape airborne stretches contained
       (z/speed/dist all 0 violations) + 500/500 random-control
       falsification trials stay inside, 0 escapes. Laws learned: the
-      envelope bounds the AIR PHASE ONLY — measure at the last airborne
+      envelope bounds the AIR PHASE ONLY â€” measure at the last airborne
       tick, never after the contact tick (the board clip converts vz
       into horizontal speed = M1.2's business); z sits in a duck-offset
-      band {−8.5, 0, +8.5} RELATIVE TO ENTRY DUCK STATE, not on the
+      band {âˆ’8.5, 0, +8.5} RELATIVE TO ENTRY DUCK STATE, not on the
       ballistic point.
 - [x] 1.2 Board window per face (`SolverBoard.h` + `boardwin` gate):
-      closed-form clip physics — dot = v1·n sweeps [vz·nz − s·h,
-      vz·nz + s·h] over aim; speed² loss = dot² EXACTLY; MinApproachDot
-      = the tangency law (0 ⇔ s·h ≥ |vz·nz|, else unavoidable loss);
+      closed-form clip physics â€” dot = v1Â·n sweeps [vzÂ·nz âˆ’ sÂ·h,
+      vzÂ·nz + sÂ·h] over aim; speedÂ² loss = dotÂ² EXACTLY; MinApproachDot
+      = the tangency law (0 â‡” sÂ·h â‰¥ |vzÂ·nz|, else unavoidable loss);
       AimCone(cap); polygon region test with hull-center slack 43u
       (=|(16,16,36)|, geometric). TickEvents grew contact_pos/
       contact_vel (pure instrumentation); Fn::ClipVelocity exposed.
       GATE PASSED first run: 13/13 tape boards approaching + in-region
-      (max edge −0.4u) + min-law held + clip model EXACT vs the
+      (max edge âˆ’0.4u) + min-law held + clip model EXACT vs the
       mirror's own measured loss (worst 0.0000 u/s); spot check 827
-      single-plane strikes across all faces × aim spectrum, 0 cone
+      single-plane strikes across all faces Ã— aim spectrum, 0 cone
       violations, closed-form zero-input clip-tick prediction matches
-      MoveTick exactly (StartGravity → clip → FinishGravity decomposition
+      MoveTick exactly (StartGravity â†’ clip â†’ FinishGravity decomposition
       confirmed). FINDING: the certified tapes' worst board = |dot|
-      432 u/s = 38.5% of speed² lost — the OLD solver's board quality
+      432 u/s = 38.5% of speedÂ² lost â€” the OLD solver's board quality
       quantified (these tapes are parity-certified, not optimality-
       certified). The expert cap must come from the demo traces (M1.5
       ledger), NOT from these tapes.
 - [x] 1.3 Air-phase primitive (`SolverAir.h/.cpp` + `airsolve` gate):
       target-heading spline flown on the exact engine by a law-derived
-      controller — per tick it lands the spline heading exactly via the
-      certified turn-curve inversion (cosa ∈ [0, cap/v]: full-turn-full-
-      gain → no-turn-no-gain), and beyond the perp rate engages the
-      BRAKING TURN (cosa < 0: budget 562.5 >> cap 30 buys ~32°/tick at
-      850 u/s for ~114 u/s — testimony's "eat the energy in the turn",
+      controller â€” per tick it lands the spline heading exactly via the
+      certified turn-curve inversion (cosa âˆˆ [0, cap/v]: full-turn-full-
+      gain â†’ no-turn-no-gain), and beyond the perp rate engages the
+      BRAKING TURN (cosa < 0: budget 562.5 >> cap 30 buys ~32Â°/tick at
+      850 u/s for ~114 u/s â€” testimony's "eat the energy in the turn",
       now a controller capability whose cost the optimizer owns via the
       spline slope). Strafe-side flips rate-limited by construction
       (min 12 ticks; blocked flip with small error weaves, large error
       coasts). Search: 5 unseeded initial families (linear/late-turn/
       pure-pursuit/mirrored-tangent/outward-bump) + BASIN HOPPING
-      (deterministic jitter restarts — plain coordinate descent
+      (deterministic jitter restarts â€” plain coordinate descent
       converged at ~200 evals and left the rest of any budget unspent)
       + polish hops around the global best. Spline spans the expected
-      flight (aim_tick), not the sim cap — late knots must be live
+      flight (aim_tick), not the sim cap â€” late knots must be live
       parameters. GATE PASSED: 12/12 tape transfers reproduced
       unseeded (entry state + landing window only, never tape
       controls), 1.0s wall for the whole suite at 3000 evals/transfer.
-      Quality: the primitive beats the tape's board on 10/12 —
-      e.g. dot −50 vs tape −377, −205 vs −432, two near-perfect
-      tangent arrivals (−1.8, −0.6).
+      Quality: the primitive beats the tape's board on 10/12 â€”
+      e.g. dot âˆ’50 vs tape âˆ’377, âˆ’205 vs âˆ’432, two near-perfect
+      tangent arrivals (âˆ’1.8, âˆ’0.6).
 - [x] 1.4 Carve primitive (`SolverCarve.h/.cpp` + `carve` gate + the
       shared `SolverSteer.h` controller): on-face rides driven by the
       SAME certified controller as the air phase, with two extra
-      dials — an EFFORT channel (per-knot duty-cycled coasting: the
+      dials â€” an EFFORT channel (per-knot duty-cycled coasting: the
       expert's speed control; slow rides are effort choices, not
       heading choices) and the DUCK-OFF exit move (press duck while
       riding: the +8.5 air-duck shift pops the hull off the face,
-      keeping the climb velocity — how solved12's crest exit works,
+      keeping the climb velocity â€” how solved12's crest exit works,
       found by `ridedump` on the tape's final tick: b1028 d1). Carve
-      ENERGY LAW verified against the engine: v²_exit + Σdot² = v²_entry
-      + 2g·drop (+ wish work ≤ 900/tick), with the DERIVED discrete
-      cross-term bound Σ g·dt·nz·|dot| (a clip at fraction f inside a
-      half-gravity tick shifts E by g·dt·(2f−1)·nz·dot — measured law,
+      ENERGY LAW verified against the engine: vÂ²_exit + Î£dotÂ² = vÂ²_entry
+      + 2gÂ·drop (+ wish work â‰¤ 900/tick), with the DERIVED discrete
+      cross-term bound Î£ gÂ·dtÂ·nzÂ·|dot| (a clip at fraction f inside a
+      half-gravity tick shifts E by gÂ·dtÂ·(2fâˆ’1)Â·nzÂ·dot â€” measured law,
       not a fitted tolerance). Exit spec = full VELOCITY VECTOR (crest
       launches have mostly-vertical velocity; horizontal heading alone
       is ill-conditioned). GATE PASSED: 10/10 tape carves reproduced
@@ -137,99 +137,99 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       zero-input identity + 80/80 strafing law bound, 6.4s wall.
 - [x] 1.5 THE LEDGER (`SolverLedger.h/.cpp` + `ledger`/`ledgergate`/
       `ledger-trace`): exact event-sourced phase decomposition
-      (GROUND/AIR/RIDE) of any control line — air-gain shortfall vs
-      the 900/tick law, board loss² + fraction + TANGENCY REGRET
-      (dot² − min² at the actual arrival), ride clip dissipation,
+      (GROUND/AIR/RIDE) of any control line â€” air-gain shortfall vs
+      the 900/tick law, board lossÂ² + fraction + TANGENCY REGRET
+      (dotÂ² âˆ’ minÂ² at the actual arrival), ride clip dissipation,
       gravity conversion, wish work via energy closure (self-auditing
       within the derived cross bound + a float-accumulation allowance
-      ~ULP(v²)/op). GATE PASSED: closure 0/9 bad on the 292 tape;
+      ~ULP(vÂ²)/op). GATE PASSED: closure 0/9 bad on the 292 tape;
       planted 15-tick coast localized (prior phases bit-identical,
       delta +65.3k = 13.5k direct theft + 40.9k of misaligned-yaw
       braking the ledger also priced). THE INDICTMENT of the old
-      line, now in numbers: 329,477 u²/s² dissipated on clips +
-      77,634 air shortfall in one 405-tick run; boards at −206
-      (regret 42.6k, tangency 0 was available!) and −142 (regret
+      line, now in numbers: 329,477 uÂ²/sÂ² dissipated on clips +
+      77,634 air shortfall in one 405-tick run; boards at âˆ’206
+      (regret 42.6k, tangency 0 was available!) and âˆ’142 (regret
       20.3k, ditto). `ledger-trace` audits the 7 expert demo CSVs
-      (energy-model-break events per snapshot pair) — CAVEAT: on the
+      (energy-model-break events per snapshot pair) â€” CAVEAT: on the
       big maps those events mix real clips with teleports/boosters;
       classification needs map geometry (deferred to M5.1). The
       apples-to-apples expert comparison happens on shared maps.
 
-## M2 — Route search (stage 2)
+## M2 â€” Route search (stage 2)
 
 - [x] 2.1-2.3 Route search (`SolverRouteSearch.h/.cpp` + `routesgate`):
       best-first enumeration over feature sequences under THE POTENTIAL
-      LEDGER — total energy obeys E' = E + 900·ticks + 2g·Δz for
+      LEDGER â€” total energy obeys E' = E + 900Â·ticks + 2gÂ·Î”z for
       flights and rides alike, anchored per node (anchors telescope;
       cycles net exactly their wish work, killing the corner-bounce
       energy exploit that broke two earlier attempts). Edges = M1
-      closed forms: ballistic z-window × gain-law distance coverage
-      from the departure anchor; ride traversal priced arrival→
+      closed forms: ballistic z-window Ã— gain-law distance coverage
+      from the departure anchor; ride traversal priced arrivalâ†’
       departure anchor at ledger speed; the END edge allows LANDING
       SHORT + RUNNING the remainder (the human line's final leg).
       START = measured prestrafe ceiling (certified-sim circle-strafe
-      probe ×1.15, no fitted constant) + the single legal jump folded
-      into E. Skips are first-class (the search REJECTS start→1/2/3
-      as unreachable without the face-0 board — correct physics).
+      probe Ã—1.15, no fitted constant) + the single legal jump folded
+      into E. Skips are first-class (the search REJECTS startâ†’1/2/3
+      as unreachable without the face-0 board â€” correct physics).
       Ranking = best lb per DISTINCT BASE SHAPE (first-occurrence face
-      order; cycle variants and multi-taps collapse — the pool stage 3
-      consumes). GATE PASSED: 60 raw routes → 10 shapes in 0.00s;
+      order; cycle variants and multi-taps collapse â€” the pool stage 3
+      consumes). GATE PASSED: 60 raw routes â†’ 10 shapes in 0.00s;
       the pool contains the HUMAN shape [0 2 3], solved12's [0 1 2 3]
       (rank 7), the old solver's [0 2], and the speculative one-ride
-      [0] (rank 4 — no real run validates it; worth probing in M4).
+      [0] (rank 4 â€” no real run validates it; worth probing in M4).
       CORRECTION 2026-08-16: a session mislabeled Run 21.tas as "the
       human line" (one ride, 71k dissipation, pit finish) and briefly
-      made it the benchmark. Run 21 is a DEAD TAPE — it rides face 0
-      into the map FLOOR (z −1056 = brush 1's top) and never finishes;
+      made it the benchmark. Run 21 is a DEAD TAPE â€” it rides face 0
+      into the map FLOOR (z âˆ’1056 = brush 1's top) and never finishes;
       its header says surf_basictest only because it was recorded
       in-game there. All conclusions drawn from it are PURGED. The
       REAL human run is `basictest.tas` (user-confirmed; see M4).
 
-## M3 — Transfer refinement & assembly (stage 3)
+## M3 â€” Transfer refinement & assembly (stage 3)
 
-- [~] 3.1/3.2 Assembler (`SolverAssemble.h/.cpp` + `msolvegate`) — IN
+- [~] 3.1/3.2 Assembler (`SolverAssemble.h/.cpp` + `msolvegate`) â€” IN
       PROGRESS. Built and working: shape iteration from the M2 pool;
       START plan search scored by the RESULTING BOARD via probe air
       solves (launch-speed-toward-the-face was the head-on plunge
-      setup: dot −458 → −59.8 when fixed); region-mode air targets
-      (miss gradient to the nearest face point — point pursuit fights
+      setup: dot âˆ’458 â†’ âˆ’59.8 when fixed); region-mode air targets
+      (miss gradient to the nearest face point â€” point pursuit fights
       tangency); graze-through flights (a non-target clip continues
       the flight; ending it killed chains 37u short); TAP TRANSFERS
-      (striking the next leg's face IS the transfer — the 3-tick
+      (striking the next leg's face IS the transfer â€” the 3-tick
       clean-air exit is impossible between adjoining valley faces);
       the UNIFIED TRANSFER primitive (tap mode: the ride flows through
-      exit + flight and is scored by the next strike — the design's
+      exit + flight and is scored by the next strike â€” the design's
       stage-3 unit); zone proxy + ZoneTick + ledger comparison + .tas
       export all wired.
       SESSION 2026-08-16b (tapprobe-driven, every step measured):
       the unified transfer NOW SOLVES the human's own transfers -
       `tapprobe` (new isolation instrument: replay any tape to a
       tick, run the tap/zone solve from that exact state) showed the
-      0→2 valley transfer unseeded at dot −162.8 @ 887 u/s (human:
-      −206.4 @ 874 on the same face pair) and the face-3→zone ENDING
+      0â†’2 valley transfer unseeded at dot âˆ’162.8 @ 887 u/s (human:
+      âˆ’206.4 @ 874 on the same face pair) and the face-3â†’zone ENDING
       in 101 ticks (human: 123 from the same entry). What it took,
       in order (each verified by the probe): (1) tap target = the
       next face's BOARD REGION (aim_region math, not corner points);
       (2) FRONT-SIDE-ONLY miss gradient (behind-plane closeness is
-      not approach — kills the corridor/under-dive traps); (3)
+      not approach â€” kills the corridor/under-dive traps); (3)
       graze-through in the flight section (only the tap face ends a
       tap; zone mode grazes everything); (4) ballistic REACH-
       SHORTFALL term at separation (M1.1 closed form: prices
       "separate higher/ascending"); (5) S-CARVE families (dive then
-      up — the measured human shape: final ride heading +8°, exit
+      up â€” the measured human shape: final ride heading +8Â°, exit
       ascending +128 vz off the face edge); (6) DUAL SPLINE DOMAINS
-      in SolveCarve (est and est/2; zone est×1.7 — the M1.3 dead-
+      in SolveCarve (est and est/2; zone estÃ—1.7 â€” the M1.3 dead-
       knot lesson recurs because the ride doubles the speed); (7)
       6 knots for two-phase transfers; (8) 12k carve evals (probe-
-      measured: −395@4k → −163@12k); (9) ZONE MODE = the last
+      measured: âˆ’395@4k â†’ âˆ’163@12k); (9) ZONE MODE = the last
       transfer ends by entering the end volume, scored by arrival
       tick (the objective itself), no more FlyToZone dependence;
       (10) board ALTERNATIVES (SolveTransfer returns top-K diverse
-      hits; the leg composes each with its carve — a dot-minimal
-      board measurably set up −400 taps where a harder board set up
-      −110); (11) rolling-context NEXT_COST (exact climb law
-      v−√(v²−2g·sh) toward the leg-after target).
-      In-assembler best so far: [0 2] leg 0 at −110.3 @ 877.
+      hits; the leg composes each with its carve â€” a dot-minimal
+      board measurably set up âˆ’400 taps where a harder board set up
+      âˆ’110); (11) rolling-context NEXT_COST (exact climb law
+      vâˆ’âˆš(vÂ²âˆ’2gÂ·sh) toward the leg-after target).
+      In-assembler best so far: [0 2] leg 0 at âˆ’110.3 @ 877.
       REMAINING (the one blocker): chain CONSISTENCY - tap landings
       cluster at the bottom-west of each face where the NEXT
       transfer has no runway; min-over-verts reach can't
@@ -246,16 +246,16 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       ZONES RESOLVED 2026-08-16 (user: "the one with the red texture
       is the end zone" + BSP texture data): START = brush 6 (carries
       CABLE/GREEN, the spawn platform), END = brush 10 (carries
-      CABLE/RED, reflectivity 0.511/0.002/0.002 — the raised platform
+      CABLE/RED, reflectivity 0.511/0.002/0.002 â€” the raised platform
       z 192..256). The assembler's InZone target (brush 10) was
       already correct. Texture identity now loads from the BSP
-      (texinfo→texdata→string lumps, per-side `texd` +
+      (texinfoâ†’texdataâ†’string lumps, per-side `texd` +
       `World::texnames/texreflect`; `mapinfo` prints per-brush
       textures) so zone identification is map data, not lore.
-      `tapeinfo` (new) prints every tape's map/frames/anchor —
+      `tapeinfo` (new) prints every tape's map/frames/anchor â€”
       the provenance check that would have caught the Run 21 mixup.
 
-## M4 — Polish & anytime behavior (stage 4)
+## M4 â€” Polish & anytime behavior (stage 4)
 
 - [ ] 4.1 CMA-ES residual polish on yaw splines (boundary-locked,
       seeded from 3.1, never random).
@@ -266,26 +266,26 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       unseeded.** The 2-min setting lands within ~5 ticks of the
       20-min setting.
       THE MISSION IS THE SOLVER, NOT A MAP (user, repeatedly): the
-      gate is generic — on any map with a human/reference run, the
+      gate is generic â€” on any map with a human/reference run, the
       unseeded solve beats it. Per-map numbers below are VALIDATION
       INSTANCES only; nothing in the solver may reference them.
       basictest instance (measured 2026-08-16, user-confirmed tape):
       `basictest.tas` = the human run. Zone clock **319 ticks
       (4.785 s)** from start-zone exit (t112) to grounding on brush
       10 (t431). Route shape [0 2 3] (skips face 1). Max 915.9 u/s.
-      Its ledger: boards −115.1 (regret 5.4k), −206.4 (regret 42.6k,
-      tangency 0 available), −142.4 (regret 20.3k); whole-tape
+      Its ledger: boards âˆ’115.1 (regret 5.4k), âˆ’206.4 (regret 42.6k,
+      tangency 0 available), âˆ’142.4 (regret 20.3k); whole-tape
       dissipation 343.9k + air shortfall 138.7k. The old solver's
-      best line (cma_S292) scored 292 ticks — already faster than
-      the human — so this instance's bar is < 292 ticks unseeded,
+      best line (cma_S292) scored 292 ticks â€” already faster than
+      the human â€” so this instance's bar is < 292 ticks unseeded,
       with the human's 68k board regret as energy headroom.
 
-## M5 — Generalization
+## M5 â€” Generalization
 
 - [ ] 5.1 Second linear map, brush-geometry only, end-to-end unseeded.
       GATE: finisher + clean ledger, no code changes specific to the
       map.
-- [ ] 5.2 (!) Displacement collision in the world model — parity-side
+- [ ] 5.2 (!) Displacement collision in the world model â€” parity-side
       prerequisite for most of the map population (tracked as parity
       open item; build when a target map demands it).
 - [x] 5.3 Expert demo ingestion - CAPTURED (took 4 rounds; each failure
@@ -306,7 +306,7 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
       set; profile and push down. Throughput benchmark of the
       leaf-ordered trace under solver load (carried from parity era).
 
-## M6 — In-game validation (batched; respect the relaunch fatigue)
+## M6 â€” In-game validation (batched; respect the relaunch fatigue)
 
 - [ ] 6.1 Export candidate lines and validate IN ONE SESSION per batch
       (playback capture, diff 0.000u required).
@@ -317,7 +317,7 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - Every module validates against the certified engine or the tapes
   BEFORE anything builds on it (the strafelaw pattern: prover first).
-- No fitted constants in scoring — bounds derive from the engine model;
+- No fitted constants in scoring â€” bounds derive from the engine model;
   the ledger measures regret, not vibes.
 - No per-map tuning anywhere. If a map needs special handling, the
   design is wrong.
@@ -466,7 +466,7 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   last [0 2 3] variant rode f3 to an ascending crest exit but flew
   from 409 u/s (nothing left after -234k of grazes).
 
-- 2026-08-16: Created. M0.1–0.3 done (design doc; strafe law proven
+- 2026-08-16: Created. M0.1â€“0.3 done (design doc; strafe law proven
   float-ULP vs certified mirror; extractor v0 with 4 faces + 12
   candidate edges on basictest). NOW = M0.4 face coverage.
 - 2026-08-16 (later): M5.3 advanced - demos received and staged;
@@ -489,32 +489,32 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   DT_CSPlayer-rooted netvars, settle+load-timeout, BOM strip,
   runner-by-name, stopdemo; run segments via dense+moving selector).
   M1.1 GATE PASSED after two fix rounds, both diagnosed from gate
-  evidence: (1) first run had 6 "speed violations" up to +57u — the
+  evidence: (1) first run had 6 "speed violations" up to +57u â€” the
   measurement included the contact tick, where the board clip converts
   vz into horizontal speed; envelope now measured at the last airborne
-  tick. (2) 476 falsification escapes at exactly 8.5002 — the air-duck
+  tick. (2) 476 falsification escapes at exactly 8.5002 â€” the air-duck
   origin shift; z checks now use the duck band, RELATIVE TO ENTRY DUCK
-  STATE {−8.5, 0, +8.5} (a stretch entering ducked that unducks
-  mid-air sits at −8.5). Final: 15/15 contained, 500/500 falsification
+  STATE {âˆ’8.5, 0, +8.5} (a stretch entering ducked that unducks
+  mid-air sits at âˆ’8.5). Final: 15/15 contained, 500/500 falsification
   clean. Battery still 14/15 (unduck_face 1.45u = the documented
   parity-era residual, untouched). NOW = M1.2 board windows.
 - 2026-08-16 (later): M1.2 GATE PASSED first run (boardwin: 13/13 tape
   boards contained, clip model + zero-input tick decomposition both
   EXACT vs the engine mirror; 827 synthetic strikes, 0 violations).
-  Board physics is now closed-form: loss² = (v1·n)², min-loss law
-  max(0, |vz|·nz − s·h)², aim cone per cap. KEY FINDING for the
-  mission: the old solver's tapes contain a 38.5%-of-speed² board —
+  Board physics is now closed-form: lossÂ² = (v1Â·n)Â², min-loss law
+  max(0, |vz|Â·nz âˆ’ sÂ·h)Â², aim cone per cap. KEY FINDING for the
+  mission: the old solver's tapes contain a 38.5%-of-speedÂ² board â€”
   the "needlessly lost energy on boards" the user diagnosed, now a
   number the ledger can chase. NOW = M1.3 yaw-spline air primitive.
 - 2026-08-16 (later): M1.3 GATE PASSED, 12/12 unseeded in 1.0s. Four
   iteration rounds, each from row evidence: (1) spline domain must be
   the expected flight, not the sim cap (dead-knot bug); (2) arrival
   tick needs a hard window (tick_tol) or the search grazes back at
-  tick 1; (3) the controller NEEDED the braking turn (cosa < 0) — the
+  tick 1; (3) the controller NEEDED the braking turn (cosa < 0) â€” the
   perp-only strafe family cannot soften hard boards; adding it turned
   6 rows at once and IS the flick/eat-energy-in-the-turn mechanic;
   (4) plain coordinate descent converges at ~200 evals regardless of
-  budget (identical output at 900 vs 3000) — basin hopping with
+  budget (identical output at 900 vs 3000) â€” basin hopping with
   deterministic jitter actually spends the budget and closed the last
   2 rows. Primitive beats the tape's board loss on 10/12 transfers.
   NOW = M1.4 carve primitive.
@@ -524,19 +524,19 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   a tolerance; (2) slow rides demanded the EFFORT channel; (3) crest
   launches demanded the full exit-velocity-vector spec (heading of a
   near-vertical launch is noise); (4) the 1e6 no-exit wall froze two
-  rows across three fix rounds — a stall NEAR the aim must outscore an
+  rows across three fix rounds â€” a stall NEAR the aim must outscore an
   exit FAR from it (comparable scores restored the gradient and one
   row snapped to dv 2.2); (5) budget was NOT the lever (20k evals =
   same failure); (6) `ridedump` on the last stubborn ride revealed the
   DUCK-OFF exit (duck press on the final tick separates the hull with
-  climb velocity intact) — added as a searched genome dimension and
+  climb velocity intact) â€” added as a searched genome dimension and
   the row closed at dv 16.4. The primitive kit now expresses: tangent
   boards, braking flicks, weaves, coasting, crest launches, duck-offs.
   NOW = M1.5 the ledger.
-- 2026-08-16 (later): M1.5 GATE PASSED — M1 COMPLETE. Ledger lessons:
+- 2026-08-16 (later): M1.5 GATE PASSED â€” M1 COMPLETE. Ledger lessons:
   closure tolerance must be law + derived cross bound + float
   allowance (first run failed by 66 on a flat 60); sabotage damage is
-  NOT capped by the stolen window — misaligned downstream yaws brake
+  NOT capped by the stolen window â€” misaligned downstream yaws brake
   actively (+40.9k observed) and the ledger correctly prices that;
   localization = priors bit-identical + theft realized in the planted
   phase. The 292 line's indictment: 329k clip dissipation + 78k air
@@ -551,40 +551,40 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 - 2026-08-16 (later): M2 GATE PASSED after three bound revisions, each
   caught by edge diagnostics: (1) unpriced ride traversal made
   adjacent-face cycles free; (2) per-face full-drop energy credits let
-  corner bounces harvest fake energy every revisit — replaced by THE
-  POTENTIAL LEDGER (E' = E + 900·ticks + 2g·Δz uniformly, telescoping
+  corner bounces harvest fake energy every revisit â€” replaced by THE
+  POTENTIAL LEDGER (E' = E + 900Â·ticks + 2gÂ·Î”z uniformly, telescoping
   anchors, cycle-proof); (3) vertex-anchored credits inverted on one
-  edge (s_ub 10) — same ledger fix. Plus: the END edge needed the
+  edge (s_ub 10) â€” same ledger fix. Plus: the END edge needed the
   fly-then-RUN leg, and ranking needed base-shape dedup. (A Run 21
-  "human line" claim from this entry is RETRACTED — see the next
+  "human line" claim from this entry is RETRACTED â€” see the next
   entry.) NOW = M3: chain SolveTransfer/SolveCarve along the shape
   pool, assemble full runs, export .tas; gate = unseeded finisher
   < 2 min whose ledger dominates the old line.
-- 2026-08-16 (session end): M3 assembler ~80% — ten evidence-driven
+- 2026-08-16 (session end): M3 assembler ~80% â€” ten evidence-driven
   iterations, findings baked into code and the 3.1 status above. The
   transfer physics of basictest measured from the certified line
   (ridedump): valley-hop transfers separate MID-FACE at +55..+100
   above zmin, cross flat-or-ascending (in-plane heading clamped out
-  of the downhill half), and board the next base at z ≈ −10; Run 21's
+  of the downhill half), and board the next base at z â‰ˆ âˆ’10; Run 21's
   crest exit is a DUCK-OFF; the start jump must be chosen by its
-  BOARD, not its launch speed. Two chained boards at −59.8/−10.1
+  BOARD, not its launch speed. Two chained boards at âˆ’59.8/âˆ’10.1
   prove the primitives compose. Next concrete steps: (1) make the
   unified tap transfer's guidance walk the ride through the measured
   band before separation (the strike gradient alone lets rides dive
   and ground in the valley); (2) once a full shape chains, FlyToZone
   from the last face finishes the run; (3) resolve the ZONE QUESTION
   with the user (platform vs pit) before M4. Wall per full attempt
-  ~25-30s — well under the 2-min gate budget.
+  ~25-30s â€” well under the 2-min gate budget.
 - 2026-08-16 (corrections, user in the loop): (a) Run 21 RETRACTED as
-  any kind of benchmark — it is a dead in-game tape that rides face 0
+  any kind of benchmark â€” it is a dead in-game tape that rides face 0
   into the floor; the REAL human run is `basictest.tas` (319 zone
   ticks; ledger in M4 notes). (b) Zones are marked BY TEXTURE (user:
   red = end zone; basictest: green CABLE/GREEN on start brush 6, red
   CABLE/RED on end brush 10). Added texture identity to the world
-  loader (texinfo→texdata→string lumps), per-brush textures in
+  loader (texinfoâ†’texdataâ†’string lumps), per-brush textures in
   `mapinfo`, and `tapeinfo` (per-tape map/frames/anchor provenance).
   (c) REFRAME, user's words: "we are not solving a map, we are
-  building a solver to solve every map" — so zone identification
+  building a solver to solve every map" â€” so zone identification
   becomes a solver capability (detect start/end from texture
   dominance in map data; trigger-entity zones join in M5), and all
   per-map numbers in this doc are validation instances, never inputs.
@@ -810,8 +810,8 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   "I want to actually see the routes being searched... a density
   state space based on real lines"). New module SolverSearchLog.h/
   .cpp: both spline sims stream every evaluated candidate's REAL
-  trajectory (every 3rd tick) into a per-stage sink — all best-so-far
-  improvements kept + a uniform reservoir of the rest — and
+  trajectory (every 3rd tick) into a per-stage sink â€” all best-so-far
+  improvements kept + a uniform reservoir of the rest â€” and
   `WriteHtml` emits a SELF-CONTAINED interactive WebGL report: line
   density over the map wireframe + face polygons + the red zone box,
   stage/outcome/score-percentile filters, alpha dial, and a
@@ -823,9 +823,9 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   sampled to 44,452 lines across 66 stages, 12 MB, loads instantly.
   SOLVER PROGRESS same session (each change probe/report-verified):
   (12) interior-margin region gradient (EdgeDistOut +
-  kHullCenterSlack — the raw polygon boundary is a MARGINAL strike;
+  kHullCenterSlack â€” the raw polygon boundary is a MARGINAL strike;
   20-50u edge-skim misses were killing every chain: landings now
-  stick); (13) PER-LEG BEAM — SolveCarve returns top-K diverse
+  stick); (13) PER-LEG BEAM â€” SolveCarve returns top-K diverse
   successes (mirroring the air alts), every leg composes (board alt
   x carve alt) candidates and prices the top 3 with a DEPTH-2 probe
   of the next leg from their landing; the beam found a 1->2 transfer
@@ -833,24 +833,24 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   isolated by the beam prints: the 2->3 transfer (all candidates
   strike face 3 low-south at dead speed vs the human's ascending
   north-mid board at -8) and face-2 endings (likely genuinely
-  infeasible — the human uses face 3 as the elevator). The msolve
+  infeasible â€” the human uses face 3 as the elevator). The msolve
   report shows both patterns as density; expert eyes requested.
   Gates green after every step (airsolve 12/12, carve 10/10).
-- 2026-08-16 (session 2b): the transfer-capability campaign — eleven
+- 2026-08-16 (session 2b): the transfer-capability campaign â€” eleven
   measured steps (list in 3.1) driven by the new `tapprobe` isolation
   instrument (the FUNCPROBE method at transfer granularity: replay a
   tape to a tick, solve from that exact state, dump the winner's
-  trajectory). Probe verdicts: 0→2 unseeded −162.8 @ 887 (human −206
-  @ 874); face-3→zone ending 101 ticks (human 123). Killed traps, in
-  the order the trajectories exposed them: corner-point targets → the
-  corridor thread (behind-plane miss counted as progress) → grazes
-  ending flights → descending separations (ballistic shortfall term)
-  → dead spline knots (dual domains, again) → arrival shaping (6
-  knots, 12k evals) → the ending (zone mode: arrival tick IS the
-  score) → myopic boards (top-K diverse alts composed with their
+  trajectory). Probe verdicts: 0â†’2 unseeded âˆ’162.8 @ 887 (human âˆ’206
+  @ 874); face-3â†’zone ending 101 ticks (human 123). Killed traps, in
+  the order the trajectories exposed them: corner-point targets â†’ the
+  corridor thread (behind-plane miss counted as progress) â†’ grazes
+  ending flights â†’ descending separations (ballistic shortfall term)
+  â†’ dead spline knots (dual domains, again) â†’ arrival shaping (6
+  knots, 12k evals) â†’ the ending (zone mode: arrival tick IS the
+  score) â†’ myopic boards (top-K diverse alts composed with their
   carve). `DetectEndZone` now feeds routegraph/routesgate/msolvegate
   from texture marks with reference-replay fallback. Remaining: chain
-  consistency (landings that strand the NEXT leg — depth-2 rolling-
+  consistency (landings that strand the NEXT leg â€” depth-2 rolling-
   window composition is the next move, all primitives proven).
   Gates re-run green after every step: airsolve 12/12, carve 10/10.
 
@@ -864,11 +864,48 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 10b, GENERALITY CORRECTION + multi-node
+  shooting v1 + the bank migration lesson): user + advisor scope
+  correction RECORDED AS LAW - the human run and surf_basictest are
+  REGRESSION FIXTURES, never design targets; production derives
+  nothing from tapes (nodes, headings, reversal ticks, sampling
+  priors); THE DELETION INVARIANT: removing all reference tapes
+  must leave production search decisions unchanged (current code
+  complies - only test commands touch tapes); multiple shooting =
+  generic adaptive conditioning (node count/positions/times are
+  numerical resolution axes like spatial/heading/knot refinement);
+  synthetic validation matrix (airsuite: start speed/vz x range x
+  height x normal x horizon x reversals x target width) is the
+  certification bed, human tapes just extra rows; entrance spec is
+  H(Q|S0) = max over legal trajectories - never "beat the human";
+  human full runs may seed the INCUMBENT (upper bound) in the map
+  solver, never the route. BUILT: (1) GuidedShootSeq - sequential
+  multi-node shooting (Level A): free horizontal nodes (neutral
+  interpolation + symmetric lateral offsets both signs, geometry-
+  derived), continuous simulation, SHORT-HORIZON law-model lookahead
+  (6-tick hold rollout + straight-run remainder) replacing per-tick
+  greed; m adaptive (m=0 shots then m=1 grid); (2) dwell-age cap at
+  the gap (exact state reduction) in boundary measurement; (3) bank
+  entries verified/migrated: THE MIGRATION LESSON - the age-cap
+  changed state hashes and ORPHANED all floors (gate correctly
+  showed "new floor 666k" where "950k stands" belonged); legacy-key
+  migration built (replays under both hashes, merges, erases);
+  floors RESTORED: f0 892k, f2 950k, f3 759k under canonical keys.
+  PERMANENT RULE: key-semantics changes require migration; NEXT
+  HARDENING: entries must store their full start state (not only
+  its hash) so future migrations never depend on re-deriving
+  states. MEASURED: multi-node shooting now REACHES the f2 disc
+  (13u strikes, was NONE) but in the hard -550 basin - the 950k
+  class remains cold-inaccessible; f0 892k @ 14u unchanged. NEXT:
+  ladder measures basin radius in NODE coordinates (a,b) per the
+  advisor; adaptive node times/count + Level B defect shooting if
+  needed; build airsuite (the general certification matrix); f3
+  759k->847k refind; then the humanexact/efield/fieldexact ladder.
 - 2026-08-18 (session 10, THE FULL-MAP HANDOFF + the go, first
   guided-shooting run): Docs/FullMapSolverHandoff.md filed = the
   second design of record (transfer-operator composition -> Bellman/
-  best-first B&B over exact boundary states -> certification; §51
-  certify-without-resolving = the tractability mechanism; §19 role
+  best-first B&B over exact boundary states -> certification; Â§51
+  certify-without-resolving = the tractability mechanism; Â§19 role
   reversal: closed forms become bounds/proposals/impossibility
   proofs, never values). Advisor's go received with rulings: h(S) =
   max of admissible bounds ladder (direct-to-zone day one, relaxed
