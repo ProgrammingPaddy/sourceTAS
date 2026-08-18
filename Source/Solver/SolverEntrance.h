@@ -128,6 +128,15 @@ namespace Entrance {
 	                    float psi1, float psi2, int split, int n,
 	                    std::vector<float>* prof);
 
+	// The segment-schedule encoding RefSolve searches: per segment,
+	// turn at `rate` (signed fraction of the per-tick free rate) for
+	// `len` ticks. Exposed for the representation-completeness unit
+	// test (repfit): the same encoding, fed a fitted schedule.
+	void ScheduleProfile(const PlayerState& entry, const MoveParams& p,
+	                     const std::vector<int>& len,
+	                     const std::vector<float>& rate,
+	                     std::vector<float>* prof);
+
 	// THE GENERAL REFERENCE SOLVE (ruling 2026-08-18: one general
 	// boundary-value search over the admissible L/R control space -
 	// segments of (length >= the dwell law, signed turn-rate

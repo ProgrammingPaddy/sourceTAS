@@ -96,6 +96,21 @@ namespace Air {
 	                        const Route::Graph& g,
 	                        const std::vector<float>& knots, int horizon);
 
+	// OPEN-LOOP WISH SCHEDULE (ruling 2026-08-18, repfit finding): fly
+	// the DIRECT admissible input space - per tick, wish at the angle
+	// acos(cosa_k) on side_k of the current velocity heading (side 0 =
+	// null tick). No tracking feedback, so no flip-state desync (the
+	// measured failure of per-tick heading mirroring). Any wish
+	// DIRECTION is exactly expressible; the dwell law governs side
+	// sign changes, which the CALLER's schedule owns. Same
+	// strike/graze/ground semantics as FlyHeadingSpline.
+	Result FlyWishSchedule(const PlayerState& entry, const World& w,
+	                       const MoveParams& p, const Target& t,
+	                       const Route::Graph& g,
+	                       const std::vector<signed char>& side,
+	                       const std::vector<float>& cosa,
+	                       int horizon);
+
 	// The unseeded boundary-value solve: geometric initial spline (the
 	// closed-form tangent-arrival heading from M1.1 ballistics + M1.2
 	// dot line), then pattern search on knot values against the exact

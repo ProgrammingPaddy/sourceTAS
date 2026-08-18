@@ -6407,7 +6407,7 @@ namespace {
 		}
 		const int min_gap = static_cast<int>(
 			ceilf((1.f / o.params.dt) / o.params.strafe_rate_max));
-		int rows = 0, pass = 0;
+		int rows = 0, pass = 0, na = 0;
 		for (const EFEvent& fe : events) {
 			const Route::Face& fc = g.faces[fe.fidx];
 			Vec3 vpost;
@@ -6450,10 +6450,24 @@ namespace {
 					last_sign = sg;
 				}
 			}
-			rows++;
+			// Classification (advisor 2026-08-18): a witness that
+			// violates the dwell law is OUTSIDE the solver's
+			// admissible space - N/A for the lower bound, never a
+			// mandatory failure. Admissible-but-not-found = FAIL.
+			const bool outside_law = viol > 0;
 			const bool covers = rr.ok && rr.H >= eh - 2000.f;
-			if (covers)
-				pass++;
+			if (outside_law) {
+				na++;
+			} else {
+				rows++;
+				if (covers)
+					pass++;
+			}
+			const char* verdict = outside_law
+				? "N/A - HUMAN OUTSIDE CONTROL LAW"
+				: (covers ? (rr.ok && rr.H > eh + 2000.f
+					? "PASS (exceeds)" : "PASS (matches)")
+					: "FAIL - ADMISSIBLE WITNESS NOT MATCHED");
 			if (rr.ok)
 				printf("humanexact: t%4d f%d | E_h %.0fk (dot %.1f)"
 					" | H(Q_h) %.0fk (dot %.1f, %.0fu off, %d "
@@ -6461,16 +6475,13 @@ namespace {
 					fe.tick, fe.fidx, eh / 1e3f,
 					Dot(fe.v1, fc.n), rr.H / 1e3f, rr.flight.dot,
 					Len(rr.flight.pos - fe.cp), flights,
-					(rr.H - eh) / 1e3f,
-					covers ? (rr.H > eh + 2000.f
-						? "PASS (exceeds)" : "PASS (matches)")
-					: "<- BELOW HUMAN: incomplete");
+					(rr.H - eh) / 1e3f, verdict);
 			else
 				printf("humanexact: t%4d f%d | E_h %.0fk (dot %.1f)"
-					" | H(Q_h) NONE in %d flights <- BELOW HUMAN: "
-					"incomplete (no clean-air strike within 16u)"
-					"\n", fe.tick, fe.fidx, eh / 1e3f,
-					Dot(fe.v1, fc.n), flights);
+					" | H(Q_h) NONE in %d flights (no clean-air "
+					"strike within 16u) | %s\n",
+					fe.tick, fe.fidx, eh / 1e3f,
+					Dot(fe.v1, fc.n), flights, verdict);
 			if (rt.ok)
 				printf("humanexact:   tangent at Q_h: %.0fk (dot "
 					"%.1f) | delta_tan %+.0fk\n", rt.H / 1e3f,
@@ -6487,13 +6498,325 @@ namespace {
 					? " <- the human uses controls outside the "
 					  "solver's restriction" : "");
 		}
-		printf("humanexact: %d/%d exact points covered | %s\n",
-			pass, rows, rows > 0 && pass == rows
+		printf("humanexact: %d/%d mandatory exact points covered "
+			"(%d N/A outside the control law) | %s\n",
+			pass, rows, na, rows > 0 && pass == rows
 				? "LOWER BOUND HOLDS"
-				: "INCOMPLETE - the human witnesses beat the "
-				  "solver");
+				: "INCOMPLETE - admissible human witnesses beat "
+				  "the solver");
 		fflush(stdout);
 		return rows > 0 && pass == rows ? 0 : 1;
+	}
+
+	// repfit: THE REPRESENTATION-COMPLETENESS UNIT TEST (advisor
+	// 2026-08-18). Before blaming the optimizer, prove the human's
+	// ADMISSIBLE flights are inside the solver's control basis:
+	//   U_human in U_solver, not just U_human in U_game.
+	// MEASURED en route (kept as the record): the heading-command
+	// channel CANNOT reproduce flights even when handed the human's
+	// realized headings (66-282u misses - the M1.3-era per-tick
+	// mirror desync). The honest basis is the INPUT space itself:
+	// per tick, wish direction as (side, cosa) about the current
+	// velocity heading, executed open-loop by Air::FlyWishSchedule.
+	// Rows per event: (a) the per-tick wish schedule (the basis
+	// ceiling - must reproduce), (b) the segment-compressed schedule
+	// (what a schedule search would fly). Never a production seed.
+	int CmdRepFit(const std::string& map_path, const ReplayOpts& o,
+	              const std::string& tape_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("repfit: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("repfit: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<EFEvent> events;
+		if (!EFReplay(w, g, o, tape, &events, nullptr, nullptr)) {
+			printf("repfit: no flight events in tape\n");
+			return 1;
+		}
+		// Second replay capturing per-tick velocity + duck through
+		// every frame (the flight windows index into this).
+		std::vector<Vec3> vels;
+		std::vector<unsigned char> ducked;
+		{
+			PlayerState s;
+			s.pos = tape.start.origin;
+			s.vel = tape.start.velocity;
+			s.ducked = tape.start.ducked;
+			s.hull_state = tape.start.ducked ? 1 : 0;
+			s.stamina = tape.start.stamina;
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+			vels.push_back(s.vel);
+			ducked.push_back(s.ducked ? 1 : 0);
+			for (const TapeFrame& fr : tape.frames) {
+				MoveTick(s, w, o.params, fr.pitch, fr.yaw,
+					fr.fmove, fr.smove, fr.umove, fr.buttons,
+					nullptr);
+				vels.push_back(s.vel);
+				ducked.push_back(s.ducked ? 1 : 0);
+			}
+		}
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / o.params.dt) / o.params.strafe_rate_max));
+		int reps = 0, rows = 0;
+		for (const EFEvent& fe : events) {
+			const Route::Face& fc = g.faces[fe.fidx];
+			const int t0 = fe.sep_tick + 1;
+			const int t1 = fe.tick;
+			if (t1 - t0 < 6
+				|| t1 >= static_cast<int>(vels.size()))
+				continue;
+			// Realized turn-rate stats (vs the free rate) + duck.
+			int above_rate = 0, duck_ticks = 0;
+			float fmax = 0.f;
+			for (int t2 = t0; t2 < t1; ++t2) {
+				const Vec3& va = vels[static_cast<size_t>(t2)];
+				const Vec3& vb = vels[static_cast<size_t>(t2) + 1];
+				const float sa = Len2D(va);
+				if (sa < 1.f || Len2D(vb) < 1.f)
+					continue;
+				const float dh = Steer::WrapPi(
+					atan2f(vb.Y, vb.X) - atan2f(va.Y, va.X));
+				Strafe::TickLaw law = Strafe::Law(o.params, sa,
+					1.f, ducked[static_cast<size_t>(t2)] != 0);
+				const float wr = law.TurnRad(0.f, 1.f);
+				const float ft = wr > 1e-6f ? dh / wr : 0.f;
+				if (fabsf(ft) > fmax)
+					fmax = fabsf(ft);
+				if (fabsf(ft) > 1.001f)
+					above_rate++;
+				if (ducked[static_cast<size_t>(t2)]
+					!= ducked[static_cast<size_t>(t0)])
+					duck_ticks++;
+			}
+			// THE WISH-BASIS RECONSTRUCTION: the tape's per-tick
+			// wish DIRECTION re-expressed as (side, cosa) about the
+			// current velocity heading - exactly what
+			// FlyWishSchedule executes. Null wishes = side 0.
+			std::vector<signed char> wside;
+			std::vector<float> wcosa;
+			int wrev = 0, wviol = 0, wmind = 100000;
+			{
+				int last_sign = 0, last_t = -100000;
+				for (int t2 = t0; t2 < t1; ++t2) {
+					const TapeFrame& fr = tape.frames[
+						static_cast<size_t>(t2)];
+					const float yr = fr.yaw * 0.0174532925f;
+					const float wx = cosf(yr) * fr.fmove
+						+ sinf(yr) * fr.smove;
+					const float wy = sinf(yr) * fr.fmove
+						- cosf(yr) * fr.smove;
+					const Vec3& vv = vels[static_cast<size_t>(t2)];
+					const float s2v = Len2D(vv);
+					if (wx * wx + wy * wy < 1.f || s2v < 1.f) {
+						wside.push_back(0);
+						wcosa.push_back(1.f);
+						continue;
+					}
+					const float omega = atan2f(wy, wx);
+					const float h = atan2f(vv.Y, vv.X);
+					// The executor's input mapping (the controller's
+					// convention) realizes its wish at wh + pi in
+					// WishFromInput coordinates - invert through the
+					// SAME mapping, not the raw engine form.
+					const float d = Steer::WrapPi(omega
+						- 3.14159265f - h);
+					const int sg = d >= 0.f ? 1 : -1;
+					wside.push_back(static_cast<signed char>(sg));
+					wcosa.push_back(cosf(d));
+					const int i = t2 - t0;
+					if (last_sign && sg != last_sign) {
+						wrev++;
+						const int gp = i - last_t;
+						if (gp < wmind)
+							wmind = gp;
+						if (gp < min_gap)
+							wviol++;
+						last_t = i;
+					} else if (!last_sign) {
+						last_t = i;
+					}
+					last_sign = sg;
+				}
+			}
+			Air::Target vt;
+			vt.face = fe.fidx;
+			vt.dot_cap = 3000.f;
+			vt.aim = fe.cp;
+			Vec3 vpost;
+			Fn::ClipVelocity(fe.v1, fc.n, &vpost);
+			const float eh = Dot(vpost, vpost)
+				+ 2.f * o.params.gravity
+				* (fe.cp.Z - fc.zmin);
+			rows++;
+			printf("repfit: t%4d f%d | window %d ticks | max|f| "
+				"%.2f (%d above-rate) | wish reversals %d, min "
+				"dwell %s (%d under law) | duck %d\n",
+				fe.tick, fe.fidx, t1 - t0, fmax, above_rate,
+				wrev, wrev ? std::to_string(wmind).c_str()
+					: "n/a", wviol, duck_ticks);
+			// (a) EXACT ROW: the per-tick wish schedule - the basis
+			// ceiling. Must reproduce the flight.
+			vt.max_ticks = static_cast<int>(wside.size()) + 8;
+			Air::Result ex = Air::FlyWishSchedule(fe.sep, w,
+				o.params, vt, g, wside, wcosa,
+				static_cast<int>(wside.size()) + 8);
+			bool exact_ok = false;
+			if (ex.hit && ex.dot < 0.f) {
+				const float H2 = Dot(ex.end_state.vel,
+					ex.end_state.vel) + 2.f * o.params.gravity
+					* (ex.pos.Z - fc.zmin);
+				exact_ok = Len(ex.pos - fe.cp) <= 24.f
+					&& fabsf(H2 - eh) <= 0.03f * eh;
+				printf("repfit:   per-tick wish schedule: strike "
+					"%.0fu off | dot %.1f vs %.1f | E %.0fk vs "
+					"%.0fk | %s\n", Len(ex.pos - fe.cp),
+					ex.dot, Dot(fe.v1, fc.n), H2 / 1e3f,
+					eh / 1e3f, exact_ok ? "EXACT-ROW OK"
+						: "EXACT-ROW DIVERGED <- executor gap");
+			} else {
+				printf("repfit:   per-tick wish schedule: %s "
+					"(closest %.0fu) <- executor gap\n",
+					ex.hit ? "contact-assisted"
+						: (ex.grounded ? "grounded" : "missed"),
+					ex.miss_dist < 1e8f ? ex.miss_dist : -1.f);
+			}
+			// (b) SEGMENT ROW: compress (side, cosa) into segments
+			// (boundaries at side changes + greedy splits on cosa
+			// error, cap ~24) and fly - the shape a schedule search
+			// would actually discover.
+			{
+				std::vector<int> cuts;
+				cuts.push_back(0);
+				for (size_t i = 1; i < wside.size(); ++i)
+					if (wside[i] != wside[i - 1])
+						cuts.push_back(static_cast<int>(i));
+				cuts.push_back(static_cast<int>(wside.size()));
+				auto seg_stat = [&](int a, int b, float* mean) {
+					float sum = 0.f;
+					int cnt = 0;
+					for (int i = a; i < b; ++i)
+						if (wside[static_cast<size_t>(i)]) {
+							sum += wcosa[static_cast<size_t>(i)];
+							cnt++;
+						}
+					*mean = cnt ? sum / static_cast<float>(cnt)
+						: 1.f;
+					float worst = 0.f;
+					int at = (a + b) / 2;
+					for (int i = a; i < b; ++i)
+						if (wside[static_cast<size_t>(i)]) {
+							const float e2 = fabsf(wcosa[
+								static_cast<size_t>(i)] - *mean);
+							if (e2 > worst) {
+								worst = e2;
+								at = i;
+							}
+						}
+					return std::make_pair(worst, at);
+				};
+				for (int it = 0; it < 40
+					&& static_cast<int>(cuts.size()) < 60; ++it) {
+					float worst = 0.f;
+					int wat = -1, wseg = -1;
+					for (size_t c = 0; c + 1 < cuts.size(); ++c) {
+						float mn;
+						std::pair<float, int> pr = seg_stat(
+							cuts[c], cuts[c + 1], &mn);
+						if (pr.first > worst
+							&& cuts[c + 1] - cuts[c] >= 2) {
+							worst = pr.first;
+							wat = pr.second;
+							wseg = static_cast<int>(c);
+						}
+					}
+					if (worst < 0.004f || wseg < 0)
+						break;
+					if (wat <= cuts[static_cast<size_t>(wseg)]
+						|| wat >= cuts[static_cast<size_t>(wseg)
+							+ 1])
+						break;
+					cuts.insert(cuts.begin() + wseg + 1, wat);
+				}
+				std::vector<signed char> sside;
+				std::vector<float> scosa;
+				for (size_t c = 0; c + 1 < cuts.size(); ++c) {
+					const int a = cuts[c], b = cuts[c + 1];
+					float mn;
+					seg_stat(a, b, &mn);
+					int pos = 0, neg = 0;
+					for (int i = a; i < b; ++i) {
+						if (wside[static_cast<size_t>(i)] > 0)
+							pos++;
+						else if (wside[static_cast<size_t>(i)] < 0)
+							neg++;
+					}
+					signed char sd = 0;
+					if (pos || neg)
+						sd = pos >= neg ? 1 : -1;
+					for (int i = a; i < b; ++i) {
+						sside.push_back(sd);
+						scosa.push_back(mn);
+					}
+				}
+				Air::Result ar = Air::FlyWishSchedule(fe.sep, w,
+					o.params, vt, g, sside, scosa,
+					static_cast<int>(sside.size()) + 8);
+				if (ar.hit && ar.dot < 0.f
+					&& ar.struck_brush < 0) {
+					const float H2 = Dot(ar.end_state.vel,
+						ar.end_state.vel) + 2.f * o.params.gravity
+						* (ar.pos.Z - fc.zmin);
+					const bool rep = Len(ar.pos - fe.cp) <= 24.f
+						&& fabsf(H2 - eh) <= 0.03f * eh;
+					if (rep && exact_ok)
+						reps++;
+					printf("repfit:   %d-segment schedule: strike "
+						"%.0fu off | dot %.1f vs %.1f | E %.0fk "
+						"vs %.0fk | %s\n",
+						static_cast<int>(cuts.size()) - 1,
+						Len(ar.pos - fe.cp), ar.dot,
+						Dot(fe.v1, fc.n), H2 / 1e3f, eh / 1e3f,
+						rep ? (wviol == 0
+							? "REPRESENTABLE"
+							: "reproduced (human outside law)")
+						: "DIVERGED <- segment quantization");
+				} else {
+					printf("repfit:   %d-segment schedule: %s "
+						"(closest %.0fu) <- segment quantization"
+						"\n", static_cast<int>(cuts.size()) - 1,
+						ar.hit ? "contact-assisted"
+							: (ar.grounded ? "grounded"
+								: "missed"),
+						ar.miss_dist < 1e8f ? ar.miss_dist
+							: -1.f);
+				}
+			}
+		}
+		printf("repfit: %d/%d flights representable in the wish "
+			"basis (exact row AND segment row reproduce)\n",
+			reps, rows);
+		fflush(stdout);
+		return 0;
 	}
 
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
@@ -9267,6 +9590,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 4, o))
 			return 1;
 		return CmdHumanExact(argv[2], o, argv[3]);
+	}
+	if (cmd == "repfit" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdRepFit(argv[2], o, argv[3]);
 	}
 	if (cmd == "msolve2" && argc >= 4) {
 		ReplayOpts o;

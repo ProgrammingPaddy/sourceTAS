@@ -864,6 +864,38 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 9d, THE BASIS VERDICT - repfit settles it):
+  advisor's representation-completeness unit test built (`repfit`)
+  and it OVERTURNED the optimizer-blame hypothesis in three steps:
+  (1) heading-CHANNEL test: flying the human's own realized per-tick
+  headings through the tracking controller misses their contacts by
+  66-282u (the M1.3-era per-tick mirror desync, reconfirmed) - the
+  heading-command channel is the wrong basis; (2) NEW
+  Air::FlyWishSchedule - the OPEN-LOOP wish basis: per tick,
+  (side, cosa) about the current velocity heading = the direct
+  admissible input space, no feedback to desync. Inversion subtlety
+  caught by measurement: the controller's input mapping realizes its
+  wish at wh + pi in WishFromInput coordinates - the tape inversion
+  must go through the SAME mapping (one-line fix after grounded/313u
+  misses); (3) THE EXACT ROWS THEN REPRODUCE ALL THREE HUMAN FLIGHTS
+  PERFECTLY: 0u off at f0/f2/f3, dots -115.1/-203.9/-139.0 vs their
+  -115.1/-206.4/-142.4, E within 1%. U_human IS in U_solver -
+  representation completeness of the wish basis is PROVEN, including
+  the above-free-rate turning (human peaks 2.4-5.3x free rate; rates
+  beyond |1| are legal via the braking-turn branch - RefSolve's rate
+  clamp widened to +/-3 accordingly). Segment compression at 2-4
+  piecewise-constant segments drifts 13-125u = open-loop compounding
+  of tiny cosa quantization, NOT a basis defect (finer variance
+  thresholds do not split further; drift is positional, the search
+  space is what matters). humanexact rows reclassified per the
+  ruling: f0/f2 = FAIL (admissible witness not matched), f3 = N/A
+  (4-tick reversal, outside the 6-tick law; law KEPT per advisor).
+  NEXT (the one sanctioned build): migrate RefSolve onto the wish
+  basis (side-run schedules + cosa profiles, seeds + moves + full-
+  budget deterministic restarts), re-run
+  humanexact/efield/fieldexact; then carve-search hardening under
+  dwell 6.
+
 - 2026-08-18 (session 9c, THE RULINGS LAND - dwell 6, clean-air law,
   humanexact, the general reference solver): user+advisor directives
   implemented (full text in SolverRebuild.md 2.11 RULINGS block).

@@ -174,6 +174,16 @@ namespace Entrance {
 
 	} // namespace
 
+	void ScheduleProfile(const PlayerState& entry, const MoveParams& p,
+	                     const std::vector<int>& len,
+	                     const std::vector<float>& rate,
+	                     std::vector<float>* prof) {
+		SegSched ss;
+		ss.len = len;
+		ss.rate = rate;
+		SegProfile(entry, p, ss, prof);
+	}
+
 	RefResult RefSolve(const PlayerState& entry, const World& w,
 	                   const MoveParams& p, const Route::Graph& g,
 	                   int face_idx, const Vec3& q, float radius,
@@ -340,14 +350,21 @@ namespace Entrance {
 				moved = false;
 				for (size_t j = 0; j < cur.len.size()
 					&& used < budget; ++j) {
-					// Rate nudges.
+					// Rate nudges. Rates beyond |1| are LEGAL: the
+					// commanded heading outruns full-gain tracking
+					// and the controller's braking-turn branch
+					// executes the excess at the law's exact speed
+					// cost (measured: the human's flights spend
+					// ticks at 2.4-5.3x the free rate). Ceiling 3
+					// spans the useful exchange; the optimizer
+					// pays for every over-rate tick in energy.
 					for (int sg = -1; sg <= 1; sg += 2) {
 						SegSched t2 = cur;
 						float nr = t2.rate[j]
 							+ rsteps[round]
 							* static_cast<float>(sg);
-						if (nr > 1.f) nr = 1.f;
-						if (nr < -1.f) nr = -1.f;
+						if (nr > 3.f) nr = 3.f;
+						if (nr < -3.f) nr = -3.f;
 						t2.rate[j] = nr;
 						float sc;
 						ev(t2, &sc);

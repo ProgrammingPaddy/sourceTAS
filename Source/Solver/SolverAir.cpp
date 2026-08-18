@@ -210,6 +210,109 @@ namespace Air {
 		return r;
 	}
 
+	Result FlyWishSchedule(const PlayerState& entry, const World& w,
+	                       const MoveParams& p, const Target& t,
+	                       const Route::Graph& g,
+	                       const std::vector<signed char>& side,
+	                       const std::vector<float>& cosa,
+	                       int horizon) {
+		Result r;
+		if (t.face < 0 || t.face >= static_cast<int>(g.faces.size()))
+			return r;
+		const Route::Face& face = g.faces[t.face];
+		PlayerState s = entry;
+		const int hold = s.ducked ? IN_DUCK : 0;
+		SearchLog::Sink* lg = SearchLog::g_sink;
+		if (lg)
+			lg->StartTraj(s.pos, Len(s.vel));
+		r.yaw.reserve(horizon);
+		r.fmove.reserve(horizon);
+		r.smove.reserve(horizon);
+		int last_side = 0;
+		const int nsch = static_cast<int>(side.size());
+		for (int k = 0; k < horizon; ++k) {
+			const float s2d = Len2D(s.vel);
+			const float h = s2d > 1.f
+				? atan2f(s.vel.Y, s.vel.X) : 0.f;
+			const int sd = k < nsch
+				? static_cast<int>(side[static_cast<size_t>(k)])
+				: (nsch > 0 ? static_cast<int>(
+					side[static_cast<size_t>(nsch) - 1]) : 0);
+			float yaw_deg = h * 57.2957795f;
+			float fmove = 0.f, smove = 0.f;
+			if (sd != 0 && s2d > 1.f) {
+				float ca = k < nsch
+					? cosa[static_cast<size_t>(k)]
+					: (nsch > 0 ? cosa[static_cast<size_t>(
+						nsch) - 1] : 1.f);
+				if (ca > 1.f) ca = 1.f;
+				if (ca < -1.f) ca = -1.f;
+				const float alpha = acosf(ca);
+				const float wh = h + (sd > 0 ? alpha : -alpha);
+				smove = -450.f * static_cast<float>(sd);
+				yaw_deg = (wh + (sd > 0 ? 1.f : -1.f)
+					* kPi * 0.5f) * 57.2957795f;
+				if (last_side && sd != last_side)
+					r.flips++;
+				last_side = sd;
+			}
+			TickEvents ev;
+			MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f, hold,
+				&ev);
+			if (lg)
+				lg->Point(s.pos, Len(s.vel));
+			r.yaw.push_back(yaw_deg);
+			r.fmove.push_back(fmove);
+			r.smove.push_back(smove);
+			const float dxa = s.pos.X - t.aim.X;
+			const float dya = s.pos.Y - t.aim.Y;
+			const float dza = s.pos.Z - t.aim.Z;
+			const float da = sqrtf(dxa * dxa + dya * dya
+				+ dza * dza);
+			if (da < r.miss_dist) {
+				r.miss_dist = da;
+				r.closest = s.pos;
+			}
+			if (ev.ncontacts > 0) {
+				int tc = -1;
+				for (int c = 0; c < ev.ncontacts; ++c)
+					if (ev.contact_brush[c] == face.brush
+						&& ev.contact_plane[c] == face.side)
+						tc = c;
+				if (tc >= 0) {
+					r.hit = true;
+					r.tick = k + 1;
+					r.pos = ev.contact_pos[tc];
+					r.v1 = ev.contact_vel[tc];
+					r.dot = Dot(r.v1, face.n);
+					r.edge = Board::EdgeDistOut(face, r.pos);
+					r.speed = Len(r.v1);
+					r.speed2d = Len2D(r.v1);
+					r.end_state = s;
+					r.end_pos = s.pos;
+					if (lg) {
+						lg->Contact(r.pos, Len(s.vel));
+						lg->EndTraj(SearchLog::kHit);
+					}
+					return r;
+				}
+				if (r.struck_brush < 0)
+					r.struck_brush = ev.contact_brush[0];
+			}
+			if (s.on_ground) {
+				r.grounded = true;
+				r.end_pos = s.pos;
+				if (lg)
+					lg->EndTraj(SearchLog::kGrounded);
+				return r;
+			}
+		}
+		r.end_pos = s.pos;
+		if (lg)
+			lg->EndTraj(SearchLog::kMiss);
+		return r;
+	}
+
 	namespace {
 
 		float Score(const Result& r, const Target& t) {
