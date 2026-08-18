@@ -1078,6 +1078,17 @@ namespace Assemble {
 					[](const Cand& a, const Cand& b) {
 						return a.comp < b.comp;
 					});
+				// A leg with NO bar-passing board FAILS - the bar
+				// marks failures (8e5+) but the commit previously
+				// took the least-bad anyway, which is how a -644
+				// slam with 180k kept re-entered committed chains.
+				if (cpool[0].lo.sc >= 7.9e5f) {
+					printf("assemble: leg %d NO BAR-PASSING BOARD "
+						"(best %.0f)\n", static_cast<int>(li),
+						cpool[0].lo.sc);
+					keep_partial(static_cast<int>(li));
+					return false;
+				}
 				LegOut lo = cpool[0].lo;
 				if (cpool[0].ai >= 0) {
 					const Air::Result& ba = alts[cpool[0].ai];
