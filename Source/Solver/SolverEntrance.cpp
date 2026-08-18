@@ -184,12 +184,66 @@ namespace Entrance {
 		SegProfile(entry, p, ss, prof);
 	}
 
+	namespace {
+
+		// Layer-1 search representation over the canonical wish space
+		// (ruling 2026-08-18): side-RUNS - each a strafe side held for
+		// `len` ticks carrying a small cosa KNOT LADDER (linear across
+		// the run). Runs expand to the per-tick (side, cosa) schedule
+		// Air::FlyWishSchedule executes; the ladder refines toward
+		// per-tick resolution. A RESOLUTION DIAL, never a trajectory
+		// family. All nonzero runs hold >= the dwell law
+		// (conservative: applied at every run, not only sign flips).
+		struct WishRun {
+			int len = 0;
+			signed char side = 0;
+			std::vector<float> ck;
+		};
+
+		void ExpandRuns(const std::vector<WishRun>& runs,
+		                std::vector<signed char>* side,
+		                std::vector<float>* cosa) {
+			side->clear();
+			cosa->clear();
+			for (const WishRun& r : runs) {
+				const int K = static_cast<int>(r.ck.size());
+				for (int i = 0; i < r.len; ++i) {
+					float c = 1.f;
+					if (K == 1) {
+						c = r.ck[0];
+					} else if (K > 1) {
+						float x = r.len > 1
+							? static_cast<float>(i)
+								/ static_cast<float>(r.len - 1)
+								* static_cast<float>(K - 1)
+							: 0.f;
+						int k0 = static_cast<int>(x);
+						if (k0 > K - 2)
+							k0 = K - 2;
+						const float fr = x
+							- static_cast<float>(k0);
+						c = r.ck[static_cast<size_t>(k0)]
+							* (1.f - fr)
+							+ r.ck[static_cast<size_t>(k0) + 1]
+							* fr;
+					}
+					if (c > 1.f) c = 1.f;
+					if (c < -1.f) c = -1.f;
+					side->push_back(r.side);
+					cosa->push_back(c);
+				}
+			}
+		}
+
+	} // namespace
+
 	RefResult RefSolve(const PlayerState& entry, const World& w,
 	                   const MoveParams& p, const Route::Graph& g,
 	                   int face_idx, const Vec3& q, float radius,
 	                   int n_hint, int budget, bool tangent_mode,
 	                   int* flights_counter, float zmin,
 	                   const std::function<void(const Air::Result&,
+	                       const std::vector<signed char>&,
 	                       const std::vector<float>&, int)>&
 	                       on_strike) {
 		RefResult best;
@@ -204,80 +258,72 @@ namespace Entrance {
 			return best;
 		const float h0 = atan2f(entry.vel.Y, entry.vel.X);
 		const float gs = entry.gravity_scale;
-		const int n_cap = (n_hint > 8 ? n_hint : 60) + 30;
+		const int N = n_hint > 8 ? n_hint : 60;
+		const int n_cap = N + 40;
 		Air::Target vt;
 		vt.face = face_idx;
 		vt.dot_cap = 3000.f;
 		vt.aim = q;
-		int used = 0;
-		std::vector<float> prof;
-		// One engine flight of a schedule; score drives the search,
-		// only clean-air in-radius strikes can WIN.
-		auto ev = [&](const SegSched& ss, float* score) {
+		std::vector<signed char> sbuf;
+		std::vector<float> cbuf;
+		// One engine flight of a run schedule. Score drives the
+		// search; only clean-air in-radius strikes can WIN.
+		auto ev = [&](const std::vector<WishRun>& runs) {
 			int total = 0;
-			for (int l : ss.len)
-				total += l;
-			if (total < 8 || total > n_cap) {
-				*score = -1e9f;
-				return;
-			}
-			SegProfile(entry, p, ss, &prof);
+			for (const WishRun& r : runs)
+				total += r.len;
+			if (total < 8 || total > n_cap)
+				return -1e9f;
+			ExpandRuns(runs, &sbuf, &cbuf);
 			vt.max_ticks = total + 8;
-			used++;
+			best.evals++;
 			if (flights_counter)
 				(*flights_counter)++;
-			Air::Result ar = Air::FlyHeadingSpline(entry, w, p, vt,
-				g, prof, total + 8);
-			if (!ar.hit || ar.dot >= 0.f) {
-				*score = -(ar.miss_dist < 1e8f ? ar.miss_dist
+			Air::Result ar = Air::FlyWishSchedule(entry, w, p, vt,
+				g, sbuf, cbuf, total + 8);
+			if (!ar.hit || ar.dot >= 0.f)
+				return -(ar.miss_dist < 1e8f ? ar.miss_dist
 					: 1e8f);
-				return;
-			}
 			if (ar.struck_brush >= 0) {
-				// Contact-assisted: guides (it reached the face)
-				// but can never win the clean-air field.
 				best.contact_assisted++;
-				*score = -Len(ar.pos - q) - 500.f;
-				return;
+				return -Len(ar.pos - q) - 500.f;
 			}
 			if (on_strike)
-				on_strike(ar, prof, total + 8);
+				on_strike(ar, sbuf, cbuf, total + 8);
 			const float d = Len(ar.pos - q);
-			if (d > radius) {
-				*score = -d;
-				return;
-			}
-			const float H = Dot(ar.end_state.vel, ar.end_state.vel)
-				+ 2.f * p.gravity * gs * (ar.pos.Z - zmin);
-			if (tangent_mode) {
-				if (-ar.dot > kTanEps) {
-					*score = 1e5f - fabsf(ar.dot);
-					return;
-				}
-				*score = 1e7f + H;
+			if (d > radius)
+				return -d;
+			const float H = Dot(ar.end_state.vel,
+				ar.end_state.vel) + 2.f * p.gravity * gs
+				* (ar.pos.Z - zmin);
+			float sc;
+			if (tangent_mode && -ar.dot > kTanEps) {
+				sc = 1e5f - fabsf(ar.dot);
 			} else {
-				*score = 1e7f + H;
+				sc = 1e7f + H;
 			}
-			if (*score >= 1e7f && H > best.H) {
+			if (sc >= 1e7f && H > best.H) {
 				best.ok = true;
 				best.H = H;
 				best.flight = ar;
-				best.prof = prof;
+				best.wside = sbuf;
+				best.wcosa = cbuf;
 				best.horizon = total + 8;
 			}
+			return sc;
 		};
-		// Seeds: turn-to-arrival-then-hold at the closed-form tangent
-		// heading and at the bearing, plus outward-bulge reversals.
+		// ---- SEED GRID (deterministic) ----
+		// Arrival-heading estimate: the closed-form tangent heading
+		// at the ballistic arrival state, falling back to bearing.
 		const float bear = atan2f(q.Y - entry.pos.Y,
 			q.X - entry.pos.X);
 		float th_arr = bear;
 		{
 			const float hn = sqrtf(face.n.X * face.n.X
 				+ face.n.Y * face.n.Y);
-			const float sa = Envelope::SMax(s0, n_hint > 8
-				? n_hint : 60, p);
-			const float va = Envelope::VzAfter(entry.vel.Z,
-				n_hint > 8 ? n_hint : 60, p, gs);
+			const float sa = Envelope::SMax(s0, N, p);
+			const float va = Envelope::VzAfter(entry.vel.Z, N, p,
+				gs);
 			if (sa * hn > 1e-4f) {
 				float cphi = -va * face.n.Z / (sa * hn);
 				if (cphi > 1.f) cphi = 1.f;
@@ -290,149 +336,217 @@ namespace Entrance {
 					<= fabsf(Steer::WrapPi(cb - bear)) ? ca : cb;
 			}
 		}
-		const int N = n_hint > 8 ? n_hint : 60;
-		auto turn_hold = [&](float tgt, float frac) {
-			SegSched ss;
-			const float d = Steer::WrapPi(tgt - h0);
-			int tl = static_cast<int>(fabsf(d)
-				/ (0.05f * (frac > 0.1f ? frac : 0.1f))) + 1;
-			// Rough turn length; the search reshapes it. Clamp into
-			// the schedule.
-			if (tl < min_gap) tl = min_gap;
-			if (tl > N) tl = N;
-			ss.len.push_back(tl);
-			ss.rate.push_back(d >= 0.f ? frac : -frac);
-			if (N - tl >= min_gap) {
-				ss.len.push_back(N - tl);
-				ss.rate.push_back(0.f);
-			}
-			return ss;
+		const signed char s_to = static_cast<signed char>(
+			Steer::WrapPi(th_arr - h0) >= 0.f ? 1 : -1);
+		auto one_run = [&](signed char sd, float c0, float c1) {
+			std::vector<WishRun> runs(1);
+			runs[0].len = N;
+			runs[0].side = sd;
+			runs[0].ck.push_back(c0);
+			runs[0].ck.push_back(c1);
+			return runs;
 		};
-		std::vector<SegSched> pool;
-		pool.push_back(turn_hold(th_arr, 1.f));
-		pool.push_back(turn_hold(th_arr, 0.5f));
-		pool.push_back(turn_hold(bear, 1.f));
-		for (int sg = -1; sg <= 1; sg += 2) {
-			// Bulge: swing away, swing back, hold - one reversal.
-			SegSched ss;
-			const int a = N / 3 < min_gap ? min_gap : N / 3;
-			ss.len.push_back(a);
-			ss.rate.push_back(0.6f * static_cast<float>(sg));
-			ss.len.push_back(a);
-			ss.rate.push_back(-0.9f * static_cast<float>(sg));
-			if (N - 2 * a >= min_gap) {
-				ss.len.push_back(N - 2 * a);
-				ss.rate.push_back(0.f);
-			}
-			pool.push_back(ss);
+		auto two_run = [&](signed char sd0, float c0, int l0,
+			signed char sd1, float c1a, float c1b) {
+			std::vector<WishRun> runs(2);
+			if (l0 < min_gap) l0 = min_gap;
+			if (N - l0 < min_gap) l0 = N - min_gap;
+			runs[0].len = l0;
+			runs[0].side = sd0;
+			runs[0].ck.push_back(c0);
+			runs[1].len = N - l0;
+			runs[1].side = sd1;
+			runs[1].ck.push_back(c1a);
+			runs[1].ck.push_back(c1b);
+			return runs;
+		};
+		std::vector<std::vector<WishRun>> seeds;
+		for (int m2 = 0; m2 < 2; ++m2) {
+			const signed char sd = m2 ? static_cast<signed char>(
+				-s_to) : s_to;
+			seeds.push_back(one_run(sd, 0.0f, 0.9f));
+			seeds.push_back(one_run(sd, 0.4f, 0.9f));
+			seeds.push_back(one_run(sd, 0.9f, 0.9f));
+			seeds.push_back(one_run(sd, 0.0f, -0.4f));
+			seeds.push_back(one_run(sd, -0.5f, 0.5f));
 		}
-		float cur_best_score = -1e30f;
-		SegSched cur;
-		for (SegSched& ss : pool) {
-			if (used >= budget)
-				break;
+		seeds.push_back(two_run(static_cast<signed char>(-s_to),
+			0.5f, N / 2, s_to, 0.2f, 0.9f));
+		seeds.push_back(two_run(static_cast<signed char>(-s_to),
+			0.9f, N / 3, s_to, 0.0f, 0.8f));
+		seeds.push_back(two_run(s_to, 0.0f, N / 2,
+			static_cast<signed char>(-s_to), 0.3f, 0.9f));
+		{
+			std::vector<WishRun> coast(1);
+			coast[0].len = N;
+			coast[0].side = 0;
+			coast[0].ck.push_back(1.f);
+			seeds.push_back(coast);
+		}
+		struct PoolEntry {
 			float sc;
-			ev(ss, &sc);
-			if (sc > cur_best_score) {
-				cur_best_score = sc;
-				cur = ss;
-			}
+			std::vector<WishRun> runs;
+		};
+		std::vector<PoolEntry> pool;
+		for (const std::vector<WishRun>& sd : seeds) {
+			if (best.evals >= budget)
+				break;
+			pool.push_back({ ev(sd), sd });
 		}
-		// Coordinate descent over the schedule + growth moves. The
-		// space is the full admissible one: any L/R schedule is a
-		// sequence of (len >= dwell, rate) segments, and splits let
-		// the search add reversals wherever they pay.
-		const float rsteps[3] = { 0.35f, 0.15f, 0.06f };
-		for (int round = 0; round < 3 && used < budget; ++round) {
+		std::sort(pool.begin(), pool.end(),
+			[](const PoolEntry& a, const PoolEntry& b) {
+				return a.sc > b.sc;
+			});
+		if (pool.size() > 3)
+			pool.resize(3);
+		// ---- TOP-K DEEPENING + THE RESOLUTION LADDER ----
+		auto deepen = [&](PoolEntry& pe, float kstep, int lstep) {
 			bool moved = true;
 			int guard = 0;
-			while (moved && used < budget && guard++ < 6) {
+			while (moved && best.evals < budget && guard++ < 8) {
 				moved = false;
-				for (size_t j = 0; j < cur.len.size()
-					&& used < budget; ++j) {
-					// Rate nudges. Rates beyond |1| are LEGAL: the
-					// commanded heading outruns full-gain tracking
-					// and the controller's braking-turn branch
-					// executes the excess at the law's exact speed
-					// cost (measured: the human's flights spend
-					// ticks at 2.4-5.3x the free rate). Ceiling 3
-					// spans the useful exchange; the optimizer
-					// pays for every over-rate tick in energy.
-					for (int sg = -1; sg <= 1; sg += 2) {
-						SegSched t2 = cur;
-						float nr = t2.rate[j]
-							+ rsteps[round]
-							* static_cast<float>(sg);
-						if (nr > 3.f) nr = 3.f;
-						if (nr < -3.f) nr = -3.f;
-						t2.rate[j] = nr;
-						float sc;
-						ev(t2, &sc);
-						if (sc > cur_best_score) {
-							cur_best_score = sc;
-							cur = t2;
-							moved = true;
-						}
-					}
-					// Length nudges.
-					const int lsteps[2] = { 6, 2 };
-					for (int li = 0; li < 2; ++li)
+				for (size_t j = 0; j < pe.runs.size(); ++j) {
+					// Knot nudges.
+					for (size_t ki = 0; ki < pe.runs[j].ck.size();
+						++ki)
 						for (int sg = -1; sg <= 1; sg += 2) {
-							SegSched t2 = cur;
-							int nl = t2.len[j] + lsteps[li] * sg;
-							if (nl < min_gap)
-								nl = min_gap;
-							t2.len[j] = nl;
-							float sc;
-							ev(t2, &sc);
-							if (sc > cur_best_score) {
-								cur_best_score = sc;
-								cur = t2;
+							if (best.evals >= budget)
+								return;
+							std::vector<WishRun> t2 = pe.runs;
+							float nv = t2[j].ck[ki] + kstep
+								* static_cast<float>(sg);
+							if (nv > 1.f) nv = 1.f;
+							if (nv < -1.f) nv = -1.f;
+							t2[j].ck[ki] = nv;
+							const float sc = ev(t2);
+							if (sc > pe.sc) {
+								pe.sc = sc;
+								pe.runs = t2;
 								moved = true;
 							}
 						}
-				}
-				// Growth: split the longest segment with a reversal;
-				// append a tail segment.
-				if (!moved && cur.len.size() < 8
-					&& used < budget) {
-					size_t lj = 0;
-					for (size_t j = 1; j < cur.len.size(); ++j)
-						if (cur.len[j] > cur.len[lj])
-							lj = j;
-					if (cur.len[lj] >= 2 * min_gap) {
-						SegSched t2 = cur;
-						const int half = t2.len[lj] / 2;
-						const float f = t2.rate[lj];
-						t2.len[lj] = half;
-						t2.len.insert(t2.len.begin()
-							+ static_cast<long long>(lj) + 1,
-							t2.len[lj] == half
-								? cur.len[lj] - half : half);
-						t2.rate.insert(t2.rate.begin()
-							+ static_cast<long long>(lj) + 1,
-							f == 0.f ? 0.5f : -f * 0.7f);
-						float sc;
-						ev(t2, &sc);
-						if (sc > cur_best_score) {
-							cur_best_score = sc;
-							cur = t2;
+					// Length nudges (final run absorbs; interior
+					// runs trade ticks with their neighbor).
+					for (int sg = -1; sg <= 1; sg += 2) {
+						if (best.evals >= budget)
+							return;
+						std::vector<WishRun> t2 = pe.runs;
+						const int dl = lstep * sg;
+						if (j + 1 < t2.size()) {
+							if (t2[j].len + dl < min_gap
+								|| t2[j + 1].len - dl < min_gap)
+								continue;
+							t2[j].len += dl;
+							t2[j + 1].len -= dl;
+						} else {
+							if (t2[j].len + dl < min_gap)
+								continue;
+							t2[j].len += dl;
+						}
+						const float sc = ev(t2);
+						if (sc > pe.sc) {
+							pe.sc = sc;
+							pe.runs = t2;
 							moved = true;
 						}
 					}
-					SegSched t3 = cur;
-					t3.len.push_back(min_gap + 2);
-					t3.rate.push_back(t3.rate.empty() ? 0.5f
-						: -t3.rate.back() * 0.5f);
-					float sc;
-					ev(t3, &sc);
-					if (sc > cur_best_score) {
-						cur_best_score = sc;
-						cur = t3;
+				}
+				if (moved)
+					continue;
+				// Ladder: refine the longest run's knots
+				// (K -> 2K-1, midpoint inserts, toward per-tick).
+				size_t lj = 0;
+				for (size_t j = 1; j < pe.runs.size(); ++j)
+					if (pe.runs[j].len > pe.runs[lj].len)
+						lj = j;
+				if (static_cast<int>(pe.runs[lj].ck.size()) < 17
+					&& static_cast<int>(pe.runs[lj].ck.size())
+						< pe.runs[lj].len) {
+					std::vector<WishRun> t2 = pe.runs;
+					std::vector<float> nk;
+					const std::vector<float>& ok2 = t2[lj].ck;
+					for (size_t i = 0; i + 1 < ok2.size(); ++i) {
+						nk.push_back(ok2[i]);
+						nk.push_back(0.5f * (ok2[i]
+							+ ok2[i + 1]));
+					}
+					nk.push_back(ok2.back());
+					if (nk.size() < 2) {
+						nk = ok2;
+						nk.push_back(ok2.back());
+					}
+					t2[lj].ck = nk;
+					const float sc = ev(t2);
+					if (sc >= pe.sc) {
+						pe.sc = sc;
+						pe.runs = t2;
+						moved = true;
+					}
+				}
+				// Reversal insertion: split the longest run.
+				if (!moved && pe.runs.size() < 7
+					&& pe.runs[lj].len >= 2 * min_gap
+					&& best.evals < budget) {
+					std::vector<WishRun> t2 = pe.runs;
+					WishRun tail;
+					tail.len = t2[lj].len / 2;
+					t2[lj].len -= tail.len;
+					tail.side = static_cast<signed char>(
+						-t2[lj].side);
+					tail.ck.push_back(t2[lj].ck.back() * 0.6f);
+					t2.insert(t2.begin()
+						+ static_cast<long long>(lj) + 1, tail);
+					const float sc = ev(t2);
+					if (sc > pe.sc) {
+						pe.sc = sc;
+						pe.runs = t2;
 						moved = true;
 					}
 				}
 			}
+		};
+		const float ksteps[3] = { 0.3f, 0.12f, 0.05f };
+		const int lsteps[3] = { 6, 2, 2 };
+		for (int rd = 0; rd < 3; ++rd)
+			for (PoolEntry& pe : pool) {
+				if (best.evals >= budget)
+					break;
+				deepen(pe, ksteps[rd], lsteps[rd]);
+			}
+		// ---- DETERMINISTIC RESTARTS until the budget is spent or
+		// improvement dries up (the sandwich gap is the caller's
+		// convergence measure - budget is only the leash). ----
+		unsigned rng = 0x9e3779b9u
+			^ static_cast<unsigned>(face_idx * 7919)
+			^ static_cast<unsigned>(static_cast<int>(q.X) * 131)
+			^ static_cast<unsigned>(static_cast<int>(q.Y));
+		auto frand = [&]() {
+			rng = rng * 1664525u + 1013904223u;
+			return static_cast<float>((rng >> 8) & 0xFFFF)
+				/ 65535.f * 2.f - 1.f;
+		};
+		int dry = 0;
+		while (best.evals < budget && dry < 4 && !pool.empty()) {
+			const float before = pool[0].sc;
+			PoolEntry pe = pool[0];
+			for (WishRun& r : pe.runs) {
+				for (float& c : r.ck) {
+					c += 0.25f * frand();
+					if (c > 1.f) c = 1.f;
+					if (c < -1.f) c = -1.f;
+				}
+				const int dl = static_cast<int>(4.f * frand());
+				if (r.len + dl >= min_gap)
+					r.len += dl;
+			}
+			pe.sc = ev(pe.runs);
+			deepen(pe, 0.12f, 2);
+			if (pe.sc > pool[0].sc)
+				pool[0] = pe;
+			if (pool[0].sc <= before + 1e-3f)
+				dry++;
+			else
+				dry = 0;
 		}
 		return best;
 	}
@@ -676,7 +790,9 @@ namespace Entrance {
 		auto credit = [&](const Air::Result& cr, float psi1,
 			float psi2, int split, int n,
 			const std::vector<float>* spline_knots,
-			int spline_horizon, int source) {
+			int spline_horizon, int source,
+			const std::vector<signed char>* wish_side = nullptr,
+			const std::vector<float>* wish_cosa = nullptr) {
 			const Vec3 dq = cr.pos - m.origin;
 			int iu = static_cast<int>(Dot(dq, m.ud) / m.du + 0.5f);
 			int iv = static_cast<int>(Dot(dq, m.vd) / m.dv + 0.5f);
@@ -706,11 +822,20 @@ namespace Entrance {
 				r.psi2 = psi2;
 				r.split = split;
 				r.prof_n = n;
-				if (spline_knots) {
+				if (wish_side) {
+					r.wside = *wish_side;
+					r.wcosa = *wish_cosa;
+					r.knots.clear();
+					r.horizon = spline_horizon;
+				} else if (spline_knots) {
 					r.knots = *spline_knots;
+					r.wside.clear();
+					r.wcosa.clear();
 					r.horizon = spline_horizon;
 				} else {
 					r.knots.clear();
+					r.wside.clear();
+					r.wcosa.clear();
 					r.horizon = 0;
 				}
 				r.source = source;
@@ -884,10 +1009,13 @@ namespace Entrance {
 			targets.insert(targets.end(), bound_targets.begin(),
 				bound_targets.end());
 			// Every clean-air strike the reference search flies
-			// anywhere raises the field's lower bound (source=1).
+			// anywhere raises the field's lower bound (source=1),
+			// witnessed in the canonical wish basis.
 			auto ref_credit = [&](const Air::Result& ar,
-				const std::vector<float>& kprof, int hz) {
-				credit(ar, 0.f, 0.f, 0, ar.tick, &kprof, hz, 1);
+				const std::vector<signed char>& wsd,
+				const std::vector<float>& wcs, int hz) {
+				credit(ar, 0.f, 0.f, 0, ar.tick, nullptr, hz, 1,
+					&wsd, &wcs);
 			};
 			for (const SpTarget& tg : targets) {
 				if (m.flights >= o.flights_cap)

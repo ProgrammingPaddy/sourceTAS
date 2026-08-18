@@ -6098,21 +6098,28 @@ namespace {
 						if (!r.verified)
 							continue;
 						checked++;
-						int hz;
-						if (!r.knots.empty()) {
-							prof = r.knots;
-							hz = r.horizon;
-						} else {
-							Entrance::WitnessProfile(fe.sep,
-								o.params, r.psi1, r.psi2,
-								r.split, r.prof_n, &prof);
-							hz = r.prof_n + 8;
-						}
+						Air::Result cr;
 						vt.aim = r.cp;
-						vt.max_ticks = hz;
-						Air::Result cr = Air::FlyHeadingSpline(
-							fe.sep, w, o.params, vt, g, prof,
-							hz);
+						if (!r.wside.empty()) {
+							vt.max_ticks = r.horizon;
+							cr = Air::FlyWishSchedule(fe.sep, w,
+								o.params, vt, g, r.wside,
+								r.wcosa, r.horizon);
+						} else {
+							int hz;
+							if (!r.knots.empty()) {
+								prof = r.knots;
+								hz = r.horizon;
+							} else {
+								Entrance::WitnessProfile(fe.sep,
+									o.params, r.psi1, r.psi2,
+									r.split, r.prof_n, &prof);
+								hz = r.prof_n + 8;
+							}
+							vt.max_ticks = hz;
+							cr = Air::FlyHeadingSpline(fe.sep, w,
+								o.params, vt, g, prof, hz);
+						}
 						if (!cr.hit) {
 							mism++;
 							continue;
@@ -6687,12 +6694,22 @@ namespace {
 					* (ex.pos.Z - fc.zmin);
 				exact_ok = Len(ex.pos - fe.cp) <= 24.f
 					&& fabsf(H2 - eh) <= 0.03f * eh;
-				printf("repfit:   per-tick wish schedule: strike "
-					"%.0fu off | dot %.1f vs %.1f | E %.0fk vs "
-					"%.0fk | %s\n", Len(ex.pos - fe.cp),
-					ex.dot, Dot(fe.v1, fc.n), H2 / 1e3f,
-					eh / 1e3f, exact_ok ? "EXACT-ROW OK"
+				// Full terminal-state error (advisor: contact
+				// distance alone is not exactness).
+				printf("repfit:   per-tick wish schedule: dp %.1fu "
+					"| dv (%.1f, %.1f, %.1f) | dE %+.1fk | "
+					"d(n.v) %+.1f | %s\n",
+					Len(ex.pos - fe.cp),
+					ex.v1.X - fe.v1.X, ex.v1.Y - fe.v1.Y,
+					ex.v1.Z - fe.v1.Z, (H2 - eh) / 1e3f,
+					ex.dot - Dot(fe.v1, fc.n),
+					exact_ok ? "EXACT-ROW OK"
 						: "EXACT-ROW DIVERGED <- executor gap");
+				printf("repfit:   basis_representable %s | "
+					"6tick_admissible %s\n",
+					exact_ok ? "YES" : "NO",
+					wviol == 0 ? "YES" : "NO (dwell violation "
+						"in the human witness)");
 			} else {
 				printf("repfit:   per-tick wish schedule: %s "
 					"(closest %.0fu) <- executor gap\n",

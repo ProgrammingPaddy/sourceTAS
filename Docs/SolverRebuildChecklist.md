@@ -864,6 +864,39 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 9e, REFSOLVE ON THE WISH BASIS - first human-
+  beating number): RefSolve rebuilt on the canonical control space
+  per the advisor's two-layer architecture - Layer 0 = per-tick
+  (side, cosa) via Air::FlyWishSchedule (no controller in the
+  definition), Layer 1 = side-RUNS carrying cosa KNOT LADDERS
+  (linear across the run; midpoint-insert refinement toward
+  per-tick resolution - a dial, not a family), deterministic seed
+  grid (single-run cosa ramps both sides, bulge two-runs, coast) +
+  top-3 deepening (knot/length moves, ladder splits, reversal
+  insertion) + LCG-seeded restarts until budget or 4 dry cycles.
+  Witnesses now stored/replayed AS wish schedules (Rec.wside/wcosa;
+  witnesscheck replays via FlyWishSchedule - 118/118 reproduce).
+  LADDER RESULTS (basictest): humanexact f0 898k vs 921k (-23k, 7u
+  off the literal contact, was NONE) FAIL-mandatory; f2 689k vs
+  945k (-256k) FAIL-mandatory - the one deep case left; f3 847k @
+  dot -127.5 vs the human's 834k = THE SOLVER EXCEEDS THE HUMAN
+  WITH A LEGAL 6-TICK FLIGHT (+12k; their witness needed a 4-tick
+  reversal - N/A formally, exactly the advisor's hoped-for
+  outcome). efield: f0 77 cells to 908k, f2 9 to 760k (clean-air
+  law rejecting 12 contact-assisted strikes), f3 32 cells to 820k
+  (was 8/689k). fieldexact 11/17 saturated; f3 fresh references
+  beat in-Build stored cells by up to +310k = the gap is now
+  BUDGET ALLOCATION (in-Build 220 vs gate 700 flights), not
+  representation. repfit hardened per advisor: full terminal-state
+  deltas (f0: dp 0.0u, dv (0,0,0), d(n.v) -0.0 - engine-tolerance
+  membership) + explicit basis_representable / 6tick_admissible
+  flags (f3: YES/NO - the apparent contradiction resolved: the
+  executor executes, the SEARCH owns admissibility). OPEN: f2's
+  soft-fast arrival class (-256k, the real mystery); in-Build
+  budget laddering to absorb gate-level discoveries; Tier-0 reach
+  model (clean-air contradictions f2:3 f3:1, cull stays off);
+  carve port FROZEN until entrance convergence per advisor.
+
 - 2026-08-18 (session 9d, THE BASIS VERDICT - repfit settles it):
   advisor's representation-completeness unit test built (`repfit`)
   and it OVERTURNED the optimizer-blame hypothesis in three steps:

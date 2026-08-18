@@ -56,11 +56,18 @@ namespace Entrance {
 		float psi1 = 0.f, psi2 = 0.f;
 		int   split = 0;
 		int   prof_n = 0;
-		// DENSE-PROFILE witness (reference-solver discoveries): when
+		// DENSE-PROFILE witness (heading-command layer): when
 		// non-empty, the witness is these knots flown over `horizon`
 		// ticks and psi1/psi2/split are meaningless.
 		std::vector<float> knots;
 		int   horizon = 0;
+		// WISH-BASIS witness (the canonical control space, ruling
+		// 2026-08-18): when wside is non-empty the witness is the
+		// per-tick (side, cosa) schedule replayed by
+		// Air::FlyWishSchedule over `horizon` ticks - it takes
+		// precedence over both other forms.
+		std::vector<signed char> wside;
+		std::vector<float> wcosa;
 		// Which realization layer found the winner (0 = two-hold
 		// family, 1 = reference solver) - production-family
 		// completeness is measured from these tags (ruling
@@ -151,19 +158,25 @@ namespace Entrance {
 		bool  ok = false;
 		float H = -1e30f;
 		Air::Result flight;       // the winning engine outcome
-		std::vector<float> prof;  // dense heading witness
+		// The winning wish-basis witness (per-tick side + cosa,
+		// replayed by Air::FlyWishSchedule over `horizon`).
+		std::vector<signed char> wside;
+		std::vector<float> wcosa;
 		int   horizon = 0;
+		int   evals = 0;              // engine flights spent
 		int   contact_assisted = 0;   // clean-air-law rejections seen
 	};
 	// on_strike (optional): called for EVERY clean-air face strike the
 	// search flies, wherever it lands - the caller may credit its
-	// field ("every valid witness raises the lower bound").
+	// field ("every valid witness raises the lower bound"). Args:
+	// the flight, the wish schedule (side, cosa), its horizon.
 	RefResult RefSolve(const PlayerState& entry, const World& w,
 	                   const MoveParams& p, const Route::Graph& g,
 	                   int face_idx, const Vec3& q, float radius,
 	                   int n_hint, int budget, bool tangent_mode,
 	                   int* flights_counter, float zmin,
 	                   const std::function<void(const Air::Result&,
+	                       const std::vector<signed char>&,
 	                       const std::vector<float>&, int)>&
 	                       on_strike = nullptr);
 
