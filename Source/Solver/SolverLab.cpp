@@ -1,4 +1,4 @@
-﻿// SolverLab: console harness for the solver core. Runs the engine-independent
+// SolverLab: console harness for the solver core. Runs the engine-independent
 // world + movement model without the game so search/physics work iterates at
 // full speed. Commands:
 //
@@ -5785,7 +5785,8 @@ namespace {
 	// extraction: replay the tape, record each long-air transfer's
 	// separation state + real contact. ----
 	struct EFEvent {
-		int tick = 0;
+		int tick = 0;      // contact frame
+		int sep_tick = 0;  // separation frame (flight start)
 		int fidx = -1;
 		PlayerState sep;
 		Vec3 cp, v1;
@@ -5815,6 +5816,7 @@ namespace {
 		}
 		int air = 0;
 		PlayerState sep;
+		int sep_t = 0;
 		if (refpts) {
 			refpts->push_back(s.pos);
 			refspd->push_back(Len(s.vel));
@@ -5837,6 +5839,7 @@ namespace {
 				if (fidx >= 0 && air >= 8) {
 					EFEvent fe;
 					fe.tick = static_cast<int>(t);
+					fe.sep_tick = sep_t;
 					fe.fidx = fidx;
 					fe.sep = sep;
 					fe.cp = ev.contact_pos[0];
@@ -5845,8 +5848,10 @@ namespace {
 				}
 				air = 0;
 			} else if (!s.on_ground) {
-				if (air == 0)
+				if (air == 0) {
 					sep = s;
+					sep_t = static_cast<int>(t);
+				}
 				air++;
 			} else {
 				air = 0;
@@ -5913,10 +5918,18 @@ namespace {
 			}
 			const size_t ncell = static_cast<size_t>(em.nu)
 				* static_cast<size_t>(em.nv);
+			int src_ref = 0;
+			for (int b2 = 0; b2 < 2; ++b2)
+				for (size_t i = 0; i < ncell; ++i)
+					if (em.rec[b2][i].verified
+						&& em.rec[b2][i].source == 1)
+						src_ref++;
 			printf("efield: t%4d f%d | %dx%d cells | feas %d verif %d "
-				"| traces %d flights %d | H %.0fk..%.0fk | %.0f ms\n",
+				"(%d ref-found) | traces %d flights %d | contact-"
+				"assisted rejected %d | H %.0fk..%.0fk | %.0f ms\n",
 				fe.tick, fe.fidx, em.nu, em.nv, em.cells_feasible,
-				em.cells_verified, em.traced, em.flights,
+				em.cells_verified, src_ref, em.traced, em.flights,
+				em.contact_assisted,
 				em.H_lo / 1e3f, em.H_hi / 1e3f, ms);
 			// (1) THE HUMAN COVERAGE ROW: the family must offer, at
 			// the human's own cell, at least what the human achieved.
@@ -6065,8 +6078,8 @@ namespace {
 						"closed-form min possible %.1f %s\n",
 						Entrance::kTanEps, min_ach, min_pos,
 						min_pos > Entrance::kTanEps
-							? "(CASE D: no tangent exists at the "
-							  "reached arrival states)"
+							? "(CANDIDATE Case D - not proven until "
+							  "the reference frontier certifies)"
 							: "(tangent exists - realization "
 							  "fell short)");
 				}
@@ -6305,95 +6318,16 @@ namespace {
 				const Vec3 q = em.origin
 					+ Scale(em.ud, static_cast<float>(iu) * em.du)
 					+ Scale(em.vd, static_cast<float>(iv) * em.dv);
-				// ---- The broader reference: 5-knot spline pattern
-				// search on the exact engine, maximizing replayed
-				// post-board energy for strikes near this cell. ----
-				const int kn = 5;
-				const int horizon = r.prof_n + 20;
-				Air::Target rt;
-				rt.face = fe.fidx;
-				rt.aim = q;
-				rt.dot_cap = 2000.f;
-				rt.max_ticks = horizon;
-				std::vector<float> wit;
-				Entrance::WitnessProfile(fe.sep, o.params, r.psi1,
-					r.psi2, r.split, r.prof_n, &wit);
-				auto knots_from = [&](float f0, float f1, float f2,
-					float f3, float f4) {
-					std::vector<float> ks(kn);
-					ks[0] = f0; ks[1] = f1; ks[2] = f2;
-					ks[3] = f3; ks[4] = f4;
-					return ks;
-				};
-				std::vector<std::vector<float>> inits;
-				if (!wit.empty()) {
-					std::vector<float> ks(kn);
-					for (int i = 0; i < kn; ++i)
-						ks[i] = wit[static_cast<size_t>(i)
-							* (wit.size() - 1) / (kn - 1)];
-					inits.push_back(ks);
-					for (int i = 0; i < kn; ++i)
-						ks[i] = Steer::WrapPi(ks[i] + 0.2f);
-					inits.push_back(ks);
-					for (int i = 0; i < kn; ++i)
-						ks[i] = Steer::WrapPi(ks[i] - 0.4f);
-					inits.push_back(ks);
-				}
-				const float bear = atan2f(q.Y - fe.sep.pos.Y,
-					q.X - fe.sep.pos.X);
-				inits.push_back(knots_from(bear, bear, bear, bear,
-					bear));
-				inits.push_back(knots_from(bear, bear,
-					Steer::WrapPi((bear + r.theta) * 0.5f),
-					r.theta, r.theta));
+				// ---- The reference: the GENERAL admissible-control
+				// solve (segment schedules over the dwell law) with
+				// an independent budget - it must fail to beat the
+				// stored H for the family to certify. ----
 				int flights = 0;
-				float H_ref = -1e30f, ref_dot = 0.f;
-				auto eval = [&](const std::vector<float>& ks) {
-					flights++;
-					Air::Result ar = Air::FlyHeadingSpline(fe.sep,
-						w, o.params, rt, g, ks, horizon);
-					if (ar.hit && ar.dot < 0.f
-						&& Len(ar.pos - q) <= eo.grid * 0.9f) {
-						const float H2 = Dot(ar.end_state.vel,
-							ar.end_state.vel) + 2.f
-							* o.params.gravity
-							* (ar.pos.Z - fc.zmin);
-						if (H2 > H_ref) {
-							H_ref = H2;
-							ref_dot = ar.dot;
-						}
-						return 1e7f + H2;
-					}
-					return -(ar.hit ? Len(ar.pos - q)
-						: ar.miss_dist);
-				};
-				for (std::vector<float>& ks : inits) {
-					float cur = eval(ks);
-					const float steps[3] = { 0.3f, 0.12f, 0.05f };
-					for (int rd = 0; rd < 3; ++rd) {
-						bool moved = true;
-						int sweeps = 0;
-						while (moved && sweeps++ < 5
-							&& flights < 700) {
-							moved = false;
-							for (int ki = 0; ki < kn; ++ki) {
-								for (int sgn = -1; sgn <= 1;
-									sgn += 2) {
-									std::vector<float> t2 = ks;
-									t2[ki] = Steer::WrapPi(t2[ki]
-										+ steps[rd]
-										* static_cast<float>(sgn));
-									const float sc = eval(t2);
-									if (sc > cur) {
-										cur = sc;
-										ks = t2;
-										moved = true;
-									}
-								}
-							}
-						}
-					}
-				}
+				Entrance::RefResult rr = Entrance::RefSolve(fe.sep,
+					w, o.params, g, fe.fidx, q, eo.grid * 0.9f,
+					r.n, 700, false, &flights, fc.zmin);
+				const float H_ref = rr.ok ? rr.H : -1e30f;
+				const float ref_dot = rr.ok ? rr.flight.dot : 0.f;
 				rows++;
 				const float gap = H_ref > -1e29f
 					? H_ref - r.H : -1e30f;
@@ -6434,6 +6368,132 @@ namespace {
 				: "FAMILY GAPS FOUND - do not certify");
 		fflush(stdout);
 		return rows > 0 && sat == rows ? 0 : 1;
+	}
+
+	// humanexact: THE EXACT-POINT LOWER-BOUND GATE (ruling 2026-08-18).
+	// The human tape is QC only, never a seed - but at its exact
+	// contact coordinate it is a constructive feasible witness: from
+	// the same separation state, the admissible solve must deliver
+	//     H(Q_h) >= E_h  (and ordinarily EXCEED it).
+	// H(Q_h) < E_h is definitive incompleteness - no theoretical
+	// argument survives a witness. No cell-center ambiguity: the solve
+	// targets the literal recorded contact. Also reports whether the
+	// human's own inputs violate the dwell law the solver is
+	// restricted to, and runs the explicit FastestTangent solve at the
+	// same point (tangent "none" stays CANDIDATE Case D only).
+	int CmdHumanExact(const std::string& map_path, const ReplayOpts& o,
+	                  const std::string& tape_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("humanexact: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("humanexact: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<EFEvent> events;
+		if (!EFReplay(w, g, o, tape, &events, nullptr, nullptr)) {
+			printf("humanexact: no flight events in tape\n");
+			return 1;
+		}
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / o.params.dt) / o.params.strafe_rate_max));
+		int rows = 0, pass = 0;
+		for (const EFEvent& fe : events) {
+			const Route::Face& fc = g.faces[fe.fidx];
+			Vec3 vpost;
+			Fn::ClipVelocity(fe.v1, fc.n, &vpost);
+			const float eh = Dot(vpost, vpost)
+				+ 2.f * o.params.gravity
+				* (fe.cp.Z - fc.zmin);
+			const int n_h = fe.tick - fe.sep_tick;
+			int flights = 0, tfl = 0;
+			Entrance::RefResult rr = Entrance::RefSolve(fe.sep, w,
+				o.params, g, fe.fidx, fe.cp, 16.f, n_h, 1500,
+				false, &flights, fc.zmin);
+			Entrance::RefResult rt = Entrance::RefSolve(fe.sep, w,
+				o.params, g, fe.fidx, fe.cp, 16.f, n_h, 800,
+				true, &tfl, fc.zmin);
+			// The human's own reversal cadence vs the dwell law.
+			int reversals = 0, viol = 0, mind = 100000;
+			{
+				int last_sign = 0, last_t = -100000;
+				for (int t2 = fe.sep_tick + 1; t2 <= fe.tick
+					&& t2 < static_cast<int>(tape.frames.size());
+					++t2) {
+					const float sm = tape.frames[
+						static_cast<size_t>(t2)].smove;
+					const int sg = sm > 1.f ? 1
+						: (sm < -1.f ? -1 : 0);
+					if (!sg)
+						continue;
+					if (last_sign && sg != last_sign) {
+						reversals++;
+						const int gp = t2 - last_t;
+						if (gp < mind)
+							mind = gp;
+						if (gp < min_gap)
+							viol++;
+						last_t = t2;
+					} else if (!last_sign) {
+						last_t = t2;
+					}
+					last_sign = sg;
+				}
+			}
+			rows++;
+			const bool covers = rr.ok && rr.H >= eh - 2000.f;
+			if (covers)
+				pass++;
+			if (rr.ok)
+				printf("humanexact: t%4d f%d | E_h %.0fk (dot %.1f)"
+					" | H(Q_h) %.0fk (dot %.1f, %.0fu off, %d "
+					"flights) | gap %+.0fk | %s\n",
+					fe.tick, fe.fidx, eh / 1e3f,
+					Dot(fe.v1, fc.n), rr.H / 1e3f, rr.flight.dot,
+					Len(rr.flight.pos - fe.cp), flights,
+					(rr.H - eh) / 1e3f,
+					covers ? (rr.H > eh + 2000.f
+						? "PASS (exceeds)" : "PASS (matches)")
+					: "<- BELOW HUMAN: incomplete");
+			else
+				printf("humanexact: t%4d f%d | E_h %.0fk (dot %.1f)"
+					" | H(Q_h) NONE in %d flights <- BELOW HUMAN: "
+					"incomplete (no clean-air strike within 16u)"
+					"\n", fe.tick, fe.fidx, eh / 1e3f,
+					Dot(fe.v1, fc.n), flights);
+			if (rt.ok)
+				printf("humanexact:   tangent at Q_h: %.0fk (dot "
+					"%.1f) | delta_tan %+.0fk\n", rt.H / 1e3f,
+					rt.flight.dot, ((rr.ok ? rr.H : eh) - rt.H)
+					/ 1e3f);
+			else
+				printf("humanexact:   tangent at Q_h: none found "
+					"(CANDIDATE Case D at this point - not "
+					"proven)\n");
+			printf("humanexact:   human inputs: %d reversals, min "
+				"dwell %s ticks, %d under the %d-tick law%s\n",
+				reversals, reversals ? std::to_string(mind).c_str()
+					: "n/a", viol, min_gap, viol
+					? " <- the human uses controls outside the "
+					  "solver's restriction" : "");
+		}
+		printf("humanexact: %d/%d exact points covered | %s\n",
+			pass, rows, rows > 0 && pass == rows
+				? "LOWER BOUND HOLDS"
+				: "INCOMPLETE - the human witnesses beat the "
+				  "solver");
+		fflush(stdout);
+		return rows > 0 && pass == rows ? 0 : 1;
 	}
 
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
@@ -9201,6 +9261,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 4, o))
 			return 1;
 		return CmdFieldExact(argv[2], o, argv[3]);
+	}
+	if (cmd == "humanexact" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdHumanExact(argv[2], o, argv[3]);
 	}
 	if (cmd == "msolve2" && argc >= 4) {
 		ReplayOpts o;

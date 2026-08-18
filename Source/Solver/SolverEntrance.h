@@ -21,8 +21,10 @@
 // dominance is an OPEN THEOREM (handoff 9.2) - tangent_gap > 0 means
 // a lossy arrival genuinely out-carries every tangent arrival there.
 
+#include <functional>
 #include <vector>
 
+#include "SolverAir.h"
 #include "SolverMove.h"
 #include "SolverRoute.h"
 
@@ -54,12 +56,17 @@ namespace Entrance {
 		float psi1 = 0.f, psi2 = 0.f;
 		int   split = 0;
 		int   prof_n = 0;
-		// SPLINE-FAMILY witness (second realization layer, for cells
-		// the two-hold family cannot express - corridor approaches):
-		// when non-empty, the witness is these knots flown over
-		// `horizon` ticks and psi1/psi2/split are meaningless.
+		// DENSE-PROFILE witness (reference-solver discoveries): when
+		// non-empty, the witness is these knots flown over `horizon`
+		// ticks and psi1/psi2/split are meaningless.
 		std::vector<float> knots;
 		int   horizon = 0;
+		// Which realization layer found the winner (0 = two-hold
+		// family, 1 = reference solver) - production-family
+		// completeness is measured from these tags (ruling
+		// 2026-08-18: H is the best witnessed result regardless of
+		// finder; the finder is recorded).
+		int   source = 0;
 		// FastestTangent at this cell/branch (|dot| <= kTanEps),
 		// stored separately - NEVER replaces H.
 		bool  tan_ok = false;
@@ -86,6 +93,13 @@ namespace Entrance {
 		int   flights = 0;        // engine witness flights flown
 		int   cells_feasible = 0;
 		int   cells_verified = 0;
+		// THE CLEAN-AIR LAW (ruling 2026-08-18): a direct entrance
+		// witness must be collision-free before Q - an intermediate
+		// strike rewrites the ballistics and the flight is no longer
+		// the aerial operator (it is Air -> Contact -> Air, a route-
+		// graph composition, not a field entry). Rejected strikes are
+		// counted here, never credited.
+		int   contact_assisted = 0;
 	};
 
 	struct Opts {
@@ -113,6 +127,36 @@ namespace Entrance {
 	void WitnessProfile(const PlayerState& entry, const MoveParams& p,
 	                    float psi1, float psi2, int split, int n,
 	                    std::vector<float>* prof);
+
+	// THE GENERAL REFERENCE SOLVE (ruling 2026-08-18: one general
+	// boundary-value search over the admissible L/R control space -
+	// segments of (length >= the dwell law, signed turn-rate
+	// fraction) - NOT an expanding vocabulary of named geometric
+	// families; the cheap families are proposal seeds only). The
+	// objective is the best CLEAN-AIR engine strike within `radius`
+	// of `q`: replayed post-board energy, maximized. tangent_mode
+	// restricts the win condition to |dot| <= kTanEps (the explicit
+	// FastestTangent solve). Misses/contact-assisted strikes guide
+	// but never win.
+	struct RefResult {
+		bool  ok = false;
+		float H = -1e30f;
+		Air::Result flight;       // the winning engine outcome
+		std::vector<float> prof;  // dense heading witness
+		int   horizon = 0;
+		int   contact_assisted = 0;   // clean-air-law rejections seen
+	};
+	// on_strike (optional): called for EVERY clean-air face strike the
+	// search flies, wherever it lands - the caller may credit its
+	// field ("every valid witness raises the lower bound").
+	RefResult RefSolve(const PlayerState& entry, const World& w,
+	                   const MoveParams& p, const Route::Graph& g,
+	                   int face_idx, const Vec3& q, float radius,
+	                   int n_hint, int budget, bool tangent_mode,
+	                   int* flights_counter, float zmin,
+	                   const std::function<void(const Air::Result&,
+	                       const std::vector<float>&, int)>&
+	                       on_strike = nullptr);
 
 } // namespace Entrance
 } // namespace Solver

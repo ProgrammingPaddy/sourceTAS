@@ -864,6 +864,45 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 9c, THE RULINGS LAND - dwell 6, clean-air law,
+  humanexact, the general reference solver): user+advisor directives
+  implemented (full text in SolverRebuild.md 2.11 RULINGS block).
+  (1) DWELL LAW 6 TICKS: strafe_rate_max 6->12/sec; every hardcoded
+  12 now derives from the law (SolverPath flip gap, Entrance flip
+  prune, controller min_gap). Gate ripple: airsolve 3/3 PASS; carve
+  gate RED 2/3 - the f3 slow-crest reproduction row (tape n=58 s2d
+  315) no longer converges (solver finds n=37 s2d 725, dv 690; the
+  carve search families were tuned under 12-tick pacing) - OPEN, fix
+  = carve-search hardening, not a rule revert. (2) CLEAN-AIR LAW: a
+  field witness must be collision-free before Q (struck_brush < 0);
+  contact-assisted strikes counted + rejected (0 observed! - the f2
+  "bound-unreachable" cells are CLEAN flights: the earlier graze
+  attribution was WRONG; Tier-0's reach model itself is too tight
+  there, likely the contact-altitude/tick-band - Tier-0 cull stays
+  off). (3) FAMILY DISCIPLINE: 5-knot spline family DELETED;
+  RefSolve = one general solve over segment schedules (len >= dwell,
+  signed turn-rate fraction; split/append moves add reversals);
+  powers the in-Build second layer (source-tagged), fieldexact, and
+  humanexact. (4) HUMANEXACT (the exact-point lower-bound gate):
+  0/3 covered - f0 no clean strike within 16u of the literal
+  contact (E_h 921k); f2 659k vs 945k (gap -286k, our dot -557 vs
+  their -206); f3 no strike (E_h 834k). HUMAN DWELL AUDIT: f0/f2
+  flights are ADMISSIBLE (1 reversal, 21/25-tick dwell) - those
+  misses are OUR incompleteness; f3 uses a 4-TICK reversal, OUTSIDE
+  the 6-tick law -> user decision needed (the advisor's predicted
+  case). (5) Case D downgraded to CANDIDATE everywhere. DIAGNOSIS
+  (one cause across all gates): the segment SPACE is right, the
+  OPTIMIZER is weak - greedy coordinate descent with few
+  deterministic seeds converges prematurely (humanexact used
+  137/1500 budget; fresh fieldexact references land -104k..-244k
+  BELOW stored H at f2 = seed-sensitive, untrustworthy as a
+  certifier). fieldexact 14/17 sat, worst gap 13k. witnesscheck
+  100% (81/81). NEXT (priority): make RefSolve trustworthy - seed
+  grid (multiple arrival headings x turn rates x lengths, both
+  bulge signs), top-k deepening, deterministic restarts until the
+  budget is USED; then re-run the gate ladder; then carve-search
+  hardening under dwell 6.
+
 - 2026-08-18 (session 9b, PHASE A BUILT - the witness-backed entrance
   field laboratory; ruling received and recorded: laws become
   EXECUTION-VERIFICATION, admission = exact witness-backed argmax

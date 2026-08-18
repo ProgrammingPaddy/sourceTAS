@@ -316,6 +316,44 @@ terminal angle are never guessed independently. Key objects:
   sampling instead of uniform oversampling; exact engine remains
   the judge everywhere.
 
+RULINGS 2026-08-18 (user + advisor, binding):
+- THE DWELL LAW (revised): minimum 6 TICKS between strafe direction
+  changes ("at MOST we take a 6 tick hold before allowing another
+  change in direction"). strafe_rate_max = 12/sec at 66.67tps.
+- THE CLEAN-AIR LAW: a direct entrance-field witness must be
+  collision-free before Q. An intermediate strike rewrites vz(T) -
+  the flight is Air -> Contact -> Air, a ROUTE-GRAPH composition,
+  never a member of A(S0,Q,T). Contact-assisted routes may be
+  valuable; they belong in the global transition graph. Tier-0's
+  pure-flight reachability bound is judged on clean-air witnesses
+  only.
+- FAMILY DISCIPLINE: no expanding vocabulary of named path shapes
+  (segmented splines, edge-waypoints, ... dropped). ONE general
+  reference boundary-value solve over the admissible L/R control
+  space - segment schedules (length >= dwell, signed turn rate) -
+  defines realization. Cheap families (two-hold etc.) are proposal
+  seeds; they certify only by saturating the reference frontier
+  (fieldexact). H is the best witnessed value regardless of finder;
+  the finder is TAGGED so family completeness stays measurable.
+- THE HUMAN LOWER BOUND (humanexact): the human tape is QC only,
+  never a seed - but at its exact contact coordinate it is a
+  constructive feasible witness: H(Q_h | S_h) >= E_h is REQUIRED
+  (and ordinarily H should exceed E_h meaningfully). Below-human =
+  definitive incompleteness. Cell-center scoring hides
+  discretization ambiguity - validate at the literal coordinate.
+- CASE D standard: an empty tangent slot means "no tangent found in
+  the explored family" - CANDIDATE Case D. Proven Case D requires
+  the certified reference frontier to fail to intersect the tangent
+  manifold (or an analytic feasibility proof).
+- THE SANDWICH INVARIANT: H_found(Q) <= H_true(Q) <= H_upper(Q).
+  Human witnesses and every new solver witness raise the lower
+  bound; the certified analytic field is the upper bound; the solve
+  is finished at a point when the two squeeze to <= epsilon. That
+  is an optimality certificate, not "we tried enough families".
+- Phase B stays FROZEN until: every humanexact row passes, the
+  certification sample shows essentially zero unexplained reference
+  gap, witness replay is 100%, and no false clean-air culls.
+
 ### 2.8 Skill tells / the loss patterns to kill
 The user can tell a player's skill level immediately from: (1) how
 smoothly they move in the air, (2) how cleanly and efficiently they

@@ -143,6 +143,283 @@ namespace Entrance {
 		}
 	}
 
+	namespace {
+
+		// A segment schedule: the admissible L/R control space. Each
+		// segment turns at `rate` (fraction of the per-tick free rate,
+		// signed) for `len` ticks; a sign change between segments is a
+		// strafe reversal, so every segment holds at least the dwell
+		// law (conservatively applied to all segments).
+		struct SegSched {
+			std::vector<int>   len;
+			std::vector<float> rate;
+		};
+
+		void SegProfile(const PlayerState& entry, const MoveParams& p,
+		                const SegSched& ss, std::vector<float>* prof) {
+			prof->clear();
+			float h = atan2f(entry.vel.Y, entry.vel.X);
+			float s = Len2D(entry.vel);
+			const float cap2 = p.air_speed_cap * p.air_speed_cap;
+			for (size_t j = 0; j < ss.len.size(); ++j)
+				for (int k = 0; k < ss.len[j]; ++k) {
+					Strafe::TickLaw lk = Strafe::Law(p, s, 1.f,
+						entry.ducked);
+					h = Steer::WrapPi(h + lk.TurnRad(0.f, 1.f)
+						* ss.rate[j]);
+					prof->push_back(h);
+					s = sqrtf(s * s + cap2);
+				}
+		}
+
+	} // namespace
+
+	RefResult RefSolve(const PlayerState& entry, const World& w,
+	                   const MoveParams& p, const Route::Graph& g,
+	                   int face_idx, const Vec3& q, float radius,
+	                   int n_hint, int budget, bool tangent_mode,
+	                   int* flights_counter, float zmin,
+	                   const std::function<void(const Air::Result&,
+	                       const std::vector<float>&, int)>&
+	                       on_strike) {
+		RefResult best;
+		if (face_idx < 0
+			|| face_idx >= static_cast<int>(g.faces.size()))
+			return best;
+		const Route::Face& face = g.faces[face_idx];
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const float s0 = Len2D(entry.vel);
+		if (s0 < 1.f)
+			return best;
+		const float h0 = atan2f(entry.vel.Y, entry.vel.X);
+		const float gs = entry.gravity_scale;
+		const int n_cap = (n_hint > 8 ? n_hint : 60) + 30;
+		Air::Target vt;
+		vt.face = face_idx;
+		vt.dot_cap = 3000.f;
+		vt.aim = q;
+		int used = 0;
+		std::vector<float> prof;
+		// One engine flight of a schedule; score drives the search,
+		// only clean-air in-radius strikes can WIN.
+		auto ev = [&](const SegSched& ss, float* score) {
+			int total = 0;
+			for (int l : ss.len)
+				total += l;
+			if (total < 8 || total > n_cap) {
+				*score = -1e9f;
+				return;
+			}
+			SegProfile(entry, p, ss, &prof);
+			vt.max_ticks = total + 8;
+			used++;
+			if (flights_counter)
+				(*flights_counter)++;
+			Air::Result ar = Air::FlyHeadingSpline(entry, w, p, vt,
+				g, prof, total + 8);
+			if (!ar.hit || ar.dot >= 0.f) {
+				*score = -(ar.miss_dist < 1e8f ? ar.miss_dist
+					: 1e8f);
+				return;
+			}
+			if (ar.struck_brush >= 0) {
+				// Contact-assisted: guides (it reached the face)
+				// but can never win the clean-air field.
+				best.contact_assisted++;
+				*score = -Len(ar.pos - q) - 500.f;
+				return;
+			}
+			if (on_strike)
+				on_strike(ar, prof, total + 8);
+			const float d = Len(ar.pos - q);
+			if (d > radius) {
+				*score = -d;
+				return;
+			}
+			const float H = Dot(ar.end_state.vel, ar.end_state.vel)
+				+ 2.f * p.gravity * gs * (ar.pos.Z - zmin);
+			if (tangent_mode) {
+				if (-ar.dot > kTanEps) {
+					*score = 1e5f - fabsf(ar.dot);
+					return;
+				}
+				*score = 1e7f + H;
+			} else {
+				*score = 1e7f + H;
+			}
+			if (*score >= 1e7f && H > best.H) {
+				best.ok = true;
+				best.H = H;
+				best.flight = ar;
+				best.prof = prof;
+				best.horizon = total + 8;
+			}
+		};
+		// Seeds: turn-to-arrival-then-hold at the closed-form tangent
+		// heading and at the bearing, plus outward-bulge reversals.
+		const float bear = atan2f(q.Y - entry.pos.Y,
+			q.X - entry.pos.X);
+		float th_arr = bear;
+		{
+			const float hn = sqrtf(face.n.X * face.n.X
+				+ face.n.Y * face.n.Y);
+			const float sa = Envelope::SMax(s0, n_hint > 8
+				? n_hint : 60, p);
+			const float va = Envelope::VzAfter(entry.vel.Z,
+				n_hint > 8 ? n_hint : 60, p, gs);
+			if (sa * hn > 1e-4f) {
+				float cphi = -va * face.n.Z / (sa * hn);
+				if (cphi > 1.f) cphi = 1.f;
+				if (cphi < -1.f) cphi = -1.f;
+				const float po = acosf(cphi);
+				const float paz = atan2f(face.n.Y, face.n.X);
+				const float ca = Steer::WrapPi(paz + po);
+				const float cb = Steer::WrapPi(paz - po);
+				th_arr = fabsf(Steer::WrapPi(ca - bear))
+					<= fabsf(Steer::WrapPi(cb - bear)) ? ca : cb;
+			}
+		}
+		const int N = n_hint > 8 ? n_hint : 60;
+		auto turn_hold = [&](float tgt, float frac) {
+			SegSched ss;
+			const float d = Steer::WrapPi(tgt - h0);
+			int tl = static_cast<int>(fabsf(d)
+				/ (0.05f * (frac > 0.1f ? frac : 0.1f))) + 1;
+			// Rough turn length; the search reshapes it. Clamp into
+			// the schedule.
+			if (tl < min_gap) tl = min_gap;
+			if (tl > N) tl = N;
+			ss.len.push_back(tl);
+			ss.rate.push_back(d >= 0.f ? frac : -frac);
+			if (N - tl >= min_gap) {
+				ss.len.push_back(N - tl);
+				ss.rate.push_back(0.f);
+			}
+			return ss;
+		};
+		std::vector<SegSched> pool;
+		pool.push_back(turn_hold(th_arr, 1.f));
+		pool.push_back(turn_hold(th_arr, 0.5f));
+		pool.push_back(turn_hold(bear, 1.f));
+		for (int sg = -1; sg <= 1; sg += 2) {
+			// Bulge: swing away, swing back, hold - one reversal.
+			SegSched ss;
+			const int a = N / 3 < min_gap ? min_gap : N / 3;
+			ss.len.push_back(a);
+			ss.rate.push_back(0.6f * static_cast<float>(sg));
+			ss.len.push_back(a);
+			ss.rate.push_back(-0.9f * static_cast<float>(sg));
+			if (N - 2 * a >= min_gap) {
+				ss.len.push_back(N - 2 * a);
+				ss.rate.push_back(0.f);
+			}
+			pool.push_back(ss);
+		}
+		float cur_best_score = -1e30f;
+		SegSched cur;
+		for (SegSched& ss : pool) {
+			if (used >= budget)
+				break;
+			float sc;
+			ev(ss, &sc);
+			if (sc > cur_best_score) {
+				cur_best_score = sc;
+				cur = ss;
+			}
+		}
+		// Coordinate descent over the schedule + growth moves. The
+		// space is the full admissible one: any L/R schedule is a
+		// sequence of (len >= dwell, rate) segments, and splits let
+		// the search add reversals wherever they pay.
+		const float rsteps[3] = { 0.35f, 0.15f, 0.06f };
+		for (int round = 0; round < 3 && used < budget; ++round) {
+			bool moved = true;
+			int guard = 0;
+			while (moved && used < budget && guard++ < 6) {
+				moved = false;
+				for (size_t j = 0; j < cur.len.size()
+					&& used < budget; ++j) {
+					// Rate nudges.
+					for (int sg = -1; sg <= 1; sg += 2) {
+						SegSched t2 = cur;
+						float nr = t2.rate[j]
+							+ rsteps[round]
+							* static_cast<float>(sg);
+						if (nr > 1.f) nr = 1.f;
+						if (nr < -1.f) nr = -1.f;
+						t2.rate[j] = nr;
+						float sc;
+						ev(t2, &sc);
+						if (sc > cur_best_score) {
+							cur_best_score = sc;
+							cur = t2;
+							moved = true;
+						}
+					}
+					// Length nudges.
+					const int lsteps[2] = { 6, 2 };
+					for (int li = 0; li < 2; ++li)
+						for (int sg = -1; sg <= 1; sg += 2) {
+							SegSched t2 = cur;
+							int nl = t2.len[j] + lsteps[li] * sg;
+							if (nl < min_gap)
+								nl = min_gap;
+							t2.len[j] = nl;
+							float sc;
+							ev(t2, &sc);
+							if (sc > cur_best_score) {
+								cur_best_score = sc;
+								cur = t2;
+								moved = true;
+							}
+						}
+				}
+				// Growth: split the longest segment with a reversal;
+				// append a tail segment.
+				if (!moved && cur.len.size() < 8
+					&& used < budget) {
+					size_t lj = 0;
+					for (size_t j = 1; j < cur.len.size(); ++j)
+						if (cur.len[j] > cur.len[lj])
+							lj = j;
+					if (cur.len[lj] >= 2 * min_gap) {
+						SegSched t2 = cur;
+						const int half = t2.len[lj] / 2;
+						const float f = t2.rate[lj];
+						t2.len[lj] = half;
+						t2.len.insert(t2.len.begin()
+							+ static_cast<long long>(lj) + 1,
+							t2.len[lj] == half
+								? cur.len[lj] - half : half);
+						t2.rate.insert(t2.rate.begin()
+							+ static_cast<long long>(lj) + 1,
+							f == 0.f ? 0.5f : -f * 0.7f);
+						float sc;
+						ev(t2, &sc);
+						if (sc > cur_best_score) {
+							cur_best_score = sc;
+							cur = t2;
+							moved = true;
+						}
+					}
+					SegSched t3 = cur;
+					t3.len.push_back(min_gap + 2);
+					t3.rate.push_back(t3.rate.empty() ? 0.5f
+						: -t3.rate.back() * 0.5f);
+					float sc;
+					ev(t3, &sc);
+					if (sc > cur_best_score) {
+						cur_best_score = sc;
+						cur = t3;
+						moved = true;
+					}
+				}
+			}
+		}
+		return best;
+	}
+
 	FieldMap Build(const PlayerState& entry, const World& w,
 	               const MoveParams& p, const Route::Graph& g,
 	               int face_idx, const Opts& o) {
@@ -226,6 +503,8 @@ namespace Entrance {
 				b.tan = c;
 		};
 
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
 		auto trace = [&](float psi1, float psi2, int split) {
 			// Flip-gap prune (soft: the controller enforces the real
 			// law during engine flights - this only avoids seeding
@@ -241,7 +520,7 @@ namespace Entrance {
 					const int tat = wl > 1e-5f
 						? static_cast<int>(fabsf(ta) / wl) + 1
 						: split;
-					if (split - tat < 12)
+					if (split - tat < min_gap)
 						return;
 				}
 			}
@@ -355,8 +634,12 @@ namespace Entrance {
 		vt.dot_cap = 2000.f;
 		vt.aim_region = false;
 		std::vector<float> prof;
-		// One engine flight; on a face strike, credit the ACTUAL
-		// landing cell. Returns hit and fills *out.
+		// One engine flight; on a CLEAN-AIR face strike, credit the
+		// ACTUAL landing cell. A strike after any intermediate
+		// contact is rejected (the clean-air law): the ballistic
+		// reduction no longer holds for that flight - it belongs to
+		// the route graph as Air -> Contact -> Air, not to this
+		// field.
 		auto fly = [&](float psi1, float psi2, int split, int n,
 			Air::Result* out) {
 			WitnessProfile(entry, p, psi1, psi2, split, n, &prof);
@@ -366,12 +649,17 @@ namespace Entrance {
 			m.flights++;
 			*out = Air::FlyHeadingSpline(entry, w, p, vt, g, prof,
 				n + 8);
+			if (out->hit && out->dot < 0.f
+				&& out->struck_brush >= 0) {
+				m.contact_assisted++;
+				return false;
+			}
 			return out->hit && out->dot < 0.f;
 		};
 		auto credit = [&](const Air::Result& cr, float psi1,
 			float psi2, int split, int n,
 			const std::vector<float>* spline_knots,
-			int spline_horizon) {
+			int spline_horizon, int source) {
 			const Vec3 dq = cr.pos - m.origin;
 			int iu = static_cast<int>(Dot(dq, m.ud) / m.du + 0.5f);
 			int iv = static_cast<int>(Dot(dq, m.vd) / m.dv + 0.5f);
@@ -408,6 +696,7 @@ namespace Entrance {
 					r.knots.clear();
 					r.horizon = 0;
 				}
+				r.source = source;
 			}
 			if (-cr.dot <= kTanEps && (H > r.tan_E || !r.tan_ok)) {
 				r.tan_ok = true;
@@ -443,7 +732,7 @@ namespace Entrance {
 					+ offs[att]);
 				if (fly(c.psi1, p2, c.split, c.n, &cr)) {
 					credit(cr, c.psi1, p2, c.split, c.n,
-						nullptr, 0);
+						nullptr, 0, 0);
 					hit_psi2 = p2;
 					struck = true;
 					break;
@@ -467,7 +756,7 @@ namespace Entrance {
 						continue;
 					}
 					credit(tr2, c.psi1, p2b, c.split, c.n,
-						nullptr, 0);
+						nullptr, 0, 0);
 					if (-tr2.dot <= kTanEps)
 						break;
 					const float dd = tr2.dot - dota;
@@ -577,7 +866,12 @@ namespace Entrance {
 				bound_targets.resize(6);
 			targets.insert(targets.end(), bound_targets.begin(),
 				bound_targets.end());
-			const int kn = 5;
+			// Every clean-air strike the reference search flies
+			// anywhere raises the field's lower bound (source=1).
+			auto ref_credit = [&](const Air::Result& ar,
+				const std::vector<float>& kprof, int hz) {
+				credit(ar, 0.f, 0.f, 0, ar.tick, &kprof, hz, 1);
+			};
 			for (const SpTarget& tg : targets) {
 				if (m.flights >= o.flights_cap)
 					break;
@@ -586,125 +880,10 @@ namespace Entrance {
 				const Vec3 q = m.origin
 					+ Scale(m.ud, static_cast<float>(iu) * m.du)
 					+ Scale(m.vd, static_cast<float>(iv) * m.dv);
-				const int horizon = tg.n + 20;
-				vt.aim = q;
-				vt.max_ticks = horizon;
-				const float bear = atan2f(q.Y - entry.pos.Y,
-					q.X - entry.pos.X);
-				const BinScratch& b = scratch[tg.br][
-					static_cast<size_t>(tg.idx)];
-				// Arrival-heading estimate: the trace's landing
-				// heading when the cell was traced, else the
-				// closed-form tangent heading (M1.2) at the
-				// ballistic arrival state.
-				float th_arr = b.best.ok ? b.best.theta : bear;
-				if (!b.best.ok) {
-					const float sa = Envelope::SMax(s0, tg.n, p);
-					const float va = Envelope::VzAfter(vz0, tg.n,
-						p, gs);
-					const float hn2 = sqrtf(face.n.X * face.n.X
-						+ face.n.Y * face.n.Y);
-					if (sa * hn2 > 1e-4f) {
-						float cphi = -va * face.n.Z / (sa * hn2);
-						if (cphi > 1.f) cphi = 1.f;
-						if (cphi < -1.f) cphi = -1.f;
-						const float po = acosf(cphi);
-						const float paz = atan2f(face.n.Y,
-							face.n.X);
-						const float ca = Steer::WrapPi(paz + po);
-						const float cb = Steer::WrapPi(paz - po);
-						th_arr = fabsf(Steer::WrapPi(ca - bear))
-							<= fabsf(Steer::WrapPi(cb - bear))
-							? ca : cb;
-					}
-				}
-				std::vector<std::vector<float>> inits;
-				{
-					std::vector<float> ks(kn, bear);
-					inits.push_back(ks);
-					for (int i2 = 0; i2 < kn; ++i2)
-						ks[i2] = Steer::WrapPi(bear
-							+ Steer::WrapPi(th_arr - bear)
-							* static_cast<float>(i2)
-							/ static_cast<float>(kn - 1));
-					inits.push_back(ks);
-					// Outward-bulge curves (the corridor shape:
-					// swing wide, then come back to the face).
-					for (int sg = -1; sg <= 1; sg += 2) {
-						std::vector<float> kb = inits.back();
-						kb[1] = Steer::WrapPi(kb[1]
-							+ 0.5f * static_cast<float>(sg));
-						kb[2] = Steer::WrapPi(kb[2]
-							+ 0.35f * static_cast<float>(sg));
-						inits.push_back(kb);
-					}
-					// The two-hold seed as knots (traced cells).
-					if (b.best.ok) {
-						std::vector<float> wp;
-						WitnessProfile(entry, p, b.best.psi1,
-							b.best.psi2, b.best.split, b.best.n,
-							&wp);
-						if (!wp.empty()) {
-							for (int i2 = 0; i2 < kn; ++i2)
-								ks[i2] = wp[static_cast<size_t>(
-									i2) * (wp.size() - 1)
-									/ (kn - 1)];
-							inits.push_back(ks);
-						}
-					}
-				}
-				int fl0 = m.flights;
-				float bestH = -1e30f;
-				auto ev = [&](const std::vector<float>& ks) {
-					m.flights++;
-					Air::Result ar = Air::FlyHeadingSpline(entry,
-						w, p, vt, g, ks, horizon);
-					if (ar.hit && ar.dot < 0.f) {
-						credit(ar, 0.f, 0.f, 0, ar.tick, &ks,
-							horizon);
-						const float H2 = Dot(ar.end_state.vel,
-							ar.end_state.vel) + 2.f * p.gravity
-							* gs * (ar.pos.Z - face.zmin);
-						const bool on_cell = Len(ar.pos - q)
-							<= o.grid * 0.9f;
-						if (on_cell && H2 > bestH)
-							bestH = H2;
-						return on_cell ? 1e7f + H2
-							: -Len(ar.pos - q);
-					}
-					return -(ar.miss_dist < 1e8f ? ar.miss_dist
-						: 1e8f);
-				};
-				for (std::vector<float>& ks : inits) {
-					if (m.flights - fl0 > 200
-						|| m.flights >= o.flights_cap)
-						break;
-					float cur = ev(ks);
-					const float steps[2] = { 0.25f, 0.1f };
-					for (int rd = 0; rd < 2; ++rd) {
-						bool moved = true;
-						int sweeps = 0;
-						while (moved && sweeps++ < 3
-							&& m.flights - fl0 <= 200
-							&& m.flights < o.flights_cap) {
-							moved = false;
-							for (int ki = 0; ki < kn; ++ki)
-								for (int sg = -1; sg <= 1;
-									sg += 2) {
-									std::vector<float> t2 = ks;
-									t2[ki] = Steer::WrapPi(t2[ki]
-										+ steps[rd]
-										* static_cast<float>(sg));
-									const float sc = ev(t2);
-									if (sc > cur) {
-										cur = sc;
-										ks = t2;
-										moved = true;
-									}
-								}
-						}
-					}
-				}
+				RefResult rr = RefSolve(entry, w, p, g, face_idx,
+					q, o.grid * 0.9f, tg.n, 220, false,
+					&m.flights, face.zmin, ref_credit);
+				m.contact_assisted += rr.contact_assisted;
 			}
 		}
 

@@ -66,7 +66,9 @@ namespace Path {
 		if (m > n)
 			m = n;
 		// Flip-gap law: opposite-signed turns need the hold between
-		// them to cover the strafe rate limit.
+		// them to cover the strafe rate limit (min dwell derived from
+		// MoveParams::strafe_rate_max - 6 ticks under the 2026-08-18
+		// rule).
 		const float turn_a = Steer::WrapPi(psi - h0);
 		const float turn_b = Steer::WrapPi(phi - psi);
 		if (turn_a * turn_b < 0.f) {
@@ -74,7 +76,9 @@ namespace Path {
 			const float we = le.TurnRad(0.f, 1.f);
 			const int ta = we > 1e-5f
 				? static_cast<int>(fabsf(turn_a) / we) : n;
-			if (n - m - ta < 12)
+			const int gap = static_cast<int>(
+				ceilf((1.f / p.dt) / p.strafe_rate_max));
+			if (n - m - ta < gap)
 				return 1e9f;   // flip gap unaffordable
 		}
 		// Full gain per tick: the controller WEAVES on held headings
