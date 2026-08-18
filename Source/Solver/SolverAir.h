@@ -50,6 +50,14 @@ namespace Air {
 		int   aim_tick = -1;
 		float tick_w = 0.f;
 		int   tick_tol = -1;
+		// THE CONSTRUCTED PATH (SolverPath): when the goal cell's
+		// arrival tangent heading + ballistic tick are known (the
+		// heatmap provides both), the solve first CONSTRUCTS the
+		// turn-hold-turn profile and flies it once - the search runs
+		// only if the constructed flight misses on the real engine.
+		float arr_phi = 0.f;
+		int   arr_n = -1;
+		bool  have_arr = false;
 	};
 
 	struct Result {

@@ -28,6 +28,7 @@
 #include "SolverLedger.h"
 #include "SolverRouteSearch.h"
 #include "SolverAssemble.h"
+#include "SolverPath.h"
 #include "SolverPlan.h"
 #include "SolverField.h"
 #include "SolverParams.h"
@@ -5551,6 +5552,149 @@ namespace {
 		return 0;
 	}
 
+	// pathgate: THE CONSTRUCTED-PATH VALIDATION (SolverPath). For
+	// every long-air transfer of the tape: from the real separation
+	// state, target the HUMAN'S OWN strike cell (its tangent heading
+	// + ballistic tick from the heatmap), construct the turn-hold-
+	// turn profile, fly it ONCE on the exact engine, and compare the
+	// board it produces against the tape's. Also times the
+	// construction. PASS = every constructed flight strikes the face.
+	int CmdPathGate(const std::string& map_path, const ReplayOpts& o,
+	                const std::string& tape_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("pathgate: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("pathgate: %s\n", err.c_str());
+			return 1;
+		}
+		PlayerState s;
+		s.pos = tape.start.origin;
+		s.vel = tape.start.velocity;
+		s.ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
+		s.stamina = tape.start.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		struct FEvent {
+			int tick = 0;
+			int fidx = -1;
+			PlayerState sep;
+			Vec3 cp, v1;
+		};
+		std::vector<FEvent> events;
+		int air = 0;
+		PlayerState sep;
+		for (size_t t = 0; t < tape.frames.size(); ++t) {
+			const TapeFrame& fr = tape.frames[t];
+			TickEvents ev;
+			MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+				fr.smove, fr.umove, fr.buttons, &ev);
+			if (ev.ncontacts > 0) {
+				int fidx = -1;
+				for (size_t fi = 0; fi < g.faces.size(); ++fi)
+					if (g.faces[fi].brush == ev.contact_brush[0]
+						&& g.faces[fi].side == ev.contact_plane[0])
+						fidx = static_cast<int>(fi);
+				if (fidx >= 0 && air >= 8) {
+					FEvent fe;
+					fe.tick = static_cast<int>(t);
+					fe.fidx = fidx;
+					fe.sep = sep;
+					fe.cp = ev.contact_pos[0];
+					fe.v1 = ev.contact_vel[0];
+					events.push_back(fe);
+				}
+				air = 0;
+			} else if (!s.on_ground) {
+				if (air == 0)
+					sep = s;
+				air++;
+			} else {
+				air = 0;
+			}
+		}
+		int rows = 0, hits = 0;
+		for (const FEvent& fe : events) {
+			const Route::Face& fc = g.faces[fe.fidx];
+			// The human's strike cell in the map from their sep.
+			Field::FaceMap fm = Field::Compute(fe.sep.pos,
+				fe.sep.vel, fc, o.params, fe.sep.ducked, 32.f, 300);
+			if (fm.best < 0)
+				continue;
+			const Vec3 dq = fe.cp - fm.origin;
+			int iu = static_cast<int>(Dot(dq, fm.ud) / fm.du + 0.5f);
+			int iv = static_cast<int>(Dot(dq, fm.vd) / fm.dv + 0.5f);
+			if (iu < 0) iu = 0;
+			if (iu >= fm.nu) iu = fm.nu - 1;
+			if (iv < 0) iv = 0;
+			if (iv >= fm.nv) iv = fm.nv - 1;
+			const Field::Sample& cell = fm.samples[
+				static_cast<size_t>(iv) * fm.nu + iu];
+			if (!cell.reachable)
+				continue;
+			rows++;
+			const clock_t c0 = clock();
+			Path::Plan pl = Path::Solve(fe.sep.pos, fe.sep.vel,
+				cell.q, cell.phi, static_cast<int>(cell.n),
+				o.params, fe.sep.ducked);
+			const double us = 1e6
+				* static_cast<double>(clock() - c0) / CLOCKS_PER_SEC;
+			if (!pl.ok) {
+				printf("pathgate: t%4d f%d NO PLAN (end_dist %.0f) "
+					"| tape dot %.1f\n", fe.tick, fe.fidx,
+					pl.end_dist, Dot(fe.v1, fc.n));
+				continue;
+			}
+			Air::Target at;
+			at.face = fe.fidx;
+			at.aim = cell.q;
+			at.aim_region = false;
+			at.dot_cap = 2000.f;
+			at.max_ticks = pl.n + 12;
+			Air::Result ar = Air::FlyHeadingSpline(fe.sep, w,
+				o.params, at, g, pl.heading, pl.n + 8);
+			if (ar.hit) {
+				hits++;
+				printf("pathgate: t%4d f%d CONSTRUCTED dot %.1f @ "
+					"(%.0f,%.0f,%.0f) miss-to-cell %.0fu, %d ticks "
+					"| tape dot %.1f | plan %.0fus\n",
+					fe.tick, fe.fidx, ar.dot, ar.pos.X, ar.pos.Y,
+					ar.pos.Z, Len(ar.pos - cell.q), ar.tick,
+					Dot(fe.v1, fc.n), us);
+			} else {
+				printf("pathgate: t%4d f%d FLEW AND MISSED "
+					"(closest %.0f) | tape dot %.1f | plan %.0fus\n",
+					fe.tick, fe.fidx, ar.miss_dist,
+					Dot(fe.v1, fc.n), us);
+			}
+		}
+		printf("pathgate: %d/%d constructed flights struck | %s\n",
+			hits, rows, hits == rows && rows > 0
+				? "GATE PASS" : "GATE FAIL");
+		fflush(stdout);
+		return hits == rows && rows > 0 ? 0 : 1;
+	}
+
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
 	// Replay certified tapes through the exact sim, collect every SURF
 	// contact (contacted plane normal.z < walkable), and verify each
@@ -8399,6 +8543,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdAutopsy(argv[2], o, tapes, 24000);
+	}
+	if (cmd == "pathgate" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdPathGate(argv[2], o, argv[3]);
 	}
 	if (cmd == "boardproof" && argc >= 4) {
 		ReplayOpts o;

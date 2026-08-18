@@ -7,6 +7,7 @@
 
 #include "SolverBoard.h"
 #include "SolverEnvelope.h"
+#include "SolverPath.h"
 #include "SolverSearchLog.h"
 #include "SolverSteer.h"
 #include "SolverStrafe.h"
@@ -236,6 +237,27 @@ namespace Air {
 		if (t.face < 0 || t.face >= static_cast<int>(g.faces.size()))
 			return best;
 		const Route::Face& face = g.faces[t.face];
+		// CONSTRUCTED FIRST (SolverPath): when the goal carries its
+		// arrival heading + timing, build the turn-hold-turn profile
+		// and fly it ONCE on the exact engine - accept a real strike
+		// under the cap immediately; fall through to the search only
+		// on a miss. One eval instead of hundreds when the map's
+		// geometry holds.
+		if (t.have_arr && t.arr_n >= 4) {
+			Path::Plan pl = Path::Solve(entry.pos, entry.vel, t.aim,
+				t.arr_phi, t.arr_n, p, entry.ducked);
+			if (pl.ok) {
+				Result cr = FlyHeadingSpline(entry, w, p, t, g,
+					pl.heading, pl.n + 8);
+				if (cr.hit && -cr.dot <= t.dot_cap && cr.dot < 0.f) {
+					if (alts) {
+						alts->clear();
+						alts->push_back(cr);
+					}
+					return cr;
+				}
+			}
+		}
 		const float s2d0 = Len2D(entry.vel);
 		const float h0 = s2d0 > 1.f
 			? atan2f(entry.vel.Y, entry.vel.X)

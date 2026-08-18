@@ -997,8 +997,17 @@ namespace Assemble {
 						Field::FaceMap fmap = Field::Compute(
 							cur.pos, cur.vel, fc, p, cur.ducked,
 							32.f, 300, 1.f, &fctx);
-						if (fmap.best >= 0)
+						if (fmap.best >= 0) {
 							at.aim = fmap.samples[fmap.best].q;
+							// The cell's arrival heading + timing
+							// feed the CONSTRUCTED path (SolverPath)
+							// - the air solve flies it first.
+							at.arr_phi =
+								fmap.samples[fmap.best].phi;
+							at.arr_n = static_cast<int>(
+								fmap.samples[fmap.best].n);
+							at.have_arr = true;
+						}
 					}
 					Air::Result ar = Air::SolveTransfer(cur, w, p,
 						g, at, 4, o.air_evals, &alts, 3);
