@@ -2963,6 +2963,8 @@ namespace {
 			SearchLog::g_sink = nullptr;
 			viz_sink.Flush();
 			viz_sink.gravity = o.params.gravity;
+			viz_sink.wish_rate = o.params.air_speed_cap
+				* o.params.air_speed_cap;
 			std::vector<Vec3> ref;
 			std::vector<float> refs;
 			CollectRef(at.start, at.frames, &ref, &refs);
@@ -4092,6 +4094,8 @@ namespace {
 				}
 			}
 			sink.gravity = o.params.gravity;
+			sink.wish_rate = o.params.air_speed_cap
+				* o.params.air_speed_cap;
 			sink.AddRef("REF " + tname, refpts, &refspd);
 			// PASS 2: one exit map per RIDE (board k -> exit toward
 			// board k+1's face, or the zone for the last ride).
@@ -8556,6 +8560,8 @@ int main(int argc, char** argv) {
 		strftime(st, sizeof(st), "%m%d-%H%M%S", &tmv);
 		SearchLog::Sink sink;
 		sink.gravity = o.params.gravity;
+		sink.wish_rate = o.params.air_speed_cap
+			* o.params.air_speed_cap;
 		SearchLog::g_sink = &sink;
 		Plan::Opts po;
 		Assemble::RunResult rr, part;

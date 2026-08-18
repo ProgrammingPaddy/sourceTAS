@@ -55,10 +55,14 @@ namespace SearchLog {
 		unsigned char outcome = 0;
 		bool  notable = false; // best-so-far improvement (or ref)
 		float score = 0.f;
+		int   stride = 1;      // sim ticks between kept points (the
+		                       // report's ideal-gain yardstick)
 		std::vector<Vec3> pts;
 		std::vector<float> spd;  // |v| at each kept point (u/s) - the
 		                         // report shows total energy at any
 		                         // selected point from it
+		std::vector<int> marks;  // kept-point indices of FACE CONTACTS
+		                         // (boards/taps) - drawn as markers
 	};
 
 	struct Stage {
@@ -85,6 +89,10 @@ namespace SearchLog {
 		// Sim side: one candidate = StartTraj .. Point.. .. EndTraj.
 		void StartTraj(const Vec3& p0, float s0 = 0.f);
 		void Point(const Vec3& p, float s = 0.f);
+		// A board/tap contact: force-kept point (bypasses the stride,
+		// so the line ends exactly at the wall) + a contact marker in
+		// the report ("where exactly the board happens").
+		void Contact(const Vec3& p, float s = 0.f);
 		void EndTraj(int outcome);
 
 		// Solver side, immediately after the sim call returns:
@@ -98,6 +106,10 @@ namespace SearchLog {
 
 		// 2g factor source for the report's energy readout.
 		float gravity = 800.f;
+		// Ideal wish-work rate (air_speed_cap^2, u^2/s^2 per tick) -
+		// the report's efficiency coloring grades each line's energy
+		// gain against stride*this.
+		float wish_rate = 900.f;
 
 		// Energy-field heat triangles (the hotspot maps): v01 in [0,1]
 		// colors cold->hot; rendered as translucent surface overlay.

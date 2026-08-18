@@ -549,9 +549,13 @@ namespace Carve {
 					RecExit(t.tap_brush >= 0
 						? SearchLog::kHit : SearchLog::kStruck,
 						k + 1);
-					if (lg)
+					if (lg) {
+						if (t.tap_brush >= 0)
+							lg->Contact(ev.contact_pos[tc],
+								Len(s.vel));
 						lg->EndTraj(t.tap_brush >= 0
 							? SearchLog::kHit : SearchLog::kStruck);
+					}
 					return r;
 				}
 				air_streak = 0;

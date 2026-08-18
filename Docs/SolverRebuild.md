@@ -284,6 +284,38 @@ boards as emergent vs named candidates; whether the void test is
 "no ramp reachable" rather than "target unreachable"; the map as
 exit-tick-conditioned (a family over candidate departure moments).
 
+### 2.11 THE OPTIMAL-BOARDING HANDOFF (2026-08-18, user-delivered
+formal design - FULL TEXT: Docs/OptimalBoardingHandoff.md; ADOPTED)
+The user handed a complete engineering spec that formalizes 2.10 as
+mathematics. Central guarantee: a heatmap point Q is valued by the
+best board that ACTUALLY EXISTS from the start state after the
+aerial path to Q has itself been optimized - terminal speed and
+terminal angle are never guessed independently. Key objects:
+- s_A*(S0,Q,T,theta): the aerial boundary-value function - max
+  horizontal arrival speed at Q, arrival branch T, requested
+  terminal heading theta, under exact dynamics + reversal law;
+  returns WITNESS controls. This replaces separable budget
+  approximations (reach bound x turn budget x brake price).
+- H(Q|S0) = max over T,theta of ExactPostBoardEnergy(v-(theta)):
+  the authoritative heatmap value. Winning angle/speed/time/witness
+  are OUTPUTS.
+- FastestTangent(Q,T) = highest-energy member of A(S0,Q,T) ∩ B(T,n)
+  (reachable set ∩ tangent manifold). Stored separately.
+- OPEN THEOREM (do not assume): tangent dominance. A faster lossy
+  arrival CAN beat a slower tangent arrival on absolute post-board
+  energy (Case E). Compute both, store tangent_gap(Q), collect
+  evidence; collapse to the tangent solve only on proof. This
+  supersedes the earlier absolutist reading of "non-tangent loses
+  more energy every time" (true at FIXED arrival speed, open when
+  speed varies with the path).
+- Reversal constraints: use the ENGINE-DERIVED dwell (>=12 ticks
+  between side changes, strafe_rate_max) - the doc's 6/6 figures
+  are illustrative only.
+- Architecture: witness-backed local transfer operators composed at
+  the route level (Air -> Board -> Ramp -> Air); adaptive/frontier
+  sampling instead of uniform oversampling; exact engine remains
+  the judge everywhere.
+
 ### 2.8 Skill tells / the loss patterns to kill
 The user can tell a player's skill level immediately from: (1) how
 smoothly they move in the air, (2) how cleanly and efficiently they

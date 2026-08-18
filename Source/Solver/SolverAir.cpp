@@ -181,8 +181,10 @@ namespace Air {
 					r.end_state = s;
 					r.end_pos = s.pos;
 					r.flips = ctl.flips;
-					if (lg)
+					if (lg) {
+						lg->Contact(r.pos, Len(s.vel));
 						lg->EndTraj(SearchLog::kHit);
+					}
 					return r;
 				}
 				// Any other contact is a GRAZE: clip and keep flying

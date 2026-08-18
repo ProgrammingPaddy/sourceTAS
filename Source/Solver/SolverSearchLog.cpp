@@ -56,6 +56,7 @@ namespace SearchLog {
 		pending_ = Traj();
 		pending_.stage = cur_stage_;
 		pending_.ctx = cur_ctx_;
+		pending_.stride = keep_every_;
 		pending_.pts.push_back(p0);
 		pending_.spd.push_back(s0);
 	}
@@ -68,6 +69,15 @@ namespace SearchLog {
 			pending_.pts.push_back(p);
 			pending_.spd.push_back(s);
 		}
+	}
+
+	void Sink::Contact(const Vec3& p, float s) {
+		if (!open_)
+			return;
+		pending_.pts.push_back(p);
+		pending_.spd.push_back(s);
+		pending_.marks.push_back(
+			static_cast<int>(pending_.pts.size()) - 1);
 	}
 
 	void Sink::EndTraj(int outcome) {
@@ -100,6 +110,7 @@ namespace SearchLog {
 		t.eval = eval_counter_++;
 		t.outcome = kRef;
 		t.notable = true;
+		t.stride = 1;   // refs are per-frame captures
 		t.pts = pts;
 		if (spds && spds->size() == pts.size())
 			t.spd = *spds;
@@ -247,6 +258,9 @@ button:hover{background:#232d40}
 <input type="range" id="al" min="1" max="100" value="22"></div>
 <div class="row"><span style="width:70px">best %</span>
 <input type="range" id="pct" min="1" max="100" value="100"></div>
+<div class="sec">Colors</div>
+<div id="cmode"></div>
+<div id="legend" style="color:#8fa1bd"></div>
 <div class="sec">Outcomes</div>
 <div id="outs"></div>
 <div class="sec">Overlays</div>
@@ -255,8 +269,8 @@ button:hover{background:#232d40}
 <div id="stages"></div>
 <div class="hint">drag pan &middot; right-drag rotate &middot;
 wheel zoom &middot; click a line to inspect it (energy at the picked
-point) and the route that fed it &middot; the scrub replays the search
-in eval order</div>
+point) and the route that fed it &middot; &#10005; = board contact
+&middot; the scrub replays the search in eval order</div>
 </div>
 <div id="stats"></div>
 <div id="pick"></div>
@@ -272,7 +286,7 @@ const P=new Float32Array(NP*3);
 for(let i=0;i<NP*3;i++)P[i]=Q[i]*0.25;
 const SP=D.spd?decodeB64(D.spd):null;
 const G2=2*(D.gravity||800);
-const T=D.trajs; // [stage,outcome,notable,score,eval,off,npts,ctx]
+const T=D.trajs; // [stage,outcome,notable,score,eval,off,npts,ctx,stride,[marks]]
 const NT=T.length;
 const OUTNAMES=["miss","grounded","struck","HIT","exited","ZONED","ref",
 "doomed"];
@@ -292,6 +306,37 @@ const rank=new Float32Array(NT);
 for(const s in by){const a=by[s];a.sort((x,y)=>T[x][3]-T[y][3]);
 for(let j=0;j<a.length;j++)rank[a[j]]=a.length>1?j/(a.length-1):0;}}
 let maxEval=1;for(let i=0;i<NT;i++)if(T[i][4]>maxEval)maxEval=T[i][4];
+// EFFICIENCY COLORS (user directive 2026-08-18): per line, walk the
+// energy ledger E = s^2 + 2g*z over kept points; segment drops beyond
+// quantization noise accumulate as LOSS. light blue = gained at the
+// ideal wish rate (cap^2/tick), green = no loss (sub-ideal gain),
+// orange -> dark red = energy destroyed (darker = larger fraction).
+const CAP2=D.cap2||900;
+const effCol=new Uint8Array(NT*3);
+const effOk=new Uint8Array(NT);
+for(let i=0;i<NT;i++){
+const t=T[i];const off=t[5],n=t[6],stride=t[8]||1;
+if(!SP||n<2)continue;
+let started=false,e0=0,prev=0,loss=0,gain=0;
+for(let k=0;k<n;k++){
+const j=off+k;const s=SP[j];
+if(s<=0)continue;
+const e=s*s+G2*P[j*3+2];
+if(!started){started=true;e0=e;prev=e;continue;}
+const d=e-prev;prev=e;
+const tol=Math.max(4000,e*0.004);
+if(d<-tol)loss+=-d;else if(d>0)gain+=d;}
+if(!started)continue;
+effOk[i]=1;
+let r,g,b;
+if(loss>1){
+const q=Math.sqrt(Math.min(1,loss/Math.max(1,e0+gain)));
+r=255-135*q;g=150-140*q;b=40-30*q;
+}else{
+const ideal=(n-1)*stride*CAP2;
+if(ideal>0&&gain>=0.88*ideal){r=120;g=205;b=255;}
+else{r=95;g=225;b=130;}}
+effCol[i*3]=r;effCol[i*3+1]=g;effCol[i*3+2]=b;}
 // stage colors: golden-angle hues; refs get fixed identities
 function hsl(h,s,l){const a=s*Math.min(l,1-l);
 const f=n=>{const k=(n+h/30)%12;return l-a*Math.max(Math.min(k-3,9-k,1),-1);};
@@ -329,6 +374,9 @@ const dynP=new Float32Array(maxSegs*2*3);
 const dynC=new Uint8Array(maxSegs*2*4);
 const bP=gl.createBuffer(),bC=gl.createBuffer();
 let dynN=0;
+// contact markers (3-axis crosses at board/tap strikes)
+const mP=gl.createBuffer(),mC=gl.createBuffer();
+let mkN=0;
 // geometry static
 const geoP=[],geoC=[];
 function pushSeg(arrP,arrC,x1,y1,z1,x2,y2,z2,r,g2,b,a){
@@ -380,6 +428,7 @@ gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(heatC),gl.STATIC_DRAW);
 const heatN=heatP.length/3;
 // UI state
 let evCut=maxEval,pctCut=1.0,alpha=0.22,selId=-1,selDesc=null;
+let colorByEff=true;
 // Selection lineage: contexts are chain prefixes, so descendants of
 // the selected line's committed chain = contexts that start with it.
 function computeSel(){
@@ -401,34 +450,57 @@ return true;}
 let visKept=0,visTotal=0;
 function rebuild(){
 let o=0;visKept=0;
+const mkP=[],mkC=[];
 for(let i=0;i<NT;i++){
 if(!visT(i))continue;
 const t=T[i];const st=t[0],oc=t[1],nb=t[2];
 const ref=oc===6;
 visKept++;
+let r,g2,b,a=ref?255:(nb?235:90);
+if(colorByEff&&effOk[i]){
+r=effCol[i*3];g2=effCol[i*3+1];b=effCol[i*3+2];
+}else{
 const col=stageColor[st];
-let r=col[0]*255,g2=col[1]*255,b=col[2]*255,a=ref?255:(nb?235:90);
+r=col[0]*255;g2=col[1]*255;b=col[2]*255;
 if(nb&&!ref){r=Math.min(255,r*1.35+40);g2=Math.min(255,g2*1.35+40);
 b=Math.min(255,b*1.35+40);}
-else if(!ref){const q=1.0-0.65*rank[i];r*=q;g2*=q;b*=q;}
+else if(!ref){const q=1.0-0.65*rank[i];r*=q;g2*=q;b*=q;}}
+let dim=false;
 if(selId>=0){
 if(i===selId){r=255;g2=255;b=255;a=255;}
 else{
 const fam=t[7]>=0&&selDesc&&selDesc[t[7]];
 if(fam||ref){a=255;}
-else{const gy=(r+g2+b)/3*0.3+26;r=gy;g2=gy;b=gy+6;a=Math.min(a,24);}}}
+else{const gy=(r+g2+b)/3*0.3+26;r=gy;g2=gy;b=gy+6;a=Math.min(a,24);
+dim=true;}}}
 const off=t[5],n=t[6];
 for(let k2=0;k2<n-1;k2++){
 const i1=(off+k2)*3,i2=(off+k2+1)*3;
 dynP[o*3]=P[i1];dynP[o*3+1]=P[i1+1];dynP[o*3+2]=P[i1+2];
 dynC[o*4]=r;dynC[o*4+1]=g2;dynC[o*4+2]=b;dynC[o*4+3]=a;o++;
 dynP[o*3]=P[i2];dynP[o*3+1]=P[i2+1];dynP[o*3+2]=P[i2+2];
-dynC[o*4]=r;dynC[o*4+1]=g2;dynC[o*4+2]=b;dynC[o*4+3]=a;o++;}}
+dynC[o*4]=r;dynC[o*4+1]=g2;dynC[o*4+2]=b;dynC[o*4+3]=a;o++;}
+// contact crosses (skip lines dimmed by a selection)
+const marks=t[9];
+if(marks&&marks.length&&!dim){
+const sel=i===selId;
+const mr=sel?255:255,mg=sel?255:220,mb=sel?255:90;
+for(const mkI of marks){
+if(mkI<0||mkI>=n)continue;
+const j=(off+mkI)*3;
+const x=P[j],y=P[j+1],z=P[j+2],h=8;
+mkP.push(x-h,y,z,x+h,y,z, x,y-h,z,x,y+h,z, x,y,z-h,x,y,z+h);
+for(let v=0;v<6;v++)mkC.push(mr,mg,mb,255);}}}
 dynN=o;
 gl.bindBuffer(gl.ARRAY_BUFFER,bP);
 gl.bufferData(gl.ARRAY_BUFFER,dynP.subarray(0,dynN*3),gl.DYNAMIC_DRAW);
 gl.bindBuffer(gl.ARRAY_BUFFER,bC);
 gl.bufferData(gl.ARRAY_BUFFER,dynC.subarray(0,dynN*4),gl.DYNAMIC_DRAW);
+mkN=mkP.length/3;
+gl.bindBuffer(gl.ARRAY_BUFFER,mP);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(mkP),gl.DYNAMIC_DRAW);
+gl.bindBuffer(gl.ARRAY_BUFFER,mC);
+gl.bufferData(gl.ARRAY_BUFFER,new Uint8Array(mkC),gl.DYNAMIC_DRAW);
 document.getElementById("stats").innerHTML=
 visKept+" / "+NT+" kept lines &middot; sampled from "+D.total_evals+
 " evaluated candidates";}
@@ -480,6 +552,12 @@ gl.vertexAttribPointer(aP,3,gl.FLOAT,false,0,0);
 gl.bindBuffer(gl.ARRAY_BUFFER,bC);
 gl.vertexAttribPointer(aC,4,gl.UNSIGNED_BYTE,true,0,0);
 gl.drawArrays(gl.LINES,0,dynN);}
+if(mkN){gl.uniform1f(uA,1.0);
+gl.bindBuffer(gl.ARRAY_BUFFER,mP);
+gl.vertexAttribPointer(aP,3,gl.FLOAT,false,0,0);
+gl.bindBuffer(gl.ARRAY_BUFFER,mC);
+gl.vertexAttribPointer(aC,4,gl.UNSIGNED_BYTE,true,0,0);
+gl.drawArrays(gl.LINES,0,mkN);}
 requestAnimationFrame(draw);}
 // input: L-drag PAN (grab the world), R/middle-drag rotate,
 // shift-drag also pans, small L-click picks a line.
@@ -572,8 +650,28 @@ setInterval(()=>{if(!playing)return;
 evCut=Math.min(maxEval,evCut+Math.max(1,Math.round(maxEval/400)));
 evS.value=evCut;evTxt();queueRebuild();
 if(evCut>=maxEval){playing=false;playBtn.innerHTML="&#9654; play";}},33);
+// color mode + legend
+{const cm=document.getElementById("cmode");
+[["efficiency (energy ledger)",true],["stage",false]].forEach(pair=>{
+const l=document.createElement("label");
+l.innerHTML='<input type="radio" name="cm"'+
+(pair[1]===colorByEff?' checked':'')+'><span class="n">'+pair[0]+
+'</span>';
+l.firstChild.addEventListener("change",()=>{colorByEff=pair[1];
+queueRebuild();});
+cm.appendChild(l);});
+document.getElementById("legend").innerHTML=
+'<div><span class="sw" style="background:rgb(120,205,255)"></span> '+
+'max ideal gain (~cap&sup2;/tick)</div>'+
+'<div><span class="sw" style="background:rgb(95,225,130)"></span> '+
+'no loss</div>'+
+'<div><span class="sw" style="background:linear-gradient(90deg,'+
+'rgb(255,150,40),rgb(120,10,10));width:32px"></span> '+
+'energy lost (darker = worse)</div>'+
+'<div><span style="color:rgb(255,220,90)">&#10005;</span> '+
+'board contact</div>';}
 const outsDiv=document.getElementById("outs");
-for(let i=0;i<7;i++){if(i===6)continue;
+for(let i=0;i<OUTNAMES.length;i++){if(i===6)continue;
 const l=document.createElement("label");
 l.title=OUTTIPS[i];
 l.innerHTML='<input type="checkbox" checked><span class="n">'+
@@ -683,10 +781,14 @@ rebuild();draw();
 			int off = 0;
 			for (size_t i = 0; i < trajs.size(); ++i) {
 				const Traj& t = trajs[i];
-				AppendF(&js, "%s[%d,%d,%d,%.1f,%d,%d,%d,%d]",
+				AppendF(&js, "%s[%d,%d,%d,%.1f,%d,%d,%d,%d,%d,[",
 					i ? "," : "", t.stage, t.outcome,
 					t.notable ? 1 : 0, t.score, t.eval, off,
-					static_cast<int>(t.pts.size()), t.ctx);
+					static_cast<int>(t.pts.size()), t.ctx,
+					t.stride);
+				for (size_t mi = 0; mi < t.marks.size(); ++mi)
+					AppendF(&js, "%s%d", mi ? "," : "", t.marks[mi]);
+				js += "]]";
 				off += static_cast<int>(t.pts.size());
 			}
 		}
@@ -699,7 +801,8 @@ rebuild();draw();
 				h.v);
 		}
 		js += "],\"pts\":\"" + b64 + "\",\"spd\":\"" + s64 + "\",";
-		AppendF(&js, "\"gravity\":%.0f,", sink.gravity);
+		AppendF(&js, "\"gravity\":%.0f,\"cap2\":%.0f,", sink.gravity,
+			sink.wish_rate);
 		js += "\"geo\":{";
 		js += "\"boxes\":[";
 		for (size_t i = 0; i < w.brushes.size(); ++i) {

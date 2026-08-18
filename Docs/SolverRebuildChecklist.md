@@ -864,4 +864,34 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 9, THE OPTIMAL-BOARDING HANDOFF + efficiency
+  visuals): the user delivered a formal heatmap redesign spec -
+  copied to Docs/OptimalBoardingHandoff.md (design of record;
+  summary + adoption notes in SolverRebuild.md 2.11). Core: per-point
+  ENTRANCE values become witness-backed optima - s_A*(S0,Q,T,theta)
+  boundary-value function replaces the separable bound x budget x
+  price approximation; H(Q) = max exact post-board energy over
+  arrival branches x terminal headings; FastestTangent(Q,T) stored
+  separately with tangent_gap; tangent dominance = OPEN THEOREM
+  (Case E: faster lossy arrivals CAN beat slower tangent ones -
+  supersedes the absolutist reading; measure, don't assume).
+  REPORT VISUALS (user directive, shipped this session): efficiency
+  coloring - per line the energy ledger E = s^2 + 2g*z is walked
+  over kept points; light blue = gained >=88% of the ideal wish rate
+  (cap^2/tick x stride), green = no loss, orange->dark red = energy
+  destroyed (darker = larger fraction); stage coloring stays as a
+  radio toggle; legend in sidebar. CONTACT MARKS: Sink::Contact()
+  force-keeps the exact strike point (line now ends AT the wall) +
+  yellow 3-axis crosses at every board/tap contact (air kHit + carve
+  tap kHit call sites); marks skip selection-dimmed lines. Also
+  fixed: the doomed outcome filter checkbox (loop stopped at 6 - the
+  8th entry never rendered). Data: stride + marks per traj row,
+  cap2 in the blob. Verified live on a fresh msolvegate report
+  (26,305 lines: 28 blue / 9,702 green / 16,575 loss-colored, 4,664
+  contact marks, 0 lines without speed data, no JS errors). Honest
+  instrument reading: only 28 lines sustain >=88% ideal gain - real
+  flights weave at ~80% of cap^2/tick (the free-rate curve headroom
+  the user deferred). Solve itself unchanged (leg-failure rule
+  firing correctly; no finisher; partial exported).
+
 - 2026-08-18 (session 8, ENGINE LINE-SEARCH + the corridor verdict): closed-loop model corrections replaced by an honest psi LINE-SEARCH on the real engine (9 flights max in pathgate, 7 in the solver integration; first on-cell/cap-passing strike wins). Measured: f0 constructs at -110 vs human -115 (1 eval); f2 and f3 RESIST STRUCTURALLY - their true approaches are CORRIDOR-HUGGERS (f2 skims the f0/f1 slope, closest point pinned 155u north/57u high at every psi - diving early grazes and the clip kills the southward push; f3 strikes 264u along-face from the cell). No geometry-blind trace family spans these; psi search converges to the corridor wall. Overnight zombie exe (PID 32932) held the build lock - killed. NEXT: EDGE-WAYPOINT CONSTRUCTION for corridor transfers - plan as two open-air segments via the face bottom-edge crossing (along-face leg to just past the edge, then the short dive to the cell); both segments are trace-friendly and the corridor constraint becomes the waypoint. Gates green throughout.
