@@ -111,6 +111,12 @@ namespace Air {
 	                       const std::vector<float>& cosa,
 	                       int horizon);
 
+	// The ONE place the (side, cosa) -> engine-input mapping lives
+	// (the wh + pi convention trap is buried here - see repfit).
+	// h = current horizontal velocity heading.
+	void WishInputs(float h, int side, float cosa, float* yaw_deg,
+	                float* fmove, float* smove);
+
 	// The unseeded boundary-value solve: geometric initial spline (the
 	// closed-form tangent-arrival heading from M1.1 ballistics + M1.2
 	// dot line), then pattern search on knot values against the exact

@@ -5791,6 +5791,10 @@ namespace {
 		int sep_tick = 0;  // separation frame (flight start)
 		int fidx = -1;
 		PlayerState sep;
+		// Boundary control-history state at separation (Invariant 9:
+		// the dwell law crosses operator seams) - measured from the
+		// tape's smove stream.
+		Steer::CtlState sep_ctl;
 		Vec3 cp, v1;
 	};
 
@@ -5819,12 +5823,24 @@ namespace {
 		int air = 0;
 		PlayerState sep;
 		int sep_t = 0;
+		Steer::CtlState sep_ctl;
+		signed char sm_sign = 0;
+		int sm_change_t = -1000;
 		if (refpts) {
 			refpts->push_back(s.pos);
 			refspd->push_back(Len(s.vel));
 		}
 		for (size_t t = 0; t < tape.frames.size(); ++t) {
 			const TapeFrame& fr = tape.frames[t];
+			// Strafe side from the input stream (controller
+			// convention: smove < 0 = side +1).
+			const signed char sg = fr.smove < -1.f ? 1
+				: (fr.smove > 1.f ? -1 : 0);
+			if (sg != 0) {
+				if (sm_sign != 0 && sg != sm_sign)
+					sm_change_t = static_cast<int>(t);
+				sm_sign = sg;
+			}
 			TickEvents ev;
 			MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
 				fr.smove, fr.umove, fr.buttons, &ev);
@@ -5844,6 +5860,7 @@ namespace {
 					fe.sep_tick = sep_t;
 					fe.fidx = fidx;
 					fe.sep = sep;
+					fe.sep_ctl = sep_ctl;
 					fe.cp = ev.contact_pos[0];
 					fe.v1 = ev.contact_vel[0];
 					events->push_back(fe);
@@ -5853,6 +5870,9 @@ namespace {
 				if (air == 0) {
 					sep = s;
 					sep_t = static_cast<int>(t);
+					sep_ctl.side = sm_sign;
+					sep_ctl.age = static_cast<int>(t)
+						- sm_change_t;
 				}
 				air++;
 			} else {
@@ -5860,6 +5880,138 @@ namespace {
 			}
 		}
 		return !events->empty();
+	}
+
+	// ---- THE WITNESS BANK v2 (ruling 2026-08-18): entries are keyed
+	// by canonical start-state hash + map/params hashes + model/law
+	// versions + operator + event. A witness is a floor ONLY under
+	// the exact context that produced it. `src` records the finder
+	// (production vs diagnostic): diagnostic floors are real physics,
+	// but the accessibility gate requires production to refind them
+	// cold, and banked schedules are NEVER handed to the search as
+	// seeds. ----
+	struct EFBankEntry {
+		float H = -1e30f;
+		int horizon = 0;
+		std::string src;
+		std::vector<signed char> side;
+		std::vector<float> cosa;
+	};
+
+	static unsigned long long EFFnv64(const void* data, size_t n,
+		unsigned long long h = 1469598103934665603ULL) {
+		const unsigned char* b =
+			static_cast<const unsigned char*>(data);
+		for (size_t i = 0; i < n; ++i) {
+			h ^= b[i];
+			h *= 1099511628211ULL;
+		}
+		return h;
+	}
+
+	static unsigned long long EFStateHash(const PlayerState& s,
+		const Steer::CtlState& c) {
+		unsigned long long h = EFFnv64(&s.pos, sizeof(s.pos));
+		h = EFFnv64(&s.vel, sizeof(s.vel), h);
+		const int flags[4] = { s.ducked ? 1 : 0, s.hull_state,
+			static_cast<int>(c.side), c.age };
+		return EFFnv64(flags, sizeof(flags), h);
+	}
+
+	static unsigned long long EFParamsHash(const MoveParams& p) {
+		const float v[9] = { p.dt, p.gravity, p.airaccelerate,
+			p.air_speed_cap, p.maxspeed, p.accelerate, p.friction,
+			p.stopspeed, p.strafe_rate_max };
+		return EFFnv64(v, sizeof(v));
+	}
+
+	static unsigned long long EFFileHash(const std::string& path) {
+		FILE* f = nullptr;
+		if (fopen_s(&f, path.c_str(), "rb") != 0 || !f)
+			return 0;
+		unsigned long long h = 1469598103934665603ULL;
+		unsigned char buf[65536];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+			h = EFFnv64(buf, n, h);
+		fclose(f);
+		return h;
+	}
+
+	static std::string EFBankKey(const char* op,
+		unsigned long long sh, unsigned long long mh,
+		unsigned long long ph, int tick, int face) {
+		char b[256];
+		snprintf(b, sizeof(b), "BANK2 %s st%016llx mp%016llx "
+			"pr%016llx %s %s %s t%d_f%d", op, sh, mh, ph,
+			kEngineModelVersion, kControlLawVersion,
+			kCollisionLawVersion, tick, face);
+		return b;
+	}
+
+	static void EFBankLoad(const std::string& path,
+		std::map<std::string, EFBankEntry>* bank) {
+		FILE* f = nullptr;
+		if (fopen_s(&f, path.c_str(), "r") != 0 || !f)
+			return;
+		char line[512];
+		while (fgets(line, sizeof(line), f)) {
+			std::string ln = line;
+			while (!ln.empty()
+				&& (ln.back() == '\n' || ln.back() == '\r'))
+				ln.pop_back();
+			if (ln.rfind("BANK2 ", 0) != 0)
+				continue;
+			const size_t p1 = ln.find('|');
+			if (p1 == std::string::npos)
+				continue;
+			EFBankEntry be;
+			int n = 0;
+			char srcbuf[32] = { 0 };
+			if (sscanf_s(ln.c_str() + p1 + 1, "%31[^|]|%f|%d|%d",
+				srcbuf, static_cast<unsigned>(sizeof(srcbuf)),
+				&be.H, &be.horizon, &n) != 4
+				|| n < 0 || n > 4096)
+				continue;
+			be.src = srcbuf;
+			be.side.resize(static_cast<size_t>(n));
+			be.cosa.resize(static_cast<size_t>(n));
+			bool ok2 = true;
+			for (int i = 0; i < n; ++i) {
+				int sv;
+				float cv;
+				if (fscanf_s(f, "%d %f", &sv, &cv) != 2) {
+					ok2 = false;
+					break;
+				}
+				be.side[static_cast<size_t>(i)] =
+					static_cast<signed char>(sv);
+				be.cosa[static_cast<size_t>(i)] = cv;
+			}
+			if (fgets(line, sizeof(line), f)) { /* eat newline */ }
+			if (!ok2)
+				break;
+			(*bank)[ln.substr(0, p1)] = be;
+		}
+		fclose(f);
+	}
+
+	static void EFBankSave(const std::string& path,
+		const std::map<std::string, EFBankEntry>& bank) {
+		FILE* f = nullptr;
+		if (fopen_s(&f, path.c_str(), "w") != 0 || !f)
+			return;
+		for (const auto& kv : bank) {
+			fprintf(f, "%s|%s|%.1f|%d|%d\n", kv.first.c_str(),
+				kv.second.src.c_str(), kv.second.H,
+				kv.second.horizon,
+				static_cast<int>(kv.second.side.size()));
+			for (size_t i = 0; i < kv.second.side.size(); ++i)
+				fprintf(f, "%d %.6f\n",
+					static_cast<int>(kv.second.side[i]),
+					kv.second.cosa[i]);
+		}
+		fclose(f);
 	}
 
 	// efield: THE PHASE-A FIELD REPORT. For every flight event of the
@@ -5906,6 +6058,7 @@ namespace {
 			const Route::Face& fc = g.faces[fe.fidx];
 			Entrance::Opts eo;
 			eo.grid = o.ef_grid;
+			eo.entry_ctl = fe.sep_ctl;
 			const clock_t c0 = clock();
 			Entrance::FieldMap em = Entrance::Build(fe.sep, w,
 				o.params, g, fe.fidx, eo);
@@ -6372,7 +6525,8 @@ namespace {
 				int flights = 0;
 				Entrance::RefResult rr = Entrance::RefSolve(fe.sep,
 					w, o.params, g, fe.fidx, q, eo.grid * 0.9f,
-					r.n, 700, false, &flights, fc.zmin);
+					r.n, 700, false, &flights, fc.zmin,
+					fe.sep_ctl);
 				const float H_ref = rr.ok ? rr.H : -1e30f;
 				const float ref_dot = rr.ok ? rr.flight.dot : 0.f;
 				rows++;
@@ -6452,52 +6606,13 @@ namespace {
 			printf("humanexact: no flight events in tape\n");
 			return 1;
 		}
-		// THE WITNESS BANK (monotonic law: H_found may never
-		// regress - the legal f3 847k class becomes a permanent
-		// floor). One file per tape; every entry is replayed through
-		// the CURRENT engine each run - a replay below its recorded
-		// H is a MONOTONICITY BREAK, loudly.
-		struct BankEntry {
-			float H = -1e30f;
-			int horizon = 0;
-			std::vector<signed char> side;
-			std::vector<float> cosa;
-		};
-		std::map<std::string, BankEntry> bank;
+		// THE WITNESS BANK v2: context-hashed monotonic floors
+		// (state + map + params + model/law versions).*
+		std::map<std::string, EFBankEntry> bank;
 		const std::string bank_path = tape_path + ".bank";
-		{
-			FILE* f = nullptr;
-			if (fopen_s(&f, bank_path.c_str(), "r") == 0 && f) {
-				char key[64];
-				float H;
-				int hz, n;
-				while (fscanf_s(f, "%63s %f %d %d", key,
-					static_cast<unsigned>(sizeof(key)), &H, &hz,
-					&n) == 4 && n >= 0 && n < 4096) {
-					BankEntry be;
-					be.H = H;
-					be.horizon = hz;
-					be.side.resize(static_cast<size_t>(n));
-					be.cosa.resize(static_cast<size_t>(n));
-					bool ok2 = true;
-					for (int i = 0; i < n; ++i) {
-						int sv;
-						float cv;
-						if (fscanf_s(f, "%d %f", &sv, &cv) != 2) {
-							ok2 = false;
-							break;
-						}
-						be.side[static_cast<size_t>(i)] =
-							static_cast<signed char>(sv);
-						be.cosa[static_cast<size_t>(i)] = cv;
-					}
-					if (!ok2)
-						break;
-					bank[key] = be;
-				}
-				fclose(f);
-			}
-		}
+		EFBankLoad(bank_path, &bank);
+		const unsigned long long maph = EFFileHash(map_path);
+		const unsigned long long prh = EFParamsHash(o.params);
 		const int min_gap = static_cast<int>(
 			ceilf((1.f / o.params.dt) / o.params.strafe_rate_max));
 		int rows = 0, pass = 0, na = 0;
@@ -6514,7 +6629,7 @@ namespace {
 			// FastestTangent (the ruling's one-frontier design).
 			Entrance::RefResult rr = Entrance::RefSolve(fe.sep, w,
 				o.params, g, fe.fidx, fe.cp, 16.f, n_h, 2000,
-				false, &flights, fc.zmin);
+				false, &flights, fc.zmin, fe.sep_ctl);
 			// The human's own reversal cadence vs the dwell law.
 			int reversals = 0, viol = 0, mind = 100000;
 			{
@@ -6603,9 +6718,9 @@ namespace {
 			// Bank: replay the stored floor, verify monotonicity,
 			// absorb improvements.
 			{
-				char bkey[64];
-				snprintf(bkey, sizeof(bkey), "t%d_f%d", fe.tick,
-					fe.fidx);
+				const std::string bkey = EFBankKey("air-entry",
+					EFStateHash(fe.sep, fe.sep_ctl), maph, prh,
+					fe.tick, fe.fidx);
 				float bank_floor = -1e30f;
 				auto bit = bank.find(bkey);
 				if (bit != bank.end()) {
@@ -6638,8 +6753,9 @@ namespace {
 				if (rr.ok && rr.H > bank_floor + 1.f
 					&& (bit == bank.end()
 						|| rr.H > bit->second.H + 1.f)) {
-					BankEntry nb;
+					EFBankEntry nb;
 					nb.H = rr.H;
+					nb.src = "production";
 					nb.horizon = rr.horizon;
 					nb.side = rr.wside;
 					nb.cosa = rr.wcosa;
@@ -6652,26 +6768,9 @@ namespace {
 				}
 			}
 		}
-		{
-			FILE* f = nullptr;
-			if (fopen_s(&f, bank_path.c_str(), "w") == 0 && f) {
-				for (const auto& kv : bank) {
-					fprintf(f, "%s %.1f %d %d\n",
-						kv.first.c_str(), kv.second.H,
-						kv.second.horizon,
-						static_cast<int>(kv.second.side.size()));
-					for (size_t i = 0; i < kv.second.side.size();
-						++i)
-						fprintf(f, "%d %.6f\n",
-							static_cast<int>(kv.second.side[i]),
-							kv.second.cosa[i]);
-				}
-				fclose(f);
-				printf("humanexact: witness bank -> %s (%d "
-					"entries)\n", bank_path.c_str(),
-					static_cast<int>(bank.size()));
-			}
-		}
+		EFBankSave(bank_path, bank);
+		printf("humanexact: witness bank -> %s (%d entries)\n",
+			bank_path.c_str(), static_cast<int>(bank.size()));
 		printf("humanexact: %d/%d mandatory exact points covered "
 			"(%d N/A outside the control law) | %s\n",
 			pass, rows, na, rows > 0 && pass == rows
@@ -7035,6 +7134,13 @@ namespace {
 			printf("ladder: no flight events in tape\n");
 			return 1;
 		}
+		// Bank context (diagnostic floors land here, src-tagged).
+		std::map<std::string, EFBankEntry> bank;
+		const std::string bank_path = tape_path + ".bank";
+		EFBankLoad(bank_path, &bank);
+		const unsigned long long maph = EFFileHash(map_path);
+		const unsigned long long prh = EFParamsHash(o.params);
+		bool bank_dirty = false;
 		std::vector<Vec3> vels;
 		{
 			PlayerState s;
@@ -7188,7 +7294,8 @@ namespace {
 			int fl = 0;
 			Entrance::RefResult r0 = Entrance::RefSolve(fe.sep, w,
 				o.params, g, fe.fidx, fe.cp, 16.f, t1 - t0, 800,
-				false, &fl, fc.zmin, nullptr, &hside, &hcosa);
+				false, &fl, fc.zmin, fe.sep_ctl, nullptr, &hside,
+				&hcosa);
 			printf("ladder:   optimizer from exact schedule: %s "
 				"%.0fk (dot %.1f) vs E_h %.0fk | %s\n",
 				r0.ok ? "H" : "NONE",
@@ -7198,6 +7305,27 @@ namespace {
 					? "HOLDS THE BASIN"
 					: "<- LOSES THE BASIN (destructive moves or "
 					  "compression)");
+			// Bank the diagnostic floor (ruling: real physics, a
+			// permanent lower bound - src-tagged, never a seed).
+			if (r0.ok) {
+				const std::string bkey = EFBankKey("air-entry",
+					EFStateHash(fe.sep, fe.sep_ctl), maph, prh,
+					fe.tick, fe.fidx);
+				auto bit = bank.find(bkey);
+				if (bit == bank.end()
+					|| r0.H > bit->second.H + 1.f) {
+					EFBankEntry nb;
+					nb.H = r0.H;
+					nb.horizon = r0.horizon;
+					nb.src = "diagnostic";
+					nb.side = r0.wside;
+					nb.cosa = r0.wcosa;
+					bank[bkey] = nb;
+					bank_dirty = true;
+					printf("ladder:   banked %.0fk (diagnostic "
+						"floor)\n", r0.H / 1e3f);
+				}
+			}
 			// (3) PERTURBATION RECOVERY.
 			unsigned rng = 0xC0FFEEu
 				+ static_cast<unsigned>(ei) * 977u;
@@ -7220,13 +7348,19 @@ namespace {
 					Entrance::RefResult rp = Entrance::RefSolve(
 						fe.sep, w, o.params, g, fe.fidx, fe.cp,
 						16.f, t1 - t0, 800, false, &fl2,
-						fc.zmin, nullptr, &hside, &pc);
+						fc.zmin, fe.sep_ctl, nullptr, &hside,
+						&pc);
 					if (rp.ok && rp.H >= eh - 2000.f)
 						rec++;
 				}
 				printf("ladder:   perturb r=%.2f: %d/2 recovered "
 					"to >= E_h\n", radii[ri], rec);
 			}
+		}
+		if (bank_dirty) {
+			EFBankSave(bank_path, bank);
+			printf("ladder: witness bank -> %s\n",
+				bank_path.c_str());
 		}
 		fflush(stdout);
 		return 0;

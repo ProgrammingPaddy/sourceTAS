@@ -235,6 +235,129 @@ namespace Entrance {
 			}
 		}
 
+
+		// THE GUIDED SHOOTER (ruling 2026-08-18): a feedback PROPOSAL
+		// GENERATOR over the canonical wish basis. Per tick it picks
+		// the legal (side, cosa) minimizing a soft-weighted cost -
+		// endpoint residual, terminal-heading error (blended in near
+		// arrival), and gain sacrifice - then advances the REAL
+		// engine. The dwell law is enforced inline (hard); gain
+		// preservation is SOFT (deliberate braking turns stay
+		// reachable - advisor: no hidden control family). The frozen
+		// realized schedule is the only output; the caller replays it
+		// open-loop and trusts nothing else.
+		struct GuideWeights {
+			float wp = 2.f;      // endpoint attraction
+			float wt = 1.f;      // terminal-heading weight
+			float blend = 0.35f; // final fraction where wt engages
+			float we = 0.3f;     // gain-sacrifice reluctance
+		};
+
+		void GuidedShoot(const PlayerState& entry, const World& w,
+		                 const MoveParams& p, const Vec3& q,
+		                 float th_tgt, int N, int min_gap,
+		                 const Steer::CtlState& ctl0,
+		                 const GuideWeights& gw,
+		                 std::vector<signed char>* side_out,
+		                 std::vector<float>* cosa_out) {
+			side_out->clear();
+			cosa_out->clear();
+			PlayerState s = entry;
+			const int hold = s.ducked ? IN_DUCK : 0;
+			signed char cur = ctl0.side;
+			int age = ctl0.age;
+			const float cap2 = p.air_speed_cap * p.air_speed_cap;
+			static const float cgrid[7] = { 0.97f, 0.8f, 0.5f, 0.2f,
+				0.f, -0.35f, -0.7f };
+			for (int k = 0; k < N; ++k) {
+				const float s2d = Len2D(s.vel);
+				const int rem = N - k;
+				int bs = 0;
+				float bc = 1.f;
+				if (s2d > 1.f) {
+					const float h = atan2f(s.vel.Y, s.vel.X);
+					Strafe::TickLaw law = Strafe::Law(p, s2d, 1.f,
+						s.ducked);
+					const float full2 = s2d * s2d + cap2;
+					float bestJ = FLT_MAX;
+					for (int si = -1; si <= 1; ++si) {
+						if (si != 0 && cur != 0
+							&& si != cur && age < min_gap)
+							continue;   // illegal flip
+						const int nca = si == 0 ? 1 : 7;
+						for (int ci = 0; ci < nca; ++ci) {
+							float h2, s22;
+							float c = 1.f;
+							if (si == 0) {
+								h2 = h;
+								s22 = s2d;   // null: no gain
+							} else {
+								c = cgrid[ci];
+								const float s2c = 1.f - c * c;
+								const float tr = law.TurnRad(c,
+									s2c > 0.f ? sqrtf(s2c) : 0.f);
+								h2 = Steer::WrapPi(h
+									+ (si > 0 ? tr : -tr));
+								const float nv2 = law.NewSpeed2(c);
+								s22 = nv2 > 0.f ? sqrtf(nv2) : 0.f;
+							}
+							// Straight-run endpoint estimate at T
+							// (guidance only; the engine judges).
+							const float sav = sqrtf(s22 * s22
+								+ cap2 * static_cast<float>(rem)
+								* 0.5f);
+							const float D = sav * p.dt
+								* static_cast<float>(rem);
+							const float ex = s.pos.X
+								+ cosf(h2) * D;
+							const float ey = s.pos.Y
+								+ sinf(h2) * D;
+							const float dxq = q.X - ex;
+							const float dyq = q.Y - ey;
+							float J = gw.wp
+								* (dxq * dxq + dyq * dyq) * 1e-4f;
+							if (static_cast<float>(rem)
+								<= gw.blend
+								* static_cast<float>(N)) {
+								const float dth = Steer::WrapPi(
+									th_tgt - h2);
+								J += gw.wt * dth * dth * 100.f;
+							}
+							J += gw.we * (full2 - s22 * s22)
+								* 1e-3f;
+							if (J < bestJ) {
+								bestJ = J;
+								bs = si;
+								bc = c;
+							}
+						}
+					}
+				}
+				float yaw_deg = s2d > 1.f
+					? atan2f(s.vel.Y, s.vel.X) * 57.2957795f : 0.f;
+				float fmove = 0.f, smove = 0.f;
+				if (bs != 0 && s2d > 1.f)
+					Air::WishInputs(atan2f(s.vel.Y, s.vel.X), bs,
+						bc, &yaw_deg, &fmove, &smove);
+				TickEvents ev2;
+				MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f,
+					hold, &ev2);
+				side_out->push_back(static_cast<signed char>(bs));
+				cosa_out->push_back(bc);
+				if (bs != 0) {
+					if (cur != 0 && bs != cur)
+						age = 1;
+					else
+						age++;
+					cur = static_cast<signed char>(bs);
+				} else {
+					age++;
+				}
+				if (ev2.ncontacts > 0 || s.on_ground)
+					break;   // any contact ends generation
+			}
+		}
+
 	} // namespace
 
 	RefResult RefSolve(const PlayerState& entry, const World& w,
@@ -242,6 +365,7 @@ namespace Entrance {
 	                   int face_idx, const Vec3& q, float radius,
 	                   int n_hint, int budget, bool tangent_mode,
 	                   int* flights_counter, float zmin,
+	                   const Steer::CtlState& entry_ctl,
 	                   const std::function<void(const Air::Result&,
 	                       const std::vector<signed char>&,
 	                       const std::vector<float>&, int)>&
@@ -268,106 +392,176 @@ namespace Entrance {
 		vt.aim = q;
 		std::vector<signed char> sbuf;
 		std::vector<float> cbuf;
-		// ---- THE TERMINAL-HEADING FRONTIER (ruling 2026-08-18): the
-		// search reconstructs theta -> best witness per terminal-
-		// heading bin - never a global top-k that lets one strong but
-		// badly oriented arrival class evict the others before
-		// refinement. BestBoard = argmax over the frontier (H is
-		// REPLAYED, so the board composition is exact);
-		// FastestTangent = the same frontier's max-energy member with
-		// |dot| <= kTanEps. Every engine flight feeds whatever bin
-		// its arrival lands in. ----
+		// ---- THE TERMINAL-HEADING FRONTIER + THE SCOUT POOL (ruling
+		// 2026-08-18): bins preserve terminal-state diversity; scouts
+		// maximize the probability of entering difficult endpoint
+		// basins. Both feed the same canonical witness frontier. ----
 		constexpr int kBins = 24;
 		struct BinElite {
 			bool  has = false;
 			float sc = -1e30f;
 			float H = -1e30f;
 			float dot = 0.f;
+			Vec3  epos;
 			std::vector<WishRun> runs;
 		};
 		std::vector<BinElite> bins(kBins);
-		// THE SCOUT: best schedule by RAW score regardless of strike
-		// - the pre-strike guidance the frontier needs (bins only
-		// exist once flights strike; the scout climbs the miss-
-		// distance gradient until they do, then keeps serving as a
-		// diversity lane).
-		BinElite scout;
+		std::vector<BinElite> scouts(3);
 		const float kPi2 = 3.14159265f;
-		// One engine flight of a run schedule. Score drives the
-		// search; only clean-air in-radius strikes can WIN, and every
-		// such strike updates its landing bin + the tangent slot.
-		auto ev = [&](const std::vector<WishRun>& runs) {
-			int total = 0;
-			for (const WishRun& r : runs)
-				total += r.len;
+		// Schedule admissibility against the BOUNDARY control state
+		// (Invariant 9: the dwell law crosses operator seams).
+		auto sched_legal = [&](const std::vector<signed char>& sd) {
+			signed char cur = entry_ctl.side;
+			int age = entry_ctl.age;
+			for (signed char v : sd) {
+				if (v != 0 && cur != 0 && v != cur) {
+					if (age < min_gap)
+						return false;
+					age = 1;
+				} else {
+					age++;
+				}
+				if (v != 0)
+					cur = v;
+			}
+			return true;
+		};
+		// Compress a per-tick schedule into side-runs with per-tick
+		// knots (lossless; the deepen moves then operate on it).
+		auto runs_from_sched = [&](const std::vector<signed char>& sd,
+			const std::vector<float>& cs) {
+			std::vector<WishRun> runs;
+			size_t a = 0;
+			while (a < sd.size()) {
+				size_t b = a;
+				while (b < sd.size() && sd[b] == sd[a])
+					b++;
+				WishRun r;
+				r.len = static_cast<int>(b - a);
+				r.side = sd[a];
+				for (size_t i = a; i < b; ++i)
+					r.ck.push_back(cs[i]);
+				runs.push_back(r);
+				a = b;
+			}
+			return runs;
+		};
+		// The CORE evaluation: fly one per-tick schedule. Score drives
+		// the search; only clean-air in-radius strikes can WIN. Every
+		// eval feeds the scout pool; every strike feeds its terminal-
+		// heading bin and the tangent slot.
+		auto ev_sched = [&](const std::vector<signed char>& sd,
+			const std::vector<float>& cs,
+			const std::vector<WishRun>* src_runs) {
+			const int total = static_cast<int>(sd.size());
 			if (total < 8 || total > n_cap)
 				return -1e9f;
-			ExpandRuns(runs, &sbuf, &cbuf);
+			if (!sched_legal(sd))
+				return -1e9f;
 			vt.max_ticks = total + 8;
 			best.evals++;
 			if (flights_counter)
 				(*flights_counter)++;
 			Air::Result ar = Air::FlyWishSchedule(entry, w, p, vt,
-				g, sbuf, cbuf, total + 8);
-			auto scouted = [&](float s3) {
-				if (s3 > scout.sc || !scout.has) {
-					scout.has = true;
-					scout.sc = s3;
-					scout.runs = runs;
-				}
-				return s3;
-			};
-			if (!ar.hit || ar.dot >= 0.f)
-				return scouted(-(ar.miss_dist < 1e8f
-					? ar.miss_dist : 1e8f));
-			if (ar.struck_brush >= 0) {
-				best.contact_assisted++;
-				return scouted(-Len(ar.pos - q) - 500.f);
-			}
-			if (on_strike)
-				on_strike(ar, sbuf, cbuf, total + 8);
-			const float d = Len(ar.pos - q);
-			if (d > radius)
-				return scouted(-d);
-			const float H = Dot(ar.end_state.vel,
-				ar.end_state.vel) + 2.f * p.gravity * gs
-				* (ar.pos.Z - zmin);
+				g, sd, cs, total + 8);
+			const Vec3 epos = ar.hit ? ar.pos
+				: (ar.miss_dist < 1e8f ? ar.closest : ar.end_pos);
 			float sc;
-			if (tangent_mode && -ar.dot > kTanEps)
-				sc = 1e5f - fabsf(ar.dot);
-			else
-				sc = 1e7f + H;
-			// Frontier bookkeeping.
-			const float th = atan2f(ar.v1.Y, ar.v1.X);
-			int bi = static_cast<int>((th + kPi2)
-				/ (2.f * kPi2) * static_cast<float>(kBins));
-			if (bi < 0) bi = 0;
-			if (bi >= kBins) bi = kBins - 1;
-			BinElite& be = bins[static_cast<size_t>(bi)];
-			if (sc > be.sc || !be.has) {
-				be.has = true;
-				be.sc = sc;
-				be.H = H;
-				be.dot = ar.dot;
-				be.runs = runs;
+			bool strike = false;
+			float H = -1e30f;
+			if (!ar.hit || ar.dot >= 0.f) {
+				sc = -(ar.miss_dist < 1e8f ? ar.miss_dist : 1e8f);
+			} else if (ar.struck_brush >= 0) {
+				best.contact_assisted++;
+				sc = -Len(ar.pos - q) - 500.f;
+			} else {
+				if (on_strike)
+					on_strike(ar, sd, cs, total + 8);
+				const float d = Len(ar.pos - q);
+				if (d > radius) {
+					sc = -d;
+				} else {
+					strike = true;
+					H = Dot(ar.end_state.vel, ar.end_state.vel)
+						+ 2.f * p.gravity * gs
+						* (ar.pos.Z - zmin);
+					if (tangent_mode && -ar.dot > kTanEps)
+						sc = 1e5f - fabsf(ar.dot);
+					else
+						sc = 1e7f + H;
+				}
 			}
-			if (sc >= 1e7f && H > best.H) {
-				best.ok = true;
-				best.H = H;
-				best.flight = ar;
-				best.wside = sbuf;
-				best.wcosa = cbuf;
-				best.horizon = total + 8;
+			// Scout pool: endpoint-diverse top-3 by raw score.
+			{
+				int slot = -1;
+				for (int i2 = 0; i2 < 3; ++i2)
+					if (scouts[static_cast<size_t>(i2)].has
+						&& Len(scouts[static_cast<size_t>(i2)]
+							.epos - epos) < 32.f) {
+						slot = i2;
+						break;
+					}
+				if (slot < 0)
+					for (int i2 = 0; i2 < 3; ++i2)
+						if (!scouts[static_cast<size_t>(i2)].has) {
+							slot = i2;
+							break;
+						}
+				if (slot < 0) {
+					slot = 0;
+					for (int i2 = 1; i2 < 3; ++i2)
+						if (scouts[static_cast<size_t>(i2)].sc
+							< scouts[static_cast<size_t>(slot)].sc)
+							slot = i2;
+				}
+				BinElite& sl = scouts[static_cast<size_t>(slot)];
+				if (!sl.has || sc > sl.sc) {
+					sl.has = true;
+					sl.sc = sc;
+					sl.H = H;
+					sl.epos = epos;
+					sl.runs = src_runs ? *src_runs
+						: runs_from_sched(sd, cs);
+				}
 			}
-			if (-ar.dot <= kTanEps && H > best.tan_H) {
-				best.tan_ok = true;
-				best.tan_H = H;
-				best.tan_flight = ar;
-				best.tan_wside = sbuf;
-				best.tan_wcosa = cbuf;
-				best.tan_horizon = total + 8;
+			if (strike) {
+				const float th = atan2f(ar.v1.Y, ar.v1.X);
+				int bi = static_cast<int>((th + kPi2)
+					/ (2.f * kPi2) * static_cast<float>(kBins));
+				if (bi < 0) bi = 0;
+				if (bi >= kBins) bi = kBins - 1;
+				BinElite& be = bins[static_cast<size_t>(bi)];
+				if (sc > be.sc || !be.has) {
+					be.has = true;
+					be.sc = sc;
+					be.H = H;
+					be.dot = ar.dot;
+					be.epos = epos;
+					be.runs = src_runs ? *src_runs
+						: runs_from_sched(sd, cs);
+				}
+				if (sc >= 1e7f && H > best.H) {
+					best.ok = true;
+					best.H = H;
+					best.flight = ar;
+					best.wside = sd;
+					best.wcosa = cs;
+					best.horizon = total + 8;
+				}
+				if (-ar.dot <= kTanEps && H > best.tan_H) {
+					best.tan_ok = true;
+					best.tan_H = H;
+					best.tan_flight = ar;
+					best.tan_wside = sd;
+					best.tan_wcosa = cs;
+					best.tan_horizon = total + 8;
+				}
 			}
-			return scouted(sc);
+			return sc;
+		};
+		auto ev = [&](const std::vector<WishRun>& runs) {
+			ExpandRuns(runs, &sbuf, &cbuf);
+			return ev_sched(sbuf, cbuf, &runs);
 		};
 		// ---- SEED GRID (deterministic) ----
 		const float bear = atan2f(q.Y - entry.pos.Y,
@@ -443,40 +637,51 @@ namespace Entrance {
 				break;
 			ev(sd);
 		}
-		// DIAGNOSTIC SEED (the recovery ladder): compress the
-		// injected per-tick schedule to side-runs + knots and
-		// evaluate it like any other seed - it feeds the frontier
-		// through ev(). Production solves never pass one.
-		if (seed_side && seed_cosa && !seed_side->empty()) {
-			std::vector<WishRun> runs;
-			size_t i0s = 0;
-			while (i0s < seed_side->size()) {
-				size_t i1s = i0s;
-				while (i1s < seed_side->size()
-					&& (*seed_side)[i1s] == (*seed_side)[i0s])
-					i1s++;
-				WishRun r;
-				r.len = static_cast<int>(i1s - i0s);
-				r.side = (*seed_side)[i0s];
-				// FULL per-tick resolution (the K-ladder measured
-				// interp fits missing at K<=17 - the diagnostic
-				// seed must enter losslessly).
-				const int K = r.len < 2 ? 1 : r.len;
-				for (int k2 = 0; k2 < K; ++k2) {
-					const size_t at = i0s + static_cast<size_t>(
-						(r.len - 1) * k2 / (K > 1 ? K - 1 : 1));
-					r.ck.push_back((*seed_cosa)[at]);
-				}
-				runs.push_back(r);
-				i0s = i1s;
-			}
-			if (best.evals < budget)
-				ev(runs);
+		// DIAGNOSTIC SEED (the recovery ladder): injected losslessly.
+		if (seed_side && seed_cosa && !seed_side->empty()
+			&& best.evals < budget)
+			ev_sched(*seed_side, *seed_cosa, nullptr);
+		// ---- GUIDED SHOOTING (the conditioning fix for needle
+		// basins): feedback generates candidates over a small weight
+		// grid x terminal-heading offsets; each frozen schedule
+		// enters the search ONLY through its open-loop replay. The
+		// generation pass itself costs one flight of engine time and
+		// is charged to the budget. ----
+		{
+			const int gbudget = budget / 3;
+			const int fl0 = best.evals;
+			const float th_offs[5] = { 0.f, 0.2f, -0.2f, 0.45f,
+				-0.45f };
+			const float wps[3] = { 0.6f, 2.f, 6.f };
+			const float wes[2] = { 0.05f, 0.5f };
+			std::vector<signed char> gsd;
+			std::vector<float> gcs;
+			for (int ti = 0; ti < 5; ++ti)
+				for (int pi2 = 0; pi2 < 3; ++pi2)
+					for (int ei2 = 0; ei2 < 2; ++ei2) {
+						if (best.evals - fl0 >= gbudget
+							|| best.evals >= budget)
+							goto guided_done;
+						GuideWeights gw;
+						gw.wp = wps[pi2];
+						gw.we = wes[ei2];
+						GuidedShoot(entry, w, p, q,
+							Steer::WrapPi(th_arr + th_offs[ti]),
+							N, min_gap, entry_ctl, gw, &gsd,
+							&gcs);
+						best.evals++;   // the generation pass
+						if (flights_counter)
+							(*flights_counter)++;
+						if (!gsd.empty())
+							ev_sched(gsd, gcs, nullptr);
+					}
+			guided_done:;
 		}
-		// deepen(): local refinement of one bin elite (knot/length
-		// moves, the resolution ladder, reversal insertion). Every
-		// eval also feeds whatever bin its flight lands in.
+		// deepen(): local refinement of one elite (knot/length moves,
+		// the resolution ladder, reversal insertion).
 		auto deepen = [&](BinElite& pe, float kstep, int lstep) {
+			if (!pe.has)
+				return;
 			bool moved = true;
 			int guard = 0;
 			while (moved && best.evals < budget && guard++ < 8) {
@@ -577,11 +782,11 @@ namespace Entrance {
 				}
 			}
 		};
-		// FRONTIER REFINEMENT: rounds over the most promising bins -
-		// top-4 by H plus the softest-|dot| bin (the tangent flank) -
-		// then a deterministic perturb-restart of the leader. Dry
-		// counting is on the GLOBAL best; the caller's convergence
-		// measure remains the sandwich gap, budget is only the leash.
+		// FRONTIER REFINEMENT: full deepening for the SCOUT POOL and
+		// the top bins each round (bins own diversity; scouts own
+		// basin entry), then a deterministic perturb-restart of the
+		// current leaders. Dry counting is on the GLOBAL best; the
+		// caller's convergence measure remains the sandwich gap.
 		unsigned rng = 0x9e3779b9u
 			^ static_cast<unsigned>(face_idx * 7919)
 			^ static_cast<unsigned>(static_cast<int>(q.X) * 131)
@@ -591,66 +796,70 @@ namespace Entrance {
 			return static_cast<float>((rng >> 8) & 0xFFFF)
 				/ 65535.f * 2.f - 1.f;
 		};
+		auto perturb = [&](const BinElite& src) {
+			BinElite pe = src;
+			for (WishRun& r : pe.runs) {
+				for (float& c : r.ck) {
+					c += 0.25f * frand();
+					if (c > 1.f) c = 1.f;
+					if (c < -1.f) c = -1.f;
+				}
+				const int dl = static_cast<int>(4.f * frand());
+				if (r.len + dl >= min_gap)
+					r.len += dl;
+			}
+			pe.sc = ev(pe.runs);
+			deepen(pe, 0.12f, 2);
+		};
 		const float ksteps[3] = { 0.3f, 0.12f, 0.05f };
 		const int lsteps[3] = { 6, 2, 2 };
 		int dry = 0;
 		float last_best = -1e30f;
 		while (best.evals < budget && dry < 4) {
+			// Scouts always get the full schedule.
+			for (int rd = 0; rd < 3 && best.evals < budget; ++rd)
+				for (int si2 = 0; si2 < 3; ++si2)
+					deepen(scouts[static_cast<size_t>(si2)],
+						ksteps[rd], lsteps[rd]);
+			// Then the top bins by H + the softest-|dot| bin.
 			std::vector<int> order;
 			for (int b2 = 0; b2 < kBins; ++b2)
 				if (bins[static_cast<size_t>(b2)].has)
 					order.push_back(b2);
-			if (order.empty()) {
-				// No strikes yet: drive the scout toward the face
-				// on the miss-distance gradient.
-				if (!scout.has)
-					break;
-				deepen(scout, 0.2f, 4);
-				if (best.evals >= budget)
-					break;
-				continue;
-			}
-			std::sort(order.begin(), order.end(),
-				[&](int a2, int b3) {
-					return bins[static_cast<size_t>(a2)].H
-						> bins[static_cast<size_t>(b3)].H;
-				});
-			int soft = order[0];
-			for (int b2 : order)
-				if (fabsf(bins[static_cast<size_t>(b2)].dot)
-					< fabsf(bins[static_cast<size_t>(soft)].dot))
-					soft = b2;
-			std::vector<int> work(order.begin(), order.begin()
-				+ static_cast<long long>(order.size() > 4 ? 4
-					: order.size()));
-			bool have_soft = false;
-			for (int b2 : work)
-				if (b2 == soft)
-					have_soft = true;
-			if (!have_soft)
-				work.push_back(soft);
-			for (int rd = 0; rd < 3 && best.evals < budget; ++rd)
-				for (int b2 : work) {
-					if (best.evals >= budget)
-						break;
-					deepen(bins[static_cast<size_t>(b2)],
-						ksteps[rd], lsteps[rd]);
-				}
-			if (best.evals < budget && !work.empty()) {
-				BinElite pe = bins[static_cast<size_t>(work[0])];
-				for (WishRun& r : pe.runs) {
-					for (float& c : r.ck) {
-						c += 0.25f * frand();
-						if (c > 1.f) c = 1.f;
-						if (c < -1.f) c = -1.f;
+			if (!order.empty()) {
+				std::sort(order.begin(), order.end(),
+					[&](int a2, int b3) {
+						return bins[static_cast<size_t>(a2)].H
+							> bins[static_cast<size_t>(b3)].H;
+					});
+				int soft = order[0];
+				for (int b2 : order)
+					if (fabsf(bins[static_cast<size_t>(b2)].dot)
+						< fabsf(bins[static_cast<size_t>(soft)]
+							.dot))
+						soft = b2;
+				std::vector<int> work(order.begin(),
+					order.begin() + static_cast<long long>(
+						order.size() > 4 ? 4 : order.size()));
+				bool have_soft = false;
+				for (int b2 : work)
+					if (b2 == soft)
+						have_soft = true;
+				if (!have_soft)
+					work.push_back(soft);
+				for (int rd = 0; rd < 3 && best.evals < budget;
+					++rd)
+					for (int b2 : work) {
+						if (best.evals >= budget)
+							break;
+						deepen(bins[static_cast<size_t>(b2)],
+							ksteps[rd], lsteps[rd]);
 					}
-					const int dl = static_cast<int>(4.f * frand());
-					if (r.len + dl >= min_gap)
-						r.len += dl;
-				}
-				pe.sc = ev(pe.runs);
-				deepen(pe, 0.12f, 2);
+				if (best.evals < budget)
+					perturb(bins[static_cast<size_t>(work[0])]);
 			}
+			if (best.evals < budget && scouts[0].has)
+				perturb(scouts[0]);
 			if (best.H <= last_best + 1e-3f)
 				dry++;
 			else
@@ -1136,7 +1345,8 @@ namespace Entrance {
 					+ Scale(m.vd, static_cast<float>(iv) * m.dv);
 				RefResult rr = RefSolve(entry, w, p, g, face_idx,
 					q, o.grid * 0.9f, tg.n, 220, false,
-					&m.flights, face.zmin, ref_credit);
+					&m.flights, face.zmin, o.entry_ctl,
+					ref_credit);
 				m.contact_assisted += rr.contact_assisted;
 			}
 		}

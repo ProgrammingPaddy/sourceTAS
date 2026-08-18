@@ -30,6 +30,18 @@ namespace Steer {
 		return a;
 	}
 
+	// CONTROL-HISTORY STATE (Markov-completeness ruling 2026-08-18):
+	// the dwell law crosses operator boundaries - a boundary state
+	// carries the strafe side and the ticks elapsed since the last
+	// side change, so the first reversal of the NEXT operator is
+	// constrained by the last reversal of the previous one. Never
+	// reset at module seams (Invariant 9).
+	struct CtlState {
+		signed char side = 0;   // last nonzero wish side (0 = none yet)
+		int age = 1000;         // ticks since the last side change
+		                        // (large default = unconstrained)
+	};
+
 	inline float TurnAt(const Strafe::TickLaw& law, float cosa) {
 		const float s2 = 1.f - cosa * cosa;
 		return law.TurnRad(cosa, s2 > 0.f ? sqrtf(s2) : 0.f);

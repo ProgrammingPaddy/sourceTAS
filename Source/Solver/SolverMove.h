@@ -103,6 +103,15 @@ namespace Solver {
 		bool unduck_hull_defer = true;
 	};
 
+	// VERSION STAMPS (ruling 2026-08-18): banked witnesses and
+	// certified bounds are valid only under the exact model/law
+	// versions that produced them - the stamps join every bank key
+	// and every proof-carrying prune. Bump on any change to the
+	// engine mirror, the dwell law, or the collision semantics.
+	constexpr const char* kEngineModelVersion = "em1";
+	constexpr const char* kControlLawVersion = "dwell6";
+	constexpr const char* kCollisionLawVersion = "clip1";
+
 	struct PlayerState {
 		Vec3 pos;                  // feet origin
 		Vec3 vel;

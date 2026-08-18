@@ -210,6 +210,27 @@ namespace Air {
 		return r;
 	}
 
+	void WishInputs(float h, int side, float cosa, float* yaw_deg,
+	                float* fmove, float* smove) {
+		*fmove = 0.f;
+		if (side == 0) {
+			*yaw_deg = h * 57.2957795f;
+			*smove = 0.f;
+			return;
+		}
+		float ca = cosa;
+		if (ca > 1.f) ca = 1.f;
+		if (ca < -1.f) ca = -1.f;
+		const float alpha = acosf(ca);
+		const float wh = h + (side > 0 ? alpha : -alpha);
+		*smove = -450.f * static_cast<float>(side);
+		// The input mapping realizes its wish at wh + pi in
+		// WishFromInput coordinates (repfit-measured) - every
+		// producer and every inverter must route through HERE.
+		*yaw_deg = (wh + (side > 0 ? 1.f : -1.f) * kPi * 0.5f)
+			* 57.2957795f;
+	}
+
 	Result FlyWishSchedule(const PlayerState& entry, const World& w,
 	                       const MoveParams& p, const Target& t,
 	                       const Route::Graph& g,
@@ -241,17 +262,11 @@ namespace Air {
 			float yaw_deg = h * 57.2957795f;
 			float fmove = 0.f, smove = 0.f;
 			if (sd != 0 && s2d > 1.f) {
-				float ca = k < nsch
+				const float ca = k < nsch
 					? cosa[static_cast<size_t>(k)]
 					: (nsch > 0 ? cosa[static_cast<size_t>(
 						nsch) - 1] : 1.f);
-				if (ca > 1.f) ca = 1.f;
-				if (ca < -1.f) ca = -1.f;
-				const float alpha = acosf(ca);
-				const float wh = h + (sd > 0 ? alpha : -alpha);
-				smove = -450.f * static_cast<float>(sd);
-				yaw_deg = (wh + (sd > 0 ? 1.f : -1.f)
-					* kPi * 0.5f) * 57.2957795f;
+				WishInputs(h, sd, ca, &yaw_deg, &fmove, &smove);
 				if (last_side && sd != last_side)
 					r.flips++;
 				last_side = sd;

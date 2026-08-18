@@ -27,6 +27,7 @@
 #include "SolverAir.h"
 #include "SolverMove.h"
 #include "SolverRoute.h"
+#include "SolverSteer.h"
 
 namespace Solver {
 
@@ -117,6 +118,9 @@ namespace Entrance {
 		int   refine_rounds = 2;
 		int   flights_cap = 9000; // engine-flight budget per field
 		bool  dwell_free = false; // dwellcost variant: no flip-gap law
+		// Boundary control-history state (Invariant 9): constrains
+		// the first reversal of every flight this field flies.
+		Steer::CtlState entry_ctl;
 	};
 
 	// |dot| under this = tangent-valid in practice (loss^2 <= 625,
@@ -179,6 +183,10 @@ namespace Entrance {
 	// search flies, wherever it lands - the caller may credit its
 	// field ("every valid witness raises the lower bound"). Args:
 	// the flight, the wish schedule (side, cosa), its horizon.
+	// entry_ctl: the boundary control-history state (Invariant 9 -
+	// the dwell law crosses operator seams; the first reversal of
+	// this flight is constrained by the previous operator's last).
+	// Every produced schedule is validated against it.
 	// seed_side/seed_cosa (optional, DIAGNOSTIC ONLY - the recovery
 	// ladder): a per-tick wish schedule injected as one extra seed
 	// (compressed to side-runs + knots). Production solves never pass
@@ -188,6 +196,8 @@ namespace Entrance {
 	                   int face_idx, const Vec3& q, float radius,
 	                   int n_hint, int budget, bool tangent_mode,
 	                   int* flights_counter, float zmin,
+	                   const Steer::CtlState& entry_ctl
+	                       = Steer::CtlState(),
 	                   const std::function<void(const Air::Result&,
 	                       const std::vector<signed char>&,
 	                       const std::vector<float>&, int)>&

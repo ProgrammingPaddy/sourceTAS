@@ -864,6 +864,49 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 10, THE FULL-MAP HANDOFF + the go, first
+  guided-shooting run): Docs/FullMapSolverHandoff.md filed = the
+  second design of record (transfer-operator composition -> Bellman/
+  best-first B&B over exact boundary states -> certification; §51
+  certify-without-resolving = the tractability mechanism; §19 role
+  reversal: closed forms become bounds/proposals/impossibility
+  proofs, never values). Advisor's go received with rulings: h(S) =
+  max of admissible bounds ladder (direct-to-zone day one, relaxed
+  reverse map solver as the middle layer - rehabilitates the
+  potential ledger); exploratory dedup = DEFERRED CLUSTERS (record,
+  reopen before certification), never dominance; bank = exact
+  witness records, regions derive; f2 formal floor = 951k-class
+  (banked diagnostic; two gates: known-floor + cold accessibility);
+  ride basis discovered by exact replay (minimal Markov-complete
+  control, duck included if physics demands); proof-carrying prunes
+  (bound ID/version/domain/status); STATIC-MAP DOMAIN DECLARED
+  (user: maps are time-invariant) so exact-state-earlier-time
+  dominance is safe; Stage-A exit = 11 explicit criteria. BUILT
+  THIS SESSION: (1) Steer::CtlState + Invariant-9 threading -
+  boundary control state (side, dwell age) measured from tapes at
+  separation, carried through EFEvent -> Build/RefSolve -> schedule
+  admissibility validation (sched_legal at the seam); (2)
+  Air::WishInputs factored - the wh+pi mapping lives in ONE place;
+  (3) WITNESS BANK v2 - keys = state hash + map hash + params hash
+  + em1/dwell6/clip1 versions + operator + event, src-tagged
+  (production/diagnostic), diagnostic floors never seeds; (4) the
+  GUIDED SHOOTER v1 - per-tick soft-cost feedback proposal
+  generator (endpoint residual + terminal-heading blend + gain
+  sacrifice; dwell law hard inline; braking turns reachable),
+  frozen schedules enter ONLY via open-loop replay, charged to
+  budget; (5) scout POOL (3, endpoint-diverse) with full deepening
+  each round alongside the terminal-heading bins. FIRST RUN:
+  ladder banks the 950k diagnostic floor; humanexact round-trips
+  it ("bank: floor 950k stands" = the known-floor gate working
+  exactly as ruled); f0 892k @ 14u (exact-point unresolved); f2
+  cold production still NONE within 16u - guided single shooting
+  with a straight-run endpoint predictor does NOT enter the needle
+  (the greedy pull aims straight at Q; the human's line bulges
+  wide) -> NEXT per the sanctioned progression: waypoint/MULTIPLE
+  SHOOTING (0.3B), not another family; f3 climbs back to 759k @
+  12u (847k regression target still to refind). Phase B + carve
+  frozen; ExitField waits on Stage A.
+
 - 2026-08-18 (session 9f, THE LADDER VERDICT - f2's basin is a
   NEEDLE): advisor directives built: (1) `ladder` - the controlled
   recovery diagnostic around the known-admissible f2 witness
