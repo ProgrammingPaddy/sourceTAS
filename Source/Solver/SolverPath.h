@@ -153,13 +153,13 @@ namespace Path {
 			}
 		}
 		best.n = best_n;
-		if (best.end_dist
-			<= Board::kHullCenterSlack + 21.f) {
-			best.heading.clear();
-			TraceTHT(pos, h0, s0, q, phi, best.psi, best.n, p,
-				ducked, &best.heading);
-			best.ok = true;
-		}
+		// Fill the profile always (callers may attempt near-miss
+		// plans under CLOSED-LOOP correction - the engine judges);
+		// ok remains the trace-quality flag.
+		best.heading.clear();
+		TraceTHT(pos, h0, s0, q, phi, best.psi, best.n, p,
+			ducked, &best.heading);
+		best.ok = best.end_dist <= Board::kHullCenterSlack + 21.f;
 		return best;
 	}
 

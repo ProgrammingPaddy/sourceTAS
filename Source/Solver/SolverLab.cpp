@@ -5654,12 +5654,49 @@ namespace {
 				continue;
 			rows++;
 			const clock_t c0 = clock();
-			Path::Plan pl = Path::Solve(fe.sep.pos, fe.sep.vel,
-				cell.q, cell.phi, static_cast<int>(cell.n),
-				o.params, fe.sep.ducked);
+			// BOTH ballistic branches: the map stores its better-
+			// energy root per cell, but a real arrival may use the
+			// other (the human's f2 board is the descending root
+			// where the map kept the ascending one) - no tick-band
+			// correction bridges a branch gap.
+			int n_try[2] = { static_cast<int>(cell.n), -1 };
+			{
+				const float dzq = cell.q.Z - fe.sep.pos.Z;
+				const float g2r = o.params.gravity;
+				const float disc = fe.sep.vel.Z * fe.sep.vel.Z
+					- 2.f * g2r * dzq;
+				if (disc >= 0.f) {
+					const float sq = sqrtf(disc);
+					const int ra = static_cast<int>(
+						(fe.sep.vel.Z - sq)
+						/ (g2r * o.params.dt));
+					const int rb = static_cast<int>(
+						(fe.sep.vel.Z + sq)
+						/ (g2r * o.params.dt));
+					const int other = fabsf(static_cast<float>(ra)
+						- cell.n) > fabsf(static_cast<float>(rb)
+						- cell.n) ? ra : rb;
+					if (other >= 4 && other <= 300
+						&& other != n_try[0])
+						n_try[1] = other;
+				}
+			}
+			Path::Plan pl;
+			for (int bi2 = 0; bi2 < 2; ++bi2) {
+				if (n_try[bi2] < 4)
+					continue;
+				Path::Plan cand = Path::Solve(fe.sep.pos,
+					fe.sep.vel, cell.q, cell.phi, n_try[bi2],
+					o.params, fe.sep.ducked);
+				printf("pathgate:   t%4d f%d branch n=%d trace "
+					"end_dist %.0f psi %.2f\n", fe.tick, fe.fidx,
+					n_try[bi2], cand.end_dist, cand.psi);
+				if (cand.end_dist < pl.end_dist)
+					pl = cand;
+			}
 			const double us = 1e6
 				* static_cast<double>(clock() - c0) / CLOCKS_PER_SEC;
-			if (!pl.ok) {
+			if (pl.end_dist >= 150.f || pl.heading.empty()) {
 				printf("pathgate: t%4d f%d NO PLAN (end_dist %.0f) "
 					"| tape dot %.1f\n", fe.tick, fe.fidx,
 					pl.end_dist, Dot(fe.v1, fc.n));
@@ -5671,22 +5708,56 @@ namespace {
 			at.aim_region = false;
 			at.dot_cap = 2000.f;
 			at.max_ticks = pl.n + 12;
-			Air::Result ar = Air::FlyHeadingSpline(fe.sep, w,
-				o.params, at, g, pl.heading, pl.n + 8);
-			if (ar.hit) {
-				hits++;
-				printf("pathgate: t%4d f%d CONSTRUCTED dot %.1f @ "
-					"(%.0f,%.0f,%.0f) miss-to-cell %.0fu, %d ticks "
-					"| tape dot %.1f | plan %.0fus\n",
-					fe.tick, fe.fidx, ar.dot, ar.pos.X, ar.pos.Y,
-					ar.pos.Z, Len(ar.pos - cell.q), ar.tick,
-					Dot(fe.v1, fc.n), us);
-			} else {
-				printf("pathgate: t%4d f%d FLEW AND MISSED "
-					"(closest %.0f) | tape dot %.1f | plan %.0fus\n",
-					fe.tick, fe.fidx, ar.miss_dist,
-					Dot(fe.v1, fc.n), us);
+			// ENGINE LINE-SEARCH on the one knob (the shipped
+			// behavior): the trace cannot see geometry (grazes
+			// block the dive and model-based corrections turn INTO
+			// the surface) - so psi is searched on the REAL engine:
+			// a handful of flights around the planned value, first
+			// on-cell strike wins.
+			bool struck = false;
+			float best_close = 1e9f;
+			Vec3 best_pt;
+			const float offs2[9] = { 0.f, 0.12f, -0.12f, 0.24f,
+				-0.24f, 0.4f, -0.4f, 0.6f, -0.6f };
+			for (int att = 0; att < 9 && !struck; ++att) {
+				pl.heading.clear();
+				Path::TraceTHT(fe.sep.pos,
+					atan2f(fe.sep.vel.Y, fe.sep.vel.X),
+					Len2D(fe.sep.vel), cell.q, cell.phi,
+					Steer::WrapPi(pl.psi + offs2[att]), pl.n,
+					o.params, fe.sep.ducked, &pl.heading);
+				if (pl.heading.empty())
+					continue;
+				Air::Result ar = Air::FlyHeadingSpline(fe.sep, w,
+					o.params, at, g, pl.heading, pl.n + 8);
+				if (ar.hit && Len(ar.pos - cell.q) <= 64.f) {
+					struck = true;
+					hits++;
+					printf("pathgate: t%4d f%d CONSTRUCTED dot "
+						"%.1f @ (%.0f,%.0f,%.0f) miss-to-cell "
+						"%.0fu, %d ticks, eval %d | tape dot %.1f "
+						"| plan %.0fus\n",
+						fe.tick, fe.fidx, ar.dot, ar.pos.X,
+						ar.pos.Y, ar.pos.Z, Len(ar.pos - cell.q),
+						ar.tick, att + 1, Dot(fe.v1, fc.n), us);
+					break;
+				}
+				const Vec3 endp = ar.hit ? ar.pos
+					: (ar.miss_dist < 1e8f ? ar.closest
+						: ar.end_pos);
+				const float cd = Len(endp - cell.q);
+				if (cd < best_close) {
+					best_close = cd;
+					best_pt = endp;
+				}
 			}
+			if (!struck)
+				printf("pathgate: t%4d f%d MISSED line-search "
+					"(best %.0fu at %.0f,%.0f,%.0f; cell %.0f,"
+					"%.0f,%.0f) | tape dot %.1f\n",
+					fe.tick, fe.fidx, best_close, best_pt.X,
+					best_pt.Y, best_pt.Z, cell.q.X, cell.q.Y,
+					cell.q.Z, Dot(fe.v1, fc.n));
 		}
 		printf("pathgate: %d/%d constructed flights struck | %s\n",
 			hits, rows, hits == rows && rows > 0

@@ -71,6 +71,9 @@ namespace Air {
 		Vec3  v1;               // velocity entering the clip
 		int   flips = 0;        // strafe side changes used
 		float miss_dist = 1e9f; // closest approach to aim (diagnostics)
+		Vec3  closest;          // position at that closest approach -
+		                        // the honest residual for closed-loop
+		                        // path correction
 		int   struck_brush = -1; // on miss: what ended the flight
 		bool  grounded = false;  // on miss: landed on walkable ground
 		Vec3  end_pos;           // where the flight ended (diagnostics)

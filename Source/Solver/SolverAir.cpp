@@ -153,8 +153,10 @@ namespace Air {
 				const float dza = s.pos.Z - t.aim.Z;
 				da = sqrtf(dxa * dxa + dya * dya + dza * dza);
 			}
-			if (da < r.miss_dist)
+			if (da < r.miss_dist) {
 				r.miss_dist = da;
+				r.closest = s.pos;
+			}
 			if (ev.ncontacts > 0) {
 				// The target counts as hit whenever it is AMONG the
 				// tick's contacts (the hull near a face base clips
@@ -246,15 +248,33 @@ namespace Air {
 		if (t.have_arr && t.arr_n >= 4) {
 			Path::Plan pl = Path::Solve(entry.pos, entry.vel, t.aim,
 				t.arr_phi, t.arr_n, p, entry.ducked);
-			if (pl.ok) {
-				Result cr = FlyHeadingSpline(entry, w, p, t, g,
-					pl.heading, pl.n + 8);
-				if (cr.hit && -cr.dot <= t.dot_cap && cr.dot < 0.f) {
-					if (alts) {
-						alts->clear();
-						alts->push_back(cr);
+			// ENGINE LINE-SEARCH on psi (the trace cannot see
+			// geometry - grazes block dives and model corrections
+			// turn into the surface): a handful of real flights
+			// around the planned heading; the first cap-passing
+			// strike wins. Still ~200x cheaper than the search.
+			if (pl.end_dist < 150.f && !pl.heading.empty()) {
+				const float offs2[7] = { 0.f, 0.12f, -0.12f,
+					0.24f, -0.24f, 0.4f, -0.4f };
+				for (int att = 0; att < 7; ++att) {
+					pl.heading.clear();
+					Path::TraceTHT(entry.pos,
+						atan2f(entry.vel.Y, entry.vel.X),
+						Len2D(entry.vel), t.aim, t.arr_phi,
+						Steer::WrapPi(pl.psi + offs2[att]), pl.n,
+						p, entry.ducked, &pl.heading);
+					if (pl.heading.empty())
+						continue;
+					Result cr = FlyHeadingSpline(entry, w, p, t, g,
+						pl.heading, pl.n + 8);
+					if (cr.hit && -cr.dot <= t.dot_cap
+						&& cr.dot < 0.f) {
+						if (alts) {
+							alts->clear();
+							alts->push_back(cr);
+						}
+						return cr;
 					}
-					return cr;
 				}
 			}
 		}
