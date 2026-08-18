@@ -864,6 +864,47 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 9b, PHASE A BUILT - the witness-backed entrance
+  field laboratory; ruling received and recorded: laws become
+  EXECUTION-VERIFICATION, admission = exact witness-backed argmax
+  incl. lossy winners; the two-hold family = REALIZATION STRATEGY
+  ONLY, never the definition of H(Q) - certify only if it saturates
+  a broader reference frontier). NEW: Source/Solver/SolverEntrance
+  .h/.cpp - per (cell x vertical branch) records {H, theta*, s*, vz,
+  v_pre, v_post, cp, dot, loss2, witness, FastestTangent slot} where
+  EVERY stored H is an engine-REPLAYED post-board energy (|v_post|^2
+  + 2g*(cp.z-zmin)), never a trace value. Realization layers, each
+  measured in: (1) two-hold family sweep (psi1 x split x psi2, flip-
+  gap law honored) + within-bin refinement; (2) psi2 ENGINE LINE-
+  SEARCH per seed (trace is full-gain optimistic - flights landed
+  short; 6->34 f0 cells on landing); (3) SPLINE SECOND FAMILY -
+  bounded 5-knot searches at unverified high-promise bins + bulge
+  inits (cracked corridor f2: 0->7 cells; f3 3->14; f0 human cell
+  VERIFIED); (4) engine-side tangent walk with bisection at the
+  strike frontier; (5) bound-proposed targets (ballistic closed
+  forms propose untraced cells; QUOTA SPLIT 16 trace + 6 bound after
+  merged sorting let the loss-free bound scale evict realistic
+  targets - measured regression, fixed). Lab commands: `efield`
+  (per-event field + human-coverage row + bound sandwich + tangent
+  survey with the CASE-D DISCRIMINATOR + --witnesscheck +
+  --dwellcost; heat + winning-heading-arrow report) and `fieldexact`
+  (family-completeness gate: 5-knot reference search must fail to
+  beat production H per sampled cell). MEASURED STATE (basictest,
+  human tape events): f0 62 cells verified, human cell H 907k vs
+  their 921k (dot -113.3 vs -115.1, rank 0.95, field max 912k) -
+  14k residual gap; f0 is CASE D (closed-form min |dot| 91.1 - NO
+  tangent exists from that separation; our softest -96.3 is SOFTER
+  than the human's -115); f2 7 cells to 600k vs human 945k and f3
+  14 cells to 728k vs human 834k - CORRIDOR FAMILY GAP stands (the
+  pathgate verdict, now with exact numbers); f2 shows 4 engine-real
+  cells the Tier-0 bound calls UNREACHABLE (graze-modified
+  ballistics outside the bound's model - Tier-0 CANNOT hard-cull
+  until this is resolved); witnesscheck 83/83 replays reproduce H
+  (determinism); bound sandwich 0 over-bound everywhere. NEXT:
+  corridor realization (edge-waypoint two-segment construction as a
+  third family; tangent walk for spline strikes), f3 human-cell
+  reach, then fieldexact saturation before any Phase-B integration.
+
 - 2026-08-18 (session 9, THE OPTIMAL-BOARDING HANDOFF + efficiency
   visuals): the user delivered a formal heatmap redesign spec -
   copied to Docs/OptimalBoardingHandoff.md (design of record;

@@ -31,6 +31,7 @@
 #include "SolverPath.h"
 #include "SolverPlan.h"
 #include "SolverField.h"
+#include "SolverEntrance.h"
 #include "SolverParams.h"
 #include "SolverSearchLog.h"
 #include "SolverSmooth.h"
@@ -222,6 +223,11 @@ namespace {
 		int end_brush = -1;        // BSP id; -1 = none (no finish check)
 		std::string viz;           // search-space report path (--viz)
 		std::string csv;
+		// efield / fieldexact (the entrance-field laboratory)
+		bool  ef_dwellcost = false;   // also build the no-flip-gap variant
+		bool  ef_witnesscheck = false; // replay every stored witness
+		int   ef_cells = 6;           // fieldexact: sampled cells per event
+		float ef_grid = 32.f;
 		MoveParams params;
 		Hulls hulls;
 		// solve-only options
@@ -412,6 +418,10 @@ namespace {
 					else { printf("--clock must be zone|anchor\n"); return false; }
 				} else ok = false;
 			}
+			else if (a == "--dwellcost") o.ef_dwellcost = true;
+			else if (a == "--witnesscheck") o.ef_witnesscheck = true;
+			else if (a == "--cells") ok = next_i(&o.ef_cells);
+			else if (a == "--efgrid") ok = next_f(&o.ef_grid);
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
 		}
@@ -5770,6 +5780,662 @@ namespace {
 		return hits == rows && rows > 0 ? 0 : 1;
 	}
 
+	// ---- THE ENTRANCE-FIELD LABORATORY (Docs/OptimalBoardingHandoff
+	// .md, Phase A; ruling 2026-08-18). Shared per-flight-event
+	// extraction: replay the tape, record each long-air transfer's
+	// separation state + real contact. ----
+	struct EFEvent {
+		int tick = 0;
+		int fidx = -1;
+		PlayerState sep;
+		Vec3 cp, v1;
+	};
+
+	static bool EFReplay(const World& w, const Route::Graph& g,
+	                     const ReplayOpts& o, const Tape& tape,
+	                     std::vector<EFEvent>* events,
+	                     std::vector<Vec3>* refpts,
+	                     std::vector<float>* refspd) {
+		PlayerState s;
+		s.pos = tape.start.origin;
+		s.vel = tape.start.velocity;
+		s.ducked = tape.start.ducked;
+		s.hull_state = tape.start.ducked ? 1 : 0;
+		s.stamina = tape.start.stamina;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(s.pos,
+				s.pos - Vec3(0.f, 0.f, 2.f), s.ducked, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= o.params.walkable_z) {
+				s.pos.Z -= 2.f * gf;
+				s.on_ground = true;
+				s.ground_brush = tr.brush;
+			}
+		}
+		int air = 0;
+		PlayerState sep;
+		if (refpts) {
+			refpts->push_back(s.pos);
+			refspd->push_back(Len(s.vel));
+		}
+		for (size_t t = 0; t < tape.frames.size(); ++t) {
+			const TapeFrame& fr = tape.frames[t];
+			TickEvents ev;
+			MoveTick(s, w, o.params, fr.pitch, fr.yaw, fr.fmove,
+				fr.smove, fr.umove, fr.buttons, &ev);
+			if (refpts) {
+				refpts->push_back(s.pos);
+				refspd->push_back(Len(s.vel));
+			}
+			if (ev.ncontacts > 0) {
+				int fidx = -1;
+				for (size_t fi = 0; fi < g.faces.size(); ++fi)
+					if (g.faces[fi].brush == ev.contact_brush[0]
+						&& g.faces[fi].side == ev.contact_plane[0])
+						fidx = static_cast<int>(fi);
+				if (fidx >= 0 && air >= 8) {
+					EFEvent fe;
+					fe.tick = static_cast<int>(t);
+					fe.fidx = fidx;
+					fe.sep = sep;
+					fe.cp = ev.contact_pos[0];
+					fe.v1 = ev.contact_vel[0];
+					events->push_back(fe);
+				}
+				air = 0;
+			} else if (!s.on_ground) {
+				if (air == 0)
+					sep = s;
+				air++;
+			} else {
+				air = 0;
+			}
+		}
+		return !events->empty();
+	}
+
+	// efield: THE PHASE-A FIELD REPORT. For every flight event of the
+	// tape: build the witness-backed entrance field from the real
+	// separation state, then measure it against (1) the human's own
+	// arrival at their strike cell - the family must cover it, (2) the
+	// Tier-0 bound field - H must sit under the certified bound, and
+	// (3) the tangent survey - tangent_gap counterexamples reported,
+	// never averaged away. Writes a heat + winning-heading-arrow
+	// report. --dwellcost adds the no-flip-gap variant; --witnesscheck
+	// replays every stored witness and demands the recorded H.
+	int CmdEField(const std::string& map_path, const ReplayOpts& o,
+	              const std::string& tape_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("efield: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("efield: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<EFEvent> events;
+		std::vector<Vec3> refpts;
+		std::vector<float> refspd;
+		if (!EFReplay(w, g, o, tape, &events, &refpts, &refspd)) {
+			printf("efield: no flight events in tape\n");
+			return 1;
+		}
+		SearchLog::Sink sink;
+		sink.gravity = o.params.gravity;
+		sink.wish_rate = o.params.air_speed_cap * o.params.air_speed_cap;
+		sink.AddRef("REF " + tape.map, refpts, &refspd);
+		int red_flags = 0;
+		for (const EFEvent& fe : events) {
+			const Route::Face& fc = g.faces[fe.fidx];
+			Entrance::Opts eo;
+			eo.grid = o.ef_grid;
+			const clock_t c0 = clock();
+			Entrance::FieldMap em = Entrance::Build(fe.sep, w,
+				o.params, g, fe.fidx, eo);
+			const double ms = 1e3
+				* static_cast<double>(clock() - c0) / CLOCKS_PER_SEC;
+			if (em.face < 0 || em.cells_verified == 0) {
+				printf("efield: t%4d f%d EMPTY FIELD (traced %d, "
+					"flights %d)\n", fe.tick, fe.fidx, em.traced,
+					em.flights);
+				red_flags++;
+				continue;
+			}
+			const size_t ncell = static_cast<size_t>(em.nu)
+				* static_cast<size_t>(em.nv);
+			printf("efield: t%4d f%d | %dx%d cells | feas %d verif %d "
+				"| traces %d flights %d | H %.0fk..%.0fk | %.0f ms\n",
+				fe.tick, fe.fidx, em.nu, em.nv, em.cells_feasible,
+				em.cells_verified, em.traced, em.flights,
+				em.H_lo / 1e3f, em.H_hi / 1e3f, ms);
+			// (1) THE HUMAN COVERAGE ROW: the family must offer, at
+			// the human's own cell, at least what the human achieved.
+			{
+				const Vec3 dq = fe.cp - em.origin;
+				int iu = static_cast<int>(Dot(dq, em.ud) / em.du
+					+ 0.5f);
+				int iv = static_cast<int>(Dot(dq, em.vd) / em.dv
+					+ 0.5f);
+				if (iu < 0) iu = 0;
+				if (iu >= em.nu) iu = em.nu - 1;
+				if (iv < 0) iv = 0;
+				if (iv >= em.nv) iv = em.nv - 1;
+				const int br = fe.v1.Z > 0.f ? 1 : 0;
+				const Entrance::Rec& hr = em.rec[br][
+					static_cast<size_t>(iv) * em.nu + iu];
+				Vec3 vpost;
+				Fn::ClipVelocity(fe.v1, fc.n, &vpost);
+				const float eh = Dot(vpost, vpost)
+					+ 2.f * o.params.gravity
+					* (fe.cp.Z - fc.zmin);
+				// Percentile of the human's cell among verified.
+				int under = 0, tot = 0;
+				for (int b2 = 0; b2 < 2; ++b2)
+					for (size_t i = 0; i < ncell; ++i) {
+						const Entrance::Rec& r = em.rec[b2][i];
+						if (!r.verified)
+							continue;
+						tot++;
+						if (hr.verified && r.H <= hr.H)
+							under++;
+					}
+				if (!hr.verified) {
+					printf("efield:   HUMAN CELL (%d,%d br%d) "
+						"UNVERIFIED by the family (traced: %s) | "
+						"human E %.0fk dot %.1f <- FAMILY HOLE\n",
+						iu, iv, br, hr.feasible ? "yes" : "NO",
+						eh / 1e3f, Dot(fe.v1, fc.n));
+					red_flags++;
+				} else {
+					const bool covers = hr.H >= eh - 2000.f;
+					printf("efield:   human cell (%d,%d br%d): H "
+						"%.0fk vs human E %.0fk (dot %.1f vs their "
+						"%.1f) %s | cell rank %.2f | field max "
+						"%.0fk\n", iu, iv, br, hr.H / 1e3f,
+						eh / 1e3f, hr.dot, Dot(fe.v1, fc.n),
+						covers ? "COVERS" : "<- BELOW HUMAN "
+						"(family gap)", tot > 1
+							? static_cast<float>(under)
+								/ static_cast<float>(tot) : 1.f,
+						em.H_hi / 1e3f);
+					if (!covers)
+						red_flags++;
+				}
+			}
+			// (2) THE BOUND SANDWICH: every replayed H must sit under
+			// the Tier-0 certified bound at its cell; and a verified
+			// cell the bound calls unreachable is a false cull.
+			{
+				Field::FaceMap t0 = Field::Compute(fe.sep.pos,
+					fe.sep.vel, fc, o.params, fe.sep.ducked,
+					o.ef_grid, 300);
+				int viol = 0, false_cull = 0;
+				float worst = 0.f;
+				for (int b2 = 0; b2 < 2; ++b2)
+					for (size_t i = 0; i < ncell; ++i) {
+						const Entrance::Rec& r = em.rec[b2][i];
+						if (!r.verified)
+							continue;
+						if (i >= t0.samples.size())
+							continue;
+						const Field::Sample& sm = t0.samples[i];
+						if (!sm.reachable) {
+							false_cull++;
+							continue;
+						}
+						const float over = r.H - sm.e_eff;
+						if (over > 2000.f) {
+							viol++;
+							if (over > worst)
+								worst = over;
+						}
+					}
+				printf("efield:   bound sandwich: %d over-bound "
+					"(worst +%.0fk) | %d verified-but-bound-"
+					"unreachable%s\n", viol, worst / 1e3f,
+					false_cull, viol || false_cull
+						? " <- TIER-0 CONTRADICTION" : "");
+				if (viol || false_cull)
+					red_flags++;
+			}
+			// (3) THE TANGENT SURVEY: counterexamples, not averages.
+			{
+				float gmax = -1e30f;
+				int gi = -1, gb = 0, gcount = 0, tancells = 0;
+				for (int b2 = 0; b2 < 2; ++b2)
+					for (size_t i = 0; i < ncell; ++i) {
+						const Entrance::Rec& r = em.rec[b2][i];
+						if (!r.verified || !r.tan_ok)
+							continue;
+						tancells++;
+						const float gap = r.H - r.tan_E;
+						if (gap > 2000.f)
+							gcount++;
+						if (gap > gmax) {
+							gmax = gap;
+							gi = static_cast<int>(i);
+							gb = b2;
+						}
+					}
+				if (gi >= 0) {
+					const Entrance::Rec& r = em.rec[gb][
+						static_cast<size_t>(gi)];
+					printf("efield:   tangent survey: %d cells with "
+						"a tangent arrival | %d where lossy wins "
+						"(gap > 2k) | max gap %.0fk at (%d,%d br%d)"
+						": H %.0fk dot %.1f vs tan %.0fk dot %.1f"
+						"\n", tancells, gcount, gmax / 1e3f,
+						gi % em.nu, gi / em.nu, gb, r.H / 1e3f,
+						r.dot, r.tan_E / 1e3f, r.tan_dot);
+				} else {
+					// Case-D discriminator: softest achieved |dot|
+					// vs the closed-form minimum possible at those
+					// arrival states. min_pos ~ 0 with a hard
+					// min_ach = the walker/realization fell short;
+					// min_pos > eps = no tangent EXISTS here
+					// (handoff Case D) and the empty survey is the
+					// true answer.
+					float min_ach = 1e9f, min_pos = 1e9f;
+					for (int b2 = 0; b2 < 2; ++b2)
+						for (size_t i = 0; i < ncell; ++i) {
+							const Entrance::Rec& r =
+								em.rec[b2][i];
+							if (!r.verified)
+								continue;
+							if (-r.dot < min_ach)
+								min_ach = -r.dot;
+							const float mp =
+								Board::MinApproachDot(r.s2d,
+									r.vz, fc.n);
+							if (mp < min_pos)
+								min_pos = mp;
+						}
+					printf("efield:   tangent survey: none under "
+						"|dot| <= %.0f | softest achieved %.1f | "
+						"closed-form min possible %.1f %s\n",
+						Entrance::kTanEps, min_ach, min_pos,
+						min_pos > Entrance::kTanEps
+							? "(CASE D: no tangent exists at the "
+							  "reached arrival states)"
+							: "(tangent exists - realization "
+							  "fell short)");
+				}
+			}
+			// --witnesscheck: replay every stored witness; the
+			// recorded H must be the replayed H (determinism).
+			if (o.ef_witnesscheck) {
+				int mism = 0, checked = 0;
+				std::vector<float> prof;
+				Air::Target vt;
+				vt.face = fe.fidx;
+				vt.dot_cap = 2000.f;
+				for (int b2 = 0; b2 < 2; ++b2)
+					for (size_t i = 0; i < ncell; ++i) {
+						const Entrance::Rec& r = em.rec[b2][i];
+						if (!r.verified)
+							continue;
+						checked++;
+						int hz;
+						if (!r.knots.empty()) {
+							prof = r.knots;
+							hz = r.horizon;
+						} else {
+							Entrance::WitnessProfile(fe.sep,
+								o.params, r.psi1, r.psi2,
+								r.split, r.prof_n, &prof);
+							hz = r.prof_n + 8;
+						}
+						vt.aim = r.cp;
+						vt.max_ticks = hz;
+						Air::Result cr = Air::FlyHeadingSpline(
+							fe.sep, w, o.params, vt, g, prof,
+							hz);
+						if (!cr.hit) {
+							mism++;
+							continue;
+						}
+						const float H2 = Dot(cr.end_state.vel,
+							cr.end_state.vel) + 2.f
+							* o.params.gravity
+							* (cr.pos.Z - fc.zmin);
+						if (fabsf(H2 - r.H) > 1.f)
+							mism++;
+					}
+				printf("efield:   witnesscheck: %d/%d replays "
+					"reproduce H%s\n", checked - mism, checked,
+					mism ? " <- NONDETERMINISM" : "");
+				if (mism)
+					red_flags++;
+			}
+			// --dwellcost: the unrestricted-reversal variant.
+			if (o.ef_dwellcost) {
+				Entrance::Opts eo2 = eo;
+				eo2.dwell_free = true;
+				Entrance::FieldMap ef = Entrance::Build(fe.sep, w,
+					o.params, g, fe.fidx, eo2);
+				int improved = 0;
+				float dmax = 0.f;
+				for (int b2 = 0; b2 < 2; ++b2)
+					for (size_t i = 0; i < ncell
+						&& i < static_cast<size_t>(ef.nu)
+							* static_cast<size_t>(ef.nv); ++i) {
+						const Entrance::Rec& a = em.rec[b2][i];
+						const Entrance::Rec& b = ef.rec[b2][i];
+						if (!b.verified)
+							continue;
+						const float d = b.H - (a.verified
+							? a.H : -1e30f);
+						if (a.verified && d > 2000.f)
+							improved++;
+						if (a.verified && d > dmax)
+							dmax = d;
+					}
+				if (ef.cells_verified > 0)
+					printf("efield:   dwellcost: unrestricted "
+						"H_hi %.0fk vs %.0fk | %d cells improve "
+						"> 2k (max +%.0fk)\n", ef.H_hi / 1e3f,
+						em.H_hi / 1e3f, improved, dmax / 1e3f);
+				else
+					printf("efield:   dwellcost: unrestricted "
+						"variant verified nothing here\n");
+			}
+			// Render: heat = H (verified cells), arrows = winning
+			// terminal headings, markers at the argmax + human strike.
+			for (size_t i = 0; i < ncell; ++i) {
+				const Entrance::Rec* r = &em.rec[0][i];
+				if (em.rec[1][i].verified && (!r->verified
+					|| em.rec[1][i].H > r->H))
+					r = &em.rec[1][i];
+				if (!r->verified)
+					continue;
+				const int iu = static_cast<int>(i)
+					% em.nu;
+				const int iv = static_cast<int>(i) / em.nu;
+				const Vec3 q = em.origin
+					+ Scale(em.ud, static_cast<float>(iu) * em.du)
+					+ Scale(em.vd, static_cast<float>(iv) * em.dv);
+				const float v01 = em.H_hi > em.H_lo
+					? (r->H - em.H_lo) / (em.H_hi - em.H_lo) : 1.f;
+				const Vec3 lift = Scale(fc.n, 2.f);
+				const Vec3 c00 = q + lift
+					- Scale(em.ud, em.du * 0.5f)
+					- Scale(em.vd, em.dv * 0.5f);
+				const Vec3 c10 = c00 + Scale(em.ud, em.du);
+				const Vec3 c01 = c00 + Scale(em.vd, em.dv);
+				const Vec3 c11 = c10 + Scale(em.vd, em.dv);
+				sink.AddHeat(c00, c10, c11, v01);
+				sink.AddHeat(c00, c11, c01, v01);
+				// The winning-heading arrow (in-plane projection).
+				Vec3 dir(cosf(r->theta), sinf(r->theta), 0.f);
+				dir = dir - Scale(fc.n, Dot(dir, fc.n));
+				const float dl = Len(dir);
+				if (dl > 1e-3f) {
+					dir = Scale(dir, 1.f / dl);
+					const Vec3 a = q + Scale(fc.n, 4.f);
+					const Vec3 tip = a + Scale(dir, em.du * 0.85f);
+					const Vec3 side = Cross(fc.n, dir);
+					std::vector<Vec3> arrow;
+					arrow.push_back(a);
+					arrow.push_back(tip);
+					arrow.push_back(tip - Scale(dir, em.du * 0.3f)
+						+ Scale(side, em.du * 0.18f));
+					arrow.push_back(tip);
+					arrow.push_back(tip - Scale(dir, em.du * 0.3f)
+						- Scale(side, em.du * 0.18f));
+					char nm[48];
+					snprintf(nm, sizeof(nm), "EF arrows f%d",
+						fe.fidx);
+					sink.AddRef(nm, arrow);
+				}
+			}
+			{
+				std::vector<Vec3> cross;
+				cross.push_back(fe.cp + Vec3(-16.f, 0.f, 0.f));
+				cross.push_back(fe.cp + Vec3(16.f, 0.f, 0.f));
+				cross.push_back(fe.cp);
+				cross.push_back(fe.cp + Vec3(0.f, -16.f, 0.f));
+				cross.push_back(fe.cp + Vec3(0.f, 16.f, 0.f));
+				sink.AddRef("human strikes", cross);
+			}
+		}
+		CreateDirectoryA("Output", nullptr);
+		CreateDirectoryA("Output\\reports", nullptr);
+		time_t now = time(nullptr);
+		struct tm tmv;
+		localtime_s(&tmv, &now);
+		char st[64];
+		strftime(st, sizeof(st), "%m%d-%H%M%S", &tmv);
+		const std::string vp = std::string("Output\\reports\\efield_")
+			+ st + ".html";
+		std::string verr;
+		if (SearchLog::WriteHtml(vp, w, g, sink,
+			"entrance field (witness-backed)", &verr))
+			printf("efield: report -> %s\n", vp.c_str());
+		else
+			printf("efield: VIZ WRITE FAILED: %s\n", verr.c_str());
+		printf("efield: %d red flags | %s\n", red_flags,
+			red_flags == 0 ? "CLEAN" : "FINDINGS ABOVE");
+		fflush(stdout);
+		return 0;
+	}
+
+	// fieldexact: THE FAMILY-COMPLETENESS GATE (the ruling's added
+	// requirement). H(Q) is defined over ALL admissible controls; the
+	// production family is certified only if a BROADER reference
+	// search (5-knot heading splines - multi-turn curves the two-hold
+	// family cannot express) fails to beat it. Reference flights are
+	// engine flights; scores are replayed post-board energies.
+	int CmdFieldExact(const std::string& map_path, const ReplayOpts& o,
+	                  const std::string& tape_path) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("fieldexact: %s\n", err.c_str());
+			return 1;
+		}
+		Tape tape;
+		if (!LoadTas(tape_path, tape, &err)) {
+			printf("fieldexact: %s\n", err.c_str());
+			return 1;
+		}
+		std::vector<EFEvent> events;
+		if (!EFReplay(w, g, o, tape, &events, nullptr, nullptr)) {
+			printf("fieldexact: no flight events in tape\n");
+			return 1;
+		}
+		float worst_gap = 0.f;
+		int rows = 0, sat = 0;
+		for (const EFEvent& fe : events) {
+			const Route::Face& fc = g.faces[fe.fidx];
+			Entrance::Opts eo;
+			eo.grid = o.ef_grid;
+			Entrance::FieldMap em = Entrance::Build(fe.sep, w,
+				o.params, g, fe.fidx, eo);
+			if (em.cells_verified == 0)
+				continue;
+			const size_t ncell = static_cast<size_t>(em.nu)
+				* static_cast<size_t>(em.nv);
+			// Sample: top cells by H + an even spread.
+			struct CellRef { int br; int idx; float H; };
+			std::vector<CellRef> verified;
+			for (int b2 = 0; b2 < 2; ++b2)
+				for (size_t i = 0; i < ncell; ++i)
+					if (em.rec[b2][i].verified)
+						verified.push_back({ b2,
+							static_cast<int>(i),
+							em.rec[b2][i].H });
+			std::sort(verified.begin(), verified.end(),
+				[](const CellRef& a, const CellRef& b) {
+					return a.H > b.H;
+				});
+			std::vector<CellRef> picks;
+			const int k = o.ef_cells;
+			for (int i = 0; i < k / 2
+				&& i < static_cast<int>(verified.size()); ++i)
+				picks.push_back(verified[i]);
+			if (verified.size() > static_cast<size_t>(k / 2)) {
+				const size_t rest = verified.size() - k / 2;
+				const size_t step = rest / (k - k / 2) + 1;
+				for (size_t i = k / 2; i < verified.size()
+					&& static_cast<int>(picks.size()) < k;
+					i += step)
+					picks.push_back(verified[i]);
+			}
+			for (const CellRef& cref : picks) {
+				const Entrance::Rec& r = em.rec[cref.br][
+					static_cast<size_t>(cref.idx)];
+				const int iu = cref.idx % em.nu;
+				const int iv = cref.idx / em.nu;
+				const Vec3 q = em.origin
+					+ Scale(em.ud, static_cast<float>(iu) * em.du)
+					+ Scale(em.vd, static_cast<float>(iv) * em.dv);
+				// ---- The broader reference: 5-knot spline pattern
+				// search on the exact engine, maximizing replayed
+				// post-board energy for strikes near this cell. ----
+				const int kn = 5;
+				const int horizon = r.prof_n + 20;
+				Air::Target rt;
+				rt.face = fe.fidx;
+				rt.aim = q;
+				rt.dot_cap = 2000.f;
+				rt.max_ticks = horizon;
+				std::vector<float> wit;
+				Entrance::WitnessProfile(fe.sep, o.params, r.psi1,
+					r.psi2, r.split, r.prof_n, &wit);
+				auto knots_from = [&](float f0, float f1, float f2,
+					float f3, float f4) {
+					std::vector<float> ks(kn);
+					ks[0] = f0; ks[1] = f1; ks[2] = f2;
+					ks[3] = f3; ks[4] = f4;
+					return ks;
+				};
+				std::vector<std::vector<float>> inits;
+				if (!wit.empty()) {
+					std::vector<float> ks(kn);
+					for (int i = 0; i < kn; ++i)
+						ks[i] = wit[static_cast<size_t>(i)
+							* (wit.size() - 1) / (kn - 1)];
+					inits.push_back(ks);
+					for (int i = 0; i < kn; ++i)
+						ks[i] = Steer::WrapPi(ks[i] + 0.2f);
+					inits.push_back(ks);
+					for (int i = 0; i < kn; ++i)
+						ks[i] = Steer::WrapPi(ks[i] - 0.4f);
+					inits.push_back(ks);
+				}
+				const float bear = atan2f(q.Y - fe.sep.pos.Y,
+					q.X - fe.sep.pos.X);
+				inits.push_back(knots_from(bear, bear, bear, bear,
+					bear));
+				inits.push_back(knots_from(bear, bear,
+					Steer::WrapPi((bear + r.theta) * 0.5f),
+					r.theta, r.theta));
+				int flights = 0;
+				float H_ref = -1e30f, ref_dot = 0.f;
+				auto eval = [&](const std::vector<float>& ks) {
+					flights++;
+					Air::Result ar = Air::FlyHeadingSpline(fe.sep,
+						w, o.params, rt, g, ks, horizon);
+					if (ar.hit && ar.dot < 0.f
+						&& Len(ar.pos - q) <= eo.grid * 0.9f) {
+						const float H2 = Dot(ar.end_state.vel,
+							ar.end_state.vel) + 2.f
+							* o.params.gravity
+							* (ar.pos.Z - fc.zmin);
+						if (H2 > H_ref) {
+							H_ref = H2;
+							ref_dot = ar.dot;
+						}
+						return 1e7f + H2;
+					}
+					return -(ar.hit ? Len(ar.pos - q)
+						: ar.miss_dist);
+				};
+				for (std::vector<float>& ks : inits) {
+					float cur = eval(ks);
+					const float steps[3] = { 0.3f, 0.12f, 0.05f };
+					for (int rd = 0; rd < 3; ++rd) {
+						bool moved = true;
+						int sweeps = 0;
+						while (moved && sweeps++ < 5
+							&& flights < 700) {
+							moved = false;
+							for (int ki = 0; ki < kn; ++ki) {
+								for (int sgn = -1; sgn <= 1;
+									sgn += 2) {
+									std::vector<float> t2 = ks;
+									t2[ki] = Steer::WrapPi(t2[ki]
+										+ steps[rd]
+										* static_cast<float>(sgn));
+									const float sc = eval(t2);
+									if (sc > cur) {
+										cur = sc;
+										ks = t2;
+										moved = true;
+									}
+								}
+							}
+						}
+					}
+				}
+				rows++;
+				const float gap = H_ref > -1e29f
+					? H_ref - r.H : -1e30f;
+				const char* verdict;
+				if (H_ref < -1e29f)
+					verdict = "REF NO STRIKE (production stands)";
+				else if (gap > 2000.f)
+					verdict = "<- FAMILY GAP";
+				else if (gap < -2000.f)
+					verdict = "REF SHORT (production stands)";
+				else
+					verdict = "SATURATED";
+				if (gap <= 2000.f)
+					sat++;
+				if (gap > worst_gap)
+					worst_gap = gap;
+				printf("fieldexact: t%4d f%d cell (%d,%d br%d) | "
+					"H_prod %.0fk (dot %.1f) vs H_ref %s (dot "
+					"%.1f) | gap %s | %d flights | %s\n",
+					fe.tick, fe.fidx, iu, iv, cref.br,
+					r.H / 1e3f, r.dot,
+					H_ref > -1e29f
+						? (std::to_string(static_cast<int>(
+							H_ref / 1e3f)) + "k").c_str()
+						: "none",
+					ref_dot,
+					H_ref > -1e29f
+						? (std::to_string(static_cast<int>(
+							gap)).c_str())
+						: "n/a",
+					flights, verdict);
+			}
+		}
+		printf("fieldexact: %d/%d cells saturated | worst family gap "
+			"%.0f | %s\n", sat, rows, worst_gap,
+			rows > 0 && sat == rows
+				? "FAMILY HOLDS THE FRONTIER (so far)"
+				: "FAMILY GAPS FOUND - do not certify");
+		fflush(stdout);
+		return rows > 0 && sat == rows ? 0 : 1;
+	}
+
 	// facecover: THE M0.4 ACCEPTANCE GATE (Docs/SolverRebuildChecklist.md).
 	// Replay certified tapes through the exact sim, collect every SURF
 	// contact (contacted plane normal.z < walkable), and verify each
@@ -8523,6 +9189,18 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, i, o))
 			return 1;
 		return CmdFieldGate(argv[2], o, tapes);
+	}
+	if (cmd == "efield" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdEField(argv[2], o, argv[3]);
+	}
+	if (cmd == "fieldexact" && argc >= 4) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 4, o))
+			return 1;
+		return CmdFieldExact(argv[2], o, argv[3]);
 	}
 	if (cmd == "msolve2" && argc >= 4) {
 		ReplayOpts o;

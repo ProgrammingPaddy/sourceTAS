@@ -51,6 +51,7 @@
     <ClCompile Include="Source\Solver\SolverAir.cpp" />
     <ClCompile Include="Source\Solver\SolverAssemble.cpp" />
     <ClCompile Include="Source\Solver\SolverPlan.cpp" />
+    <ClCompile Include="Source\Solver\SolverEntrance.cpp" />
     <ClCompile Include="Source\Solver\SolverCarve.cpp" />
     <ClCompile Include="Source\Solver\SolverLedger.cpp" />
     <ClCompile Include="Source\Solver\SolverMove.cpp" />
