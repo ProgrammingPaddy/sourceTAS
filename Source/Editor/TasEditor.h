@@ -61,6 +61,11 @@ namespace TasEditor {
 	void NotePlaybackTick(int index);
 	bool DivergencePoint(Vector* p);
 
+	// Map Solve: real-playback capture. The hook stashes each replayed cmd's
+	// inputs so the NEXT tick's captured row (the state that cmd produced)
+	// carries them; rows export as the solver diff's ground-truth CSV.
+	void NotePlaybackInputs(int buttons, float yaw);
+
 	// Snapshot of everything WorldDraw needs to render the run line.
 	struct DrawData {
 		const Prediction::SimState* states;   // per-tick world states
@@ -104,4 +109,15 @@ namespace TasEditor {
 	// Record a fault caught by an OUTSIDE guard (hook-level SEH around Update/
 	// WorldDraw): writes the where+code to the status line and solver_fault.log.
 	void NoteExternalFault(const char* where, int code);
+
+	// THREAD MARSHAL for engine commands (crash fix 2026-08-16): with
+	// multicore rendering on, EndScene (where all UI runs) is NOT the game
+	// thread - the breadcrumb journal proved it (EndScene thr != CreateMove
+	// thr). Small commands survived that; CONNECTION TRANSITIONS (playdemo,
+	// disconnect, map loads) issued from the render thread deadlock the
+	// engine - the whole "frozen game, no crash report" family. Rule: hooks
+	// and UI PUSH commands; the CreateMove hook (game thread) DRAINS them.
+	void PushEngineCmd(const char* cmd);
+	void DrainEngineCmds();   // call ONLY from the main/game thread
+	void ClearEngineCmds();   // drop pending commands (abort paths)
 }

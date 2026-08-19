@@ -26,11 +26,62 @@ namespace Prediction {
 		Vector origin;     // feet origin after the tick
 		Vector velocity;   // velocity after the tick
 		int    flags;      // player m_fFlags after the tick (FL_ONGROUND etc.)
+		// DIRECT READS (user directive 2026-08-14: no guessing - the hooked
+		// engine is queryable): the collision hull top the engine actually
+		// carries after the tick (CCollisionProperty m_vecMaxs.z; -1 if the
+		// netvar is unresolved), and the two CMoveData float candidates for
+		// m_flMaxSpeed read right after ProcessMovement - exported raw so
+		// the capture itself identifies the field, no layout inference.
+		float  hull_top = -1.f;
+		float  mspd_a = -1.f;      // movedata +0x3C
+		float  mspd_b = -1.f;      // movedata +0x40
+		// The engine's OWN m_flStamina after the tick (-1 if unresolved):
+		// makes the stamina laws per-tick observable instead of inferred -
+		// any model drift is caught at its birth tick with the true value.
+		float  stamina_ms = -1.f;
 	};
 
 	// Fills `out` with the input for `tick`, given the simulated state after the
 	// previous tick. Runs on the game thread inside the sim; must be pure math.
 	using SimFrameFn = void(*)(int tick, const SimState& prev, Frame* out);
+
+	// ---- FUNCTION-LEVEL DIFFERENTIAL FUZZ (user directive 2026-08-15:
+	// "we have literally hooked into the exact functions... Input and output
+	// values being in perfect parity matter, the cause of those values
+	// doesn't, because if we have a 1-to-1 system, any arbitrary input will
+	// be handled identically").
+	//
+	// Each probe is an ARBITRARY player state + K ticks of arbitrary input,
+	// driven straight through the real SetupMove -> ProcessMovement ->
+	// FinishMove with the whole player restored byte-for-byte afterward.
+	// Every field that can affect or record a tick is an explicit input or
+	// output - no scenario, no map authoring, no reachability assumptions.
+	// QUEUES the batch (execution runs inside the FinishMove hook, where the
+	// movement context is valid - driving it from the UI thread faults every
+	// probe). Returns probes queued, or -1 if unavailable. Results are
+	// written when the last chunk completes.
+	int RunFuzz(const char* probe_path, const char* out_path);
+	bool FuzzBusy();
+	// Returns probes processed; fills total and the count that ran cleanly.
+	int FuzzProgress(int* total, int* ok);
+
+	// ---- FUNCPROBE: per-function isolation --------------------------------
+	// The whole-tick fuzz can only prove that a COMPOSITION of ~25 functions
+	// diverged; it can never say which one. FUNCPROBE calls ONE engine
+	// function at a time, by RVA, with state we write directly into the
+	// CGameMovement context (this->player at +0x08, this->mv at +0x10 -
+	// both confirmed in situ by disassembling CategorizePosition @0x1174f0,
+	// which reads [rcx+8] for the player and [rsi+0x10] for the movedata).
+	//
+	// Every pin is verified each run: a game update that moves an RVA or a
+	// member offset must ABORT, never silently answer with garbage.
+	int RunFuncProbe(const char* pin_path, const char* probe_path,
+	                 const char* out_path);
+	bool FuncProbeBusy();
+	int FuncProbeProgress(int* total, int* ok);
+	// Gate result: 1 = this->player/mv offsets confirmed against the live
+	// hook, 0 = MISMATCH (batch refuses to run), -1 = not yet observed.
+	int FuncProbeCtxGate();
 
 	// Resolve interfaces and install the FinishMove hook (from basehook_init).
 	void Install();
@@ -64,6 +115,10 @@ namespace Prediction {
 	// origin in the menu to verify both draw paths share one basis (read it
 	// standing still - in motion they differ by one tick of movement).
 	bool LastRealMoveOrigin(Vector& out);
+
+	// m_flMaxSpeed of the newest real command (weapon-dependent: knife 250,
+	// NO weapon 260 - the surf standard). Read, never assumed.
+	bool LastRealMaxSpeed(float* out);
 
 	// The engine's live gpGlobals->curtime (pinned RVA; see Prediction.cpp).
 	// Frozen while the game is paused - overlay submission keys off it, since

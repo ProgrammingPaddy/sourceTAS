@@ -4,6 +4,7 @@
 #include "../Menu/Breadcrumb.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -71,6 +72,7 @@ namespace {
 	// Origin of the newest REAL command's movedata (basis diagnostic: lets the
 	// menu compare the movement pipeline's origin against the netvar origin).
 	Vector g_real_move_origin;
+	float  g_real_maxspeed = 0.f;
 	bool   g_real_move_valid = false;
 	int    g_pred_flags = 0;          // player m_fFlags after the newest
 	bool   g_pred_flags_valid = false;// first-time-predicted command
@@ -111,6 +113,13 @@ namespace {
 		int stamina = 0, ducked = 0, ducking = 0, ducktime = 0;
 		int mins = 0, maxs = 0;
 		int gravity = 0, basevel = 0;
+		// THE ground truth, literally: SetGroundEntity writes this handle.
+		// FL_ONGROUND lags it on the client - measured twice now (the engine
+		// jumped from a state whose flag read airborne, and an isolated
+		// CategorizePosition set ground on 0 of 72 states the engine itself
+		// had recorded as grounded while the handle was the only thing it
+		// actually wrote).
+		int groundent = 0;
 		bool init = false;
 	} g_off;
 
@@ -138,6 +147,9 @@ namespace {
 		g_off.basevel    = NetVars::Offset("DT_CSPlayer", "m_vecBaseVelocity");
 		if (!g_off.basevel)
 			g_off.basevel = NetVars::Offset("DT_BasePlayer", "m_vecBaseVelocity");
+		g_off.groundent  = NetVars::Offset("DT_CSPlayer", "m_hGroundEntity");
+		if (!g_off.groundent)
+			g_off.groundent = NetVars::Offset("DT_BasePlayer", "m_hGroundEntity");
 		g_off.init = true;
 	}
 
@@ -288,6 +300,364 @@ namespace {
 
 	// --- editor simulation (Phase 2) ------------------------------------------
 	// Same pipeline, but the start state is teleported to an absolute anchor and
+	// ---- FUNCTION-LEVEL DIFFERENTIAL FUZZ ---------------------------------
+	// m_surfaceFriction on the CLIENT player (binary-decoded 2026-08-15:
+	// client.dll @0011adb4 / @0011fb81 - movss [player+0x1868] then mulss by
+	// sv_friction's parent value, the same Friction signature that pinned the
+	// server's +0x36C). Not a netvar, so it needs the literal offset; it is
+	// an explicit fuzz input AND output so the friction rule is measured, not
+	// assumed.
+	constexpr int kSurfFricOff = 0x1868;
+	// Tick 0 is a SETTLE tick: its output is the engine's own fully-derived
+	// state (real ground entity, re-derived duck state, real surface
+	// friction) and becomes the seed BOTH sides start from. Measured
+	// 2026-08-15: writing FL_ONGROUND does NOT ground the player (ground is
+	// m_hGroundEntity, a handle - 96% of "grounded" probes were airborne),
+	// and the engine re-derives duck state on a third of probes. Asserting
+	// an initial state was the harness lying; ticks 1..K are the test.
+	constexpr int kFuzzTicks = 5;
+
+	struct FuzzProbeIn {
+		float ox, oy, oz, vx, vy, vz, bx, by, bz;
+		int   onground, ducked, ducking;
+		float ducktime, stamina, gravity, sfric;
+		float hullmin_z, hullmax_z, hull_xy;
+		float yaw[kFuzzTicks], fmove[kFuzzTicks], smove[kFuzzTicks];
+		int   buttons[kFuzzTicks];
+	};
+	struct FuzzTickOut {
+		float ox, oy, oz, vx, vy, vz, bx, by, bz;
+		int   flags, ducked, ducking;
+		float ducktime, stamina, sfric, maxz;
+		int   ok;
+	};
+
+	// ONE probe, POD-only so SEH can wrap it: write the arbitrary state, run
+	// kFuzzTicks of engine movement, record every output field per tick, then
+	// restore the player. A faulting probe is marked and the batch continues.
+	int RunOneFuzzProbeSEH(void* player, const FuzzProbeIn* in,
+	                       FuzzTickOut* out) {
+		__try {
+			if (!BeginStateGuard(player))
+				return 0;
+			char* pb = reinterpret_cast<char*>(player);
+			if (g_off.origin)
+				*reinterpret_cast<Vector*>(pb + g_off.origin) =
+					Vector(in->ox, in->oy, in->oz);
+			if (g_off.velocity)
+				*reinterpret_cast<Vector*>(pb + g_off.velocity) =
+					Vector(in->vx, in->vy, in->vz);
+			if (g_off.basevel)
+				*reinterpret_cast<Vector*>(pb + g_off.basevel) =
+					Vector(in->bx, in->by, in->bz);
+			if (g_off.flags) {
+				int fl = *reinterpret_cast<int*>(pb + g_off.flags);
+				fl = in->onground ? (fl | FL_ONGROUND) : (fl & ~FL_ONGROUND);
+				fl = in->ducked ? (fl | FL_DUCKING) : (fl & ~FL_DUCKING);
+				if (in->bx != 0.f || in->by != 0.f || in->bz != 0.f)
+					fl |= FL_BASEVELOCITY;
+				else
+					fl &= ~FL_BASEVELOCITY;
+				*reinterpret_cast<int*>(pb + g_off.flags) = fl;
+			}
+			if (g_off.ducked)   *reinterpret_cast<bool*>(pb + g_off.ducked) = in->ducked != 0;
+			if (g_off.ducking)  *reinterpret_cast<bool*>(pb + g_off.ducking) = in->ducking != 0;
+			if (g_off.ducktime) *reinterpret_cast<float*>(pb + g_off.ducktime) = in->ducktime;
+			if (g_off.stamina)  *reinterpret_cast<float*>(pb + g_off.stamina) = in->stamina;
+			if (g_off.gravity)  *reinterpret_cast<float*>(pb + g_off.gravity) = in->gravity;
+			*reinterpret_cast<float*>(pb + kSurfFricOff) = in->sfric;
+			if (g_off.mins)
+				*reinterpret_cast<Vector*>(pb + g_off.mins) =
+					Vector(-in->hull_xy, -in->hull_xy, in->hullmin_z);
+			if (g_off.maxs)
+				*reinterpret_cast<Vector*>(pb + g_off.maxs) =
+					Vector(in->hull_xy, in->hull_xy, in->hullmax_z);
+
+			alignas(16) unsigned char cmdbuf[sizeof(CUserCmd)];
+			CUserCmd* cmd = reinterpret_cast<CUserCmd*>(cmdbuf);
+			unsigned char movebuf[kMoveDataBufSize];
+
+			for (int t = 0; t < kFuzzTicks; ++t) {
+				memset(cmdbuf, 0, sizeof(cmdbuf));
+				memset(movebuf, 0, sizeof(movebuf));
+				cmd->command_number = t + 1;
+				cmd->tick_count     = t + 1;
+				cmd->viewangles     = QAngle(0.f, in->yaw[t], 0.f);
+				cmd->forwardmove    = in->fmove[t];
+				cmd->sidemove       = in->smove[t];
+				cmd->upmove         = 0.f;
+				cmd->buttons        = in->buttons[t];
+
+				CallV<kSetupMoveIdx>(g_pred, player, cmd, g_helper, movebuf);
+				if (t == 0) {
+					// SetupMove copies ABS velocity/origin; seed the movedata
+					// directly so the probe's exact state is what moves.
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff) =
+						Vector(in->vx, in->vy, in->vz);
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff) =
+						Vector(in->ox, in->oy, in->oz);
+				}
+				CallV<kProcessMovementIdx>(g_gm, player, movebuf);
+				g_orig_finishmove(g_pred, player, cmd, movebuf);
+				*s_p_curtime += g_interval;
+
+				FuzzTickOut& o = out[t];
+				const Vector& mo = *reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff);
+				const Vector& mv = *reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff);
+				o.ox = mo.X; o.oy = mo.Y; o.oz = mo.Z;
+				o.vx = mv.X; o.vy = mv.Y; o.vz = mv.Z;
+				o.flags   = g_off.flags ? *reinterpret_cast<int*>(pb + g_off.flags) : 0;
+				o.ducked  = g_off.ducked ? (*reinterpret_cast<bool*>(pb + g_off.ducked) ? 1 : 0) : 0;
+				o.ducking = g_off.ducking ? (*reinterpret_cast<bool*>(pb + g_off.ducking) ? 1 : 0) : 0;
+				o.ducktime = g_off.ducktime ? *reinterpret_cast<float*>(pb + g_off.ducktime) : 0.f;
+				o.stamina  = g_off.stamina ? *reinterpret_cast<float*>(pb + g_off.stamina) : 0.f;
+				o.sfric    = *reinterpret_cast<float*>(pb + kSurfFricOff);
+				o.maxz     = g_off.maxs ? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
+				const Vector bvv = g_off.basevel
+					? *reinterpret_cast<Vector*>(pb + g_off.basevel) : Vector(0.f, 0.f, 0.f);
+				o.bx = bvv.X; o.by = bvv.Y; o.bz = bvv.Z;
+				o.ok = 1;
+			}
+			EndStateGuard();
+			return 1;
+		}
+		__except (FaultFilter(GetExceptionInformation())) {
+			if (s_restore_ready)
+				EndStateGuard();
+			return 0;
+		}
+	}
+
+	// ---- FUNCPROBE ---------------------------------------------------------
+	// CGameMovement member offsets, confirmed by disassembly (client.dll
+	// CategorizePosition @0x1174f0): "mov rax,[rcx+8]" -> player, and
+	// "mov rax,[rsi+0x10]" -> mv. The latch below re-proves both every run
+	// against pointers the live hook already knows, so an update that moves
+	// them fails closed instead of answering with garbage.
+	constexpr int kGmPlayerOff = 0x08;
+	constexpr int kGmMvOff     = 0x10;
+	int g_gm_ctx_gate = -1;   // -1 unknown, 1 verified, 0 mismatch
+
+	// Supported call shapes. Every CGameMovement method we pin takes only
+	// `this` in RCX; the difference is whether it returns a value.
+	enum FuncAbi { kAbiVoidThis = 0, kAbiIntThis = 1 };
+
+	struct FuncPin {
+		char name[48];
+		unsigned rva;
+		int abi;
+		// Optional PRELUDE: a function called first, on the same context, to
+		// establish state we cannot write directly. CheckJumpButton returns
+		// immediately unless the player has a ground ENTITY, and a valid
+		// EHANDLE cannot be synthesised for an arbitrary probe - so
+		// CategorizePosition (already proven 99.99% in isolation) is called
+		// first to derive ground from geometry. The prelude is part of the
+		// declared input, not a hidden fixup.
+		unsigned prelude_rva;
+	};
+	struct FuncProbeIn {
+		int pin;                     // index into pins
+		float ox, oy, oz, vx, vy, vz, bx, by, bz;
+		int   onground, ducked, ducking, buttons;
+		float ducktime, stamina, sfric, gravity, hullmax_z, yaw, fmove, smove;
+		int   oldbuttons;            // v2: mv->m_nOldButtons is a REAL input
+		                             // (Duck's press/release edges live in
+		                             // old ^ new), so it is declared per
+		                             // probe, not blanket-zeroed.
+	};
+	struct FuncProbeOut {
+		float ox, oy, oz, vx, vy, vz;
+		int   flags, ducked, ducking, ret;
+		float ducktime, stamina, sfric, maxz;
+		int   groundent;   // raw m_hGroundEntity handle: -1/0xFFFFFFFF = none
+		float fwd, side;   // v2: mv fwd/side after the call - the 0.34
+		                   // HandleDuckingSpeedCrop is observable here
+		int   ok;
+	};
+
+	std::vector<FuncPin>      s_fp_pins;
+	std::vector<FuncProbeIn>  s_fp_probes;
+	std::vector<FuncProbeOut> s_fp_outs;
+	std::string s_fp_out_path;
+	volatile int s_fp_pending = 0;
+	int s_fp_next = 0;
+	int s_fp_ok = 0;
+
+	// One isolated call: install our state into the movedata + player, point
+	// the CGameMovement context at them, invoke the pinned function, read
+	// every observable back. POD-only so SEH can wrap it.
+	int RunOneFuncProbeSEH(void* player, const FuncPin* pin,
+	                       const FuncProbeIn* in, FuncProbeOut* out) {
+		__try {
+			if (!BeginStateGuard(player))
+				return 0;
+			char* pb = reinterpret_cast<char*>(player);
+			char* gm = reinterpret_cast<char*>(g_gm);
+
+			// Player-side inputs.
+			if (g_off.origin)
+				*reinterpret_cast<Vector*>(pb + g_off.origin) = Vector(in->ox, in->oy, in->oz);
+			if (g_off.velocity)
+				*reinterpret_cast<Vector*>(pb + g_off.velocity) = Vector(in->vx, in->vy, in->vz);
+			if (g_off.basevel)
+				*reinterpret_cast<Vector*>(pb + g_off.basevel) = Vector(in->bx, in->by, in->bz);
+			if (g_off.flags) {
+				int fl = *reinterpret_cast<int*>(pb + g_off.flags);
+				fl = in->onground ? (fl | FL_ONGROUND) : (fl & ~FL_ONGROUND);
+				fl = in->ducked ? (fl | FL_DUCKING) : (fl & ~FL_DUCKING);
+				*reinterpret_cast<int*>(pb + g_off.flags) = fl;
+			}
+			if (g_off.ducked)   *reinterpret_cast<bool*>(pb + g_off.ducked) = in->ducked != 0;
+			if (g_off.ducking)  *reinterpret_cast<bool*>(pb + g_off.ducking) = in->ducking != 0;
+			if (g_off.ducktime) *reinterpret_cast<float*>(pb + g_off.ducktime) = in->ducktime;
+			if (g_off.stamina)  *reinterpret_cast<float*>(pb + g_off.stamina) = in->stamina;
+			if (g_off.gravity)  *reinterpret_cast<float*>(pb + g_off.gravity) = in->gravity;
+			*reinterpret_cast<float*>(pb + kSurfFricOff) = in->sfric;
+			// GROUND INPUT: always cleared to "none". Writing FL_ONGROUND is
+			// a no-op (the flag is a shadow of m_hGroundEntity, measured: an
+			// isolated call set the flag on 0 of 72 known-grounded states),
+			// and there is no honest way to synthesise a VALID EHANDLE for
+			// an arbitrary probe. So every probe starts ungrounded and the
+			// function's job is to SET ground from geometry; the differ
+			// seeds our model the same way.
+			if (g_off.groundent)
+				*reinterpret_cast<int*>(pb + g_off.groundent) = -1;
+			if (g_off.mins)
+				*reinterpret_cast<Vector*>(pb + g_off.mins) = Vector(-16.f, -16.f, 0.f);
+			if (g_off.maxs)
+				*reinterpret_cast<Vector*>(pb + g_off.maxs) = Vector(16.f, 16.f, in->hullmax_z);
+
+			// Movedata: build a real one through SetupMove, then overwrite
+			// the fields under test so the function sees exactly our input.
+			alignas(16) unsigned char cmdbuf[sizeof(CUserCmd)];
+			CUserCmd* cmd = reinterpret_cast<CUserCmd*>(cmdbuf);
+			unsigned char movebuf[kMoveDataBufSize];
+			memset(cmdbuf, 0, sizeof(cmdbuf));
+			memset(movebuf, 0, sizeof(movebuf));
+			cmd->command_number = 1;
+			cmd->tick_count     = 1;
+			cmd->viewangles     = QAngle(0.f, in->yaw, 0.f);
+			cmd->forwardmove    = in->fmove;
+			cmd->sidemove       = in->smove;
+			cmd->buttons        = in->buttons;
+			CallV<kSetupMoveIdx>(g_pred, player, cmd, g_helper, movebuf);
+			*reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff) =
+				Vector(in->ox, in->oy, in->oz);
+			*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff) =
+				Vector(in->vx, in->vy, in->vz);
+			// m_nOldButtons (+0x28) is a DECLARED probe input (v2): Duck's
+			// press/release edges are computed from old ^ new, so the value
+			// comes from the probe row instead of leaking in from whatever
+			// the live player was pressing via SetupMove.
+			*reinterpret_cast<int*>(movebuf + 0x28) = in->oldbuttons;
+			// GAME-MOVEMENT-OBJECT state the duck family consumes, zeroed
+			// per probe as declared inputs (both confirmed by disassembly):
+			//   gm+0xed8  Duck's curtime-gate timestamp (a stale value from
+			//             a previous probe could force-clear IN_DUCK);
+			//   gm+0xcc4  m_iSpeedCropped bit (set = HandleDuckingSpeedCrop
+			//             refuses to crop again this "tick").
+			*reinterpret_cast<float*>(gm + 0xED8) = 0.f;
+			*reinterpret_cast<int*>(gm + 0xCC4) = 0;
+
+			// Point the movement context at our player + movedata, call the
+			// isolated function, then put the context back exactly.
+			void* save_player = *reinterpret_cast<void**>(gm + kGmPlayerOff);
+			void* save_mv     = *reinterpret_cast<void**>(gm + kGmMvOff);
+			*reinterpret_cast<void**>(gm + kGmPlayerOff) = player;
+			*reinterpret_cast<void**>(gm + kGmMvOff)     = movebuf;
+
+			int ret = 0;
+			if (pin->prelude_rva)
+				reinterpret_cast<void(*)(void*)>(
+					g_client_base + pin->prelude_rva)(g_gm);
+			const uintptr_t fn = g_client_base + pin->rva;
+			if (pin->abi == kAbiIntThis)
+				// bool returns set AL only (xor al,al / mov al,1); the rest
+				// of EAX is garbage. Keep the exact byte.
+				ret = reinterpret_cast<int(*)(void*)>(fn)(g_gm) & 0xff;
+			else
+				reinterpret_cast<void(*)(void*)>(fn)(g_gm);
+
+			*reinterpret_cast<void**>(gm + kGmPlayerOff) = save_player;
+			*reinterpret_cast<void**>(gm + kGmMvOff)     = save_mv;
+
+			const Vector& mo = *reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff);
+			const Vector& mvv = *reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff);
+			out->ox = mo.X; out->oy = mo.Y; out->oz = mo.Z;
+			out->vx = mvv.X; out->vy = mvv.Y; out->vz = mvv.Z;
+			out->flags    = g_off.flags ? *reinterpret_cast<int*>(pb + g_off.flags) : 0;
+			out->ducked   = g_off.ducked ? (*reinterpret_cast<bool*>(pb + g_off.ducked) ? 1 : 0) : 0;
+			out->ducking  = g_off.ducking ? (*reinterpret_cast<bool*>(pb + g_off.ducking) ? 1 : 0) : 0;
+			out->ducktime = g_off.ducktime ? *reinterpret_cast<float*>(pb + g_off.ducktime) : 0.f;
+			out->stamina  = g_off.stamina ? *reinterpret_cast<float*>(pb + g_off.stamina) : 0.f;
+			out->sfric    = *reinterpret_cast<float*>(pb + kSurfFricOff);
+			out->maxz     = g_off.maxs ? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
+			out->groundent = g_off.groundent
+				? *reinterpret_cast<int*>(pb + g_off.groundent) : 0;
+			out->fwd  = *reinterpret_cast<float*>(movebuf + 0x2C);
+			out->side = *reinterpret_cast<float*>(movebuf + 0x34);
+			out->ret      = ret;
+			out->ok       = 1;
+			EndStateGuard();
+			return 1;
+		}
+		__except (FaultFilter(GetExceptionInformation())) {
+			if (s_restore_ready)
+				EndStateGuard();
+			return 0;
+		}
+	}
+
+	void WriteFuncResults() {
+		FILE* fo = nullptr;
+		if (fopen_s(&fo, s_fp_out_path.c_str(), "w") != 0 || !fo)
+			return;
+		fprintf(fo, "# funcprobe v2 ctxgate %d\n", g_gm_ctx_gate);
+		fprintf(fo, "id,fn,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,ducktime,"
+			"stamina,sfric,maxz,ret,ok,fwd,side,groundent\n");
+		for (size_t i = 0; i < s_fp_probes.size(); ++i) {
+			const FuncProbeOut& o = s_fp_outs[i];
+			const int pi = s_fp_probes[i].pin;
+			fprintf(fo, "%d,%s,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
+				"%.9g,%.9g,%.9g,%.9g,%d,%d,%.9g,%.9g,%d\n",
+				static_cast<int>(i),
+				(pi >= 0 && pi < static_cast<int>(s_fp_pins.size()))
+					? s_fp_pins[pi].name : "?",
+				o.ox, o.oy, o.oz, o.vx, o.vy, o.vz, o.flags, o.ducked,
+				o.ducking, o.ducktime, o.stamina, o.sfric, o.maxz,
+				o.ret, o.ok, o.fwd, o.side, o.groundent);
+		}
+		fclose(fo);
+	}
+
+	// Deferred fuzz job state (filled by RunFuzz, executed in OnFinishMove).
+	std::vector<FuzzProbeIn> s_fuzz_probes;
+	std::vector<FuzzTickOut> s_fuzz_outs;
+	std::string s_fuzz_out_path;
+	volatile int s_fuzz_pending = 0;
+	int s_fuzz_next = 0;
+	int s_fuzz_ok = 0;
+
+	void WriteFuzzResults() {
+		FILE* fo = nullptr;
+		if (fopen_s(&fo, s_fuzz_out_path.c_str(), "w") != 0 || !fo)
+			return;
+		fprintf(fo, "id,tick,ox,oy,oz,vx,vy,vz,flags,ducked,ducking,"
+			"ducktime,stamina,sfric,maxz,bx,by,bz,ok\n");
+		for (size_t i = 0; i < s_fuzz_probes.size(); ++i) {
+			for (int t = 0; t < kFuzzTicks; ++t) {
+				const FuzzTickOut& o = s_fuzz_outs[i * kFuzzTicks + t];
+				fprintf(fo, "%d,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d,%d,%d,"
+					"%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%d\n",
+					static_cast<int>(i), t, o.ox, o.oy, o.oz,
+					o.vx, o.vy, o.vz, o.flags, o.ducked, o.ducking,
+					o.ducktime, o.stamina, o.sfric, o.maxz,
+					o.bx, o.by, o.bz, o.ok);
+			}
+		}
+		fclose(fo);
+	}
+
 	// each tick's input comes from the provider (closed loop: it sees the
 	// simulated state after the previous tick).
 	int RunEditorSimSEH(void* player) {
@@ -339,16 +709,39 @@ namespace {
 				cmd->impulse        = f.impulse;
 
 				CallV<kSetupMoveIdx>(g_pred, player, cmd, g_helper, movebuf);
+				if (i == 0) {
+					// MEASURED (2026-08-14, slice decks): the netvar
+					// velocity write never reaches SetupMove's copy (abs-
+					// velocity path) - nonzero-velocity anchors started at
+					// v=0. Seed the FIRST tick's movedata directly through
+					// the pinned offsets; FinishMove propagates onward.
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff)
+						= s_sim_anchor.velocity;
+					*reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff)
+						= s_sim_anchor.origin;
+				}
 				CallV<kProcessMovementIdx>(g_gm, player, movebuf);
 
 				Prediction::SimState st;
 				st.origin   = *reinterpret_cast<Vector*>(movebuf + kMoveDataOriginOff);
 				st.velocity = *reinterpret_cast<Vector*>(movebuf + kMoveDataVelOff);
+				// Direct reads (no layout inference): both CMoveData float
+				// candidates around m_flMaxSpeed, raw.
+				st.mspd_a = *reinterpret_cast<float*>(movebuf + 0x3C);
+				st.mspd_b = *reinterpret_cast<float*>(movebuf + 0x40);
 
 				g_orig_finishmove(g_pred, player, cmd, movebuf);
 				*s_p_curtime += g_interval;
 
 				st.flags = g_off.flags ? *reinterpret_cast<int*>(pb + g_off.flags) : 0;
+				// The collision hull the engine ACTUALLY carries after this
+				// tick (CCollisionProperty m_vecMaxs.z, origin-relative).
+				st.hull_top = g_off.maxs
+					? reinterpret_cast<Vector*>(pb + g_off.maxs)->Z : -1.f;
+				// The engine's own stamina clock after the tick - per-tick
+				// observable, so stamina drift is caught at its birth tick.
+				st.stamina_ms = g_off.stamina
+					? *reinterpret_cast<float*>(pb + g_off.stamina) : -1.f;
 
 				// TRIGGERS: server-side entities the client prediction never
 				// runs - fire touched trigger_teleport / trigger_gravity here
@@ -448,6 +841,10 @@ namespace {
 
 		if (movedata) {
 			g_real_move_origin = *reinterpret_cast<Vector*>(reinterpret_cast<char*>(movedata) + kMoveDataOriginOff);
+			// Live m_flMaxSpeed (+0x3C, identified by two weapon states:
+			// knife 250 / no weapon 260) - the weapon-dependent movement
+			// cap, READ from the real command so params never assume it.
+			g_real_maxspeed = *reinterpret_cast<float*>(reinterpret_cast<char*>(movedata) + 0x3C);
 			g_real_move_valid = true;
 		}
 
@@ -462,6 +859,69 @@ namespace {
 		if (player && g_off.flags) {
 			g_pred_flags = NetVars::Get<int>(player, g_off.flags);
 			g_pred_flags_valid = true;
+		}
+
+		// FUNCPROBE CONTEXT LATCH: the real ProcessMovement just ran with
+		// this player and this movedata, so if our offsets are right the
+		// CGameMovement object must hold exactly those two pointers. This
+		// is the zero-cost proof that +0x08/+0x10 survived a game update.
+		if (g_gm_ctx_gate < 0 && g_gm && player && movedata) {
+			char* g = reinterpret_cast<char*>(g_gm);
+			g_gm_ctx_gate =
+				(*reinterpret_cast<void**>(g + kGmPlayerOff) == player
+				 && *reinterpret_cast<void**>(g + kGmMvOff) == movedata)
+				? 1 : 0;
+		}
+
+		// FUNCPROBE: one engine function per call, chunked like the fuzz.
+		if (s_fp_pending && player) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: funcprobe chunk");
+			g_in_hook_work = true;
+			constexpr int kFpChunk = 400;
+			int did = 0;
+			while (s_fp_next < static_cast<int>(s_fp_probes.size())
+				&& did < kFpChunk) {
+				const FuncProbeIn& q = s_fp_probes[s_fp_next];
+				s_restore_ready = false;
+				s_fp_ok += RunOneFuncProbeSEH(player, &s_fp_pins[q.pin], &q,
+					&s_fp_outs[s_fp_next]);
+				s_fp_next++;
+				did++;
+			}
+			g_in_hook_work = false;
+			if (s_fp_next >= static_cast<int>(s_fp_probes.size())) {
+				WriteFuncResults();
+				s_fp_pending = 0;
+			}
+			return;
+		}
+
+		// FUNCTION FUZZ runs HERE, not from the UI thread: ProcessMovement is
+		// only valid inside this hook's context (the first attempt drove it
+		// from the ImGui button and every probe faulted). Chunked so a huge
+		// corpus costs a few frames instead of one long hitch.
+		if (s_fuzz_pending && player) {
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: fuzz chunk");
+			g_in_hook_work = true;
+			constexpr int kChunk = 400;
+			int did = 0;
+			while (s_fuzz_next < static_cast<int>(s_fuzz_probes.size())
+				&& did < kChunk) {
+				FuzzTickOut* o = &s_fuzz_outs[
+					static_cast<size_t>(s_fuzz_next) * kFuzzTicks];
+				s_restore_ready = false;
+				s_fuzz_ok += RunOneFuzzProbeSEH(player,
+					&s_fuzz_probes[s_fuzz_next], o);
+				s_fuzz_next++;
+				did++;
+			}
+			g_in_hook_work = false;
+			if (s_fuzz_next >= static_cast<int>(s_fuzz_probes.size())) {
+				WriteFuzzResults();
+				s_fuzz_pending = 0;
+			}
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: fuzz chunk done");
+			return;
 		}
 
 		if (s_sim_pending) {
@@ -584,6 +1044,169 @@ void Prediction::GetPath(std::vector<Vector>& out) {
 	out.assign(g_path, g_path + g_path_count);
 }
 
+// FUNCTION-LEVEL DIFFERENTIAL FUZZ: read arbitrary probe states, run each
+// through the real engine movement, write every output field. Must run on
+// the game thread with a valid player (called from the FinishMove hook).
+int Prediction::RunFuzz(const char* probe_path, const char* out_path) {
+	if (!g_pred || !g_gm || !g_helper || !probe_path || !out_path)
+		return -1;
+	void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
+	if (!player)
+		return -1;
+	ResolveOffsets();
+	if (!g_off.origin || !g_off.velocity)
+		return -1;
+
+	std::vector<FuzzProbeIn> probes;
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, probe_path, "r") != 0 || !f)
+			return -1;
+		char line[1024];
+		while (fgets(line, sizeof(line), f)) {
+			if (line[0] == '#' || line[0] == 'i')   // comment / header
+				continue;
+			FuzzProbeIn p = {};
+			int id = 0;
+			const int n = sscanf_s(line,
+				"%d,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%f,%f,%f,%f,%f,"
+				"%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d,%f,%f,%f,%d",
+				&id, &p.ox, &p.oy, &p.oz, &p.vx, &p.vy, &p.vz,
+				&p.bx, &p.by, &p.bz, &p.onground, &p.ducked, &p.ducking,
+				&p.ducktime, &p.stamina, &p.gravity, &p.sfric,
+				&p.hullmin_z, &p.hullmax_z, &p.hull_xy,
+				&p.yaw[0], &p.fmove[0], &p.smove[0], &p.buttons[0],
+				&p.yaw[1], &p.fmove[1], &p.smove[1], &p.buttons[1],
+				&p.yaw[2], &p.fmove[2], &p.smove[2], &p.buttons[2],
+				&p.yaw[3], &p.fmove[3], &p.smove[3], &p.buttons[3],
+				&p.yaw[4], &p.fmove[4], &p.smove[4], &p.buttons[4]);
+			if (n == 40)
+				probes.push_back(p);
+		}
+		fclose(f);
+	}
+	if (probes.empty())
+		return -1;
+
+	// QUEUE it: execution happens inside the FinishMove hook, chunked.
+	s_fuzz_probes.swap(probes);
+	s_fuzz_outs.assign(s_fuzz_probes.size() * kFuzzTicks, FuzzTickOut{});
+	s_fuzz_out_path = out_path;
+	s_fuzz_next = 0;
+	s_fuzz_ok = 0;
+	s_fuzz_pending = 1;
+	return static_cast<int>(s_fuzz_probes.size());
+}
+
+int Prediction::RunFuncProbe(const char* pin_path, const char* probe_path,
+                             const char* out_path) {
+	if (!g_pred || !g_gm || !g_helper || !pin_path || !probe_path || !out_path)
+		return -1;
+	void* player = entitylist->GetClientEntity(engine->GetLocalPlayer());
+	if (!player)
+		return -1;
+	ResolveOffsets();
+	if (!g_off.origin || !g_off.velocity)
+		return -1;
+	// FAIL CLOSED: without a verified context latch every call would write
+	// through guessed offsets. -1 (never observed) is as fatal as 0.
+	if (g_gm_ctx_gate != 1)
+		return -2;
+
+	std::vector<FuncPin> pins;
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, pin_path, "r") != 0 || !f)
+			return -1;
+		char line[256];
+		while (fgets(line, sizeof(line), f)) {
+			if (line[0] == '#' || line[0] == '\n')
+				continue;
+			FuncPin p = {};
+			unsigned rva = 0, prel = 0;
+			int abi = 0;
+			const int nf = sscanf_s(line, "%47[^,],%x,%d,%x", p.name,
+				static_cast<unsigned>(sizeof(p.name)), &rva, &abi, &prel);
+			if (nf >= 3) {
+				p.rva = rva;
+				p.abi = abi;
+				p.prelude_rva = (nf >= 4) ? prel : 0u;
+				pins.push_back(p);
+			}
+		}
+		fclose(f);
+	}
+	if (pins.empty())
+		return -1;
+
+	std::vector<FuncProbeIn> probes;
+	{
+		FILE* f = nullptr;
+		if (fopen_s(&f, probe_path, "r") != 0 || !f)
+			return -1;
+		char line[512];
+		while (fgets(line, sizeof(line), f)) {
+			if (line[0] == '#' || line[0] == 'f')
+				continue;
+			FuncProbeIn q = {};
+			char fname[48] = "";
+			// v2 rows carry oldbuttons as the 23rd column; v1 rows (22)
+			// default it to 0 - both remain loadable.
+			const int nf = sscanf_s(line,
+				"%47[^,],%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%d,"
+				"%f,%f,%f,%f,%f,%f,%f,%f,%d",
+				fname, static_cast<unsigned>(sizeof(fname)),
+				&q.ox, &q.oy, &q.oz, &q.vx, &q.vy, &q.vz,
+				&q.bx, &q.by, &q.bz,
+				&q.onground, &q.ducked, &q.ducking, &q.buttons,
+				&q.ducktime, &q.stamina, &q.sfric, &q.gravity,
+				&q.hullmax_z, &q.yaw, &q.fmove, &q.smove, &q.oldbuttons);
+			if (nf == 22 || nf == 23) {
+				if (nf == 22)
+					q.oldbuttons = 0;
+				q.pin = -1;
+				for (size_t k = 0; k < pins.size(); ++k)
+					if (_stricmp(pins[k].name, fname) == 0) {
+						q.pin = static_cast<int>(k);
+						break;
+					}
+				if (q.pin >= 0)
+					probes.push_back(q);
+			}
+		}
+		fclose(f);
+	}
+	if (probes.empty())
+		return -1;
+
+	s_fp_pins.swap(pins);
+	s_fp_probes.swap(probes);
+	s_fp_outs.assign(s_fp_probes.size(), FuncProbeOut{});
+	s_fp_out_path = out_path;
+	s_fp_next = 0;
+	s_fp_ok = 0;
+	s_fp_pending = 1;
+	return static_cast<int>(s_fp_probes.size());
+}
+
+bool Prediction::FuncProbeBusy() { return s_fp_pending != 0; }
+
+int Prediction::FuncProbeProgress(int* total, int* ok) {
+	if (total) *total = static_cast<int>(s_fp_probes.size());
+	if (ok) *ok = s_fp_ok;
+	return s_fp_next;
+}
+
+int Prediction::FuncProbeCtxGate() { return g_gm_ctx_gate; }
+
+bool Prediction::FuzzBusy() { return s_fuzz_pending != 0; }
+
+int Prediction::FuzzProgress(int* total, int* ok) {
+	if (total) *total = static_cast<int>(s_fuzz_probes.size());
+	if (ok) *ok = s_fuzz_ok;
+	return s_fuzz_next;
+}
+
 bool Prediction::RequestSim(const StartState& anchor, int ticks, SimFrameFn provider) {
 	if (s_sim_pending || !provider || !anchor.valid || ticks < 1)
 		return false;
@@ -692,6 +1315,13 @@ bool Prediction::LiveFlags(int* out) {
 	if (!g_off.flags)
 		return false;
 	*out = NetVars::Get<int>(player, g_off.flags);
+	return true;
+}
+
+bool Prediction::LastRealMaxSpeed(float* out) {
+	if (!g_real_move_valid)
+		return false;
+	if (out) *out = g_real_maxspeed;
 	return true;
 }
 

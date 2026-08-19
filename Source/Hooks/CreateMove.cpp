@@ -25,6 +25,10 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 	// first (the engine froze elsewhere, not in our hook).
 	Breadcrumb::Note(Breadcrumb::SlotGame, "createmove: enter");
 
+	// Engine-command marshal drain: THIS is the game thread, the only safe
+	// place for connection transitions pushed by UI/render-thread code.
+	TasEditor::DrainEngineCmds();
+
 	// Autohop (server-style autobhop for HUMAN input), the sim JM_AutoBhop's
 	// exact button transform: while jump is HELD, the button is stripped by
 	// default and pressed only on ticks that start GROUNDED with no press let
@@ -78,6 +82,10 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 		// the freecam reads back as its look every frame - so skip it and the
 		// freecam stays a third-party observer while the run plays underneath.
 		if (g_tas.ReplayFrame(command)) {
+			// Stash the replayed inputs: the NEXT NotePlaybackTick's captured
+			// state is this cmd's outcome (Map Solve playback capture).
+			TasEditor::NotePlaybackInputs(command->buttons,
+			                              command->viewangles.Y);
 			if (!TasEditor::FreecamActive())
 				engine->SetViewAngles(command->viewangles);
 		} else if (g_tas.IsPlaying()) {

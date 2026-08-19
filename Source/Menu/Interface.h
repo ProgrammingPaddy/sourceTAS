@@ -21,4 +21,8 @@ class BasehookInterface: public DX9RenderMgr {
 		virtual void OnInitialize();
 		virtual void OnEndScene();
 		virtual bool OnInputMessage(UINT, WPARAM, LPARAM);
+
+		// The HUD + menu body, split out so OnEndScene can run it under a
+		// hook-level SEH shell (crash fix 2026-08-16).
+		void MenuHudBody();
 };

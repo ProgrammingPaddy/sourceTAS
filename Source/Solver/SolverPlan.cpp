@@ -1,0 +1,660 @@
+#include "SolverPlan.h"
+
+#include <float.h>
+#include <math.h>
+#include <time.h>
+
+#include <algorithm>
+#include <map>
+#include <vector>
+
+#include "SolverAir.h"
+#include "SolverBoard.h"
+#include "SolverCarve.h"
+#include "SolverField.h"
+#include "SolverRouteSearch.h"
+#include "SolverSearchLog.h"
+
+namespace Solver {
+namespace Plan {
+
+	namespace {
+
+		struct CellPick {
+			Vec3  q;
+			float phi = 0.f;
+			float n = 0.f;
+			float e_eff = 0.f;
+			float cap = 0.f;     // law-derived arrival |dot| cap
+		};
+
+		// Candidate cells for a board, hot tier first then warm, each
+		// with its cap: the largest loss that still keeps the warm
+		// ratio of the map's best (cap^2 = e_eff + res^2 - 0.6*e_hi;
+		// e_eff = arrival energy minus res^2, so this is exact).
+		void PickCells(const Field::FaceMap& fm, int want,
+		               std::vector<CellPick>* out) {
+			struct Row { const Field::Sample* sm; float rel; };
+			std::vector<Row> rows;
+			for (const Field::Sample& sm : fm.samples) {
+				if (!sm.reachable || sm.e_eff <= 0.f)
+					continue;
+				const float rel = fm.e_hi > 0.f
+					? sm.e_eff / fm.e_hi : 0.f;
+				if (rel < 0.6f)
+					continue;   // cold is not a candidate
+				Row r;
+				r.sm = &sm;
+				r.rel = rel;
+				rows.push_back(r);
+			}
+			// Viable + hot first, then viable warm, then the rest.
+			std::sort(rows.begin(), rows.end(),
+				[](const Row& a, const Row& b) {
+					const int ta = (a.sm->run_viable ? 2 : 0)
+						+ (a.rel >= 0.85f ? 1 : 0);
+					const int tb = (b.sm->run_viable ? 2 : 0)
+						+ (b.rel >= 0.85f ? 1 : 0);
+					if (ta != tb)
+						return ta > tb;
+					return a.sm->e_eff > b.sm->e_eff;
+				});
+			for (const Row& r : rows) {
+				if (static_cast<int>(out->size()) >= want)
+					break;
+				const float cap2 = r.sm->e_eff
+					+ r.sm->residual * r.sm->residual
+					- 0.6f * fm.e_hi;
+				if (cap2 <= 0.f)
+					continue;
+				CellPick c;
+				c.q = r.sm->q;
+				c.phi = r.sm->phi;
+				c.n = r.sm->n;
+				c.e_eff = r.sm->e_eff;
+				c.cap = sqrtf(cap2);
+				out->push_back(c);
+			}
+		}
+
+		void RenderHeat(const Field::FaceMap& fm, const Route::Face& f) {
+			if (!SearchLog::g_sink)
+				return;
+			for (const Field::Sample& sm : fm.samples) {
+				if (!sm.reachable)
+					continue;
+				float v01 = fm.e_hi > fm.e_lo
+					? (sm.e_eff - fm.e_lo) / (fm.e_hi - fm.e_lo)
+					: 1.f;
+				if (!sm.run_viable)
+					v01 *= 0.35f;
+				const Vec3 lift = Scale(f.n, 2.f);
+				const Vec3 c00 = sm.q + lift
+					- Scale(fm.ud, fm.du * 0.5f)
+					- Scale(fm.vd, fm.dv * 0.5f);
+				const Vec3 c10 = c00 + Scale(fm.ud, fm.du);
+				const Vec3 c01 = c00 + Scale(fm.vd, fm.dv);
+				const Vec3 c11 = c10 + Scale(fm.vd, fm.dv);
+				SearchLog::g_sink->AddHeat(c00, c10, c11, v01);
+				SearchLog::g_sink->AddHeat(c00, c11, c01, v01);
+			}
+		}
+
+		float EnergyAt(const PlayerState& s, float zref,
+		               const MoveParams& p) {
+			return Dot(s.vel, s.vel)
+				+ 2.f * p.gravity * (s.pos.Z - zref);
+		}
+
+		void Stage(const char* name) {
+			if (SearchLog::g_sink)
+				SearchLog::g_sink->BeginStage(name);
+		}
+
+	} // namespace
+
+	bool SolveMap(const World& w, const Route::Graph& g,
+	              const MoveParams& p, const TapeAnchor& anchor,
+	              const Opts& o, Assemble::RunResult* out,
+	              std::string* err, Assemble::RunResult* partial) {
+		const clock_t c0 = clock();
+		RouteSearch::Opts ro;
+		ro.top_k = 60;
+		std::vector<RouteSearch::Candidate> routes;
+		if (!RouteSearch::Enumerate(w, g, p, ro, &routes, err))
+			return false;
+		std::vector<std::vector<int>> shapes;
+		for (const RouteSearch::Candidate& r : routes) {
+			std::vector<int> base;
+			for (int fidx : r.faces) {
+				bool seen = false;
+				for (int b : base)
+					if (b == fidx)
+						seen = true;
+				if (!seen)
+					base.push_back(fidx);
+			}
+			bool have = false;
+			for (const std::vector<int>& s : shapes)
+				if (s == base)
+					have = true;
+			if (!have)
+				shapes.push_back(base);
+		}
+		if (static_cast<int>(shapes.size()) > o.max_shapes)
+			shapes.resize(o.max_shapes);
+		if (g.end_brush < 0
+			|| g.end_brush >= static_cast<int>(w.brushes.size())) {
+			if (err) *err = "no end brush";
+			return false;
+		}
+		const WorldBrush& eb = w.brushes[g.end_brush];
+		Vec3 zmin, zmax;
+		Assemble::ZoneVolume(eb, &zmin, &zmax);
+		bool any = false;
+		Assemble::RunResult best;
+		// One heat render per face per solve; one start solve per
+		// first-face (the per-shape re-solve was most of the wall).
+		bool heat_done[64] = { false };
+		struct StartSol {
+			bool have = false;
+			float e = -1e30f;
+			Air::Result fly;
+			Assemble::StartCand sc;
+		};
+		std::map<int, StartSol> start_cache;
+		for (const std::vector<int>& shape : shapes) {
+			const double spent = static_cast<double>(clock() - c0)
+				/ CLOCKS_PER_SEC;
+			if (spent > o.wall_budget_s)
+				break;
+			if (shape.empty())
+				continue;
+			{
+				std::string tag = "v2 [";
+				for (size_t i = 0; i < shape.size(); ++i) {
+					char b[16];
+					snprintf(b, sizeof(b), "%s%d", i ? " " : "",
+						shape[i]);
+					tag += b;
+				}
+				tag += "]";
+				printf("plan: %s\n", tag.c_str());
+				if (SearchLog::g_sink)
+					SearchLog::g_sink->SetContext(tag);
+			}
+			Assemble::RunResult rr;
+			rr.shape = shape;
+			// START: one solve per first-face, cached across shapes.
+			StartSol& ss = start_cache[shape[0]];
+			if (!ss.have && ss.e > -1e29f) {
+				// (cached failure)
+			} else if (!ss.have) {
+				Stage("v2 start");
+				const PlayerState spawn = Assemble::Spawn(w, p,
+					anchor);
+				const Route::Face& f0 = g.faces[shape[0]];
+				const float b0 = atan2f(
+					f0.centroid.Y - spawn.pos.Y,
+					f0.centroid.X - spawn.pos.X) * 57.29578f;
+				const float offs[3] = { 0.f, -35.f, 35.f };
+				const float rates[4] = { 3.f, 4.5f, 6.f, 8.f };
+				const int holds[2] = { 45, 75 };
+				for (int oi = 0; oi < 3; ++oi)
+				for (int ri = 0; ri < 4; ++ri)
+				for (int di = -1; di <= 1; di += 2)
+				for (int hi = 0; hi < 2; ++hi) {
+					Assemble::StartCand sc = Assemble::StartOne(w,
+						p, spawn, b0 + offs[oi],
+						rates[ri] * static_cast<float>(di),
+						holds[hi]);
+					if (!sc.ok)
+						continue;
+					Field::FaceMap fm = Field::Compute(
+						sc.entry.pos, sc.entry.vel, f0, p,
+						sc.entry.ducked, 32.f, 300);
+					std::vector<CellPick> cells;
+					PickCells(fm, 4, &cells);
+					for (const CellPick& c : cells) {
+						Air::Target at;
+						at.face = shape[0];
+						at.aim = c.q;
+						at.aim_region = false;
+						at.dot_cap = c.cap;
+						at.max_ticks = 240;
+						Air::Result ar = Air::SolveTransfer(
+							sc.entry, w, p, g, at, 4, 500);
+						if (!ar.hit || fabsf(ar.dot) > c.cap)
+							continue;
+						const float e = EnergyAt(ar.end_state,
+							f0.zmin, p);
+						if (e > ss.e) {
+							ss.e = e;
+							ss.fly = ar;
+							ss.sc = sc;
+							ss.have = true;
+						}
+					}
+				}
+				if (!ss.have)
+					ss.e = -1e28f;   // cached failure marker
+			}
+			if (!ss.have) {
+				printf("plan: no start board under cap for shape\n");
+				continue;
+			}
+			PlayerState state;
+			rr.frames = ss.sc.frames;
+			Assemble::AppendAirFrames(&rr.frames, ss.fly,
+				ss.sc.entry.ducked);
+			state = ss.fly.end_state;
+			rr.board_loss2 += ss.fly.dot * ss.fly.dot;
+			printf("plan: start board f%d dot %.1f E %.0fk (%.0f "
+				"u/s)\n", shape[0], ss.fly.dot, ss.e / 1000.f,
+				Len(state.vel));
+			bool dead = false;
+			for (size_t li = 0; li < shape.size() && !dead; ++li) {
+				const int fi = shape[li];
+				const Route::Face& fc = g.faces[fi];
+				const bool last = li + 1 >= shape.size();
+				char sb[48];
+				// ===== RIDE on face fi =====
+				if (last) {
+					// ENDING: provably-unreachable check first (a
+					// millisecond of closed forms vs 24k wasted
+					// evals from faces that can never reach).
+					{
+						Field::NextTarget znt;
+						znt.is_zone = true;
+						znt.zmin = zmin;
+						znt.zmax = zmax;
+						Field::ExitMap zem = Field::ComputeExit(
+							state.pos, state.vel, fc, znt, p,
+							state.ducked, 64.f, 12, 64.f, 300);
+						if (zem.best_pot < 0) {
+							printf("plan: ending provably "
+								"unreachable from f%d - skipped\n",
+								fi);
+							dead = true;
+							break;
+						}
+					}
+					snprintf(sb, sizeof(sb), "v2 leg%d zone",
+						static_cast<int>(li));
+					Stage(sb);
+					Carve::Target ct;
+					ct.face = fi;
+					ct.max_ticks = 320;
+					ct.to_zone = true;
+					ct.zone_min = zmin;
+					ct.zone_max = zmax;
+					Vec3 rim = state.pos;
+					if (rim.X < zmin.X) rim.X = zmin.X;
+					if (rim.X > zmax.X) rim.X = zmax.X;
+					if (rim.Y < zmin.Y) rim.Y = zmin.Y;
+					if (rim.Y > zmax.Y) rim.Y = zmax.Y;
+					ct.exit_heading = atan2f(rim.Y - state.pos.Y,
+						rim.X - state.pos.X);
+					ct.aim_tick = 200;
+					Carve::Result cr = Carve::SolveCarve(state, w,
+						p, g, ct, 6, o.zone_evals);
+					if (cr.zoned) {
+						Assemble::AppendCarveFrames(&rr.frames, cr,
+							state.ducked);
+						rr.finished = true;
+						rr.zone_tick =
+							static_cast<int>(rr.frames.size()) - 1;
+						rr.legs_done =
+							static_cast<int>(shape.size());
+						printf("plan: ZONE ENTRY tick %d\n",
+							cr.tick);
+						break;
+					}
+					printf("plan: ending failed (miss %.0f)\n",
+						cr.miss_dist);
+					dead = true;
+					break;
+				}
+				// Mid ride: departures from the exit map, solved as
+				// exit specs, ranked by ENERGY DELIVERED TO THE NEXT
+				// BOARD (the flight is solved per departure).
+				const int nfi = shape[li + 1];
+				const Route::Face& nf = g.faces[nfi];
+				snprintf(sb, sizeof(sb), "v2 leg%d ride",
+					static_cast<int>(li));
+				Stage(sb);
+				Field::NextTarget xnt;
+				xnt.face = &nf;
+				xnt.face_idx = nfi;
+				if (li + 2 < shape.size()) {
+					xnt.after.has = true;
+					xnt.after.pt = g.faces[shape[li + 2]].centroid;
+				} else {
+					xnt.after.has = true;
+					xnt.after.is_zone = true;
+					xnt.after.zmin = zmin;
+					xnt.after.zmax = zmax;
+				}
+				Field::ExitMap em = Field::ComputeExit(state.pos,
+					state.vel, fc, xnt, p, state.ducked, 48.f, 12,
+					48.f, 300);
+				// Rank exits by the priced potential, keep diverse
+				// top (both handednesses arise naturally: different
+				// departure directions are different samples).
+				std::vector<int> xs;
+				for (size_t i = 0; i < em.samples.size(); ++i)
+					if (em.samples[i].q.any
+						&& em.samples[i].turn_ok)
+						xs.push_back(static_cast<int>(i));
+				if (xs.empty())
+					for (size_t i = 0; i < em.samples.size(); ++i)
+						if (em.samples[i].q.any)
+							xs.push_back(static_cast<int>(i));
+				std::sort(xs.begin(), xs.end(), [&](int a, int b) {
+					return em.samples[a].fpot > em.samples[b].fpot;
+				});
+				struct Best {
+					bool ok = false;
+					Carve::Result ride;
+					Air::Result fly;
+					float e = -1e30f;
+				};
+				Best bestleg;
+				int tried = 0, exited = 0, mapped = 0, celled = 0,
+					hitc = 0, capped = 0;
+				std::vector<Vec3> tried_pts;
+				for (int xi : xs) {
+					if (tried >= o.exits_per_leg)
+						break;
+					const Field::ExitSample& ex = em.samples[xi];
+					// Spatial diversity: the priced ranking clusters
+					// at one departure spot; distinct exits (mid-
+					// face AND crest) must each get their flight.
+					bool close = false;
+					for (const Vec3& tp2 : tried_pts)
+						if (Len(ex.pt - tp2) < 96.f)
+							close = true;
+					if (close)
+						continue;
+					tried_pts.push_back(ex.pt);
+					tried++;
+					Carve::Target ct;
+					ct.face = fi;
+					ct.max_ticks = 320;
+					ct.aim_pos = ex.pt;
+					ct.pos_w = 0.02f;
+					ct.exit_heading = atan2f(ex.dir.Y, ex.dir.X);
+					ct.aim_vel = Scale(ex.dir, ex.pv);
+					ct.vel_w = 0.8f;
+					ct.aim_tick = static_cast<int>(ex.ride_ticks)
+						+ 8;
+					if (ct.aim_tick < 12)
+						ct.aim_tick = 12;
+					Carve::Result ride = Carve::SolveCarve(state,
+						w, p, g, ct, 5, o.ride_evals);
+					if (!ride.exited)
+						continue;
+					exited++;
+					// FLIGHT: boundary-value solves to the next
+					// face's cells from the REAL exit state. When
+					// the exit state cannot see the face directly
+					// (a climb still ahead), the intended exit
+					// sample's own bookkeeping supplies the map.
+					Field::NextCtx fctx2 = xnt.after;
+					Field::FaceMap fm = Field::Compute(
+						ride.end_state.pos, ride.end_state.vel,
+						nf, p, ride.end_state.ducked, 32.f, 300,
+						1.f, &fctx2);
+					if (fm.best < 0)
+						fm = Field::Compute(ex.pt,
+							Scale(ex.dir, ex.pv), nf, p,
+							ride.end_state.ducked, 32.f, 300, 1.f,
+							&fctx2);
+					if (fm.best < 0)
+						continue;
+					mapped++;
+					if (nfi < 64 && !heat_done[nfi]) {
+						heat_done[nfi] = true;
+						RenderHeat(fm, nf);
+					}
+					std::vector<CellPick> cells;
+					// The exit's OWN induced landing first - the
+					// (exit, cell) pair the exit map constructed
+					// (mid-face exits serve base cells with short
+					// direct crossings; re-picking cells blind to
+					// the pairing sent every flight at the crest
+					// line's far targets).
+					if (ex.q.have_argmax) {
+						const Vec3 dq = ex.q_argmax - fm.origin;
+						int iu = static_cast<int>(Dot(dq, fm.ud)
+							/ fm.du + 0.5f);
+						int iv = static_cast<int>(Dot(dq, fm.vd)
+							/ fm.dv + 0.5f);
+						if (iu >= 0 && iu < fm.nu && iv >= 0
+							&& iv < fm.nv) {
+							const Field::Sample& sm = fm.samples[
+								static_cast<size_t>(iv) * fm.nu
+								+ iu];
+							if (sm.reachable && fm.e_hi > 0.f
+								&& sm.e_eff / fm.e_hi >= 0.6f) {
+								const float cap2 = sm.e_eff
+									+ sm.residual * sm.residual
+									- 0.6f * fm.e_hi;
+								if (cap2 > 0.f) {
+									CellPick c;
+									c.q = sm.q;
+									c.phi = sm.phi;
+									c.n = sm.n;
+									c.e_eff = sm.e_eff;
+									c.cap = sqrtf(cap2);
+									cells.push_back(c);
+								}
+							}
+						}
+					}
+					PickCells(fm, o.cells_per_leg, &cells);
+					if (!cells.empty())
+						celled++;
+					char fb[48];
+					snprintf(fb, sizeof(fb), "v2 leg%d fly",
+						static_cast<int>(li));
+					Stage(fb);
+					for (const CellPick& c : cells) {
+						Air::Target at;
+						at.face = nfi;
+						at.aim = c.q;
+						at.aim_region = false;
+						at.dot_cap = c.cap;
+						at.max_ticks = 260;
+						Air::Result ar = Air::SolveTransfer(
+							ride.end_state, w, p, g, at, 4,
+							o.air_evals);
+						if (!ar.hit)
+							continue;
+						hitc++;
+						if (fabsf(ar.dot) > c.cap) {
+							capped++;
+							continue;
+						}
+						const float e = EnergyAt(ar.end_state,
+							nf.zmin, p);
+						if (e > bestleg.e) {
+							bestleg.ok = true;
+							bestleg.e = e;
+							bestleg.ride = ride;
+							bestleg.fly = ar;
+						}
+					}
+				}
+				bool via_tap = false;
+				Carve::Result tapr;
+				if (!bestleg.ok) {
+					// ADJOINING-FACE FORM (measured M3 fact: no
+					// clean-air exit exists toward the target
+					// between valley faces - the ride flows into
+					// the strike). Cells still come from the map
+					// (the carve's heat-density schedule + arrival
+					// gradient); ACCEPTANCE is the planner's alone:
+					// kept energy >= the warm ratio of the map's
+					// best. No emergent slam can pass.
+					snprintf(sb, sizeof(sb), "v2 leg%d tap",
+						static_cast<int>(li));
+					Stage(sb);
+					Field::NextCtx fctx3 = xnt.after;
+					Field::FaceMap fme = Field::Compute(state.pos,
+						state.vel, nf, p, state.ducked, 32.f, 300,
+						1.f, &fctx3);
+					if (fme.best < 0 && em.best_pot >= 0) {
+						const Field::ExitSample& bs =
+							em.samples[em.best_pot];
+						fme = Field::Compute(bs.pt,
+							Scale(bs.dir, bs.pv), nf, p,
+							state.ducked, 32.f, 300, 1.f, &fctx3);
+					}
+					Carve::Target ct;
+					ct.face = fi;
+					ct.max_ticks = 320;
+					ct.tap_brush = nf.brush;
+					ct.tap_side = nf.side;
+					ct.tap_face = nfi;
+					if (li + 2 < shape.size())
+						ct.next_face = shape[li + 2];
+					else {
+						ct.next_is_zone = true;
+						ct.zone_min = zmin;
+						ct.zone_max = zmax;
+					}
+					ct.exit_heading = atan2f(
+						nf.centroid.Y - state.pos.Y,
+						nf.centroid.X - state.pos.X);
+					const float s_est = Len2D(state.vel);
+					const float est = s_est > 100.f
+						? Len(nf.centroid - state.pos)
+							/ (s_est * p.dt) : 80.f;
+					ct.aim_tick = est < 10.f ? 10
+						: (est > 240.f ? 240
+							: static_cast<int>(est));
+					ct.tick_w = 0.02f;
+					if (fme.best >= 0) {
+						ct.field_aim = fme.samples[fme.best].q;
+						ct.have_field_aim = true;
+						ct.field_phi = fme.samples[fme.best].phi;
+						ct.field_n = fme.samples[fme.best].n;
+						ct.have_field_arr = true;
+						for (int pass = 0; pass < 2
+							&& ct.cells.empty(); ++pass)
+						for (const Field::Sample& sm
+							: fme.samples) {
+							if (!sm.reachable || sm.e_eff <= 0.f)
+								continue;
+							if (pass == 0 && !sm.run_viable)
+								continue;
+							const float rel = fme.e_hi > 0.f
+								? sm.e_eff / fme.e_hi : 0.f;
+							const int rep = rel >= 0.85f ? 3
+								: (rel >= 0.6f ? 1 : 0);
+							for (int rp = 0; rp < rep
+								&& ct.cells.size() < 192; ++rp) {
+								Carve::Target::Cell cc;
+								cc.q = sm.q;
+								cc.phi = sm.phi;
+								cc.n = sm.n;
+								ct.cells.push_back(cc);
+							}
+						}
+					}
+					std::vector<Carve::Result> alts;
+					Carve::Result cr = Carve::SolveCarve(state, w,
+						p, g, ct, 6, o.zone_evals, &alts, 6);
+					float bke = -1e30f;
+					for (const Carve::Result& a : alts) {
+						const bool tp = !a.exited && a.tick > 0
+							&& a.struck_brush == ct.tap_brush
+							&& a.struck_plane == ct.tap_side;
+						if (!tp)
+							continue;
+						const float kept = Dot(a.end_state.vel,
+							a.end_state.vel) + 2.f * p.gravity
+							* (a.end_state.pos.Z - nf.zmin);
+						if (fme.best >= 0 && fme.e_hi > 0.f
+							&& kept < 0.6f * fme.e_hi)
+							continue;   // below the bar = not a board
+						if (kept > bke) {
+							bke = kept;
+							tapr = a;
+							via_tap = true;
+						}
+					}
+					if (via_tap) {
+						bestleg.ok = true;
+						bestleg.e = bke;
+					}
+				}
+				if (!bestleg.ok) {
+					printf("plan: leg %d NO BOARD UNDER CAP "
+						"(f%d -> f%d): exits %d/%d rode out, "
+						"maps %d, cells %d, hits %d, cap-fails "
+						"%d\n", static_cast<int>(li), fi, nfi,
+						exited, tried, mapped, celled, hitc,
+						capped);
+					dead = true;
+					break;
+				}
+				const float e_in = EnergyAt(state, nf.zmin, p);
+				if (via_tap) {
+					Assemble::AppendCarveFrames(&rr.frames, tapr,
+						state.ducked);
+					state = tapr.end_state;
+					rr.board_loss2 += tapr.strike_dot
+						* tapr.strike_dot;
+					rr.legs_done = static_cast<int>(li) + 1;
+					printf("plan: leg %d TAP board f%d dot %.1f | "
+						"E in %.0fk out %.0fk (%.0f u/s @ z%.0f)\n",
+						static_cast<int>(li), nfi, tapr.strike_dot,
+						e_in / 1000.f, bestleg.e / 1000.f,
+						Len(state.vel), state.pos.Z);
+				} else {
+				Assemble::AppendCarveFrames(&rr.frames, bestleg.ride,
+					state.ducked);
+				Assemble::AppendAirFrames(&rr.frames, bestleg.fly,
+					bestleg.ride.end_state.ducked);
+				state = bestleg.fly.end_state;
+				rr.board_loss2 += bestleg.fly.dot * bestleg.fly.dot;
+				rr.legs_done = static_cast<int>(li) + 1;
+				printf("plan: leg %d ride exit v%.0f -> board f%d "
+					"dot %.1f | E in %.0fk out %.0fk (%.0f u/s @ "
+					"z%.0f)\n", static_cast<int>(li),
+					Len2D(bestleg.ride.exit_vel), nfi,
+					bestleg.fly.dot, e_in / 1000.f,
+					bestleg.e / 1000.f, Len(state.vel),
+					state.pos.Z);
+				}
+			}
+			if (partial) {
+				if (rr.legs_done > partial->legs_done
+					|| (rr.legs_done == partial->legs_done
+						&& rr.frames.size()
+							> partial->frames.size())) {
+					*partial = rr;
+					partial->finished = false;
+					if (!rr.finished)
+						partial->zone_tick = -1;
+				}
+			}
+			if (rr.finished) {
+				if (!any || rr.zone_tick < best.zone_tick) {
+					best = rr;
+					any = true;
+				}
+			}
+		}
+		if (!any) {
+			if (err) *err = "no shape planned to the zone";
+			return false;
+		}
+		*out = best;
+		return true;
+	}
+
+} // namespace Plan
+} // namespace Solver
