@@ -99,8 +99,12 @@ namespace Air {
 	// OPEN-LOOP WISH SCHEDULE (ruling 2026-08-18, repfit finding): fly
 	// the DIRECT admissible input space - per tick, wish at the angle
 	// acos(cosa_k) on side_k of the current velocity heading (side 0 =
-	// null tick). No tracking feedback, so no flip-state desync (the
-	// measured failure of per-tick heading mirroring). Any wish
+	// null tick). No tracking feedback, so no flip-state desync. (The
+	// historical "per-tick heading mirroring failure" was ROOT-CAUSED
+	// 2026-08-19 to the controller emitter's wish-convention bug, not to
+	// the heading channel; see wishparity. This basis is kept because it
+	// is the direct admissible input space, not because the other one
+	// was unfixable.) Any wish
 	// DIRECTION is exactly expressible; the dwell law governs side
 	// sign changes, which the CALLER's schedule owns. Same
 	// strike/graze/ground semantics as FlyHeadingSpline.

@@ -21,6 +21,8 @@
 // dominance is an OPEN THEOREM (handoff 9.2) - tangent_gap > 0 means
 // a lossy arrival genuinely out-carries every tangent arrival there.
 
+#include <math.h>
+
 #include <functional>
 #include <vector>
 
@@ -169,6 +171,47 @@ namespace Entrance {
 	// (they were 250 and 200 - inconsistent).
 	constexpr float kThetaW = 250.f;
 
+	// ---- PURE HELPERS, shared by production and the property gate
+	// (`airprops`) so a test can never drift from the implementation ----
+
+	// Scout-pool endpoint dedupe radius for an active tolerance. MUST be
+	// non-increasing in tol and MUST never exceed the historical 32u:
+	// a formula introduced for the fine-tolerance case silently loosened
+	// every coarse caller (Field::Build went to 115u with 3 slots).
+	inline float ScoutDedupe(float tol) {
+		float d = 4.f * tol;
+		if (d < 8.f) d = 8.f;
+		if (d > 32.f) d = 32.f;
+		return d;
+	}
+
+	// Curvature to-go: signed total sweep of the circle tangent to the
+	// current heading (local frame, velocity along +x) through the
+	// target at (lx, ly).
+	inline float ToGoSweep(float lx, float ly) {
+		return 2.f * atan2f(ly, lx);
+	}
+
+	// ...and its arc length, BOUNDED. Behind the target (ly -> 0,
+	// lx < 0) curvature -> 0 while |sweep| -> pi, so phi/kappa
+	// diverges - measured at 1.3e10, which swamped every other guidance
+	// term and made sidestepping look cheaper than turning. The arc can
+	// never be shorter than the chord nor longer than the half-circle
+	// through both points.
+	inline float ToGoArcLen(float lx, float ly) {
+		const float r2 = lx * lx + ly * ly;
+		const float chord = sqrtf(r2);
+		if (r2 <= 1e-3f)
+			return 0.f;
+		const float kap = 2.f * ly / r2;
+		const float phi = ToGoSweep(lx, ly);
+		float arc = fabsf(kap) > 1e-6f ? fabsf(phi / kap) : chord;
+		const float arc_max = 1.57079633f * chord;
+		if (arc < chord) arc = chord;
+		if (arc > arc_max) arc = arc_max;
+		return arc;
+	}
+
 	// Optional search-machinery tuning (advisor 2026-08-19). Defaults
 	// reproduce the production solve; airrec sweeps shoot_m to measure
 	// the recovery CURVE (the Level-B trigger is its shape).
@@ -249,6 +292,13 @@ namespace Entrance {
 		// BOUNDARY MODE residuals (RefTune::bnd_theta): best tick-T
 		// outcome by the search metric rp + 250*rth, and its terminal
 		// horizontal speed.
+		// OBSERVABILITY for the property gate: how the budget was
+		// actually divided, which coordinate chart won, and the final
+		// active tolerance. Reported, never used to decide anything.
+		int   evals_cover = 0;    // the budget-INDEPENDENT prefix
+		int   evals_phase1 = 0;   // spent before the first tightening
+		int   win_chart = -1;     // 0 = chord, 1 = curvature, -1 = none
+		float tol_final = 0.f;
 		float bnd_rp = 1e30f;
 		float bnd_rth = 1e30f;
 		float bnd_s = 0.f;

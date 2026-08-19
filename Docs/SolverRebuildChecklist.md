@@ -9,8 +9,22 @@ Legend: `[x]` done+validated Â· `[~]` in progress Â· `[ ]` not started Â·
 `(!)` blocked/depends Â· each milestone ends with its ACCEPTANCE GATE â€”
 a measurable pass/fail, never a vibe.
 
-**NOW â†’** M3 transfer refinement & assembly (IN PROGRESS â€” see 3.1/3.2
-status and the 2026-08-16 changelog tail for exactly where it stands).
+**NOW ->** STAGE A: EntranceField certification (the Air boundary
+operator). Resume from `Docs/AirRecSpec.md` - 13b is the advisor's
+ruling, 13c the measured answers to the nine Level-B gates, 13d the
+adversarial-review findings, 15 the standing ruling and the two Stage-A
+finish lines. The change-log tail below is the session journal.
+
+**RULING 2026-08-19: do NOT build Level B (defect-based multiple
+shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
+sequential shooting has the expressive power (16/20/29 of 32 at
+1x/2x/3x); the equal-compute curve (16/14/14) showed compute is being
+spent badly. Next build = the deterministic central refinement
+scheduler over domains D = (Q region, T branch, I_theta).
+
+**SUPERSEDED HEADERS (kept for history, do not act on):** this document
+previously read "NOW -> M3 transfer refinement & assembly". M3-era
+assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 
 ---
 
@@ -326,6 +340,57 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 ---
 
 ## Change log
+
+- 2026-08-19 (session 12c, THE RULING'S "IMMEDIATELY" ITEMS + THE
+  PROPERTY GATE. Advisor ruling received: DO NOT BUILD LEVEL B, BUILD
+  THE SCHEDULER; full text + the two Stage-A finish lines in
+  Docs/AirRecSpec.md 15, this session's work in 16.) DONE: (1)
+  `strafelaw` now derives its printed verdict AND its exit code from ONE
+  tolerance pair (was EXACT at 4.0 while exiting 2 at 0.05 - a gate that
+  lied to automation); (2) all three dangerous doc defects corrected
+  WITHOUT losing history - the status header (was "NOW -> M3 transfer
+  refinement & assembly", now Stage A, old header kept as SUPERSEDED),
+  the M0 entry's historical ~11-tick alternation law (now carries an
+  explicit SUPERSEDED note naming dwell6 as a MINIMUM not a cadence),
+  and the FALSIFIED "heading-command representation is structurally
+  incomplete" diagnosis, marked superseded in all three places it was
+  recorded (checklist session 9d, SolverAir.h, repfit's header) with the
+  real cause named; the pre-review m-curve table is marked SUPERSEDED
+  beside the canonical post-review one; (3) NEW GATE `airprops` - the
+  seven adversarial-review defects converted into invariants checked
+  against the real production path, with two pure helpers
+  (Entrance::ScoutDedupe, ToGoArcLen/ToGoSweep) extracted so test and
+  production cannot drift. IT IMMEDIATELY CAUGHT TWO LIVE VIOLATIONS:
+  P3 - the tolerance NEVER TIGHTENED (the refinement round was unbounded
+  so continuation was gated on budget remaining after it, and then my own
+  guard tested the phase ceiling it was meant to lift = a self-lock;
+  phase1 ran 1015 of 1200 with tol_final still 28u); P2 - MONOTONE
+  COMPUTE VIOLATED, L(300)=1028k vs L(1200)=1018k, root-caused to
+  exact_top flipping at a 600-eval threshold so the two budgets flew
+  DIFFERENT SCHEDULES rather than one being a prefix of the other.
+  PREFIX CONTAINMENT, PRECISELY: run(B1) must be a PREFIX of run(B2);
+  truncating a fixed action sequence at a budget-derived point preserves
+  that, but any budget-derived gate that changes an action's CONTENT
+  does not. exact_top is now fixed; the coverage sequence keeps its
+  truncation point (removing it too cost airsuite 48/48 -> 38/48 because
+  a fixed 40-shot prefix costs ~1000 eval-equivalents and starved every
+  600-eval query; restoring it recovered 48/48 at a best-ever 242k mean
+  gap). SCHEDULER INPUT: with prefix containment the coverage prefix is
+  budget-INDEPENDENT, so a budget FRACTION cannot bound it - the
+  reserved precision share applies to the DISCRETIONARY REMAINDER after
+  coverage (now enforced as P3), and coverage costs ~25 evals/shot, so
+  budgets under ~1500 are almost all coverage. That is the measured case
+  for cheap-scout-first escalation. FINAL BOARD (fixture hash
+  de1b000e431a84fb VERIFIED): airprops 7/7 GREEN; wishparity PASS
+  (H2, controller 4/4); strafelaw EXACT exit 0; airsolve 3/3 PASS; carve
+  3/3 PASS; airsuite 48/48 struck, mean gap 242k (best ever), rmin p50
+  13.4u p95 19.8u; CURVE[cap] L1 15/20/28 of 32 with the high-curvature
+  class 4/15 -> 8/15 -> 14/15, CURVE[iso] L1 15/12/17 - the funded curve
+  still scales and the flat-spend curve still does not, so the ruling
+  stands. NEXT: the deterministic central refinement scheduler over
+  domains D = (Q region, T branch, I_theta) per AirRecSpec 15.4, then
+  nested ceilings, then CURVE[scheduled], then UNFREEZE ExitField (the
+  repaired controller is a validated search primitive for it).
 
 - 2026-08-19 (session 12, THE CONVENTION WAS A FULL PI ROTATION - and
   the capability curve SETTLES LEVEL B: DO NOT BUILD IT. Full detail in
@@ -1436,3 +1501,30 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   firing correctly; no finisher; partial exported).
 
 - 2026-08-18 (session 8, ENGINE LINE-SEARCH + the corridor verdict): closed-loop model corrections replaced by an honest psi LINE-SEARCH on the real engine (9 flights max in pathgate, 7 in the solver integration; first on-cell/cap-passing strike wins). Measured: f0 constructs at -110 vs human -115 (1 eval); f2 and f3 RESIST STRUCTURALLY - their true approaches are CORRIDOR-HUGGERS (f2 skims the f0/f1 slope, closest point pinned 155u north/57u high at every psi - diving early grazes and the clip kills the southward push; f3 strikes 264u along-face from the cell). No geometry-blind trace family spans these; psi search converges to the corridor wall. Overnight zombie exe (PID 32932) held the build lock - killed. NEXT: EDGE-WAYPOINT CONSTRUCTION for corridor transfers - plan as two open-air segments via the face bottom-edge crossing (along-face leg to just past the edge, then the short dive to the cell); both segments are trace-friendly and the corridor constraint becomes the waypoint. Gates green throughout.
+
+  **SUPERSEDED 2026-08-19 - THE (1) DIAGNOSIS ABOVE IS FALSIFIED.** The
+  heading-command channel is NOT structurally incomplete. The 66-282u
+  misses were caused by `Steer::Controller`'s EMITTER using the wrong
+  wish convention: it computed a correct TRUE-basis cosa and emitted it
+  through the stored-basis mapping without converting, so a requested
+  braking turn became true cos ~ +0.9 - far above cap/v - and the tick
+  produced NO ACCELERATION AT ALL. Measured by `wishparity`: 0/4 targets
+  converged and the heading error stood still (0.1500 -> 0.1500 over 25
+  ticks); after the conversion, 4/4 converge to 0.0000 rad within 5
+  ticks and the `carve` gate returned to 3/3 PASS on its own. What
+  survives unchanged: the canonical witness REMAINS the direct per-tick
+  wish schedule replayed open-loop, because that is the cleanest
+  representation of actual admissible inputs and replay is the only
+  truth. What changes: the corrected controller is now a VALIDATED
+  SEARCH PRIMITIVE (and a head start for ExitField), not a discredited
+  channel.
+
+
+      **SUPERSEDED 2026-08-18 - THE STANDING LAW IS DWELL 6.** The
+      rate limit above (6 changes/sec, ~11 ticks) is HISTORICAL. The
+      current control law is `strafe_rate_max = 12/sec` = a MINIMUM
+      6-TICK DWELL between side reversals, and it is a lower bound on
+      segment length, not a cadence (segments of 13, 8, 21, 6, 17 ...
+      are all legal). Every gap constant derives from it; the dwell
+      timer crosses operator seams (Invariant 9). Do not rebuild the
+      12-tick pacing from this entry.

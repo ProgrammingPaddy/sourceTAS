@@ -1811,9 +1811,14 @@ namespace {
 		}
 		printf("strafelaw: %d points | max |dspeed^2| %.6f | max |dturn| %.8f rad\n",
 			n, max_dg, max_dt);
-		// Tolerance is ULP-relative: one ULP of speed^2 at 3400 u/s is ~1.0,
-		// so a few units of absolute drift IS float-exact agreement.
-		printf("strafelaw: %s\n", (max_dg <= 4.f && max_dt < 1e-5f)
+		// ONE AUTHORITATIVE TOLERANCE (advisor 2026-08-19): the printed
+		// verdict and the process exit code MUST derive from the same
+		// thresholds. A gate that prints EXACT while returning failure is
+		// not cosmetic once audit automation depends on it.
+		constexpr float kLawMaxDG = 4.f;    // ULP-relative: one ULP of
+		constexpr float kLawMaxDT = 1e-5f;  // speed^2 at 3400 u/s is ~1.0
+		const bool law_ok = (max_dg <= kLawMaxDG && max_dt < kLawMaxDT);
+		printf("strafelaw: %s\n", law_ok
 			? "closed form EXACT against the certified mirror (float ULP)"
 			: "LAW DEVIATES - do not build on it; find out why first");
 		// The economics table for the record: per-tick gain vs turn at the
@@ -1832,7 +1837,7 @@ namespace {
 				v, g0, t0, gb, tb);
 		}
 		fflush(stdout);
-		return (max_dg < 0.05f && max_dt < 1e-5f) ? 0 : 2;
+		return law_ok ? 0 : 2;
 	}
 
 	// routegraph: STAGE 1 of the rebuild - extract the feature graph and
@@ -6865,10 +6870,14 @@ namespace {
 	// 2026-08-18). Before blaming the optimizer, prove the human's
 	// ADMISSIBLE flights are inside the solver's control basis:
 	//   U_human in U_solver, not just U_human in U_game.
-	// MEASURED en route (kept as the record): the heading-command
-	// channel CANNOT reproduce flights even when handed the human's
-	// realized headings (66-282u misses - the M1.3-era per-tick
-	// mirror desync). The honest basis is the INPUT space itself:
+	// MEASURED en route (kept as the record, WITH ITS 2026-08-19
+	// CORRECTION): the heading-command channel could not reproduce
+	// flights even when handed the human's realized headings (66-282u
+	// misses). That was later root-caused to the CONTROLLER EMITTER's
+	// wish-convention bug (requested braking turns were emitted as
+	// inert wishes), NOT to any incompleteness of the heading channel.
+	// The basis below is still the right one to store and replay -
+	// it is the INPUT space itself:
 	// per tick, wish direction as (side, cosa) about the current
 	// velocity heading, executed open-loop by Air::FlyWishSchedule.
 	// Rows per event: (a) the per-tick wish schedule (the basis
@@ -7629,6 +7638,214 @@ namespace {
 			by_vz[2].hit, by_vz[2].n);
 		fflush(stdout);
 		return 0;
+	}
+
+	// ================= airprops: THE PROPERTY GATE (advisor
+	// 2026-08-19: "convert each of the seven adversarial-review defects
+	// into a regression/property test where possible"). Each property is
+	// an INVARIANT of the operator checked against the real production
+	// path - the two pure helpers are shared with production precisely
+	// so a test can never drift from it. One authoritative threshold set
+	// drives both the printed verdict and the exit code.
+	int CmdAirProps(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("airprops: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[256];
+		auto check = [&](const char* name, bool ok, const char* detail) {
+			printf("airprops: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", detail);
+			if (ok) pass++; else fail++;
+		};
+		int fi = -1;
+		for (size_t i = 0; i < g.faces.size(); ++i) {
+			const Route::Face& f2 = g.faces[i];
+			if (sqrtf(f2.n.X * f2.n.X + f2.n.Y * f2.n.Y) > 1e-4f) {
+				fi = static_cast<int>(i);
+				break;
+			}
+		}
+		if (fi < 0) {
+			printf("airprops: no surfable face - cannot run\n");
+			return 1;
+		}
+		const Route::Face& fc = g.faces[static_cast<size_t>(fi)];
+		const Vec3 q = fc.centroid;
+		const int Hn = 44;
+		const float s0 = 700.f, vz0 = -100.f;
+		const float T = static_cast<float>(Hn) * p.dt;
+		const float z0 = q.Z - vz0 * T + 0.5f * p.gravity * T * T;
+		const float paz = atan2f(fc.n.Y, fc.n.X);
+		const float dist = 0.8f * Envelope::DMax(s0, Hn, p);
+		PlayerState st;
+		st.pos = Vec3(q.X + cosf(paz + 0.45f) * dist,
+			q.Y + sinf(paz + 0.45f) * dist, z0);
+		const float inaz = atan2f(q.Y - st.pos.Y, q.X - st.pos.X);
+		st.vel = Vec3(cosf(inaz + 0.3f) * s0,
+			sinf(inaz + 0.3f) * s0, vz0);
+		st.ducked = false;
+		st.hull_state = 0;
+
+		// ---- P4 (review defect 4): the scout dedupe radius must be
+		// non-decreasing in tol AND never exceed the historical 32u.
+		// The original formula fixed the fine case and silently
+		// tripled the coarse one.
+		{
+			bool mono = true, capped = true;
+			float prev = -1.f;
+			for (int i = 1; i <= 64; ++i) {
+				const float t2 = static_cast<float>(i) * 0.5f;
+				const float d = Entrance::ScoutDedupe(t2);
+				if (d > 32.f + 1e-6f)
+					capped = false;
+				if (d + 1e-6f < prev)
+					mono = false;
+				prev = d;
+			}
+			const bool finer = Entrance::ScoutDedupe(1.f)
+				< Entrance::ScoutDedupe(28.f);
+			snprintf(buf, sizeof(buf), "capped@32u=%d nondecreasing=%d"
+				" finer(1u)<coarse(28u)=%d", capped ? 1 : 0,
+				mono ? 1 : 0, finer ? 1 : 0);
+			check("P4 dedupe bounded+monotone",
+				capped && mono && finer, buf);
+		}
+		// ---- P6 (review defect 6): the curvature to-go arc length is
+		// BOUNDED everywhere, including targets directly behind, where
+		// the unclamped form diverged to ~1.3e10.
+		{
+			bool bounded = true;
+			float worst = 0.f;
+			for (int i = -40; i <= 40; ++i)
+				for (int j = -40; j <= 40; ++j) {
+					const float lx = static_cast<float>(i) * 25.f;
+					const float ly = static_cast<float>(j) * 25.f;
+					const float chord = sqrtf(lx * lx + ly * ly);
+					if (chord < 1e-3f)
+						continue;
+					const float arc = Entrance::ToGoArcLen(lx, ly);
+					const float ratio = arc / chord;
+					if (ratio > worst)
+						worst = ratio;
+					if (!(arc >= chord - 1e-2f)
+						|| ratio > 1.5708f + 1e-3f)
+						bounded = false;
+				}
+			snprintf(buf, sizeof(buf), "worst arc/chord %.4f (bound "
+				"1.5708) over a full grid incl. behind", worst);
+			check("P6 curvature to-go bounded", bounded, buf);
+		}
+		// ---- P1 (review defect 1): the boundary value tier must be
+		// the FEASIBILITY PREDICATE on both channels, never a
+		// threshold on their weighted sum.
+		{
+			PlayerState b0 = st;
+			b0.pos.Z += 2500.f;
+			std::vector<signed char> sd(static_cast<size_t>(Hn), 1);
+			std::vector<float> cs(static_cast<size_t>(Hn),
+				Strafe::ToStoredWishCos(Strafe::TrueWishCos(0.f)));
+			Air::Target vt;
+			vt.face = -1;
+			vt.aim = b0.pos;
+			vt.max_ticks = Hn;
+			Air::Result ar = Air::FlyWishSchedule(b0, w, p, vt, g, sd,
+				cs, Hn);
+			if (ar.struck_brush >= 0 || ar.grounded) {
+				check("P1 boundary feasibility predicate", false,
+					"probe flight hit geometry - not exercised");
+			} else {
+				const Vec3 bq = ar.end_pos;
+				const float bth = atan2f(ar.end_state.vel.Y,
+					ar.end_state.vel.X);
+				float thiv[2] = { Steer::WrapPi(bth - 0.12f),
+					Steer::WrapPi(bth + 0.12f) };
+				Entrance::RefTune tn;
+				tn.bnd_theta = thiv;
+				tn.precision = 1.f;
+				int fl = 0;
+				Entrance::RefResult rr = Entrance::RefSolve(b0, w, p,
+					g, -1, bq, 8.f, Hn, 700, false, &fl, 0.f,
+					Steer::CtlState(), nullptr, nullptr, nullptr,
+					&tn);
+				const bool ok = !rr.ok || (rr.bnd_rp <= 8.f
+					&& rr.bnd_rth <= 1e-4f);
+				snprintf(buf, sizeof(buf), "ok=%d rp %.2fu rth %.6f "
+					"rad (sum-proxy would admit rth<=%.4f)",
+					rr.ok ? 1 : 0, rr.bnd_rp, rr.bnd_rth,
+					8.f / Entrance::kThetaW);
+				check("P1 boundary feasibility predicate", ok, buf);
+			}
+		}
+		// ---- P2 (the monotone-compute law), P3 (deterministic budget
+		// ownership, review defect 3) and P5 (the winning chart is
+		// recorded and used, review defect 5) ----
+		{
+			int f1 = 0, f2 = 0;
+			Entrance::RefTune tn;
+			tn.precision = 4.f;
+			Entrance::RefResult r1 = Entrance::RefSolve(st, w, p, g,
+				fi, q, 28.f, Hn, 300, false, &f1, fc.zmin,
+				Steer::CtlState(), nullptr, nullptr, nullptr, &tn);
+			Entrance::RefResult r2 = Entrance::RefSolve(st, w, p, g,
+				fi, q, 28.f, Hn, 1200, false, &f2, fc.zmin,
+				Steer::CtlState(), nullptr, nullptr, nullptr, &tn);
+			const float L1 = r1.ok ? r1.H : -1e30f;
+			const float L2 = r2.ok ? r2.H : -1e30f;
+			const bool mono = L2 >= L1 - 1.f;
+			snprintf(buf, sizeof(buf), "L(300)=%.0fk L(1200)=%.0fk",
+				L1 > -1e29f ? L1 / 1e3f : 0.f,
+				L2 > -1e29f ? L2 / 1e3f : 0.f);
+			check("P2 monotonic compute", mono, buf);
+			// The reserved share bounds the DISCRETIONARY remainder
+			// after the budget-independent coverage prefix (bounding
+			// coverage itself would break P2).
+			const int disc = 1200 - r2.evals_cover;
+			const int cap = r2.evals_cover
+				+ (disc > 0 ? (disc * 3) / 5 : 0);
+			const bool owned = r2.evals_phase1 > 0
+				&& r2.evals_phase1 <= cap + 80
+				&& r2.tol_final <= 16.f;
+			snprintf(buf, sizeof(buf), "cover %d, phase1 %d of 1200 "
+				"(cap %d + one round), tol_final %.1fu",
+				r2.evals_cover, r2.evals_phase1, cap,
+				r2.tol_final);
+			check("P3 budget ownership bounded", owned, buf);
+			const bool charted = r2.win_chart == 0
+				|| r2.win_chart == 1;
+			snprintf(buf, sizeof(buf), "win_chart %d (0=chord, "
+				"1=curvature, -1=never set)", r2.win_chart);
+			check("P5 winning chart recorded", charted, buf);
+		}
+		// ---- P7 (review defect 7): the residual machinery stays
+		// active on hopeless queries - the dry counter must not
+		// declare convergence on round 1 when nothing ever strikes.
+		{
+			const Vec3 far_q(q.X + 100000.f, q.Y + 100000.f, q.Z);
+			int fl = 0;
+			Entrance::RefResult rr = Entrance::RefSolve(st, w, p, g,
+				fi, far_q, 28.f, Hn, 400, false, &fl, fc.zmin);
+			const bool spent = rr.evals >= 300;
+			snprintf(buf, sizeof(buf), "unreachable target: %d of 400 "
+				"evals spent (round-1 dry exit spends ~40)",
+				rr.evals);
+			check("P7 hard-case search stays active", spent, buf);
+		}
+		printf("airprops: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "PROPERTY GATE GREEN"
+				: "PROPERTY GATE RED - a review defect regressed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
 	}
 
 	// ================= wishparity: THE CONVENTION PARITY GATE
@@ -11357,6 +11574,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "airprops" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdAirProps(argv[2], o);
 	}
 	if (cmd == "wishparity" && argc >= 3) {
 		ReplayOpts o;

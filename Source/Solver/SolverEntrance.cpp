@@ -379,28 +379,11 @@ namespace Entrance {
 								const float sh2 = sinf(hh);
 								const float lx = ddx * ch + ddy * sh2;
 								const float ly = -ddx * sh2 + ddy * ch;
-								const float r2 = lx * lx + ly * ly;
-								const float kap = r2 > 1e-3f
-									? 2.f * ly / r2 : 0.f;
-								const float phi = 2.f * atan2f(ly, lx);
-								// Arc length of that circle (chord when
-								// the turn is negligible). BOUNDED: as
-								// ly -> 0 with lx < 0 (target directly
-								// BEHIND) kappa -> 0 while |phi| -> pi,
-								// so phi/kappa diverges - measured up to
-								// 1.3e10, which swamped every other term
-								// and made sidestepping look cheaper than
-								// turning. The arc can never be shorter
-								// than the chord nor longer than the
-								// half-circle through both points, so
-								// clamp it there.
-								const float chord = sqrtf(r2);
-								float arc = fabsf(kap) > 1e-6f
-									? fabsf(phi / kap) : chord;
-								const float arc_max = 1.57079633f
-									* chord;
-								if (arc < chord) arc = chord;
-								if (arc > arc_max) arc = arc_max;
+								// Sweep and BOUNDED arc length via the shared
+								// pure helpers, so the property gate
+								// (`airprops`) tests the same code that runs.
+								const float phi = ToGoSweep(lx, ly);
+								const float arc = ToGoArcLen(lx, ly);
 								Strafe::TickLaw lr = Strafe::Law(
 									p, ss, 1.f, s.ducked);
 								const float tfree = lr.TurnRad(
@@ -991,9 +974,7 @@ namespace Entrance {
 			// the original 32u: the formula must not loosen endpoint
 			// diversity for the coarse callers (Field::Build at grid
 			// 32 would have gone to 115u with only 3 slots).
-			float dedup = 4.f * tol;
-			if (dedup < 8.f) dedup = 8.f;
-			if (dedup > 32.f) dedup = 32.f;
+				const float dedup = ScoutDedupe(tol);
 				int slot = -1;
 				for (int i2 = 0; i2 < 3; ++i2)
 					if (scouts[static_cast<size_t>(i2)].has
@@ -1180,7 +1161,28 @@ namespace Entrance {
 		// Every frozen schedule enters only through open-loop replay;
 		// generation passes are charged to the budget. ----
 		{
+			// PREFIX CONTAINMENT (advisor's monotone-compute law): the
+			// guided phase is a FIXED sequence of shots, not a
+			// fraction of the budget, so a larger budget flies the
+			// same first shots and can only ever ADD to what a
+			// smaller one found. `budget/3` and a 600-eval rollout
+			// threshold both made the action SEQUENCE depend on the
+			// total, which is how L(1200) came out below L(300).
+			// PREFIX CONTAINMENT, precisely stated: run(B1) must be a
+			// PREFIX of run(B2). Truncating the shot sequence at a
+			// budget-derived point preserves that (the larger budget
+			// flies the same shots and more). What BROKE it was
+			// exact_top flipping at 600 evals, which changed the
+			// CONTENT of every shot, so the two runs flew different
+			// schedules entirely - measured as L(1200) < L(300).
+			// exact_top is therefore fixed, and the sequence keeps a
+			// truncation point so small budgets still reach the
+			// refinement rounds (a fixed 40-shot prefix costs ~1000
+			// eval-equivalents and starved every 600-eval query:
+			// airsuite fell 48/48 -> 38/48).
+			const int kGuidedShots = 40;
 			const int gbudget = budget / 3;
+			int gshots = 0;
 			const int fl0 = best.evals;
 			std::vector<signed char> gsd;
 			std::vector<float> gcs;
@@ -1192,16 +1194,18 @@ namespace Entrance {
 			const float eqx = -epy, eqy = epx;
 			auto shoot = [&](const std::vector<GuideTarget>& tgts,
 				const GuideWeights& gw, int iv_i) {
-				if (best.evals - fl0 >= gbudget
+				if (gshots >= kGuidedShots
+					|| best.evals - fl0 >= gbudget
 					|| best.evals >= budget)
 					return;
+				gshots++;
 				if (iv_i >= 0 && iv_i < 6)
 					best.iv_shots[iv_i]++;
 				GuideWeights g2 = gw;
-				// Second-stage exact rollouts only when the budget
-				// affords them; their sim ticks are charged as
-				// flight-equivalents.
-				g2.exact_top = budget >= 600 ? 4 : 0;
+				// Second-stage exact rollouts always run so the
+				// action sequence is budget-independent; their sim
+				// ticks are charged as flight-equivalents.
+				g2.exact_top = 4;   // budget-independent
 				int ro = 0;
 				GuidedShootSeq(entry, w, p, tgts, N, min_gap,
 					entry_ctl, g2, &gsd, &gcs, &ro);
@@ -1387,6 +1391,7 @@ namespace Entrance {
 						track_best = shot_key();
 						win_ii = np.ii;
 						win_chart = np.chart;
+						best.win_chart = np.chart;
 						win_p1 = np.p1;
 					}
 				}
@@ -1697,18 +1702,47 @@ namespace Entrance {
 		}
 		// deepen(): local refinement of one elite (knot/length moves,
 		// the resolution ladder, reversal insertion).
+		// EXPLICIT BUDGET RESERVATION. The value phase gets a bounded,
+		// documented share and the requested tolerance gets the rest -
+		// rather than the value phase running until it happens to
+		// converge (measured: at 600 evals it never did, so continuation
+		// never fired at all) or being preempted mid-round by a race on
+		// the eval counter. Truth is unaffected either way: this splits
+		// RESOLUTION, and crediting stays pinned to the caller's
+		// original radius.
+		// The coverage prefix (seeds + the fixed guided shot sequence) is
+		// BUDGET-INDEPENDENT by construction - that is what makes compute
+		// monotonic - so it cannot be bounded by a fraction of the budget.
+		// The reserved share therefore applies to the DISCRETIONARY
+		// REMAINDER after coverage. (Measured consequence worth keeping:
+		// the 40-shot prefix costs ~1000 eval-equivalents with exact
+		// rollouts on, so budgets below ~1500 are almost entirely
+		// coverage - precisely the case for the scheduler's
+		// cheap-scout-first escalation over flying every shot everywhere.)
+		best.evals_cover = best.evals;
+		const int disc_rem = budget - best.evals_cover;
+		const int phase1_cap = prec < radius
+			? best.evals_cover + (disc_rem > 0 ? (disc_rem * 3) / 5 : 0)
+			: budget;
+		int rung_i = 0;   // next kLadder rung the continuation targets
+		// The refinement ROUND must respect the reserved share too:
+		// deepen()/perturb() run until the budget is gone, so gating
+		// the tightening on budget-remaining-after-a-round meant it
+		// never fired at all. budget_cur is the phase's ceiling and
+		// lifts to the full budget once the tolerance tightens.
+		int budget_cur = phase1_cap;
 		auto deepen = [&](BinElite& pe, float kstep, int lstep) {
 			if (!pe.has)
 				return;
 			bool moved = true;
 			int guard = 0;
-			while (moved && best.evals < budget && guard++ < 8) {
+			while (moved && best.evals < budget_cur && guard++ < 8) {
 				moved = false;
 				for (size_t j = 0; j < pe.runs.size(); ++j) {
 					for (size_t ki = 0; ki < pe.runs[j].ck.size();
 						++ki)
 						for (int sg = -1; sg <= 1; sg += 2) {
-							if (best.evals >= budget)
+							if (best.evals >= budget_cur)
 								return;
 							std::vector<WishRun> t2 = pe.runs;
 							float nv = t2[j].ck[ki] + kstep
@@ -1728,7 +1762,7 @@ namespace Entrance {
 							}
 						}
 					for (int sg = -1; sg <= 1; sg += 2) {
-						if (best.evals >= budget)
+						if (best.evals >= budget_cur)
 							return;
 						std::vector<WishRun> t2 = pe.runs;
 						const int dl = lstep * sg;
@@ -1793,7 +1827,7 @@ namespace Entrance {
 				}
 				if (!moved && pe.runs.size() < 7
 					&& pe.runs[lj].len >= 2 * min_gap
-					&& best.evals < budget) {
+					&& best.evals < budget_cur) {
 					std::vector<WishRun> t2 = pe.runs;
 					WishRun tail;
 					tail.len = t2[lj].len / 2;
@@ -1908,20 +1942,9 @@ namespace Entrance {
 					s3.sc = key_of(s3.res, s3.val, s3.rp,
 						s3.rth);
 		};
-		// EXPLICIT BUDGET RESERVATION. The value phase gets a bounded,
-		// documented share and the requested tolerance gets the rest -
-		// rather than the value phase running until it happens to
-		// converge (measured: at 600 evals it never did, so continuation
-		// never fired at all) or being preempted mid-round by a race on
-		// the eval counter. Truth is unaffected either way: this splits
-		// RESOLUTION, and crediting stays pinned to the caller's
-		// original radius.
-		const int phase1_cap = prec < radius
-			? (budget * 3) / 5 : budget;
-		int rung_i = 0;   // next kLadder rung the continuation targets
 		while (best.evals < budget && dry < 4) {
 			// Scouts always get the full schedule.
-			for (int rd = 0; rd < 4 && best.evals < budget; ++rd)
+			for (int rd = 0; rd < 4 && best.evals < budget_cur; ++rd)
 				for (int si2 = 0; si2 < 3; ++si2)
 					deepen(scouts[static_cast<size_t>(si2)],
 						ksteps[rd], lsteps[rd]);
@@ -1956,18 +1979,18 @@ namespace Entrance {
 						have_soft = true;
 				if (!have_soft)
 					work.push_back(soft);
-				for (int rd = 0; rd < 4 && best.evals < budget;
+				for (int rd = 0; rd < 4 && best.evals < budget_cur;
 					++rd)
 					for (int b2 : work) {
-						if (best.evals >= budget)
+						if (best.evals >= budget_cur)
 							break;
 						deepen(bins[static_cast<size_t>(b2)],
 							ksteps[rd], lsteps[rd]);
 					}
-				if (best.evals < budget)
+				if (best.evals < budget_cur)
 					perturb(bins[static_cast<size_t>(work[0])]);
 			}
-			if (best.evals < budget && scouts[0].has)
+			if (best.evals < budget_cur && scouts[0].has)
 				perturb(scouts[0]);
 			if (!progress())
 				dry++;
@@ -1988,6 +2011,10 @@ namespace Entrance {
 			// a guaranteed minimum share of the budget (the advisor's
 			// "every unresolved domain receives minimum exploration",
 			// applied to resolution rather than to regions).
+			// NOTE the guard tests the FULL budget, never the phase
+			// ceiling: gating the tightening on the ceiling it is
+			// supposed to LIFT is a self-lock (measured: phase1 ran
+			// to 1015 of 1200 and the tolerance never moved).
 			if ((dry >= 4 || best.evals >= phase1_cap) && prec < tol
 				&& best.evals < budget) {
 				float next = prec;
@@ -1996,6 +2023,12 @@ namespace Entrance {
 				if (rung_i < 6 && kLadder[rung_i] > prec)
 					next = kLadder[rung_i];
 				if (next < tol) {
+					budget_cur = budget;   // lift the phase ceiling
+					// Record how the budget actually divided the
+					// first time the tolerance tightens (property
+					// gate: phase 1 must own a bounded share).
+					if (best.evals_phase1 == 0)
+						best.evals_phase1 = best.evals;
 					tol = next;
 					rekey();
 					dry = 0;
@@ -2004,6 +2037,9 @@ namespace Entrance {
 				}
 			}
 		}
+		best.tol_final = tol;
+		if (best.evals_phase1 == 0)
+			best.evals_phase1 = best.evals;
 		return best;
 	}
 

@@ -513,10 +513,30 @@ on the winning chart and node time.
 **Gate 5 — rerun on frozen fixtures: DONE.** **Gate 6 — both curves:
 DONE**, and they are the decision:
 
-| curve | m=0 | m=1 | m=2 |
+> **SUPERSEDED — pre-adversarial-review measurement. Do not use for
+> architectural decisions.** The table immediately below was measured
+> before the seven review defects of §13d were fixed (in particular the
+> boundary value tier firing on a scalarised proxy for the feasibility
+> gate). It is kept for history only; the canonical numbers are in the
+> *post-review* table that follows it.
+
+| curve (SUPERSEDED) | m=0 | m=1 | m=2 |
 |---|---|---|---|
 | iso-budget (equal compute) | 15/32 (47%) | 18/32 (56%) | 20/32 (63%) |
-| capability (funded 1×/2×/3×) | 15/32 (47%) | **24/32 (75%)** | **30/32 (94%)** |
+| capability (funded 1×/2×/3×) | 15/32 (47%) | 24/32 (75%) | 30/32 (94%) |
+
+**CANONICAL (post-review, fixture hash `de1b000e431a84fb` VERIFIED):**
+
+| curve | m=0 | m=1 | m=2 |
+|---|---|---|---|
+| iso-budget (equal compute) | 16/32 (50%) | 14/32 (44%) | 14/32 (44%) |
+| capability (funded 1×/2×/3×) | 16/32 (50%) | **20/32 (63%)** | **29/32 (91%)** |
+
+The iso curve *declines*, which is a stronger statement than the
+pre-review numbers made: at flat spend, added representation is a net
+loss. Capability m=2 ladder: 8u:28, 4u:23, 2u:15, 1u:11 of 32; rp p50
+2.0u, p95 9.1u; high-curvature class 4/15 → 7/15 → 14/15; zero bound
+falsifications.
 
 The persistent known-reachable failing class — high integrated heading
 change (dh_tot above median) — goes **4/15 → 10/15 → 14/15** on the
@@ -665,3 +685,241 @@ PASS, a gate that had been red 2/3 since the dwell-6 law landed.
   cold-solves at m=0/1/2 (or the single requested level), prints
   per-case rows, per-stratum aggregates, the ladder, feature
   correlations, falsification checks, and the recovery curve.
+
+---
+
+## 15. STANDING RULING 2026-08-19c — build the scheduler; two Stage-A
+##     finish lines
+
+Received after §13c/§13d were measured. This section is the current
+marching order and supersedes any earlier "Level B if the curve is
+flat" language.
+
+### 15.1 The ruling
+
+> **Do not build Level B. Build the scheduler.**
+
+The funded curve shows sequential shooting has the necessary expressive
+power; the fixed-budget curve shows compute is currently spent badly.
+At sufficient funding 50% / 63% / 91%; at equal spend 50% / 44% / 44%.
+So: *more representation helps enormously when exercised, but blindly
+paying for it everywhere is worse.*
+
+### 15.2 The convention boundary is permanent law
+
+    solver mathematics / search  →  TrueWish coordinates
+                                 →  explicit conversion
+                                 →  stored/executor witness
+
+All new search-side physics speaks **true-wish** semantics. The stored
+convention is confined to the named execution bridge. **Do not migrate
+the bank again for aesthetics** — it stores the exact replay payload and
+that is correct as-is.
+
+### 15.3 The historical diagnosis is corrected
+
+"The heading-command representation is structurally incomplete" is
+**FALSIFIED**. The real cause was the controller emitter's wish
+convention, which made requested turns produce no acceleration at all.
+The canonical witness stays the direct per-tick wish schedule (cleanest
+representation of admissible inputs; replay remains authoritative), but
+the corrected controller is now a **validated search primitive**, not a
+discredited one.
+
+### 15.4 The scheduler design
+
+The atomic semantic domain is
+
+    D = (Q region, T branch, I_theta)
+
+Chord/curvature chart, m=0/1/2, GN, scouts are **methods that refine
+D**, not separate domains. Each domain carries
+`(L_D, U_D, status, kappa_D, spent_D)`. For a board query
+`L* = max_D L_D`, and the certified competitive slack is
+`C_D = max(0, U_D − L*)`. If `U_D ≤ L* + ε` the domain needs no further
+refinement at the requested accuracy — **that is a proof decision;
+everything else is scheduling.**
+
+Progressive escalation, not paying for m=2 everywhere:
+
+    broad cheap coverage → competitive intervals
+      → hard conditioned intervals → precision
+
+Every unresolved domain gets a cheap scout. Promote through m=0→1→2 only
+as necessary; once a feasible witness exists, promote through the
+positional continuation ladder; GN/polish only where the residual/value
+gap justifies it.
+
+**κ estimates difficulty, never value.** Certified competitive gap
+decides whether a domain matters; κ estimates what it will cost. No
+single priority equation is sacred — `C_D`, `U_D − L_D`, `κ_D`,
+`cost_D`, recent improvement rate, chart success and residual slope are
+all fair *ordering* signals. **Only a certified U may ever terminate a
+branch.**
+
+**Minimum portfolio coverage.** The f0 regression is the lesson: new
+curvature/gain machinery helped long-turn cases and weakened a short
+low-curvature one. The answer is NOT an "f0 fix" — it is a retained
+generic strategy portfolio (direct/chord, curvature, gain-dominant,
+braking-capable, scouts), each with a small exploration floor, with
+marginal-useful-improvement-per-cost influencing allocation thereafter.
+**No new method may starve an old one merely because its enumeration
+comes first.**
+
+**Compute must be monotonic.** For `B2 > B1`, `L(B2) ≥ L(B1)` — inside a
+single query's refinement state, not only via the persistent bank. A
+larger budget may discover that earlier priorities were foolish; it may
+never *forget* a better verified answer.
+
+### 15.5 Measurement additions
+
+Keep the iso-budget and capability curves forever. Add a third mode:
+
+    CURVE[scheduled]   at the same total compute as iso-budget
+
+That is now the number being optimised: scheduled m≤2 behaviour should
+approach the funded capability result without funded-everywhere compute.
+Also report recovery as a function of total budget, `R(B)` — an anytime
+curve that must rise monotonically.
+
+**Do not chase 100% fixed-budget recovery as the definition of truth.**
+The operator's contract remains `L, U, RESOLVED/UNRESOLVED, witnesses`.
+A hard case unresolved after a cheap query is legal; a hard case falsely
+declared impossible is not. A *generous reference run* should recover
+essentially all frozen known-reachable fixtures — that is the practical
+completeness regression.
+
+### 15.6 TWO Stage-A finish lines (replaces "frozen until perfect")
+
+**EntranceField INTEGRATION-READY** — safe to build higher operators on
+because *it never lies*. Returning `L=900k, U=1.05M, UNRESOLVED` is
+fine. Requires: exact witness replay; correct control/seam laws; stable
+witness bank; no false hard culls; semantic feasibility predicates;
+heading domains preserved when unresolved; a scheduler that actually
+exercises m0/m1/m2; monotonic lower bounds under increasing compute;
+broad recovery of known-reachable synthetic cases under escalation;
+certified upper bounds surviving oracle falsification; a working
+query/refine API. **When this is green, start ExitField.**
+
+**EntranceField CERTIFICATION-MATURE** — bounds tight enough for
+efficient global proof: materially tighter nested ceilings, adaptive
+heading/space splitting, local gap closure. This continues *alongside*
+ExitField. Separating the bars prevents permanent Stage-A purgatory, and
+the global solver uses lazy refinement anyway.
+
+### 15.7 ExitField gets a head start
+
+Do **not** resurrect the 24k carve architecture (greedy scoring,
+families, beam, local commitment are all still wrong). But the repaired
+controller is reusable *as search machinery* inside
+`ExitField(S_board)`, bringing a parity-checked turn law, free-turn and
+braking-turn capability, dwell-state continuity, exact replay, a working
+on-surface controller and duck-off behaviour. The canonical ExitField
+witness remains direct ride inputs — likely `(side, cosα, duck)` plus
+whatever `exitfit` proves necessary. `carve` returning to 3/3 the moment
+the convention was corrected is strong evidence much of Stage 2's
+numerical machinery already exists.
+
+### 15.8 Order of work
+
+1. Gate/document infrastructure (DONE 2026-08-19: `strafelaw` verdict
+   and exit code now derive from one threshold pair; the status header,
+   the superseded dwell law and the falsified basis diagnosis are all
+   annotated). Convert the seven §13d defects into regression/property
+   tests.
+2. The deterministic central refinement scheduler (§15.4).
+3. Nested ceilings `U0 ≥ U1 ≥ U2 ≥ U3 ≥ U4 ≥ H*` with per-constraint
+   decrement reporting — the scheduler becomes far more useful as soon
+   as `U_D` differs meaningfully between domains.
+4. `CURVE[scheduled]` + `R(B)`.
+5. Then **stop extending Stage A horizontally** and unfreeze ExitField.
+
+**Design the scheduler as the first implementation of the project's
+general refinement philosophy, not an Air-only hack** — the same lazy
+allocation recurs at every scale: cosα/control → shooting complexity →
+heading interval → face region → transfer → global route branch.
+
+---
+
+## 16. Session 12c — the ruling's "immediately" items, and what the
+##     property gate found
+
+### 16.1 `strafelaw` no longer lies to automation
+
+One authoritative tolerance pair (`kLawMaxDG = 4.f`, `kLawMaxDT = 1e-5f`,
+ULP-relative) now drives **both** the printed verdict and the process
+exit code. Measured: prints EXACT, exits 0. Previously it printed EXACT
+at threshold 4.0 while exiting 2 at threshold 0.05.
+
+### 16.2 Design records corrected (all three were live hazards)
+
+- **Status header**: was `NOW → M3 transfer refinement & assembly`, now
+  Stage A EntranceField certification, with the standing ruling and a
+  pointer to this document. The old header is kept, marked SUPERSEDED.
+- **The dwell law**: the M0 foundation entry still described the
+  historical ~11-tick alternation limit. It now carries an explicit
+  SUPERSEDED note stating the standing law (minimum **6-tick dwell**, a
+  lower bound on segment length, not a cadence) so a compacted agent
+  cannot rebuild 12-tick pacing from the "status document".
+- **The falsified diagnosis**: "the heading-command representation is
+  structurally incomplete" is marked **FALSIFIED** in all three places
+  it was recorded (the checklist's session-9d entry, `SolverAir.h`, and
+  `repfit`'s header in `SolverLab.cpp`), with the real cause named —
+  the controller emitter's wish convention made requested turns produce
+  no acceleration at all. The canonical witness stays the direct wish
+  schedule; the corrected controller is now a **validated search
+  primitive**.
+- **The m-curve**: the pre-review table is retained and marked
+  `SUPERSEDED — pre-adversarial-review measurement`, with the canonical
+  post-review table beside it. History preserved, not overwritten.
+
+### 16.3 The property gate `airprops` (7/7 green)
+
+Each of the seven §13d defects is now an invariant checked against the
+real production path. Two pure helpers (`ScoutDedupe`, `ToGoArcLen` /
+`ToGoSweep`) were extracted so production and the test share one
+implementation and cannot drift.
+
+| property | invariant |
+|---|---|
+| P1 | the boundary value tier is the feasibility **predicate** on both channels, never a threshold on their weighted sum |
+| P2 | **monotonic compute**: `L(B2) ≥ L(B1)` for `B2 > B1`, inside one query |
+| P3 | deterministic budget ownership: phase 1 owns a bounded share and the tolerance actually tightens |
+| P4 | scout dedupe non-decreasing in tol and never coarser than 32u |
+| P5 | the winning coordinate chart is recorded and used downstream |
+| P6 | the curvature to-go arc length is bounded everywhere, including directly-behind targets |
+| P7 | the residual machinery stays active on hopeless queries (no round-1 dry exit) |
+
+**It immediately caught two live violations**, which is the point:
+
+1. **P3 failed**: the tolerance never tightened at all. Two causes — the
+   refinement *round* was unbounded (so continuation was gated on budget
+   remaining *after* it), and then my own guard tested the phase ceiling
+   it was supposed to lift (a self-lock: phase 1 ran to 1015 of 1200 and
+   `tol_final` stayed 28u).
+2. **P2 failed**: `L(300) = 1028k` but `L(1200) = 1018k` — a larger
+   budget produced a **worse** lower bound, violating the monotone-compute
+   law. Root cause: `exact_top` flipped at a 600-eval threshold, so the
+   two budgets flew *different schedules entirely* rather than one being
+   a prefix of the other.
+
+**The precise statement of prefix containment**, learned the hard way:
+`run(B1)` must be a **prefix** of `run(B2)`. Truncating a fixed action
+sequence at a budget-derived point preserves that — the larger budget
+flies the same shots and more. What breaks it is any budget-derived gate
+that changes the **content** of an action. So `exact_top` is now fixed,
+and the coverage sequence keeps its truncation point. Removing the
+truncation as well cost airsuite 48/48 → 38/48 (a fixed 40-shot prefix
+costs ~1000 eval-equivalents and starved every 600-eval query) —
+restoring it recovered 48/48 at a best-ever 242k mean gap.
+
+### 16.4 A measured input to the scheduler design
+
+With prefix containment in force, the coverage prefix is
+budget-independent by construction, so a *fraction* of the budget cannot
+bound it: the reserved precision share must apply to the **discretionary
+remainder after coverage**. And coverage is expensive — ~25
+eval-equivalents per guided shot with exact rollouts on, so budgets
+below roughly 1500 are almost entirely coverage. That is a direct
+argument for the scheduler's cheap-scout-first escalation over flying
+every shot at every domain, and it is now enforced as P3.
