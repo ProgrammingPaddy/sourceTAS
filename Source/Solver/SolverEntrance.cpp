@@ -2167,6 +2167,7 @@ namespace Entrance {
 					float V = 0.f;       // virtual service time
 					int   lane = 0;      // current method lane
 					int   lane_stall = 0;
+					int   rung = 0;      // precision rungs driven
 					bool  gn_init = false;
 					int   state = 0;   // DOM_UNRESOLVED
 				};
@@ -2368,8 +2369,19 @@ namespace Entrance {
 								ok_lane = false;
 							if (ln == 4 && !best.ok)
 								ok_lane = false;
-							if (ln == 5 && !(prec < tol))
-								ok_lane = false;
+							if (ln == 5) {
+								// A domain acquires PRECISION DEBT only
+								// once it OWNS a witness at the active
+								// rung; the step then tightens exactly
+								// one rung and yields back to ordinary
+								// refinement until that tighter rung is
+								// itself satisfied. find-feasible ->
+								// tighten -> refine -> find-feasible.
+								const float rnow = bnd ? best.bnd_rp
+									: best.strike_rmin;
+								if (!(prec < tol) || rnow > tol)
+									ok_lane = false;
+							}
 							if (ok_lane)
 								break;
 							ln = ln >= 5 ? 2 : ln + 1;
@@ -2474,6 +2486,7 @@ namespace Entrance {
 							rekey();
 						}
 						best.sched_prec++;
+						d.rung++;
 					} else if (a.type == A_DEEPEN) {
 						// one BOUNDED deepen unit on this domain's
 						// best elite (bins hold strikes; scouts hold

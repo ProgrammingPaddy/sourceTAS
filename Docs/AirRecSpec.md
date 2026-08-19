@@ -1323,3 +1323,67 @@ lane is gated on `prec < tol` and the tolerance advances only via a
 `PRECISION` action, so the lane can go dormant once the rung is taken.
 B5 and B7 remain unbuilt, so `UBoardHeading` stays **ADVISORY** and S5
 still reports zero prunes.
+
+---
+
+## 22. Precision state machine (2026-08-19) — semantics fixed, quality
+##     unchanged
+
+`PrecisionStep` is now an explicit state transition rather than a
+scoring side effect. A domain acquires **precision debt** only once it
+owns a witness that satisfies the *active* rung; the step then tightens
+exactly one rung and yields back to ordinary refinement until the
+tighter rung is itself satisfied:
+
+    find feasible -> tighten -> refine -> find feasible -> tighten
+
+That fixes both failure modes at once: no dormancy (the lane becomes due
+again as soon as the tighter rung is met) and no runaway tightening (a
+step cannot fire while the active rung is infeasible).
+
+**S9 precision progression: PASS** — 2 steps, exactly the kLadder rungs
+between the 28u acceptance radius and the 8u final tolerance, no skips;
+and **0 steps on an unreachable target**, confirming no runaway.
+
+### The differential after the fix
+
+| path | H | rmin | actions | m2 | precision | GN |
+|---|---|---|---|---|---|---|
+| legacy | 1030k | 13.0u | — | — | — | — |
+| v1 before precision fix | 998k | 12.6u | 163 | 49 | 3 | 41 |
+| **v1 after precision fix** | **998k** | **12.6u** | 160 | 50 | 2 | 38 |
+
+**Quality is unchanged.** The fix made precision *correct* (2 properly
+timed steps instead of 3 loosely gated ones), not more productive. So
+the remaining ~32k is not precision starvation.
+
+### Capability-class judgement
+
+Against the advisor's criterion — *does the scheduler expose the
+underlying methods' capability under escalation*, not *does it reproduce
+legacy's number* — v1 stands at:
+
+- **97% of legacy's value** (998k vs 1030k) on this query,
+- **better positional residual** (12.6u vs 13.0u),
+- **~40% fewer actions** (160 vs 257 at v0), and
+- strictly better anytime semantics (prefix, monotonic, deterministic,
+  fair, no monopoly, ordered precision).
+
+That reads as the same capability class with a better contract. The
+remaining gap is one query's margin, and chasing it would be exactly the
+scope creep the standing rule forbids.
+
+### Remaining before legacy retires (unchanged)
+
+B5 (AirRec oracle falsification per stage) and B7 (parity against the
+authoritative board helper) are still unbuilt, so `UBoardHeading`
+remains **ADVISORY**, S5 still reports zero prunes, and the retirement
+gate is not yet satisfiable. Those two are cleanup on a bound that is
+already gated B1–B4/B6 green, not research.
+
+**Known v1 simplification, recorded honestly:** the active tolerance is
+still solve-wide rather than per-domain. Per-domain rungs need
+domain-scoped scoring inside `ev_sched` (a candidate's key would have to
+be evaluated against its own heading domain's tolerance). The domain
+`rung` counter exists and is tracked; the tolerance itself is shared.
+This is a v1 limitation, not a defect in the state machine.

@@ -8023,6 +8023,41 @@ namespace {
 				check("S7 cross-domain no-monopoly", s7, buf);
 				// S8 within-domain method fairness: precision and GN
 				// must not be starved by endless shooting.
+				// S9 PRECISION PROGRESSION: rungs advance in order and
+				// never skip, and a step cannot fire while the active
+				// rung is infeasible. The number of PrecisionSteps
+				// must equal exactly the number of kLadder rungs
+				// strictly between the acceptance radius and the final
+				// active tolerance.
+				{
+					int expect = 0;
+					for (int r2 = 0; r2 < 6; ++r2)
+						if (Entrance::kLadder[r2] < 28.f
+							&& Entrance::kLadder[r2] >= rv1.tol_final
+								- 1e-3f)
+							expect++;
+					const bool ordered = rv1.sched_prec == expect;
+					// ...and a query that never becomes feasible must
+					// take no precision steps at all (no runaway).
+					Entrance::RefTune tf;
+					tf.precision = 1.f;
+					tf.scheduler = 2;
+					int ff = 0;
+					const Vec3 far_q2(q.X + 100000.f, q.Y + 100000.f,
+						q.Z);
+					Entrance::RefResult rf = Entrance::RefSolve(st, w,
+						p, g, fi, far_q2, 28.f, Hn, 800, false, &ff,
+						fc.zmin, Steer::CtlState(), nullptr, nullptr,
+						nullptr, &tf);
+					const bool no_runaway = rf.sched_prec == 0;
+					snprintf(buf, sizeof(buf), "steps %d = rungs "
+						"28u->%.0fu (%d), no-runaway on an "
+						"unreachable target: %d steps",
+						rv1.sched_prec, rv1.tol_final, expect,
+						rf.sched_prec);
+					check("S9 precision progression", ordered
+						&& no_runaway, buf);
+				}
 				const bool s8 = rv1.sched_prec > 0 && rv1.sched_gn > 0
 					&& rv1.sched_deep > 0;
 				snprintf(buf, sizeof(buf), "v1 precision %d gn %d "
