@@ -7969,6 +7969,135 @@ namespace {
 					rc.strike_rmin < 1e29f ? rc.strike_rmin : -1.f);
 			}
 		}
+		// ---- BOUND GATES for the interval-specific board ceiling.
+		// An unsafe upper bound is far worse than a loose one, so these
+		// run before the bound is allowed to prune anything.
+		{
+			const float vzT = Envelope::VzAfter(st.vel.Z, Hn, p);
+			const float sT = Envelope::SMax(700.f, Hn, p);
+			const float pot = 2.f * p.gravity * (q.Z - fc.zmin);
+			const float U_speed = sT * sT + vzT * vzT + pot;
+			// B1 nested monotonicity: the interval bound may never
+			// exceed the broad speed ceiling it refines.
+			bool b1 = true;
+			float worst_gap = 0.f;
+			for (int i = 0; i < 12; ++i) {
+				const float lo = -3.14159265f
+					+ 6.2831853f * static_cast<float>(i) / 12.f;
+				const float hi = lo + 0.6f;
+				const float ub = Entrance::UBoardHeading(fc.n, vzT,
+					sT, lo, hi, pot);
+				if (ub > -1e29f && ub > U_speed + 1.f)
+					b1 = false;
+				if (ub > -1e29f && U_speed - ub > worst_gap)
+					worst_gap = U_speed - ub;
+			}
+			snprintf(buf, sizeof(buf), "U_board <= U_speed on 12 "
+				"intervals; largest tightening %.0fk", worst_gap
+				/ 1e3f);
+			check("B1 nested bound monotonicity", b1, buf);
+			// B2 dense falsification: sample the RELAXED set directly
+			// and check no member exceeds the claimed maximum.
+			bool b2 = true;
+			float worst_over = 0.f;
+			for (int i = 0; i < 8; ++i) {
+				const float lo = -3.14159265f
+					+ 6.2831853f * static_cast<float>(i) / 8.f;
+				const float hi = lo + 0.9f;
+				const float ub = Entrance::UBoardHeading(fc.n, vzT,
+					sT, lo, hi, pot);
+				for (int ti = 0; ti <= 40; ++ti)
+					for (int si = 0; si <= 40; ++si) {
+						const float th = lo + (hi - lo)
+							* static_cast<float>(ti) / 40.f;
+						const float sp = sT
+							* static_cast<float>(si) / 40.f;
+						const Vec3 v(sp * cosf(th), sp * sinf(th),
+							vzT);
+						const float d = Dot(v, fc.n);
+						if (d > 0.f)
+							continue;   // not approaching
+						const float E = sp * sp + vzT * vzT - d * d
+							+ pot;
+						if (E > ub + 1.f) {
+							b2 = false;
+							if (E - ub > worst_over)
+								worst_over = E - ub;
+						}
+					}
+			}
+			snprintf(buf, sizeof(buf), "13448 relaxed-set samples over "
+				"8 intervals; worst excess %.1f", worst_over);
+			check("B2 dense relaxed-set falsification", b2, buf);
+			// B3 partition exactness: an exhaustive split of the same
+			// relaxation must give exactly the parent's maximum.
+			bool b3 = true;
+			float worst_split = 0.f;
+			for (int i = 0; i < 10; ++i) {
+				const float lo = -3.f + 0.6f * static_cast<float>(i);
+				const float hi = lo + 1.1f;
+				const float mid = 0.5f * (lo + hi);
+				const float up = Entrance::UBoardHeading(fc.n, vzT,
+					sT, lo, hi, pot);
+				const float u1 = Entrance::UBoardHeading(fc.n, vzT,
+					sT, lo, mid, pot);
+				const float u2 = Entrance::UBoardHeading(fc.n, vzT,
+					sT, mid, hi, pot);
+				const float cmax = u1 > u2 ? u1 : u2;
+				if (up < -1e29f && cmax < -1e29f)
+					continue;
+				const float diff = fabsf(up - cmax);
+				if (diff > worst_split)
+					worst_split = diff;
+				if (up + 1.f < cmax || diff > 2000.f)
+					b3 = false;
+			}
+			snprintf(buf, sizeof(buf), "parent vs max(children) over "
+				"10 splits; worst |difference| %.1f", worst_split);
+			check("B3 heading partition exactness", b3, buf);
+			// B4 full-circle consistency.
+			const float full = Entrance::UBoardHeading(fc.n, vzT, sT,
+				-3.14159265f, 3.14159265f, pot);
+			float quart = -1e30f;
+			for (int i = 0; i < 4; ++i) {
+				const float lo = -3.14159265f
+					+ 1.57079633f * static_cast<float>(i);
+				const float u = Entrance::UBoardHeading(fc.n, vzT, sT,
+					lo, lo + 1.57079633f, pot);
+				if (u > quart)
+					quart = u;
+			}
+			const bool b4 = fabsf(full - quart) < 2000.f;
+			snprintf(buf, sizeof(buf), "full circle %.0fk vs max of 4 "
+				"quadrants %.0fk", full / 1e3f, quart / 1e3f);
+			check("B4 full-circle consistency", b4, buf);
+			// B6 tangent sanity: an interval that admits n.v = 0 at
+			// s = smax must return exactly smax^2 + vz^2 + pot.
+			const float h2 = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
+			bool b6 = true;
+			if (h2 > 1e-4f && sT > 1e-3f) {
+				const float a_star = -(fc.n.Z * vzT) / sT;
+				if (fabsf(a_star) <= h2) {
+					const float dth = acosf(a_star / h2);
+					const float phi = atan2f(fc.n.Y, fc.n.X);
+					const float th_t = phi + dth;
+					const float ub = Entrance::UBoardHeading(fc.n,
+						vzT, sT, th_t - 0.05f, th_t + 0.05f, pot);
+					const float want = sT * sT + vzT * vzT + pot;
+					b6 = fabsf(ub - want) < 2000.f;
+					snprintf(buf, sizeof(buf), "tangent-admitting "
+						"interval: U %.0fk vs smax^2+vz^2+pot "
+						"%.0fk", ub / 1e3f, want / 1e3f);
+				} else {
+					snprintf(buf, sizeof(buf), "no tangent arrival "
+						"exists at this vz/smax (|a*| > h)");
+				}
+			} else {
+				snprintf(buf, sizeof(buf), "degenerate normal - not "
+					"exercised");
+			}
+			check("B6 tangent sanity", b6, buf);
+		}
 		printf("airprops: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "PROPERTY GATE GREEN"
 				: "PROPERTY GATE RED - a review defect regressed");

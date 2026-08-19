@@ -1166,3 +1166,86 @@ bound this differs between intervals, which is precisely what the
 scheduler needs. **To be derived and proven rather than adopted from the
 shorthand**, and to carry per-stage status: only CERTIFIED bounds may
 establish `U_D <= L* + eps`; ADVISORY ones may order work only.
+
+---
+
+## 20. The interval board ceiling (2026-08-19) — exact, gated, and the
+##     causal experiment it enables
+
+`Entrance::UBoardHeading` implements the advisor's relaxed-set bound in
+closed form. At fixed arrival tick T, with `v_z(T)` fixed and the
+certified `s <= s_max(T)`, over
+`v-(s,theta) = (s cos theta, s sin theta, v_z)`, `theta in I_theta`,
+`n.v- <= 0`:
+
+    a(theta) = h cos(theta - phi),  b = n_z v_z,  d = a s + b
+    E = s^2 + v_z^2 - d^2 + 2 g (z - zmin)
+
+Because `|a| <= h <= 1`, `1 - a^2 >= 0`, so E is **convex in s** and its
+maximum can only sit at `s = 0`, `s = s_max`, or the approach boundary
+`s = -b/a`. Combined with the exact circular range of `a(theta)` over the
+interval, that gives an **exact** maximum of the relaxed set rather than
+a sampled approximation. The relaxed set is a superset of the reachable
+terminal states (it discards displacement reachability and all control
+history), so `H*(D) <= U_board(I_theta)`.
+
+`CosRange` is a separate, property-tested function because a circular-
+extrema mistake is the one error that would make the bound *unsafe*
+rather than merely loose.
+
+### Bound gates (B1–B4, B6 green)
+
+| gate | result |
+|---|---|
+| B1 nested monotonicity | `U_board <= U_speed` on 12 intervals; largest tightening **684k** |
+| B2 dense relaxed-set falsification | 13,448 samples over 8 intervals; worst excess **0.0** |
+| B3 partition exactness | parent vs max(children) over 10 splits; worst difference **0.0** |
+| B4 full-circle consistency | full circle 1180k = max of 4 quadrants 1180k |
+| B6 tangent sanity | tangent-admitting interval returns exactly `s_max^2 + v_z^2 + pot` |
+
+B5 (AirRec oracle falsification per stage) and B7 (parity against the
+exact board helper at maximizing states) are **not yet built**, so the
+bound is wired as **ADVISORY**: it orders scheduler work through
+`U_order`, and pruning still consults only the certified `U`. That is the
+status discipline working as designed — S5 still reports zero prunes.
+
+### S1 caught a second budget leak
+
+Wiring the bound changed the action mix and immediately broke trace
+prefixes: `deepen()`'s loop still consulted `budget_cur`, which is
+budget-derived, so the *same* action behaved differently at different
+budgets. On the scheduler path only `max_ev` may bound a deepen action
+(the runner has already guaranteed affordability). That is twice now
+that S1 has caught a budget dependence that reasoning missed.
+
+### The causal experiment: bound landed, gap did NOT close
+
+    @6000, same query
+    legacy     H 1030k  rmin 13.0u
+    scheduled  H  965k  rmin 19.5u     (unchanged by the new bound)
+
+Action mix at 6000: m0 18, m1 6, m2 **214**, deepen 10, gn 6, precision 3.
+So the scheduler still pours almost everything into m2 and the
+differential is unmoved. **The hypothesis that missing information alone
+explained the gap is not supported.** Two candidate causes, to be
+separated next:
+
+1. **The bound does discriminate, but ordering cannot use it.** With no
+   domain prunable (`U_D > L*` everywhere) the ordering effect is only a
+   re-ranking, and v0's rule then spends everything on the single
+   highest-gap domain — `U_D − L*` ordering without a *stopping* rule
+   for a domain that keeps failing to improve.
+2. **v0's escalation ladder is itself the problem**: it promotes to m2
+   and then never leaves (m2 214 of 257 actions), because the "stall"
+   test lets a domain re-enter m2 indefinitely rather than yielding to
+   another domain or to precision.
+
+The measured `U_D` spread across heading intervals is the first thing to
+report next session (the advisor's diagnostic: if the spread is a few k,
+the bound cannot fix scheduling; if it is hundreds of k, the fault is in
+the policy). B1's "largest tightening 684k" suggests real spread, which
+points at cause 2.
+
+**Per the standing rule this does NOT justify building the displacement
+ceiling yet** — that would be treating a scheduling-policy defect with
+more bound mathematics.

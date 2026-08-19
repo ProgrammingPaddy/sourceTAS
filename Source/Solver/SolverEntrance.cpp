@@ -2127,6 +2127,14 @@ namespace Entrance {
 			// favour of a cheaper later one, because that reorders the
 			// stream and breaks run(B1) < run(B2) as a literal prefix.
 			if (use_sched) {
+				// deepen()'s legacy loop consults budget_cur, which is
+				// budget-derived: inside a scheduler action that makes
+				// the SAME action behave differently at different
+				// budgets, so the streams diverge (caught by S1 the
+				// moment the interval bound changed the action mix).
+				// On this path only max_ev bounds a deepen action, and
+				// the runner has already guaranteed affordability.
+				budget_cur = 1 << 28;
 				// Domain = (Q region, T branch, I_theta). Q and T are
 				// fixed for one RefSolve call, so the live axis is the
 				// heading interval. THREE terminal states, not two:
@@ -2137,7 +2145,9 @@ namespace Entrance {
 				struct Dom {
 					int   iv = 0;
 					float L = -1e30f;    // best witnessed value here
-					float U = 1e30f;     // certified ceiling
+					float U = 1e30f;     // CERTIFIED ceiling (prunes)
+					float U_adv = 1e30f; // advisory interval bound
+					float U_order = 1e30f;  // ordering signal
 					float R = 1e30f;     // best residual here
 					float kappa = 0.f;   // conditioning estimate
 					int   spent = 0;
@@ -2170,6 +2180,36 @@ namespace Entrance {
 						+ 2.f * p.gravity * gs * (q.Z - zmin));
 				for (Dom& d : dom)
 					d.U = U_global;
+				// PER-DOMAIN CEILING: the interval-specific relaxed
+				// board bound. Unlike the global energy ceiling this
+				// DIFFERS between heading intervals, which is the
+				// discrimination the scheduler was missing (measured:
+				// with a constant U_D it spread work by tie-break and
+				// lost the capability differential 1030k vs 965k).
+				// Only the certified bound may prune; while this one
+				// is ADVISORY it may order work but never establish
+				// PROVED_IRRELEVANT.
+				if (!bnd) {
+					const float vzT = Envelope::VzAfter(entry.vel.Z,
+						N, p, gs);
+					const float sT = Envelope::SMax(s0, N, p);
+					const float pot = 2.f * p.gravity * gs
+						* (q.Z - zmin);
+					for (int i = 0; i < n_dom; ++i) {
+						Dom& d = dom[static_cast<size_t>(i)];
+						const float ub = UBoardHeading(facep->n, vzT,
+							sT, Steer::WrapPi(th_arr + ivt[i][0]),
+							Steer::WrapPi(th_arr + ivt[i][1]), pot);
+						d.U_adv = ub;
+						if (ub > -1e29f && ub < d.U)
+							d.U_order = ub;
+						else
+							d.U_order = d.U;
+					}
+				} else {
+					for (Dom& d : dom)
+						d.U_order = d.U;
+				}
 				// ---- action algebra ----
 				enum { A_SCOUT = 1, A_SHOOT = 2, A_PRECISION = 3,
 					A_DEEPEN = 4, A_GNITER = 5 };
@@ -2267,8 +2307,10 @@ namespace Entrance {
 						const Dom& d = dom[static_cast<size_t>(i)];
 						if (d.state != DOM_UNRESOLVED)
 							continue;
-						const float gap = d.U - (best.ok ? best.H
-							: -1e30f);
+						// ORDERING may use the advisory bound;
+						// PRUNING below uses only the certified one.
+						const float gap = d.U_order
+							- (best.ok ? best.H : -1e30f);
 						if (pick < 0 || gap > best_gap + 1e-3f
 							|| (fabsf(gap - best_gap) <= 1e-3f
 								&& (d.spent < dom[static_cast<size_t>(

@@ -171,6 +171,129 @@ namespace Entrance {
 	// (they were 250 and 200 - inconsistent).
 	constexpr float kThetaW = 250.f;
 
+	// ---- THE FIRST INTERVAL-SPECIFIC CERTIFIED CEILING ----
+	// (advisor 2026-08-19; status ADVISORY until gates B1-B7 pass.)
+	//
+	// At a fixed arrival tick T the pre-clip vertical component v_z is
+	// fixed and the certified gain law bounds horizontal speed by
+	// S = s_max(T). For a heading domain I_theta the RELAXED terminal
+	// set is
+	//     v-(s,theta) = (s cos theta, s sin theta, v_z),
+	//     0 <= s <= S,  theta in I_theta,  n.v- <= 0
+	// which is a SUPERSET of the reachable terminal states (it discards
+	// horizontal-displacement reachability and all control history), so
+	// its maximum post-board energy is a valid upper bound:
+	//     H*(D) <= U_board(I_theta).
+	//
+	// Writing h = |n_xy|, phi = atan2(n_y, n_x),
+	//     a(theta) = h cos(theta - phi),   b = n_z v_z,
+	//     d = n.v- = a s + b,
+	//     E = |v+|^2 + 2 g (z - zmin) = s^2 + v_z^2 - d^2 + P.
+	// For fixed a, E is CONVEX in s because |a| <= h <= 1 gives
+	// 1 - a^2 >= 0, so its maximum over the feasible speed interval can
+	// only occur at an endpoint: s = 0, s = S, or the approach boundary
+	// s = -b/a. That makes the relaxed maximum EXACT in closed form
+	// rather than a sampled approximation.
+
+	// Exact range of cos over the circular interval [lo, hi] (radians,
+	// hi may wrap past +pi). Getting this wrong is the one mistake that
+	// would make the bound UNSAFE rather than merely loose, so it is a
+	// separate, property-tested function.
+	inline void CosRange(float lo, float hi, float* cmin, float* cmax) {
+		const float kTwoPi = 6.28318531f;
+		float w = hi - lo;
+		while (w < 0.f) w += kTwoPi;
+		while (w > kTwoPi) w -= kTwoPi;
+		if (w >= kTwoPi - 1e-6f) {          // full circle
+			*cmin = -1.f;
+			*cmax = 1.f;
+			return;
+		}
+		const float c0 = cosf(lo);
+		const float c1 = cosf(lo + w);
+		*cmin = c0 < c1 ? c0 : c1;
+		*cmax = c0 > c1 ? c0 : c1;
+		// A multiple of 2pi inside the swept span reaches cos = +1;
+		// an odd multiple of pi reaches cos = -1. Find the first
+		// candidate at or after `lo` and test whether it lies within w.
+		const float k0 = ceilf(lo / kTwoPi);
+		if (k0 * kTwoPi - lo <= w + 1e-6f)
+			*cmax = 1.f;
+		const float k1 = ceilf((lo - 3.14159265f) / kTwoPi);
+		if (k1 * kTwoPi + 3.14159265f - lo <= w + 1e-6f)
+			*cmin = -1.f;
+	}
+
+	// The exact maximum of the relaxed set described above.
+	//   n        : unit face normal
+	//   vz       : pre-clip vertical component at the arrival tick
+	//   smax     : certified horizontal-speed ceiling s_max(T)
+	//   th_lo/hi : the heading domain (circular interval)
+	//   pot      : 2 g (z_contact - zmin), the potential term the
+	//              stored H carries
+	inline float UBoardHeading(const Vec3& n, float vz, float smax,
+	                           float th_lo, float th_hi, float pot) {
+		const float h = sqrtf(n.X * n.X + n.Y * n.Y);
+		const float b = n.Z * vz;
+		const float base = vz * vz + pot;
+		if (h < 1e-5f) {
+			// Vertical normal: a == 0, so d == b for every arrival.
+			return b <= 0.f ? smax * smax + base - b * b : -1e30f;
+		}
+		const float phi = atan2f(n.Y, n.X);
+		float cmin = -1.f, cmax = 1.f;
+		CosRange(th_lo - phi, th_hi - phi, &cmin, &cmax);
+		const float a_lo = h * cmin;
+		const float a_hi = h * cmax;
+		float best = -1e30f;
+		// Candidate A: s = 0 (feasible only if the arrival is already
+		// approaching, i.e. b <= 0).
+		if (b <= 0.f) {
+			const float v = base - b * b;
+			if (v > best)
+				best = v;
+		}
+		// Candidate B: s = smax, with the feasible `a` that puts the
+		// normal component closest to zero from the approaching side.
+		{
+			const float a_star = smax > 1e-6f ? -b / smax : 0.f;
+			float a_use = a_star < a_hi ? a_star : a_hi;
+			if (a_use >= a_lo) {
+				const float d = a_use * smax + b;
+				if (d <= 1e-4f) {
+					const float v = smax * smax + base - d * d;
+					if (v > best)
+						best = v;
+				}
+			}
+		}
+		// Candidate C: the approach boundary s = -b/a (zero clip loss).
+		// Needs sign(a) opposite to b and |a| >= |b|/smax so that
+		// s <= smax; among those, the SMALLEST |a| gives the largest s
+		// and hence the largest energy.
+		if (fabsf(b) > 1e-6f && smax > 1e-6f) {
+			const float need = fabsf(b) / smax;
+			float a_use = 0.f;
+			bool have = false;
+			if (b < 0.f) {                  // need a > 0
+				a_use = a_lo > need ? a_lo : need;
+				have = a_use <= a_hi && a_use > 0.f;
+			} else {                        // need a < 0
+				a_use = a_hi < -need ? a_hi : -need;
+				have = a_use >= a_lo && a_use < 0.f;
+			}
+			if (have) {
+				const float s = -b / a_use;
+				if (s >= 0.f && s <= smax + 1e-3f) {
+					const float v = s * s + base;
+					if (v > best)
+						best = v;
+				}
+			}
+		}
+		return best;
+	}
+
 	// ---- PURE HELPERS, shared by production and the property gate
 	// (`airprops`) so a test can never drift from the implementation ----
 
