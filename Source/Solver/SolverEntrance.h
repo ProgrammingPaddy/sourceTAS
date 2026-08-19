@@ -158,6 +158,30 @@ namespace Entrance {
 	// restricts the win condition to |dot| <= kTanEps (the explicit
 	// FastestTangent solve). Misses/contact-assisted strikes guide
 	// but never win.
+	// THE EXACTNESS LADDER (advisor 2026-08-19): spatial recovery is
+	// reported at these tolerances, coarse to fine - a benchmark
+	// curve, not a single hit/miss bit.
+	constexpr float kLadder[6] = { 32.f, 16.f, 8.f, 4.f, 2.f, 1.f };
+
+	// Optional search-machinery tuning (advisor 2026-08-19). Defaults
+	// reproduce the production solve; airrec sweeps shoot_m to measure
+	// the recovery CURVE (the Level-B trigger is its shape).
+	struct RefTune {
+		// Sequential-shooting node ceiling: 0 = single-target shots
+		// only, 1 = +one free node (+node-time), 2 = +second node +
+		// outcome-space Gauss-Newton. Base seeds/frontier/deepen/
+		// scouts always run.
+		int shoot_m = 2;
+		// BOUNDARY MODE (Layer-1 recoverability): non-null = solve the
+		// free-air boundary problem (S0, Q, T, theta) instead of a
+		// face strike. Points at {th_lo, th_hi} (radians, absolute).
+		// T is fixed = n_hint: schedules are exactly that long,
+		// scored on the tick-T residual; success = within `radius` of
+		// q with terminal heading inside the interval; H = terminal
+		// horizontal speed (the s_A* quantity).
+		const float* bnd_theta = nullptr;
+	};
+
 	struct RefResult {
 		bool  ok = false;
 		float H = -1e30f;
@@ -178,6 +202,30 @@ namespace Entrance {
 		int   tan_horizon = 0;
 		int   evals = 0;              // engine flights spent
 		int   contact_assisted = 0;   // clean-air-law rejections seen
+		// EXACTNESS LADDER (advisor 2026-08-19): closest clean-air
+		// strike to q over the whole search (any distance), its
+		// terminal heading, and the best replayed H per kLadder rung.
+		float strike_rmin = 1e30f;
+		float strike_rmin_th = 0.f;
+		float rung_E[6] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f,
+			-1e30f };
+		// PER-INTERVAL heading coverage {L_i, hits, shots} about
+		// iv_ref (the closed-form arrival estimate). L_i = best
+		// in-radius witness whose terminal heading lies in interval i;
+		// hits = its witness count; shots = guided attempts targeted
+		// at it. hits == 0 means UNRESOLVED - never "unreachable"
+		// (estimates order, only certified bounds erase).
+		float iv_L[6] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f,
+			-1e30f };
+		int   iv_hits[6] = { 0, 0, 0, 0, 0, 0 };
+		int   iv_shots[6] = { 0, 0, 0, 0, 0, 0 };
+		float iv_ref = 0.f;
+		// BOUNDARY MODE residuals (RefTune::bnd_theta): best tick-T
+		// outcome by the search metric rp + 250*rth, and its terminal
+		// horizontal speed.
+		float bnd_rp = 1e30f;
+		float bnd_rth = 1e30f;
+		float bnd_s = 0.f;
 	};
 	// on_strike (optional): called for EVERY clean-air face strike the
 	// search flies, wherever it lands - the caller may credit its
@@ -204,7 +252,8 @@ namespace Entrance {
 	                       on_strike = nullptr,
 	                   const std::vector<signed char>* seed_side
 	                       = nullptr,
-	                   const std::vector<float>* seed_cosa = nullptr);
+	                   const std::vector<float>* seed_cosa = nullptr,
+	                   const RefTune* tune = nullptr);
 
 } // namespace Entrance
 } // namespace Solver

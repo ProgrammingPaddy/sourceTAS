@@ -408,6 +408,23 @@ namespace Entrance {
 						for (int ci = 0; ci < 7; ++ci)
 							cands.push_back({ si, cgrid[ci],
 								cgrid[ci], 0.f });
+						// THE ACTIVE GAIN BAND (airrec 2026-08-19:
+						// realized cos(rho) = -stored c, so gains
+						// live in stored c near (-cap/s, +cap/s) -
+						// SPEED-DERIVED band candidates, straighter
+						// (-) and tighter (+) gain arcs. Without
+						// these the vocabulary cannot express
+						// sustained-gain carve arcs at speed.
+						if (s2d > p.air_speed_cap) {
+							const float bw = p.air_speed_cap
+								/ s2d;
+							cands.push_back({ si, -0.95f * bw,
+								-0.95f * bw, 0.f });
+							cands.push_back({ si, -0.5f * bw,
+								-0.5f * bw, 0.f });
+							cands.push_back({ si, 0.5f * bw,
+								0.5f * bw, 0.f });
+						}
 						static const float pg[4][2] = {
 							{ 0.9f, 0.2f }, { 0.2f, 0.9f },
 							{ 0.f, -0.5f }, { -0.5f, 0.3f } };
@@ -416,6 +433,14 @@ namespace Entrance {
 								pg[pi3][1], 0.f });
 					}
 					// Stage 1: closed-form law rollout ranks all.
+					// CONVENTION BRIDGE (airrec 2026-08-19): the
+					// stored basis realizes its wish at wh + pi, so
+					// the TRUE wish-from-velocity cosine handed to
+					// the law is the NEGATION of the stored value.
+					// Before this bridge the model evaluated every
+					// candidate's speed effect mirrored (brakes
+					// ranked as inert, inert as brakes) - measured
+					// constructively by the recoverability suite.
 					for (Cand2& cd : cands) {
 						float hh = h, ss = s2d;
 						float px = s.pos.X, py = s.pos.Y;
@@ -429,12 +454,14 @@ namespace Entrance {
 							if (cd.si != 0) {
 								Strafe::TickLaw law = Strafe::Law(
 									p, ss, 1.f, s.ducked);
-								const float s2c = 1.f - c * c;
-								const float tr = law.TurnRad(c,
+								const float ce = -c;
+								const float s2c = 1.f - ce * ce;
+								const float tr = law.TurnRad(ce,
 									s2c > 0.f ? sqrtf(s2c) : 0.f);
 								hh = Steer::WrapPi(hh
 									+ (cd.si > 0 ? tr : -tr));
-								const float nv2 = law.NewSpeed2(c);
+								const float nv2 = law.NewSpeed2(
+									ce);
 								sac += ss * ss + cap2
 									- (nv2 > 0.f ? nv2 : 0.f);
 								ss = nv2 > 0.f ? sqrtf(nv2) : 0.f;
@@ -546,12 +573,21 @@ namespace Entrance {
 	                       const std::vector<float>&, int)>&
 	                       on_strike,
 	                   const std::vector<signed char>* seed_side,
-	                   const std::vector<float>* seed_cosa) {
+	                   const std::vector<float>* seed_cosa,
+	                   const RefTune* tune) {
 		RefResult best;
-		if (face_idx < 0
-			|| face_idx >= static_cast<int>(g.faces.size()))
+		// BOUNDARY MODE (advisor 2026-08-19): tune->bnd_theta swaps
+		// the win condition from "clean face strike near q" to "state
+		// at exactly tick N within radius of q with terminal heading
+		// inside the interval" - the free-air (S0, Q, T, theta)
+		// problem. All search machinery runs unchanged on the score.
+		const bool bnd = tune && tune->bnd_theta;
+		const int tune_m = tune ? tune->shoot_m : 2;
+		if (!bnd && (face_idx < 0
+			|| face_idx >= static_cast<int>(g.faces.size())))
 			return best;
-		const Route::Face& face = g.faces[face_idx];
+		const Route::Face* facep = bnd ? nullptr
+			: &g.faces[static_cast<size_t>(face_idx)];
 		const int min_gap = static_cast<int>(
 			ceilf((1.f / p.dt) / p.strafe_rate_max));
 		const float s0 = Len2D(entry.vel);
@@ -562,9 +598,48 @@ namespace Entrance {
 		const int N = n_hint > 8 ? n_hint : 60;
 		const int n_cap = N + 40;
 		Air::Target vt;
-		vt.face = face_idx;
+		vt.face = bnd ? -1 : face_idx;
 		vt.dot_cap = 3000.f;
 		vt.aim = q;
+		// Arrival-heading reference + the heading-interval table,
+		// hoisted above ev_sched so every strike can be binned into
+		// its interval (per-interval {L, hits, shots} coverage).
+		const float bear = atan2f(q.Y - entry.pos.Y,
+			q.X - entry.pos.X);
+		float th_arr = bear;
+		if (bnd) {
+			th_arr = Steer::WrapPi(tune->bnd_theta[0] + 0.5f
+				* Steer::WrapPi(tune->bnd_theta[1]
+					- tune->bnd_theta[0]));
+		} else {
+			const float hn = sqrtf(facep->n.X * facep->n.X
+				+ facep->n.Y * facep->n.Y);
+			const float sa = Envelope::SMax(s0, N, p);
+			const float va = Envelope::VzAfter(entry.vel.Z, N, p,
+				gs);
+			if (sa * hn > 1e-4f) {
+				float cphi = -va * facep->n.Z / (sa * hn);
+				if (cphi > 1.f) cphi = 1.f;
+				if (cphi < -1.f) cphi = -1.f;
+				const float po = acosf(cphi);
+				const float paz = atan2f(facep->n.Y, facep->n.X);
+				const float ca = Steer::WrapPi(paz + po);
+				const float cb = Steer::WrapPi(paz - po);
+				th_arr = fabsf(Steer::WrapPi(ca - bear))
+					<= fabsf(Steer::WrapPi(cb - bear)) ? ca : cb;
+			}
+		}
+		best.iv_ref = th_arr;
+		// Terminal-heading INTERVALS (full-circle conservative cover
+		// about th_arr; estimates order search, never erase). Boundary
+		// mode collapses row 0 to the GIVEN interval.
+		float ivt[6][2] = { { -0.25f, 0.25f }, { 0.2f, 0.8f },
+			{ -0.8f, -0.2f }, { 0.8f, 1.9f }, { -1.9f, -0.8f },
+			{ 1.9f, -1.9f } };
+		if (bnd) {
+			ivt[0][0] = Steer::WrapPi(tune->bnd_theta[0] - th_arr);
+			ivt[0][1] = Steer::WrapPi(tune->bnd_theta[1] - th_arr);
+		}
 		std::vector<signed char> sbuf;
 		std::vector<float> cbuf;
 		// ---- THE TERMINAL-HEADING FRONTIER + THE SCOUT POOL (ruling
@@ -631,20 +706,52 @@ namespace Entrance {
 			const int total = static_cast<int>(sd.size());
 			if (total < 8 || total > n_cap)
 				return -1e9f;
+			if (bnd && total != N)
+				return -1e9f;   // T is FIXED in boundary mode
 			if (!sched_legal(sd))
 				return -1e9f;
-			vt.max_ticks = total + 8;
+			vt.max_ticks = bnd ? total : total + 8;
 			best.evals++;
 			if (flights_counter)
 				(*flights_counter)++;
 			Air::Result ar = Air::FlyWishSchedule(entry, w, p, vt,
-				g, sd, cs, total + 8);
+				g, sd, cs, bnd ? total : total + 8);
 			const Vec3 epos = ar.hit ? ar.pos
 				: (ar.miss_dist < 1e8f ? ar.closest : ar.end_pos);
 			float sc;
 			bool strike = false;
 			float H = -1e30f;
-			if (!ar.hit || ar.dot >= 0.f) {
+			float th_term = 0.f;
+			if (bnd) {
+				// Tick-T boundary residual: any contact/grounding is
+				// a hard failure; otherwise score the terminal state
+				// against (Q, theta-interval).
+				if (ar.struck_brush >= 0 || ar.grounded) {
+					sc = -1e6f - (ar.miss_dist < 1e8f
+						? ar.miss_dist : 0.f);
+				} else {
+					const float rp = Len(ar.end_pos - q);
+					const Vec3& vT = ar.end_state.vel;
+					const float sT = Len2D(vT);
+					th_term = sT > 1.f ? atan2f(vT.Y, vT.X) : 0.f;
+					const float rth = sqrtf(ThetaIntervalDist2(
+						th_term,
+						Steer::WrapPi(th_arr + ivt[0][0]),
+						Steer::WrapPi(th_arr + ivt[0][1])));
+					sc = -(rp + 250.f * rth);
+					if (sc > -(best.bnd_rp
+						+ 250.f * best.bnd_rth)) {
+						best.bnd_rp = rp;
+						best.bnd_rth = rth;
+						best.bnd_s = sT;
+					}
+					if (rp <= radius && rth <= 1e-4f) {
+						strike = true;
+						H = sT;   // the s_A* quantity
+						sc = 1e7f + H;
+					}
+				}
+			} else if (!ar.hit || ar.dot >= 0.f) {
 				sc = -(ar.miss_dist < 1e8f ? ar.miss_dist : 1e8f);
 			} else if (ar.struck_brush >= 0) {
 				best.contact_assisted++;
@@ -653,13 +760,25 @@ namespace Entrance {
 				if (on_strike)
 					on_strike(ar, sd, cs, total + 8);
 				const float d = Len(ar.pos - q);
+				th_term = atan2f(ar.v1.Y, ar.v1.X);
+				const float Hs = Dot(ar.end_state.vel,
+					ar.end_state.vel) + 2.f * p.gravity * gs
+					* (ar.pos.Z - zmin);
+				// Exactness ladder: EVERY clean strike reports its
+				// distance to q; per-rung best H feeds the
+				// tolerance dashboard (advisor 2026-08-19).
+				if (d < best.strike_rmin) {
+					best.strike_rmin = d;
+					best.strike_rmin_th = th_term;
+				}
+				for (int r2 = 0; r2 < 6; ++r2)
+					if (d <= kLadder[r2] && Hs > best.rung_E[r2])
+						best.rung_E[r2] = Hs;
 				if (d > radius) {
 					sc = -d;
 				} else {
 					strike = true;
-					H = Dot(ar.end_state.vel, ar.end_state.vel)
-						+ 2.f * p.gravity * gs
-						* (ar.pos.Z - zmin);
+					H = Hs;
 					if (tangent_mode && -ar.dot > kTanEps)
 						sc = 1e5f - fabsf(ar.dot);
 					else
@@ -700,7 +819,7 @@ namespace Entrance {
 				}
 			}
 			if (strike) {
-				const float th = atan2f(ar.v1.Y, ar.v1.X);
+				const float th = th_term;
 				int bi = static_cast<int>((th + kPi2)
 					/ (2.f * kPi2) * static_cast<float>(kBins));
 				if (bi < 0) bi = 0;
@@ -715,15 +834,27 @@ namespace Entrance {
 					be.runs = src_runs ? *src_runs
 						: runs_from_sched(sd, cs);
 				}
+				// Per-interval witness coverage {L_i, hits}: each
+				// in-radius witness credits every heading interval
+				// containing its terminal heading.
+				const float rel = Steer::WrapPi(th - th_arr);
+				for (int i3 = 0; i3 < 6; ++i3)
+					if (ThetaIntervalDist2(rel, ivt[i3][0],
+						ivt[i3][1]) <= 0.f) {
+						best.iv_hits[i3]++;
+						if (H > best.iv_L[i3])
+							best.iv_L[i3] = H;
+					}
 				if (sc >= 1e7f && H > best.H) {
 					best.ok = true;
 					best.H = H;
 					best.flight = ar;
 					best.wside = sd;
 					best.wcosa = cs;
-					best.horizon = total + 8;
+					best.horizon = bnd ? total : total + 8;
 				}
-				if (-ar.dot <= kTanEps && H > best.tan_H) {
+				if (!bnd && -ar.dot <= kTanEps
+					&& H > best.tan_H) {
 					best.tan_ok = true;
 					best.tan_H = H;
 					best.tan_flight = ar;
@@ -738,28 +869,7 @@ namespace Entrance {
 			ExpandRuns(runs, &sbuf, &cbuf);
 			return ev_sched(sbuf, cbuf, &runs);
 		};
-		// ---- SEED GRID (deterministic) ----
-		const float bear = atan2f(q.Y - entry.pos.Y,
-			q.X - entry.pos.X);
-		float th_arr = bear;
-		{
-			const float hn = sqrtf(face.n.X * face.n.X
-				+ face.n.Y * face.n.Y);
-			const float sa = Envelope::SMax(s0, N, p);
-			const float va = Envelope::VzAfter(entry.vel.Z, N, p,
-				gs);
-			if (sa * hn > 1e-4f) {
-				float cphi = -va * face.n.Z / (sa * hn);
-				if (cphi > 1.f) cphi = 1.f;
-				if (cphi < -1.f) cphi = -1.f;
-				const float po = acosf(cphi);
-				const float paz = atan2f(face.n.Y, face.n.X);
-				const float ca = Steer::WrapPi(paz + po);
-				const float cb = Steer::WrapPi(paz - po);
-				th_arr = fabsf(Steer::WrapPi(ca - bear))
-					<= fabsf(Steer::WrapPi(cb - bear)) ? ca : cb;
-			}
-		}
+		// ---- SEED GRID (deterministic; th_arr hoisted above) ----
 		const signed char s_to = static_cast<signed char>(
 			Steer::WrapPi(th_arr - h0) >= 0.f ? 1 : -1);
 		auto one_run = [&](signed char sd, float c0, float c1) {
@@ -837,10 +947,12 @@ namespace Entrance {
 			const float epx = rl > 1.f ? rx / rl : 1.f;
 			const float eqx = -epy, eqy = epx;
 			auto shoot = [&](const std::vector<GuideTarget>& tgts,
-				const GuideWeights& gw) {
+				const GuideWeights& gw, int iv_i) {
 				if (best.evals - fl0 >= gbudget
 					|| best.evals >= budget)
 					return;
+				if (iv_i >= 0 && iv_i < 6)
+					best.iv_shots[iv_i]++;
 				GuideWeights g2 = gw;
 				// Second-stage exact rollouts only when the budget
 				// affords them; their sim ticks are charged as
@@ -866,35 +978,38 @@ namespace Entrance {
 				t2.until = N;
 				return t2;
 			};
-			// Terminal-heading INTERVALS (generic coarse partition
-			// around the closed-form arrival estimate; each interval
-			// independently establishes its reachable class - the
-			// numerical implementation of theta -> s_A*(theta)).
-			const float iv[6][2] = { { -0.25f, 0.25f },
-				{ 0.2f, 0.8f }, { -0.8f, -0.2f }, { 0.8f, 1.9f },
-				{ -1.9f, -0.8f }, { 1.9f, -1.9f } };
-			for (int ii = 0; ii < 3; ++ii) {
+			// Terminal-heading INTERVALS: the table (ivt) is hoisted
+			// to function scope so ev_sched bins witnesses into it;
+			// each interval independently establishes its reachable
+			// class - the numerical implementation of
+			// theta -> s_A*(theta). Boundary mode has ONE given
+			// interval (row 0).
+			const int n_near = bnd ? 1 : 3;
+			for (int ii = 0; ii < n_near; ++ii) {
 				std::vector<GuideTarget> tg(1,
-					final_tgt(iv[ii][0], iv[ii][1]));
+					final_tgt(ivt[ii][0], ivt[ii][1]));
 				GuideWeights gw;
 				gw.wp = 2.f;
 				gw.we = 0.3f;
-				shoot(tg, gw);
+				shoot(tg, gw, ii);
 				gw.wp = 6.f;
 				gw.we = 0.05f;
-				shoot(tg, gw);
+				shoot(tg, gw, ii);
 			}
 			// FULL-DOMAIN coverage (advisor: estimates may order,
 			// never erase headings) - the far intervals each get a
-			// shot so no terminal class silently disappears.
-			for (int ii = 3; ii < 6; ++ii) {
-				std::vector<GuideTarget> tg(1,
-					final_tgt(iv[ii][0], iv[ii][1]));
-				GuideWeights gw;
-				gw.wp = 2.f;
-				gw.we = 0.3f;
-				shoot(tg, gw);
-			}
+			// shot so no terminal class silently disappears. One
+			// shot is COVERAGE ONLY: an interval without a witness
+			// stays UNRESOLVED (iv_hits == 0), never "unreachable".
+			if (!bnd)
+				for (int ii = 3; ii < 6; ++ii) {
+					std::vector<GuideTarget> tg(1,
+						final_tgt(ivt[ii][0], ivt[ii][1]));
+					GuideWeights gw;
+					gw.wp = 2.f;
+					gw.we = 0.3f;
+					shoot(tg, gw, ii);
+				}
 			// m = 1: intervals x symmetric laterals; then node-TIME
 			// adaptation around whichever shot advanced the best.
 			const float lam0 = 0.45f;
@@ -912,45 +1027,45 @@ namespace Entrance {
 					* static_cast<float>(N));
 				return n1;
 			};
-			for (int ii = 0; ii < 3; ++ii)
-				for (int bi2 = 0; bi2 < 7; ++bi2) {
-					std::vector<GuideTarget> tg;
-					tg.push_back(node_at(lam0, bmag[bi2]));
-					tg.push_back(final_tgt(iv[ii][0],
-						iv[ii][1]));
-					GuideWeights gw;
-					gw.wp = 2.f;
-					gw.we = 0.3f;
-					shoot(tg, gw);
-					if (best.H > track_best + 1.f) {
-						track_best = best.H;
-						win_ii = ii;
-						win_bi = bi2;
+			if (tune_m >= 1) {
+				for (int ii = 0; ii < n_near; ++ii)
+					for (int bi2 = 0; bi2 < 7; ++bi2) {
+						std::vector<GuideTarget> tg;
+						tg.push_back(node_at(lam0, bmag[bi2]));
+						tg.push_back(final_tgt(ivt[ii][0],
+							ivt[ii][1]));
+						GuideWeights gw;
+						gw.wp = 2.f;
+						gw.we = 0.3f;
+						shoot(tg, gw, ii);
+						if (best.H > track_best + 1.f) {
+							track_best = best.H;
+							win_ii = ii;
+							win_bi = bi2;
+						}
 					}
-				}
-			// Node-time adaptation (a numerical resolution axis,
-			// not admissibility): retry the winning node
-			// earlier/later.
-			{
+				// Node-time adaptation (a numerical resolution
+				// axis, not admissibility): retry the winning node
+				// earlier/later.
 				const float lams[4] = { 0.3f, 0.38f, 0.55f,
 					0.65f };
 				for (int li = 0; li < 4; ++li) {
 					std::vector<GuideTarget> tg;
 					tg.push_back(node_at(lams[li],
 						bmag[win_bi]));
-					tg.push_back(final_tgt(iv[win_ii][0],
-						iv[win_ii][1]));
+					tg.push_back(final_tgt(ivt[win_ii][0],
+						ivt[win_ii][1]));
 					GuideWeights gw;
 					gw.wp = 2.f;
 					gw.we = 0.3f;
-					shoot(tg, gw);
+					shoot(tg, gw, win_ii);
 				}
 			}
 			// m = 2 (generic): first node at the winner's corridor,
 			// second free node closer to the target with symmetric
 			// lateral variants - depart -> develop -> close, with
 			// nothing about the shape encoded.
-			{
+			if (tune_m >= 2) {
 				const float l2s[3] = { 0.f, 0.4f, -0.4f };
 				for (int li = 0; li < 3; ++li) {
 					float b2 = bmag[win_bi] + l2s[li];
@@ -960,38 +1075,40 @@ namespace Entrance {
 					tg.push_back(node_at(0.3f,
 						bmag[win_bi] * 0.6f));
 					tg.push_back(node_at(0.62f, b2));
-					tg.push_back(final_tgt(iv[win_ii][0],
-						iv[win_ii][1]));
+					tg.push_back(final_tgt(ivt[win_ii][0],
+						ivt[win_ii][1]));
 					GuideWeights gw;
 					gw.wp = 2.f;
 					gw.we = 0.3f;
-					shoot(tg, gw);
+					shoot(tg, gw, win_ii);
 				}
 			}
-			// OUTCOME-SPACE GAUSS-NEWTON on the winning node
-			// (advisor: attack the ill-conditioning in state
-			// coordinates - finite-difference the replay residual
-			// w.r.t. the node position, damped least-squares step).
-			// Evaluations replay directly; the final polished
-			// schedule is fed through ev_sched for crediting.
-			if (best.ok && budget - best.evals > 20) {
-				float nx = entry.pos.X + 0.45f * rx
-					+ bmag[win_bi] * rl * 0.5f * eqx;
-				float ny = entry.pos.Y + 0.45f * ry
-					+ bmag[win_bi] * rl * 0.5f * eqy;
-				const float th_mid = Steer::WrapPi(th_arr
-					+ 0.5f * (iv[win_ii][0] + iv[win_ii][1]));
-				auto eval_node = [&](float x2, float y2,
-					float* r_out) {
-					GuideTarget n1;
-					n1.x = x2;
-					n1.y = y2;
-					n1.until = static_cast<int>(0.45f
-						* static_cast<float>(N));
+			// OUTCOME-SPACE GAUSS-NEWTON (advisor 2026-08-19): the
+			// correction solves the COMPLETE boundary residual
+			// R = (x_T - x_Q, y_T - y_Q, w_th * d(theta_T, I)) -
+			// never an XY-only polish with terminal heading left in
+			// another basin. Pass 1 = single node (2 vars, the
+			// cheap fast pass); pass 2 = the FULL ACTIVE NODE
+			// VECTOR xi = (x1, y1, x2, y2) of the m=2
+			// configuration - J is 3x4 (no squareness requirement),
+			// damped least squares (J^T J + lambda I) dxi = -J^T R.
+			// Every evaluation replays and is charged; schedules
+			// enter the frontier only through ev_sched.
+			if (tune_m >= 2
+				&& (best.ok || (bnd && best.bnd_rp < 500.f))
+				&& budget - best.evals > 20) {
+				const float th_lo_w = Steer::WrapPi(th_arr
+					+ ivt[win_ii][0]);
+				const float th_hi_w = Steer::WrapPi(th_arr
+					+ ivt[win_ii][1]);
+				// Replay a node configuration; boundary residual.
+				auto eval_nodes = [&](const GuideTarget* nds,
+					int nn, float* r_out) {
 					std::vector<GuideTarget> tg;
-					tg.push_back(n1);
-					tg.push_back(final_tgt(iv[win_ii][0],
-						iv[win_ii][1]));
+					for (int i4 = 0; i4 < nn; ++i4)
+						tg.push_back(nds[i4]);
+					tg.push_back(final_tgt(ivt[win_ii][0],
+						ivt[win_ii][1]));
 					GuideWeights gw;
 					gw.wp = 4.f;
 					gw.we = 0.15f;
@@ -1003,70 +1120,210 @@ namespace Entrance {
 					best.evals += 2;
 					if (flights_counter)
 						(*flights_counter) += 2;
-					if (s2.empty()) {
-						r_out[0] = 1e4f;
-						r_out[1] = 1e4f;
-						r_out[2] = 1e4f;
+					r_out[0] = 1e4f;
+					r_out[1] = 1e4f;
+					r_out[2] = 1e4f;
+					if (s2.empty())
 						return;
-					}
-					vt.max_ticks = static_cast<int>(s2.size())
-						+ 8;
+					const int hz2 = bnd
+						? static_cast<int>(s2.size())
+						: static_cast<int>(s2.size()) + 8;
+					vt.max_ticks = hz2;
 					Air::Result ar = Air::FlyWishSchedule(entry,
-						w, p, vt, g, s2, c2,
-						static_cast<int>(s2.size()) + 8);
-					if (!ar.hit || ar.dot >= 0.f
-						|| ar.struck_brush >= 0) {
-						r_out[0] = 1e4f;
-						r_out[1] = 1e4f;
-						r_out[2] = 1e4f;
-						return;
+						w, p, vt, g, s2, c2, hz2);
+					float px, py, tha;
+					if (bnd) {
+						if (ar.struck_brush >= 0 || ar.grounded
+							|| static_cast<int>(s2.size()) != N)
+							return;
+						px = ar.end_pos.X;
+						py = ar.end_pos.Y;
+						const Vec3& vT = ar.end_state.vel;
+						tha = Len2D(vT) > 1.f
+							? atan2f(vT.Y, vT.X) : 0.f;
+					} else {
+						if (!ar.hit || ar.dot >= 0.f
+							|| ar.struck_brush >= 0)
+							return;
+						px = ar.pos.X;
+						py = ar.pos.Y;
+						tha = atan2f(ar.v1.Y, ar.v1.X);
 					}
 					ev_sched(s2, c2, nullptr);
-					r_out[0] = ar.pos.X - q.X;
-					r_out[1] = ar.pos.Y - q.Y;
-					const float tha = atan2f(ar.v1.Y, ar.v1.X);
+					r_out[0] = px - q.X;
+					r_out[1] = py - q.Y;
 					r_out[2] = sqrtf(ThetaIntervalDist2(tha,
-						Steer::WrapPi(th_mid - 0.15f),
-						Steer::WrapPi(th_mid + 0.15f))) * 200.f;
+						th_lo_w, th_hi_w)) * 200.f;
 				};
-				float R0[3];
-				eval_node(nx, ny, R0);
-				for (int it = 0; it < 3
-					&& budget - best.evals > 8; ++it) {
-					if (fabsf(R0[0]) > 5e3f)
-						break;
-					const float dstep = 24.f;
-					float R1[3], R2[3];
-					eval_node(nx + dstep, ny, R1);
-					eval_node(nx, ny + dstep, R2);
-					float Jm[3][2];
-					for (int r2 = 0; r2 < 3; ++r2) {
-						Jm[r2][0] = (R1[r2] - R0[r2]) / dstep;
-						Jm[r2][1] = (R2[r2] - R0[r2]) / dstep;
+				// ---- Pass 1: single node, 2 variables ----
+				{
+					float nx = entry.pos.X + 0.45f * rx
+						+ bmag[win_bi] * rl * 0.5f * eqx;
+					float ny = entry.pos.Y + 0.45f * ry
+						+ bmag[win_bi] * rl * 0.5f * eqy;
+					auto eval1 = [&](float x2, float y2,
+						float* r_out) {
+						GuideTarget n1;
+						n1.x = x2;
+						n1.y = y2;
+						n1.until = static_cast<int>(0.45f
+							* static_cast<float>(N));
+						eval_nodes(&n1, 1, r_out);
+					};
+					float R0[3];
+					eval1(nx, ny, R0);
+					for (int it = 0; it < 3
+						&& budget - best.evals > 8; ++it) {
+						if (fabsf(R0[0]) > 5e3f)
+							break;
+						const float dstep = 24.f;
+						float R1[3], R2[3];
+						eval1(nx + dstep, ny, R1);
+						eval1(nx, ny + dstep, R2);
+						float Jm[3][2];
+						for (int r2 = 0; r2 < 3; ++r2) {
+							Jm[r2][0] = (R1[r2] - R0[r2])
+								/ dstep;
+							Jm[r2][1] = (R2[r2] - R0[r2])
+								/ dstep;
+						}
+						// (J^T J + lambda I) dx = -J^T R (2x2)
+						float a11 = 0.5f, a12 = 0.f, a22 = 0.5f;
+						float b1 = 0.f, b2 = 0.f;
+						for (int r2 = 0; r2 < 3; ++r2) {
+							a11 += Jm[r2][0] * Jm[r2][0];
+							a12 += Jm[r2][0] * Jm[r2][1];
+							a22 += Jm[r2][1] * Jm[r2][1];
+							b1 -= Jm[r2][0] * R0[r2];
+							b2 -= Jm[r2][1] * R0[r2];
+						}
+						const float det = a11 * a22 - a12 * a12;
+						if (fabsf(det) < 1e-6f)
+							break;
+						float dx = (b1 * a22 - b2 * a12) / det;
+						float dy = (b2 * a11 - b1 * a12) / det;
+						const float dl = sqrtf(dx * dx
+							+ dy * dy);
+						if (dl > 160.f) {
+							dx *= 160.f / dl;
+							dy *= 160.f / dl;
+						}
+						nx += dx;
+						ny += dy;
+						eval1(nx, ny, R0);
 					}
-					// (J^T J + lambda I) dx = -J^T R  (2x2 solve)
-					float a11 = 0.5f, a12 = 0.f, a22 = 0.5f;
-					float b1 = 0.f, b2 = 0.f;
-					for (int r2 = 0; r2 < 3; ++r2) {
-						a11 += Jm[r2][0] * Jm[r2][0];
-						a12 += Jm[r2][0] * Jm[r2][1];
-						a22 += Jm[r2][1] * Jm[r2][1];
-						b1 -= Jm[r2][0] * R0[r2];
-						b2 -= Jm[r2][1] * R0[r2];
+				}
+				// ---- Pass 2: FULL ACTIVE NODE VECTOR (m=2) ----
+				if (budget - best.evals > 60) {
+					float xi[4] = {
+						entry.pos.X + 0.3f * rx + bmag[win_bi]
+							* 0.6f * rl * 0.5f * eqx,
+						entry.pos.Y + 0.3f * ry + bmag[win_bi]
+							* 0.6f * rl * 0.5f * eqy,
+						entry.pos.X + 0.62f * rx + bmag[win_bi]
+							* rl * 0.5f * eqx,
+						entry.pos.Y + 0.62f * ry + bmag[win_bi]
+							* rl * 0.5f * eqy };
+					auto evalxi = [&](const float* x4,
+						float* r_out) {
+						GuideTarget nds[2];
+						nds[0].x = x4[0];
+						nds[0].y = x4[1];
+						nds[0].until = static_cast<int>(0.3f
+							* static_cast<float>(N));
+						nds[1].x = x4[2];
+						nds[1].y = x4[3];
+						nds[1].until = static_cast<int>(0.62f
+							* static_cast<float>(N));
+						eval_nodes(nds, 2, r_out);
+					};
+					float R0[3];
+					evalxi(xi, R0);
+					for (int it = 0; it < 3
+						&& budget - best.evals > 12; ++it) {
+						if (fabsf(R0[0]) > 5e3f)
+							break;
+						const float dstep = 24.f;
+						float Jm[3][4];
+						for (int c4 = 0; c4 < 4; ++c4) {
+							float xp[4] = { xi[0], xi[1], xi[2],
+								xi[3] };
+							xp[c4] += dstep;
+							float Rp[3];
+							evalxi(xp, Rp);
+							for (int r2 = 0; r2 < 3; ++r2)
+								Jm[r2][c4] = (Rp[r2] - R0[r2])
+									/ dstep;
+						}
+						// (J^T J + lambda I) dxi = -J^T R via
+						// 4x4 elimination, partial pivoting.
+						float A[4][5];
+						for (int i4 = 0; i4 < 4; ++i4) {
+							for (int j4 = 0; j4 < 4; ++j4) {
+								float acc = i4 == j4
+									? 0.5f : 0.f;
+								for (int r2 = 0; r2 < 3; ++r2)
+									acc += Jm[r2][i4]
+										* Jm[r2][j4];
+								A[i4][j4] = acc;
+							}
+							float bb = 0.f;
+							for (int r2 = 0; r2 < 3; ++r2)
+								bb -= Jm[r2][i4] * R0[r2];
+							A[i4][4] = bb;
+						}
+						bool sing = false;
+						for (int c4 = 0; c4 < 4 && !sing;
+							++c4) {
+							int piv = c4;
+							for (int r3 = c4 + 1; r3 < 4; ++r3)
+								if (fabsf(A[r3][c4])
+									> fabsf(A[piv][c4]))
+									piv = r3;
+							if (fabsf(A[piv][c4]) < 1e-7f) {
+								sing = true;
+								break;
+							}
+							if (piv != c4)
+								for (int j4 = c4; j4 < 5;
+									++j4) {
+									const float t3 = A[c4][j4];
+									A[c4][j4] = A[piv][j4];
+									A[piv][j4] = t3;
+								}
+							for (int r3 = c4 + 1; r3 < 4;
+								++r3) {
+								const float f4 = A[r3][c4]
+									/ A[c4][c4];
+								for (int j4 = c4; j4 < 5;
+									++j4)
+									A[r3][j4] -= f4
+										* A[c4][j4];
+							}
+						}
+						if (sing)
+							break;
+						float dx4[4];
+						for (int c4 = 3; c4 >= 0; --c4) {
+							float acc = A[c4][4];
+							for (int j4 = c4 + 1; j4 < 4; ++j4)
+								acc -= A[c4][j4] * dx4[j4];
+							dx4[c4] = acc / A[c4][c4];
+						}
+						for (int nn = 0; nn < 2; ++nn) {
+							const float dl = sqrtf(
+								dx4[nn * 2] * dx4[nn * 2]
+								+ dx4[nn * 2 + 1]
+								* dx4[nn * 2 + 1]);
+							if (dl > 160.f) {
+								dx4[nn * 2] *= 160.f / dl;
+								dx4[nn * 2 + 1] *= 160.f / dl;
+							}
+						}
+						for (int c4 = 0; c4 < 4; ++c4)
+							xi[c4] += dx4[c4];
+						evalxi(xi, R0);
 					}
-					const float det = a11 * a22 - a12 * a12;
-					if (fabsf(det) < 1e-6f)
-						break;
-					float dx = (b1 * a22 - b2 * a12) / det;
-					float dy = (b2 * a11 - b1 * a12) / det;
-					const float dl = sqrtf(dx * dx + dy * dy);
-					if (dl > 160.f) {
-						dx *= 160.f / dl;
-						dy *= 160.f / dl;
-					}
-					nx += dx;
-					ny += dy;
-					eval_node(nx, ny, R0);
 				}
 			}
 		}
@@ -1204,13 +1461,20 @@ namespace Entrance {
 			pe.sc = ev(pe.runs);
 			deepen(pe, 0.12f, 2);
 		};
-		const float ksteps[3] = { 0.3f, 0.12f, 0.05f };
-		const int lsteps[3] = { 6, 2, 2 };
+		// Resolution rungs; the finest is SPEED-DERIVED (airrec
+		// 2026-08-19: the active gain band spans ~cap/s of stored
+		// cosa, so a fixed 0.05 floor is coarser than the whole band
+		// at speed and long arcs could not be aimed).
+		const float kfine = p.air_speed_cap
+			/ (2.f * (s0 > p.air_speed_cap ? s0
+				: p.air_speed_cap));
+		const float ksteps[4] = { 0.3f, 0.12f, 0.05f, kfine };
+		const int lsteps[4] = { 6, 2, 2, 1 };
 		int dry = 0;
 		float last_best = -1e30f;
 		while (best.evals < budget && dry < 4) {
 			// Scouts always get the full schedule.
-			for (int rd = 0; rd < 3 && best.evals < budget; ++rd)
+			for (int rd = 0; rd < 4 && best.evals < budget; ++rd)
 				for (int si2 = 0; si2 < 3; ++si2)
 					deepen(scouts[static_cast<size_t>(si2)],
 						ksteps[rd], lsteps[rd]);
@@ -1240,7 +1504,7 @@ namespace Entrance {
 						have_soft = true;
 				if (!have_soft)
 					work.push_back(soft);
-				for (int rd = 0; rd < 3 && best.evals < budget;
+				for (int rd = 0; rd < 4 && best.evals < budget;
 					++rd)
 					for (int b2 : work) {
 						if (best.evals >= budget)

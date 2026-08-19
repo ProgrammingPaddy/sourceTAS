@@ -327,7 +327,94 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 ## Change log
 
-- 2026-08-17 (session 5b, THE DOOM CULL WIRED - user approved): ONE
+- 2026-08-19 (session 11, AIRREC BUILT - the constructive
+  recoverability suite; the stored-basis convention MEASURED and the
+  stage-1 mirror bug caught+fixed; spec doc filed as
+  Docs/AirRecSpec.md, the post-compaction design of record with the
+  15 standing laws). THE INSTRUMENT (advisor's top priority): hidden
+  LEGAL wish schedules create known-reachable problems; production
+  solves them cold; oracles are quarantined fixtures (never banked,
+  never seeded; production receives only (S0,Q,T[,theta])). TWO
+  LAYERS: L1 free-air boundary (S0,Q,T,theta) via new RefTune
+  {shoot_m, bnd_theta} boundary mode in RefSolve (fixed-T schedules,
+  tick-T residual rp+250*rth, H = terminal horizontal speed = the
+  s_A* quantity; FlyWishSchedule gained a free-flight branch t.face
+  < 0, end_state now filled on every exit path) - tests the
+  numerical shooting core; L2 clean face strikes built by the
+  TRANSLATION TRICK (free flight is translation invariant: probe the
+  hidden schedule once in open air, translate the start so the
+  trajectory crosses the face, demand a clean single-plane strike
+  from the true replay; unconstructible cases printed with reasons,
+  never dropped) - tests the actual Air->Board operator. Strata:
+  reversals {0,1,2,3} x profile {gain, smooth, aggressive, brake->
+  gain} x dwell {near-min, long} x T {28,48,76} x s0 {350,700,1000}
+  x vz {+180,-60,-380}; 32 L1 + 12 L2 oracles, 100% constructed,
+  legality-audited. Metrics per advisor: cold recovery %, tolerance
+  ladder 32/16/8/4/2/1u, rp/rth p50/p95, oracle-energy recovery %,
+  ev/case, per-stratum splits, dh_tot median-split feature
+  correlation, and BOUND FALSIFICATION (U < E_oracle -> loud fail;
+  0 falsifications across all 264 solves today - empirical
+  validation only, not certification). ALSO BUILT: per-interval
+  heading coverage {L_i, hits, shots} + iv_ref in RefResult
+  (UNRESOLVED reporting: one-shot far intervals are coverage, not
+  value); exactness ladder in RefResult (strike_rmin + rung_E[6]) +
+  airsuite ladder line; FULL-xi GAUSS-NEWTON pass 2 (advisor
+  correction): xi = (x1,y1,x2,y2) of the m=2 configuration, 3x4
+  FD Jacobian, damped LS via 4x4 elimination, complete boundary
+  residual (x,y,theta) - the single-node 2-var pass stays as the
+  cheap first pass. THE DISCOVERY CHAIN (the suite paying for
+  itself on day one): (1) smoke run: constant stored cosa=0.95 bled
+  350->32 u/s -> MEASURED: the executor realizes its wish at wh+pi,
+  so realized cos(rho) = -stored_c; stored +1 = max brake; the
+  active gain band is stored c in ~(-cap/s, +cap/s) (verified
+  numerically: stored -0.02 at s350/T48 gained exactly the law-
+  predicted +54 u/s); generator profiles rewritten in stored units.
+  (2) FIRST SWEEP (pre-fix): recovery curve FLAT - L1 m0 8 = m1 8 =
+  m2 8 of 32, machinery levels changing NOTHING; failures
+  concentrated in 0-reversal sustained-gain ARCS (0/8; e.g. 627u
+  miss on a 76-tick gain flight while recovered flights bled to
+  30-58 u/s). Root-caused, not hand-waved: (a) Strafe::TickLaw is
+  in TRUE wish-from-velocity units (header + SDK-literal addspeed)
+  but GuidedShootSeq stage-1 passed STORED c straight in -> every
+  candidate's speed effect modeled MIRRORED (brakes ranked inert,
+  inert ranked brake; only c=0 right; stage-2 exact rollouts could
+  only re-rank a mirror-chosen shortlist); (b) the candidate grid
+  had NO gain-band members (band width ~2cap/s is speed-dependent);
+  (c) the deepen knot floor 0.05 is WIDER than the whole gain band
+  at speed - long arcs could not be aimed. FIXES (all search-side;
+  law/executor untouched): negate at the bridge (law.NewSpeed2(-c),
+  TurnRad(-c,.)), speed-derived gain-band candidates (+-0.5cap/s,
+  -0.95cap/s), fourth speed-derived knot rung cap/2s. (3) POST-FIX
+  SWEEP: L1 m0 7 -> m1 8 -> m2 9 of 32 (mild slope, still low);
+  ladder-32u 15->21 at m2, 1u 0->2; L2 10/12 at all levels (two
+  constructed strikes at 20-27u rmin now unrecovered - budget
+  shifted); THE PERSISTENT KNOWN-REACHABLE FAILING CLASS = long
+  sustained-gain arcs (r0 1/8; large total curvature, chord-frame
+  nodes + 6-tick lookahead cannot enter them). REGRESSION BOARD:
+  floors ALL STAND (f0 895k, f2 950k, f3 759k; bank correct);
+  humanexact rediscovery f0 890k@14u (~same), f2 519k@16u - THE
+  FIRST production cold near-contact at the f2 disc in this era
+  (class floor 950k unmet, but the needle is finally TOUCHED), f3
+  276k@16u (down this run; floor stands, reported as failed
+  rediscovery); airsuite 40/48 struck (was 42 - two hz30 s900
+  vz-100 strikes lost = the dilution class) but MEAN SANDWICH GAP
+  366k -> 312k (best ever) with dramatically softer high-speed
+  arrivals (f0 hz30 s900 vz-400: dot -863.9 -> -34.5, H 549k ->
+  1144k; f3 1163k -> 1429k) - the gain-band vocabulary is what the
+  value search was missing; new airsuite ladder exposes the
+  16u->8u CLIFF: 28-30/48 within 16u, 0/48 within 8u. VERDICT FOR
+  THE ADVISOR (Level-B trigger reads the curve): 7->8->9 is not the
+  scaling shape, but two cheap generic conditioners remain untried
+  before defect shooting - (a) arc-frame node placement (nodes
+  sampled along constant-turn-rate arc families through entry->Q -
+  generic geometry; chord-frame laterals cap at 0.5*chord and
+  cannot express large-arc bulges), (b) curvature-aware remaining-
+  residual reach (currently straight-line DMax). NEXT: advisor
+  ruling on arc-frame conditioning vs Level B; then the adaptive
+  budget scheduler (P ~ competitiveGap*(1+beta*kappa)/cost, kappa =
+  difficulty NOT value, minimum scout allowance everywhere); then
+  nested-ceiling gap attribution (U0>=U1>=...>=H*) against the 312k
+  mean gap; airrec reruns are the regression gate for all of it.
   shared test `Carve::ExitDoomed` (tap: Envelope::CanReach with true
   2D polygon distance + xy-AABB containment proxy, z from face
   verts, hull-padded; zone: Field::ZoneReach) - benched as row

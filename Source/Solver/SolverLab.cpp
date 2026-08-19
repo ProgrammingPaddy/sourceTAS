@@ -229,6 +229,9 @@ namespace {
 		int   ef_cells = 6;           // fieldexact: sampled cells per event
 		int   ef_event = -1;          // ladder: which flight event (-1 = all)
 		float ef_grid = 32.f;
+		int   rec_m = -1;             // airrec: single machinery level
+		                              // (-1 = sweep m0/m1/m2 for the curve)
+		int   rec_budget = 1000;      // airrec: flat per-case eval budget
 		MoveParams params;
 		Hulls hulls;
 		// solve-only options
@@ -424,6 +427,8 @@ namespace {
 			else if (a == "--cells") ok = next_i(&o.ef_cells);
 			else if (a == "--event") ok = next_i(&o.ef_event);
 			else if (a == "--efgrid") ok = next_f(&o.ef_grid);
+			else if (a == "--m") ok = next_i(&o.rec_m);
+			else if (a == "--budget") ok = next_i(&o.rec_budget);
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
 		}
@@ -7472,6 +7477,10 @@ namespace {
 		int total = 0, near_ok = 0, exact_ok = 0;
 		double gap_sum = 0.0;
 		int gap_n = 0;
+		// EXACTNESS LADDER (advisor 2026-08-19): per-case closest
+		// clean strike, aggregated per tolerance rung.
+		int rung_n[6] = { 0, 0, 0, 0, 0, 0 };
+		std::vector<float> rmins;
 		struct Agg {
 			int n = 0, hit = 0;
 		};
@@ -7534,6 +7543,14 @@ namespace {
 						by_hz[hi2].n++;
 						by_sp[si2].n++;
 						by_vz[vi2].n++;
+						for (int r2 = 0; r2 < 6; ++r2)
+							if (rr.strike_rmin
+								<= Entrance::kLadder[r2])
+								rung_n[r2]++;
+						if (rr.strike_rmin < 1e29f)
+							rmins.push_back(rr.strike_rmin);
+						if (rr.strike_rmin <= 4.f)
+							exact_ok++;
 						if (rr.ok) {
 							near_ok++;
 							by_hz[hi2].hit++;
@@ -7541,29 +7558,46 @@ namespace {
 							by_vz[vi2].hit++;
 							const float d = Len(rr.flight.pos
 								- q);
-							if (d <= 4.f)
-								exact_ok++;
 							gap_sum += static_cast<double>(
 								U - rr.H);
 							gap_n++;
 							printf("airsuite: f%d hz%d s%.0f "
 								"vz%+.0f | H %.0fk (dot %.1f, "
-								"%.0fu) | U %.0fk G %.0fk | %d "
-								"ev\n", static_cast<int>(fi), Hn,
+								"%.0fu) rmin %.1fu | U %.0fk G "
+								"%.0fk | %d ev\n",
+								static_cast<int>(fi), Hn,
 								s0, vz0, rr.H / 1e3f,
-								rr.flight.dot, d, U / 1e3f,
+								rr.flight.dot, d,
+								rr.strike_rmin, U / 1e3f,
 								(U - rr.H) / 1e3f, rr.evals);
 						} else {
 							printf("airsuite: f%d hz%d s%.0f "
-								"vz%+.0f | NO STRIKE (%d ev) | U "
-								"%.0fk\n", static_cast<int>(fi),
-								Hn, s0, vz0, rr.evals, U / 1e3f);
+								"vz%+.0f | NO STRIKE (rmin "
+								"%.0fu, %d ev) | U %.0fk\n",
+								static_cast<int>(fi),
+								Hn, s0, vz0,
+								rr.strike_rmin < 1e29f
+									? rr.strike_rmin : -1.f,
+								rr.evals, U / 1e3f);
 						}
 					}
 		}
 		printf("airsuite: %d/%d cases struck (%d exact<=4u) | mean "
 			"sandwich gap %.0fk\n", near_ok, total, exact_ok,
 			gap_n ? gap_sum / gap_n / 1e3 : 0.0);
+		// The tolerance ladder: how close the search gets, not just
+		// whether it got inside one radius.
+		if (!rmins.empty()) {
+			std::sort(rmins.begin(), rmins.end());
+			const float p50 = rmins[rmins.size() / 2];
+			const float p95 = rmins[(rmins.size() * 95) / 100
+				>= rmins.size() ? rmins.size() - 1
+				: (rmins.size() * 95) / 100];
+			printf("airsuite: ladder <=32u:%d <=16u:%d <=8u:%d "
+				"<=4u:%d <=2u:%d <=1u:%d of %d | rmin p50 %.1fu "
+				"p95 %.1fu\n", rung_n[0], rung_n[1], rung_n[2],
+				rung_n[3], rung_n[4], rung_n[5], total, p50, p95);
+		}
 		printf("airsuite: by horizon: hz30 %d/%d hz55 %d/%d | by "
 			"speed: s400 %d/%d s900 %d/%d | by vz: +150 %d/%d "
 			"-100 %d/%d -400 %d/%d\n",
@@ -7571,6 +7605,613 @@ namespace {
 			by_sp[0].hit, by_sp[0].n, by_sp[1].hit, by_sp[1].n,
 			by_vz[0].hit, by_vz[0].n, by_vz[1].hit, by_vz[1].n,
 			by_vz[2].hit, by_vz[2].n);
+		fflush(stdout);
+		return 0;
+	}
+
+	// ================= airrec: THE CONSTRUCTIVE RECOVERABILITY
+	// SUITE (advisor 2026-08-19; Docs/AirRecSpec.md is the design of
+	// record). Hidden LEGAL wish schedules create known-reachable
+	// problems; production must recover them cold. Layer 1 = free-air
+	// boundary problems (S0, Q, T, theta) - tests the numerical
+	// shooting core. Layer 2 = clean face strikes - tests the actual
+	// Air->Board operator. QUARANTINE: oracle schedules/features live
+	// only in this harness; production receives (S0, Q, T[, theta]);
+	// nothing is banked and nothing is seeded. Every oracle is also a
+	// constructive floor: any certified ceiling below it is FALSIFIED
+	// (empirical validation only - passing is not certification).
+
+	namespace {
+
+	struct RecOracle {
+		bool  ok = false;
+		const char* why = "";
+		PlayerState S0;
+		std::vector<signed char> side;
+		std::vector<float> cosa;
+		int   T = 0;          // oracle arrival tick
+		Vec3  Q;              // boundary point / contact
+		float th = 0.f;       // terminal heading
+		float sT = 0.f;       // horizontal speed at T
+		float vzT = 0.f;
+		float E = 0.f;        // post-board energy (layer 2)
+		int   face = -1;      // layer 2 target face
+		float zmin = 0.f;
+		// Stratum labels + measured complexity features (harness
+		// only; production never sees these).
+		int   rev = 0, prof = 0, dwell = 0;
+		int   min_dwell = 0;
+		float dh_tot = 0.f, dh_max = 0.f, sac = 0.f;
+		int   brake = 0;
+	};
+
+	// Deterministic legal schedule for one control-complexity
+	// stratum: rev+1 alternating side segments (each >= min_gap, so
+	// legal from a fresh CtlState by construction), cosa profile by
+	// class. Encodes control-space coverage, never trajectory shapes.
+	void RecSchedule(int rev, int prof, int dwell_style, int T,
+	                 int min_gap, unsigned seed,
+	                 std::vector<signed char>* side,
+	                 std::vector<float>* cosa, int* min_dwell) {
+		side->assign(static_cast<size_t>(T), 0);
+		cosa->assign(static_cast<size_t>(T), 1.f);
+		unsigned rng = seed * 2654435761u + 0x9e3779b9u;
+		auto fr = [&]() {
+			rng = rng * 1664525u + 1013904223u;
+			return static_cast<float>((rng >> 8) & 0xFFFF)
+				/ 65535.f;
+		};
+		const int nseg = rev + 1;
+		std::vector<int> len(static_cast<size_t>(nseg), 0);
+		int used = 0;
+		if (dwell_style == 0) {
+			// Near-minimum dwell: min_gap + 0..3, remainder to the
+			// last segment.
+			for (int i = 0; i + 1 < nseg; ++i) {
+				len[static_cast<size_t>(i)] = min_gap
+					+ static_cast<int>(fr() * 3.99f);
+				used += len[static_cast<size_t>(i)];
+			}
+			len[static_cast<size_t>(nseg) - 1] = T - used;
+		} else {
+			for (int i = 0; i < nseg; ++i)
+				len[static_cast<size_t>(i)] = T / nseg;
+			len[static_cast<size_t>(nseg) - 1] += T
+				- (T / nseg) * nseg;
+		}
+		bool bad = false;
+		for (int i = 0; i < nseg; ++i)
+			if (len[static_cast<size_t>(i)] < min_gap)
+				bad = true;
+		if (bad) {
+			for (int i = 0; i < nseg; ++i)
+				len[static_cast<size_t>(i)] = T / nseg;
+			len[static_cast<size_t>(nseg) - 1] += T
+				- (T / nseg) * nseg;
+		}
+		*min_dwell = 1 << 20;
+		for (int i = 0; i < nseg; ++i)
+			if (len[static_cast<size_t>(i)] < *min_dwell)
+				*min_dwell = len[static_cast<size_t>(i)];
+		// STORED-BASIS CONVENTION (measured 2026-08-19, smoke run):
+		// the canonical (side, cosa) executor realizes its wish at
+		// wh + pi, so stored cosa = +1 wishes BACKWARD (max brake)
+		// and the active gain band is small-NEGATIVE stored cosa
+		// (~ -cap/s). Profiles below are written in STORED units so
+		// the strata mean what they claim: gain flights gain.
+		const float ph = fr() * 6.2831853f;
+		signed char s = fr() < 0.5f ? static_cast<signed char>(-1)
+			: static_cast<signed char>(1);
+		int k = 0;
+		for (int i = 0; i < nseg; ++i) {
+			for (int j = 0; j < len[static_cast<size_t>(i)];
+				++j, ++k) {
+				(*side)[static_cast<size_t>(k)] = s;
+				float c = -0.02f;
+				switch (prof) {
+				case 0: c = -0.02f; break;               // near-max gain
+				case 1: c = 0.24f + 0.26f                // smooth vary:
+					* sinf(6.2831853f * static_cast<float>(k)
+						/ static_cast<float>(T) + ph);   // [-0.02, 0.5]
+					break;
+				case 2: c = (i & 1) ? 0.65f : -0.02f;    // aggressive
+					break;                               // gain<->brake
+				case 3: c = k < T / 3 ? 0.7f : -0.02f;   // brake->gain
+					break;
+				}
+				(*cosa)[static_cast<size_t>(k)] = c;
+			}
+			s = static_cast<signed char>(-s);
+		}
+	}
+
+	// Open-loop free flight with per-tick visibility (harness-side
+	// feature extraction). Fails on any contact or grounding. Fills
+	// the oracle's terminal state + complexity features.
+	bool RecFreeFly(const PlayerState& S0, const World& w,
+	                const MoveParams& p,
+	                const std::vector<signed char>& side,
+	                const std::vector<float>& cosa,
+	                RecOracle* out, std::vector<Vec3>* traj) {
+		PlayerState s = S0;
+		const int hold = s.ducked ? IN_DUCK : 0;
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		out->dh_tot = 0.f;
+		out->dh_max = 0.f;
+		out->sac = 0.f;
+		out->brake = 0;
+		const int T = static_cast<int>(side.size());
+		float h_prev = atan2f(S0.vel.Y, S0.vel.X);
+		for (int k = 0; k < T; ++k) {
+			const float s2d = Len2D(s.vel);
+			const float h = s2d > 1.f
+				? atan2f(s.vel.Y, s.vel.X) : h_prev;
+			float yaw = h * 57.2957795f, fm = 0.f, sm = 0.f;
+			if (side[static_cast<size_t>(k)] != 0 && s2d > 1.f) {
+				Air::WishInputs(h,
+					static_cast<int>(
+						side[static_cast<size_t>(k)]),
+					cosa[static_cast<size_t>(k)], &yaw, &fm,
+					&sm);
+				// Stored convention: POSITIVE cosa = braking wish.
+				if (cosa[static_cast<size_t>(k)] > 0.3f)
+					out->brake++;
+			}
+			const float pre2 = s2d * s2d + cap2;
+			TickEvents ev;
+			MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, hold, &ev);
+			if (traj)
+				traj->push_back(s.pos);
+			if (ev.ncontacts > 0 || s.on_ground)
+				return false;
+			const float post = Len2D(s.vel);
+			const float dsac = pre2 - post * post;
+			if (dsac > 0.f)
+				out->sac += dsac;
+			const float h2 = post > 1.f
+				? atan2f(s.vel.Y, s.vel.X) : h;
+			const float dh = fabsf(Steer::WrapPi(h2 - h));
+			out->dh_tot += dh;
+			if (dh > out->dh_max)
+				out->dh_max = dh;
+			h_prev = h2;
+		}
+		out->Q = s.pos;
+		out->sT = Len2D(s.vel);
+		out->vzT = s.vel.Z;
+		out->th = out->sT > 1.f ? atan2f(s.vel.Y, s.vel.X) : 0.f;
+		return true;
+	}
+
+	// Layer-2 oracle construction: free flight is TRANSLATION
+	// INVARIANT, so probe the hidden schedule once in open air, then
+	// translate the start so the trajectory crosses the target face
+	// near its centroid, and demand a clean single-plane strike from
+	// the TRUE replay. Retries over approach bearing and plane
+	// offset; failure is reported, never silently dropped.
+	bool RecBoardOracle(const World& w, const MoveParams& p,
+	                    const Route::Graph& g, int face_idx,
+	                    float s0, float vz0, int T,
+	                    const std::vector<signed char>& side,
+	                    const std::vector<float>& cosa,
+	                    float zhigh, RecOracle* out) {
+		const Route::Face& fc = g.faces[static_cast<size_t>(
+			face_idx)];
+		const float hn = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
+		if (hn < 1e-4f) {
+			out->why = "vertical-normal face";
+			return false;
+		}
+		const float paz = atan2f(fc.n.Y, fc.n.X);
+		const float voffs[5] = { 0.f, 0.3f, -0.3f, 0.6f, -0.6f };
+		const float eps[4] = { 4.f, 10.f, 1.f, 16.f };
+		for (int vo = 0; vo < 5; ++vo) {
+			const float inaz = Steer::WrapPi(paz + 3.14159265f
+				+ voffs[vo]);
+			PlayerState st;
+			st.pos = Vec3(0.f, 0.f, zhigh);
+			st.vel = Vec3(cosf(inaz) * s0, sinf(inaz) * s0, vz0);
+			st.ducked = false;
+			st.hull_state = 0;
+			RecOracle probe;
+			std::vector<Vec3> traj;
+			if (!RecFreeFly(st, w, p, side, cosa, &probe, &traj))
+				continue;
+			// The terminal velocity must actually approach the
+			// plane, or no translation can make it strike.
+			const float vdot = probe.sT * (cosf(probe.th) * fc.n.X
+				+ sinf(probe.th) * fc.n.Y) + probe.vzT * fc.n.Z;
+			if (vdot > -50.f)
+				continue;
+			const Vec3 dT = traj[static_cast<size_t>(T) - 1]
+				- st.pos;
+			for (int ei = 0; ei < 4; ++ei) {
+				PlayerState real = st;
+				real.pos = fc.centroid + Scale(fc.n, eps[ei])
+					- dT;
+				Air::Target vt;
+				vt.face = face_idx;
+				vt.dot_cap = 3000.f;
+				vt.aim = fc.centroid;
+				vt.max_ticks = T + 10;
+				Air::Result ar = Air::FlyWishSchedule(real, w, p,
+					vt, g, side, cosa, T + 10);
+				if (!ar.hit || ar.dot >= 0.f
+					|| ar.struck_brush >= 0)
+					continue;
+				if (ar.tick < T - 6 || ar.tick > T + 8)
+					continue;
+				out->ok = true;
+				out->S0 = real;
+				out->T = ar.tick;
+				out->Q = ar.pos;
+				out->th = atan2f(ar.v1.Y, ar.v1.X);
+				out->sT = Len2D(ar.v1);
+				out->vzT = ar.v1.Z;
+				out->E = Dot(ar.end_state.vel, ar.end_state.vel)
+					+ 2.f * p.gravity * real.gravity_scale
+					* (ar.pos.Z - fc.zmin);
+				out->face = face_idx;
+				out->zmin = fc.zmin;
+				out->dh_tot = probe.dh_tot;
+				out->dh_max = probe.dh_max;
+				out->sac = probe.sac;
+				out->brake = probe.brake;
+				return true;
+			}
+		}
+		out->why = "no clean-strike construction";
+		return false;
+	}
+
+	} // namespace
+
+	int CmdAirRec(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("airrec: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const int budget = o.rec_budget > 100 ? o.rec_budget : 1000;
+		float zhigh = -1e30f;
+		for (const Route::Face& fc : g.faces)
+			if (fc.centroid.Z > zhigh)
+				zhigh = fc.centroid.Z;
+		zhigh += 3000.f;
+		auto legal = [&](const std::vector<signed char>& sd) {
+			signed char cur = 0;
+			int age = 1000;
+			for (signed char v : sd) {
+				if (v != 0 && cur != 0 && v != cur) {
+					if (age < min_gap)
+						return false;
+					age = 1;
+				} else {
+					age++;
+				}
+				if (v != 0)
+					cur = v;
+			}
+			return true;
+		};
+		const int hzs[3] = { 28, 48, 76 };
+		const float sps[3] = { 350.f, 700.f, 1000.f };
+		const float vzs[3] = { 180.f, -60.f, -380.f };
+		// ---------- Layer-1 oracles (free-air boundary) ----------
+		std::vector<RecOracle> L1;
+		int ci = 0;
+		for (int rev = 0; rev < 4; ++rev)
+			for (int prof = 0; prof < 4; ++prof)
+				for (int dw = 0; dw < 2; ++dw, ++ci) {
+					RecOracle oc;
+					oc.rev = rev;
+					oc.prof = prof;
+					oc.dwell = dw;
+					const int T = hzs[ci % 3];
+					const float s0 = sps[(ci / 3) % 3];
+					const float vz0 = vzs[(ci / 9) % 3];
+					if (T < (rev + 1) * min_gap) {
+						oc.why = "horizon too short for strata";
+						L1.push_back(oc);
+						continue;
+					}
+					RecSchedule(rev, prof, dw, T, min_gap,
+						static_cast<unsigned>(ci * 7919 + 13),
+						&oc.side, &oc.cosa, &oc.min_dwell);
+					if (!legal(oc.side)) {
+						oc.why = "ILLEGAL SCHEDULE (generator "
+							"bug)";
+						L1.push_back(oc);
+						continue;
+					}
+					PlayerState st;
+					st.pos = Vec3(1200.f * cosf(
+						static_cast<float>(ci) * 2.39996f),
+						1200.f * sinf(static_cast<float>(ci)
+							* 2.39996f), zhigh);
+					const float az = static_cast<float>(ci)
+						* 0.71f;
+					st.vel = Vec3(cosf(az) * s0, sinf(az) * s0,
+						vz0);
+					st.ducked = false;
+					st.hull_state = 0;
+					oc.S0 = st;
+					oc.T = T;
+					if (!RecFreeFly(st, w, p, oc.side, oc.cosa,
+						&oc, nullptr)) {
+						oc.why = "contact in free layer";
+						L1.push_back(oc);
+						continue;
+					}
+					oc.ok = true;
+					L1.push_back(oc);
+				}
+		// ---------- Layer-2 oracles (clean face strikes) ----------
+		std::vector<RecOracle> L2;
+		int fci = 0;
+		for (size_t fi = 0; fi < g.faces.size(); ++fi) {
+			const Route::Face& fc = g.faces[fi];
+			const float hn = sqrtf(fc.n.X * fc.n.X
+				+ fc.n.Y * fc.n.Y);
+			if (hn < 1e-4f)
+				continue;
+			for (int cc = 0; cc < 3; ++cc, ++fci) {
+				RecOracle oc;
+				oc.rev = cc == 0 ? 0 : (cc == 1 ? 1 : 2);
+				oc.prof = cc == 0 ? 0 : (cc == 1 ? 1 : 3);
+				oc.dwell = 1;
+				oc.face = static_cast<int>(fi);
+				const int T = hzs[fci % 3];
+				const float s0 = sps[(fci / 3) % 3];
+				const float vz0 = vzs[(fci / 9) % 3];
+				if (T < (oc.rev + 1) * min_gap) {
+					oc.why = "horizon too short for strata";
+					L2.push_back(oc);
+					continue;
+				}
+				RecSchedule(oc.rev, oc.prof, oc.dwell, T, min_gap,
+					static_cast<unsigned>(fci * 104729 + 7),
+					&oc.side, &oc.cosa, &oc.min_dwell);
+				if (!legal(oc.side)) {
+					oc.why = "ILLEGAL SCHEDULE (generator bug)";
+					L2.push_back(oc);
+					continue;
+				}
+				RecBoardOracle(w, p, g, static_cast<int>(fi), s0,
+					vz0, T, oc.side, oc.cosa, zhigh, &oc);
+				L2.push_back(oc);
+			}
+		}
+		int n1 = 0, n2 = 0;
+		for (const RecOracle& oc : L1)
+			if (oc.ok)
+				n1++;
+		for (const RecOracle& oc : L2)
+			if (oc.ok)
+				n2++;
+		printf("airrec: oracles L1 %d/%d L2 %d/%d (budget %d/case, "
+			"dwell law min_gap %d)\n", n1,
+			static_cast<int>(L1.size()), n2,
+			static_cast<int>(L2.size()), budget, min_gap);
+		for (const RecOracle& oc : L1)
+			if (!oc.ok)
+				printf("airrec: L1 UNCONSTRUCTIBLE r%d p%d dw%d: "
+					"%s\n", oc.rev, oc.prof, oc.dwell, oc.why);
+		for (const RecOracle& oc : L2)
+			if (!oc.ok)
+				printf("airrec: L2 f%d UNCONSTRUCTIBLE r%d p%d: "
+					"%s\n", oc.face, oc.rev, oc.prof, oc.why);
+		// ---------- cold solves per machinery level ----------
+		const int m_lo = o.rec_m >= 0 ? o.rec_m : 0;
+		const int m_hi = o.rec_m >= 0 ? o.rec_m : 2;
+		int curve1[3] = { -1, -1, -1 };
+		int curve2[3] = { -1, -1, -1 };
+		for (int m = m_lo; m <= m_hi; ++m) {
+			struct MAgg {
+				int n = 0, ok = 0, fals = 0;
+				int rung[6] = { 0, 0, 0, 0, 0, 0 };
+				std::vector<float> rp, rth;
+				std::vector<float> efrac;
+				long long ev = 0;
+				int rev_n[4] = { 0, 0, 0, 0 };
+				int rev_ok[4] = { 0, 0, 0, 0 };
+				int prof_n[4] = { 0, 0, 0, 0 };
+				int prof_ok[4] = { 0, 0, 0, 0 };
+			};
+			MAgg a1, a2;
+			// dh_tot median split (feature correlation, L1).
+			std::vector<float> dhs;
+			for (const RecOracle& oc : L1)
+				if (oc.ok)
+					dhs.push_back(oc.dh_tot);
+			std::sort(dhs.begin(), dhs.end());
+			const float dh_med = dhs.empty() ? 0.f
+				: dhs[dhs.size() / 2];
+			int lo_n = 0, lo_ok = 0, hi_n = 0, hi_ok = 0;
+			for (const RecOracle& oc : L1) {
+				if (!oc.ok)
+					continue;
+				float thiv[2] = { Steer::WrapPi(oc.th - 0.12f),
+					Steer::WrapPi(oc.th + 0.12f) };
+				Entrance::RefTune tn;
+				tn.shoot_m = m;
+				tn.bnd_theta = thiv;
+				int fl = 0;
+				Entrance::RefResult rr = Entrance::RefSolve(
+					oc.S0, w, p, g, -1, oc.Q, 8.f, oc.T, budget,
+					false, &fl, 0.f, Steer::CtlState(), nullptr,
+					nullptr, nullptr, &tn);
+				const bool rec = rr.ok;
+				a1.n++;
+				if (rec)
+					a1.ok++;
+				a1.ev += rr.evals;
+				a1.rev_n[oc.rev]++;
+				a1.prof_n[oc.prof]++;
+				if (rec) {
+					a1.rev_ok[oc.rev]++;
+					a1.prof_ok[oc.prof]++;
+				}
+				if (oc.dh_tot <= dh_med) {
+					lo_n++;
+					if (rec)
+						lo_ok++;
+				} else {
+					hi_n++;
+					if (rec)
+						hi_ok++;
+				}
+				const float rp = rr.bnd_rp;
+				const float rth = rr.bnd_rth;
+				a1.rp.push_back(rp);
+				a1.rth.push_back(rth);
+				for (int r2 = 0; r2 < 6; ++r2)
+					if (rp <= Entrance::kLadder[r2]
+						&& rth <= 1e-4f)
+						a1.rung[r2]++;
+				if (oc.sT > 1.f)
+					a1.efrac.push_back(rr.bnd_s / oc.sT);
+				// Falsification: the kinetic ceiling must clear
+				// the oracle's realized terminal energy.
+				const float sa = Envelope::SMax(Len2D(oc.S0.vel),
+					oc.T, p);
+				const float va = Envelope::VzAfter(oc.S0.vel.Z,
+					oc.T, p);
+				const float Uk = sa * sa + va * va;
+				const float Ek = oc.sT * oc.sT
+					+ oc.vzT * oc.vzT;
+				if (Uk < Ek) {
+					a1.fals++;
+					printf("airrec: m%d L1 BOUND FALSIFIED: U_kin "
+						"%.0fk < oracle %.0fk (r%d p%d T%d)\n",
+						m, Uk / 1e3f, Ek / 1e3f, oc.rev,
+						oc.prof, oc.T);
+				}
+				printf("airrec: m%d L1 r%d p%d dw%d T%d s%.0f "
+					"vz%+.0f | rp %.1fu rth %.2f | s %.0f/%.0f "
+					"| %s | %d ev\n", m, oc.rev, oc.prof,
+					oc.dwell, oc.T, Len2D(oc.S0.vel),
+					oc.S0.vel.Z, rp, rth, rr.bnd_s, oc.sT,
+					rec ? "OK" : "MISS", rr.evals);
+			}
+			for (const RecOracle& oc : L2) {
+				if (!oc.ok)
+					continue;
+				Entrance::RefTune tn;
+				tn.shoot_m = m;
+				int fl = 0;
+				Entrance::RefResult rr = Entrance::RefSolve(
+					oc.S0, w, p, g, oc.face, oc.Q, 32.f, oc.T,
+					budget, false, &fl, oc.zmin,
+					Steer::CtlState(), nullptr, nullptr,
+					nullptr, &tn);
+				const float rmin = rr.strike_rmin;
+				const bool rec = rmin <= 16.f;
+				a2.n++;
+				if (rec)
+					a2.ok++;
+				a2.ev += rr.evals;
+				a2.rev_n[oc.rev]++;
+				a2.prof_n[oc.prof]++;
+				if (rec) {
+					a2.rev_ok[oc.rev]++;
+					a2.prof_ok[oc.prof]++;
+				}
+				a2.rp.push_back(rmin < 1e29f ? rmin : 9999.f);
+				const float rth = rmin < 1e29f
+					? fabsf(Steer::WrapPi(rr.strike_rmin_th
+						- oc.th)) : 9.f;
+				a2.rth.push_back(rth);
+				for (int r2 = 0; r2 < 6; ++r2)
+					if (rmin <= Entrance::kLadder[r2])
+						a2.rung[r2]++;
+				// Oracle-energy recovery at the 16u rung.
+				const float E16 = rr.rung_E[1];
+				if (oc.E > 1.f && E16 > -1e29f)
+					a2.efrac.push_back(E16 / oc.E);
+				const float sa = Envelope::SMax(Len2D(oc.S0.vel),
+					oc.T, p);
+				const float va = Envelope::VzAfter(oc.S0.vel.Z,
+					oc.T, p);
+				const float U = sa * sa + va * va + 2.f
+					* p.gravity * (oc.Q.Z - oc.zmin);
+				if (U < oc.E) {
+					a2.fals++;
+					printf("airrec: m%d L2 BOUND FALSIFIED: U "
+						"%.0fk < oracle E %.0fk (f%d r%d p%d)\n",
+						m, U / 1e3f, oc.E / 1e3f, oc.face,
+						oc.rev, oc.prof);
+				}
+				printf("airrec: m%d L2 f%d r%d p%d T%d | rmin "
+					"%.1fu rth %.2f | E16 %s/%.0fk | U %.0fk | "
+					"%s | %d ev\n", m, oc.face, oc.rev, oc.prof,
+					oc.T, rmin < 1e29f ? rmin : -1.f, rth,
+					E16 > -1e29f ? std::to_string(
+						static_cast<int>(E16 / 1e3f)).c_str()
+						: "-", oc.E / 1e3f, U / 1e3f,
+					rec ? "OK" : "MISS", rr.evals);
+			}
+			auto pct = [](std::vector<float>& v, float q) {
+				if (v.empty())
+					return 0.f;
+				std::sort(v.begin(), v.end());
+				size_t i = static_cast<size_t>(
+					static_cast<float>(v.size() - 1) * q);
+				return v[i];
+			};
+			auto agg_print = [&](const char* tag, MAgg& a) {
+				if (!a.n)
+					return;
+				printf("airrec: m%d %s: recover %d/%d | ladder "
+					"32:%d 16:%d 8:%d 4:%d 2:%d 1:%d | rp p50 "
+					"%.1f p95 %.1f | rth p50 %.3f p95 %.3f | "
+					"E-rec p50 %.1f%% | ev/case %lld | "
+					"falsified %d\n", m, tag, a.ok, a.n,
+					a.rung[0], a.rung[1], a.rung[2], a.rung[3],
+					a.rung[4], a.rung[5], pct(a.rp, 0.5f),
+					pct(a.rp, 0.95f), pct(a.rth, 0.5f),
+					pct(a.rth, 0.95f),
+					100.f * pct(a.efrac, 0.5f),
+					a.n ? a.ev / a.n : 0, a.fals);
+				printf("airrec: m%d %s by rev: 0:%d/%d 1:%d/%d "
+					"2:%d/%d 3:%d/%d | by prof: const %d/%d "
+					"smooth %d/%d aggr %d/%d brake %d/%d\n", m,
+					tag, a.rev_ok[0], a.rev_n[0], a.rev_ok[1],
+					a.rev_n[1], a.rev_ok[2], a.rev_n[2],
+					a.rev_ok[3], a.rev_n[3], a.prof_ok[0],
+					a.prof_n[0], a.prof_ok[1], a.prof_n[1],
+					a.prof_ok[2], a.prof_n[2], a.prof_ok[3],
+					a.prof_n[3]);
+			};
+			agg_print("L1", a1);
+			printf("airrec: m%d L1 features: dh_tot<=%.2frad "
+				"%d/%d vs > %d/%d\n", m, dh_med, lo_ok, lo_n,
+				hi_ok, hi_n);
+			agg_print("L2", a2);
+			if (m >= 0 && m < 3) {
+				curve1[m] = a1.ok;
+				curve2[m] = a2.ok;
+			}
+			fflush(stdout);
+		}
+		if (m_lo != m_hi)
+			printf("airrec: CURVE L1 m0 %d m1 %d m2 %d of %d | L2 "
+				"m0 %d m1 %d m2 %d of %d  (Level-B trigger reads "
+				"the SHAPE: scaling curve = sequential shooting "
+				"suffices; flat curve with known-reachable "
+				"failures = build defect shooting)\n", curve1[0],
+				curve1[1], curve1[2], n1, curve2[0], curve2[1],
+				curve2[2], n2);
 		fflush(stdout);
 		return 0;
 	}
@@ -10358,6 +10999,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirSuite(argv[2], o);
+	}
+	if (cmd == "airrec" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdAirRec(argv[2], o);
 	}
 	if (cmd == "ladder" && argc >= 4) {
 		ReplayOpts o;

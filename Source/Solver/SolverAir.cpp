@@ -238,7 +238,69 @@ namespace Air {
 	                       const std::vector<float>& cosa,
 	                       int horizon) {
 		Result r;
-		if (t.face < 0 || t.face >= static_cast<int>(g.faces.size()))
+		// FREE-FLIGHT MODE (t.face < 0): no strike target - the flight
+		// runs the schedule to the horizon and returns the terminal
+		// state (the boundary-recoverability layer flies (Q, T, theta)
+		// problems in open air). ANY contact or grounding ends it as a
+		// failure; hit stays false.
+		if (t.face < 0) {
+			PlayerState s = entry;
+			const int hold = s.ducked ? IN_DUCK : 0;
+			int last_side = 0;
+			const int nsch = static_cast<int>(side.size());
+			for (int k = 0; k < horizon; ++k) {
+				const float s2d = Len2D(s.vel);
+				const float h = s2d > 1.f
+					? atan2f(s.vel.Y, s.vel.X) : 0.f;
+				const int sd = k < nsch
+					? static_cast<int>(
+						side[static_cast<size_t>(k)])
+					: (nsch > 0 ? static_cast<int>(
+						side[static_cast<size_t>(nsch) - 1]) : 0);
+				float yaw_deg = h * 57.2957795f;
+				float fmove = 0.f, smove = 0.f;
+				if (sd != 0 && s2d > 1.f) {
+					const float ca = k < nsch
+						? cosa[static_cast<size_t>(k)]
+						: (nsch > 0 ? cosa[static_cast<size_t>(
+							nsch) - 1] : 1.f);
+					WishInputs(h, sd, ca, &yaw_deg, &fmove,
+						&smove);
+					if (last_side && sd != last_side)
+						r.flips++;
+					last_side = sd;
+				}
+				TickEvents ev;
+				MoveTick(s, w, p, 0.f, yaw_deg, fmove, smove, 0.f,
+					hold, &ev);
+				const float dxa = s.pos.X - t.aim.X;
+				const float dya = s.pos.Y - t.aim.Y;
+				const float dza = s.pos.Z - t.aim.Z;
+				const float da = sqrtf(dxa * dxa + dya * dya
+					+ dza * dza);
+				if (da < r.miss_dist) {
+					r.miss_dist = da;
+					r.closest = s.pos;
+				}
+				if (ev.ncontacts > 0) {
+					if (r.struck_brush < 0)
+						r.struck_brush = ev.contact_brush[0];
+					r.end_pos = s.pos;
+					r.end_state = s;
+					return r;
+				}
+				if (s.on_ground) {
+					r.grounded = true;
+					r.end_pos = s.pos;
+					r.end_state = s;
+					return r;
+				}
+			}
+			r.end_pos = s.pos;
+			r.end_state = s;
+			return r;
+		}
+		if (t.face >= static_cast<int>(g.faces.size()))
 			return r;
 		const Route::Face& face = g.faces[t.face];
 		PlayerState s = entry;
@@ -317,12 +379,14 @@ namespace Air {
 			if (s.on_ground) {
 				r.grounded = true;
 				r.end_pos = s.pos;
+				r.end_state = s;
 				if (lg)
 					lg->EndTraj(SearchLog::kGrounded);
 				return r;
 			}
 		}
 		r.end_pos = s.pos;
+		r.end_state = s;
 		if (lg)
 			lg->EndTraj(SearchLog::kMiss);
 		return r;
