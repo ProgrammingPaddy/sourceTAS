@@ -232,6 +232,9 @@ namespace {
 		int   rec_m = -1;             // airrec: single machinery level
 		                              // (-1 = sweep m0/m1/m2 for the curve)
 		int   rec_budget = 1000;      // airrec: flat per-case eval budget
+		int   suite_budget = 600;     // airsuite: per-case eval budget
+		int   suite_sched = -1;       // airsuite: -1 = RefTune default
+		int   suite_cover = -1;       // airsuite: coverage rollout depth
 		MoveParams params;
 		Hulls hulls;
 		// solve-only options
@@ -429,6 +432,9 @@ namespace {
 			else if (a == "--efgrid") ok = next_f(&o.ef_grid);
 			else if (a == "--m") ok = next_i(&o.rec_m);
 			else if (a == "--budget") ok = next_i(&o.rec_budget);
+			else if (a == "--suite-budget") ok = next_i(&o.suite_budget);
+			else if (a == "--sched") ok = next_i(&o.suite_sched);
+			else if (a == "--cover-top") ok = next_i(&o.suite_cover);
 			else { printf("unknown option: %s\n", a.c_str()); return false; }
 			if (!ok) { printf("option %s needs a value\n", a.c_str()); return false; }
 		}
@@ -7514,6 +7520,16 @@ namespace {
 		// so no value metric can regress from it.
 		Entrance::RefTune as_tune;
 		as_tune.precision = 1.f;
+		// Controlled-comparison arms (--sched / --cover-top /
+		// --suite-budget). Defaults reproduce the standing baseline.
+		if (o.suite_sched >= 0)
+			as_tune.scheduler = o.suite_sched;
+		if (o.suite_cover >= 0)
+			as_tune.cover_top = o.suite_cover;
+		const int as_budget = o.suite_budget > 0 ? o.suite_budget : 600;
+		// MEASURED coverage cost - the mandatory prefix is an
+		// operational-efficiency claim, so it gets counted, not asserted.
+		long long cov_ev = 0, cov_n = 0, all_ev = 0;
 		const int hzs[2] = { 30, 55 };
 		const float sps[2] = { 400.f, 900.f };
 		const float vzs[3] = { 150.f, -100.f, -400.f };
@@ -7562,9 +7578,12 @@ namespace {
 						Entrance::RefResult rr =
 							Entrance::RefSolve(st, w, o.params, g,
 								static_cast<int>(fi), q, 28.f, Hn,
-								600, false, &fl, fc.zmin,
+								as_budget, false, &fl, fc.zmin,
 								Steer::CtlState(), nullptr, nullptr,
 								nullptr, &as_tune);
+						cov_ev += rr.sched_cover_ev;
+						cov_n += rr.sched_cover;
+						all_ev += rr.evals;
 						const float sa = Envelope::SMax(s0, Hn,
 							o.params);
 						const float va = Envelope::VzAfter(vz0,
@@ -7613,6 +7632,11 @@ namespace {
 						}
 					}
 		}
+		printf("airsuite: arm sched %d cover_top %d budget %d | coverage "
+			"%lld actions %lld ev = %.1f%% of %lld total\n",
+			o.suite_sched, o.suite_cover, as_budget, cov_n, cov_ev,
+			all_ev ? 100.0 * static_cast<double>(cov_ev)
+				/ static_cast<double>(all_ev) : 0.0, all_ev);
 		printf("airsuite: %d/%d cases struck (%d exact<=4u) | mean "
 			"sandwich gap %.0fk\n", near_ok, total, exact_ok,
 			gap_n ? gap_sum / gap_n / 1e3 : 0.0);
@@ -8174,6 +8198,85 @@ namespace {
 				r3.sched_m_used[1], r3.sched_m_used[2],
 				r3.sched_prec, r3.tol_final);
 			check("S4 scheduler fairness/progress", fair, buf);
+			// ---- S10 COVERAGE CONSERVATISM AND PROGRESSION ----
+			// The cheap coverage action exists to make a speculative
+			// query affordable. The danger it introduces is that it
+			// quietly becomes a COARSE REACHABILITY PRUNE: a scout that
+			// finds nothing declaring the heading interval dead. Only a
+			// certified bound may eliminate a domain, so this gate
+			// pins three things at once:
+			//   (a) every initially-unresolved domain is covered before
+			//       any method-specific escalation runs;
+			//   (b) a domain whose coverage found nothing is still
+			//       UNRESOLVED - never PROVED_IRRELEVANT - and every
+			//       elimination that did happen names a certified bound;
+			//   (c) competitive domains remain eligible for the ordinary
+			//       m0/m1/m2/GN/deepen/precision ladder afterwards.
+			{
+				// A tiny budget can only afford the coverage prefix; it
+				// is the sharpest test of (a) and (b) because nothing
+				// else has run yet.
+				Entrance::RefResult rc0;
+				{
+					Entrance::RefTune tn;
+					tn.precision = 4.f;
+					tn.scheduler = 2;
+					int fl = 0;
+					rc0 = Entrance::RefSolve(st, w, p, g, fi, q, 28.f,
+						Hn, 40, false, &fl, fc.zmin, Steer::CtlState(),
+						nullptr, nullptr, nullptr, &tn);
+				}
+				// (a) coverage is the literal prefix, one per domain.
+				const int ndom = 6;
+				bool prefix_ok = rc0.sched_cover > 0
+					&& rc0.sched_cover == rc0.sched_actions
+					&& rc0.sched_m_used[1] == 0
+					&& rc0.sched_m_used[2] == 0
+					&& rc0.sched_deep == 0 && rc0.sched_gn == 0
+					&& rc0.sched_prec == 0;
+				for (int i = 0; i < rc0.sched_cover && prefix_ok; ++i)
+					if (rc0.dom_cover[i] != 1)
+						prefix_ok = false;
+				// A full-coverage run must reach every domain exactly
+				// once and never twice.
+				bool once_each = r3.sched_cover == ndom;
+				for (int i = 0; i < ndom && once_each; ++i)
+					if (r3.dom_cover[i] != 1)
+						once_each = false;
+				// (b) conservatism: nothing eliminated without a
+				// certified bound, at either budget.
+				bool conservative = true;
+				for (int i = 0; i < ndom; ++i)
+					if (rc0.dom_state[i] == 1 || r3.dom_state[i] == 1) {
+						// an eliminated domain must have a prune record
+						bool named = false;
+						for (size_t k = 0; k < r3.prunes.size(); ++k)
+							if (r3.prunes[k].domain == i
+								&& r3.prunes[k].bound_id != 0
+								&& r3.prunes[k].U
+									<= r3.prunes[k].L_star
+										+ r3.prunes[k].eps)
+								named = true;
+						if (!named)
+							conservative = false;
+					}
+				if (!rc0.prunes.empty())
+					conservative = false;   // nothing certified can fire
+				                            // before any witness exists
+				// (c) escalation still reachable after coverage.
+				const bool escalates = r3.sched_m_used[0] > 0
+					&& r3.sched_m_used[1] > 0 && r3.sched_m_used[2] > 0;
+				const bool s10 = prefix_ok && once_each && conservative
+					&& escalates;
+				snprintf(buf, sizeof(buf), "@40: %d actions all coverage "
+					"| @1400: %d coverage (1/domain=%d) %d ev = %d%% of "
+					"%d | 0 uncertified eliminations | escalates=%d",
+					rc0.sched_actions, r3.sched_cover, once_each ? 1 : 0,
+					r3.sched_cover_ev,
+					r3.evals > 0 ? 100 * r3.sched_cover_ev / r3.evals : 0,
+					r3.evals, escalates ? 1 : 0);
+				check("S10 coverage conservatism", s10, buf);
+			}
 			// S5: proof-carrying prunes. Every certified elimination
 			// carries the bound identity AND the incumbent witness.
 			bool proofs = true;
@@ -9207,6 +9310,10 @@ namespace {
 				tn.shoot_m = m;
 				tn.bnd_theta = thiv;
 				tn.precision = 1.f;   // measured to 1u; drive to it
+				if (o.suite_sched >= 0)
+					tn.scheduler = o.suite_sched;
+				if (o.suite_cover >= 0)
+					tn.cover_top = o.suite_cover;
 				int fl = 0;
 				Entrance::RefResult rr = Entrance::RefSolve(
 					oc.S0, w, p, g, -1, oc.Q, 8.f, oc.T, bud,
@@ -9271,6 +9378,10 @@ namespace {
 				Entrance::RefTune tn;
 				tn.shoot_m = m;
 				tn.precision = 1.f;   // measured to 1u; drive to it
+				if (o.suite_sched >= 0)
+					tn.scheduler = o.suite_sched;
+				if (o.suite_cover >= 0)
+					tn.cover_top = o.suite_cover;
 				int fl = 0;
 				Entrance::RefResult rr = Entrance::RefSolve(
 					oc.S0, w, p, g, oc.face, oc.Q, 32.f, oc.T,

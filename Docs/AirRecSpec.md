@@ -1559,6 +1559,9 @@ At 6x the budget the scheduler is **better than legacy on every axis**
 capability deficit — it is a coverage cost**. The scheduler pays
 mandatory minimum coverage across all 6 heading domains before anything
 escalates: 6 scouts x `kCostShot` 40 = **240 of 600 evals (40%)**,
+[**CORRECTED in section 24.3: that figure came from the CHARGED
+price, not measurement. Measured, full-price coverage is 139
+evals/case = 23.8%.**]
 leaving 360 to be split six ways. Legacy's guided phase concentrated
 instead.
 
@@ -1621,3 +1624,168 @@ still declines from m=0 to m=1.
 Not on the list, per standing ruling: the 998k->1030k single-query
 differential, per-domain tolerances, the displacement ceiling, or any
 further Air acceptance criterion.
+
+---
+
+## 24. ScoutCheap: the coverage cost was real and is gone — and a second,
+##     independent capability gap surfaced (2026-08-19)
+
+Session 12k. The one authorised focused change is built, gated (S10) and
+measured across the full controlled comparison. The coverage result is a
+clean win. The integration decision is still **NO**, for a reason that
+has nothing to do with coverage.
+
+### 24.1 The change
+
+`A_COVER` (ScoutCheap) is now a distinct action identity from `A_SHOOT`.
+Its only job is to initialise a heading domain enough for the scheduler
+to decide what deserves more: best residual seen, whether any approach
+looks plausible, a witness if lucky, a stall/conditioning seed. It runs
+the final target only, **closed form only** — no intermediate nodes, no
+second-stage exact ranking of four candidates, no m1/m2/GN/deepen/
+precision. Those are escalation and are reached only after a domain
+earns them through the ordinary scheduler.
+
+`shoot()` gained an explicit rollout-depth argument. It is fixed by the
+ACTION, never by the budget: escalation passes 4, coverage passes
+`RefTune::cover_top` (default 0). `cover_top` exists as configuration
+solely so the controlled comparison below is reproducible without a
+recompile.
+
+The coverage actions remain the deterministic prefix of the same
+budget-oblivious stream — one per unresolved domain, before any
+escalation — so `Trace(B1) < Trace(B2)` is untouched. S1/S2/S3 stay
+green and confirm it.
+
+**Conservatism is the whole reason it is safe to be this cheap.** A
+coverage action that finds nothing yields UNRESOLVED. It may never
+conclude that a heading interval is unreachable. Only a certified bound
+may eliminate a domain.
+
+### 24.2 S10 (new gate): coverage conservatism and progression
+
+    @40 evals:   6 actions, ALL coverage, no m1/m2/GN/deepen/precision
+    @1400 evals: 6 coverage, exactly 1 per domain, 12 ev total
+                 0 uncertified eliminations | escalation reached
+    PASS
+
+The gate pins (a) every initially-unresolved domain is covered before
+any method-specific escalation, (b) no domain is ever eliminated without
+a certified bound naming itself and satisfying `U <= L* + eps` — checked
+at a budget so small that only coverage has run, which is where a
+coarse-reachability prune would hide, and (c) competitive domains remain
+eligible for the ordinary ladder afterwards.
+
+Board: **24 of 24 green** (P1–P7, S1–S10, B1–B7).
+
+### 24.3 The coverage cost, measured (not inferred)
+
+**Correction to section 23.6.** That entry put the mandatory prefix at
+"240 of 600 evals (40%)". That number was derived from the *charged*
+price `kCostShot = 40`, which is the runner's affordability reserve, not
+what a shot actually spends. Measured directly, over all 48 AirSuite
+cases at 600 evals each:
+
+| arm | coverage actions | coverage evals | share of total |
+|---|---|---|---|
+| v1 full-price coverage | 288 | 6,680 (139/case) | **23.8%** |
+| v1 ScoutCheap | 288 | 576 (**12/case**) | **2.0%** |
+
+So the cost was real and large — just 23.8%, not 40% — and ScoutCheap
+removes **11.6x** of it, handing ~22% of every cheap query back to
+refinement.
+
+### 24.4 The controlled comparison (identical fixture, methods, bounds)
+
+AirSuite, `--sched / --cover-top / --suite-budget`:
+
+| budget | arm | struck | <=16u | p50 | p95 |
+|---|---|---|---|---|---|
+| 600 | legacy | **48/48** | 40 | 13.4u | 19.8u |
+| 600 | v1 full coverage | 39/48 | 29 | 15.4u | 47.8u |
+| 600 | **v1 ScoutCheap** | **40/48** | **35** | 15.1u | 47.8u |
+| 1800 | legacy | 48/48 | 45 | 12.6u | 16.4u |
+| 1800 | v1 full coverage | 48/48 | 36 | 12.9u | 21.3u |
+| 1800 | **v1 ScoutCheap** | **48/48** | **40** | 13.0u | 21.3u |
+| 3600 | legacy | 48/48 | 47 | 12.6u | 14.3u |
+| 3600 | v1 full coverage | 48/48 | 48 | 12.7u | 13.7u |
+| 3600 | **v1 ScoutCheap** | **48/48** | **48** | **12.6u** | **13.7u** |
+
+ScoutCheap helps everywhere and never hurts: +1 strike and **+6 on the
+<=16u count** at 600, +4 at 1800, and at 3600 it edges legacy on every
+axis. The single-query 6000 differential is unchanged (v1 998k rmin
+12.6u, v0 965k), confirming the change touched the cheap prefix and
+nothing else.
+
+This lands in the advisor's "helps only modestly" branch on AirSuite:
+40/48 at 600 with 8 conservatively UNRESOLVED, 48/48 at 1800.
+
+### 24.5 THE DECISION IS STILL NO — and for a new reason
+
+AirRec is the constructive known-reachable yardstick: hidden legal
+schedules whose recovery is guaranteed to be possible. Run at **equal
+compute** on the frozen fixture (`de1b000e431a84fb`), machinery pinned
+to m2, 3000 ev/case:
+
+| arm | L1 recover | <=8u | rp p50 | rp p95 | falsified |
+|---|---|---|---|---|---|
+| legacy | **29/32** | 28 | 1.0u | 8.8u | 0 |
+| v1 ScoutCheap | **18/32** | 17 | 4.7u | 33.8u | 0 |
+| v1 full coverage | 18/32 | 17 | 1.8u | 33.8u | 0 |
+
+**AirRec L1 is BOUNDARY mode, where `n_dom = 1`.** With a single domain
+there is no coverage prefix worth speaking of, no domain spread, and no
+fairness discipline to blame — and indeed the two coverage arms are
+identical at 18/32. So this is a *second, independent* gap: the
+scheduler's method ladder does not expose, on a single domain, what
+legacy's fixed interleaved sequence does. It is not the AirSuite
+problem wearing a different hat.
+
+Against the advisor's own integration criterion — *reaches full generic
+capability under escalation* — this fails, and it fails on the suite
+built specifically to answer that question. 18 of 32 provably-recoverable
+problems, against legacy's 29, at the same budget.
+
+Recorded honestly alongside it: **the scheduler path never consults
+`RefTune::shoot_m`** (`tune_m` is read only at the three legacy call
+sites). So AirRec's m-curve cannot be computed for the scheduler arm at
+all — its "17/18/18" is the same machinery measured three times, not a
+representation curve. The 29-vs-18 comparison above deliberately avoids
+that trap by pinning m and equalising the budget.
+
+**Ruling: legacy is NOT retired, `scheduler` default stays 0,
+EntranceField is NOT integration-ready.**
+
+### 24.6 What this says about the process
+
+Two separate capability gaps have now been found by two different
+suites, and neither was visible in the single-query capability probe
+that the earlier plan leaned on:
+
+- AirSuite @600 exposed the **coverage cost** (fixed here) plus a
+  residual six-domain spread effect;
+- AirRec L1 @equal compute exposes a **single-domain ladder deficit**
+  that coverage cannot touch.
+
+The single-query probe reported 998k vs 1030k — 97% — and would have
+waved both through. Generic suites are the gate; one query is an anecdote.
+
+### 24.7 Regression board (default config, unchanged)
+
+| suite | result |
+|---|---|
+| airprops | **24/24 PASS** (P1–P7, S1–S10, B1–B7) |
+| airsuite | 48/48, mean gap 242k, <=16u 40 — unchanged |
+| airrec | fixture `de1b000e431a84fb` VERIFIED; legacy curves unchanged |
+| wishparity | PASS |
+| strafelaw | float-ULP exact |
+| carve | 3/3, M1.4 GATE PASS |
+| airsolve | 3/3, M1.3 GATE PASS |
+
+### 24.8 New measurement scaffolding (kept)
+
+`airsuite` and `airrec` both accept `--sched N`, `--cover-top K` and
+`--suite-budget B` / `--budget B`, and `airsuite` reports measured
+coverage cost per arm. Defaults reproduce the standing baselines
+exactly. This exists so the next comparison is a command, not a
+recompile — the last two sessions each lost time to that.

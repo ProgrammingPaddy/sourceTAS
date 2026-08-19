@@ -658,6 +658,9 @@ namespace Entrance {
 		// raw max-gap cannot monopolise the stream, plus within-domain
 		// method yielding. No budget enters either.
 		const bool fair_sched = sched_ver >= 2;
+		// Coverage rollout depth: 0 = ScoutCheap. Immutable config,
+		// never budget-derived.
+		const int  cover_top = tune ? tune->cover_top : 0;
 		const bool legacy_seq = !use_sched;
 		if (!bnd && (face_idx < 0
 			|| face_idx >= static_cast<int>(g.faces.size())))
@@ -1204,7 +1207,7 @@ namespace Entrance {
 			const float epx = rl > 1.f ? rx / rl : 1.f;
 			const float eqx = -epy, eqy = epx;
 			auto shoot = [&](const std::vector<GuideTarget>& tgts,
-				const GuideWeights& gw, int iv_i) {
+				const GuideWeights& gw, int iv_i, int etop = 4) {
 				// The legacy phase self-limits; the SCHEDULER owns
 				// ordering, so on that path only the runner may stop
 				// the stream (a self-limit here made scheduled
@@ -1221,7 +1224,11 @@ namespace Entrance {
 				// Second-stage exact rollouts always run so the
 				// action sequence is budget-independent; their sim
 				// ticks are charged as flight-equivalents.
-				g2.exact_top = 4;   // budget-independent
+				// Fixed by the ACTION, never by the budget. Escalation keeps
+				// the full four-way exact ranking; the mandatory coverage
+				// action passes 0 and runs closed-form only, which is where
+				// almost all of a shot's cost lives.
+				g2.exact_top = etop;
 				int ro = 0;
 				GuidedShootSeq(entry, w, p, tgts, N, min_gap,
 					entry_ctl, g2, &gsd, &gcs, &ro);
@@ -2265,8 +2272,12 @@ namespace Entrance {
 						d.U_order = d.U;
 				}
 				// ---- action algebra ----
-				enum { A_SCOUT = 1, A_SHOOT = 2, A_PRECISION = 3,
-					A_DEEPEN = 4, A_GNITER = 5 };
+					// A_COVER is the MANDATORY CHEAP TOUCH of a heading domain;
+					// A_SHOOT is escalation. They are distinct action IDENTITIES
+					// because they carry different information and different
+					// cost, and a trace must never conflate them.
+					enum { A_COVER = 1, A_SHOOT = 2, A_PRECISION = 3,
+						A_DEEPEN = 4, A_GNITER = 5 };
 				struct Act {
 					int type = 0;
 					int iv = 0;
@@ -2303,6 +2314,10 @@ namespace Entrance {
 				// answer is SMALLER resumable units, never "find a
 				// cheaper action that fits".
 				const int kCostShot = 40;
+				// Coverage runs closed-form only (no second-stage exact
+				// ranking), so it costs one scoring flight plus change.
+				// Priced with headroom, still an order below a shot.
+				const int kCostCover = 4;
 				const int kCostPrec = 1;
 				const int kCostDeep = 10;   // deepen bounded to 8 evals
 				const int kCostGN = 8;      // one iteration = 3 probes
@@ -2315,12 +2330,12 @@ namespace Entrance {
 						Dom& d = dom[static_cast<size_t>(i)];
 						if (d.state == DOM_UNRESOLVED
 							&& d.scouts == 0) {
-							out->type = A_SCOUT;
+							out->type = A_COVER;
 							out->iv = i;
 							out->m = 0;
 							out->chart = 0;
 							out->idx = 0;
-							out->cost = kCostShot;
+							out->cost = kCostCover;
 							out->hash = act_hash(*out);
 							return true;
 						}
@@ -2602,6 +2617,29 @@ namespace Entrance {
 						}
 						d.gn++;
 						best.sched_gn++;
+					} else if (a.type == A_COVER) {
+						// ScoutCheap(D): the ONE job is to initialise this heading
+						// domain enough for the scheduler to decide what deserves
+						// more - best residual seen, whether any approach looks
+						// plausible, a witness if lucky, a stall/conditioning seed.
+						// No intermediate nodes, no second-stage exact ranking of
+						// four candidates, no m1/m2/GN/deepen/precision: those are
+						// escalation and belong AFTER the domain earns them.
+						//
+						// CONSERVATISM (S10): finding nothing here means UNRESOLVED
+						// and never "this interval is unreachable". Only a certified
+						// bound may eliminate a domain - which is exactly what makes
+						// it safe for coverage to be this cheap.
+						std::vector<GuideTarget> tg;
+						tg.push_back(final_tgt(ivt[a.iv][0], ivt[a.iv][1]));
+						GuideWeights gw;
+						gw.wp = 2.f;
+						gw.we = 0.3f;
+						shoot(tg, gw, a.iv, cover_top);
+						d.scouts++;
+						best.sched_cover++;
+						best.sched_cover_ev += best.evals - ev0;
+						best.dom_cover[a.iv < 6 ? a.iv : 5]++;
 					} else {
 						const int ivx = a.iv < n_near ? a.iv : a.iv;
 						std::vector<GuideTarget> tg;
@@ -2619,12 +2657,10 @@ namespace Entrance {
 						tg.push_back(final_tgt(ivt[ivx][0],
 							ivt[ivx][1]));
 						GuideWeights gw;
-						gw.wp = a.type == A_SCOUT ? 2.f : 4.f;
-						gw.we = a.type == A_SCOUT ? 0.3f : 0.15f;
+						gw.wp = 4.f;
+						gw.we = 0.15f;
 						shoot(tg, gw, ivx);
-						if (a.type == A_SCOUT)
-							d.scouts++;
-						else if (a.m >= 0 && a.m < 3)
+						if (a.m >= 0 && a.m < 3)
 							d.shots[a.m]++;
 						if (a.m > d.m)
 							d.m = a.m;
@@ -2682,6 +2718,7 @@ namespace Entrance {
 				}
 				for (int i = 0; i < n_dom && i < 6; ++i) {
 					best.dom_U[i] = dom[static_cast<size_t>(i)].U_order;
+					best.dom_state[i] = dom[static_cast<size_t>(i)].state;
 					best.dom_L[i] = dom[static_cast<size_t>(i)].L;
 					best.dom_spent[i] =
 						dom[static_cast<size_t>(i)].spent;

@@ -15,14 +15,17 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-19 (session 12j): the Air bound is CERTIFIED; the
-scheduler is NOT yet authoritative.** Gates B1-B7 are green and
-`Entrance::UBoardHeading` is in the certified registry. Legacy is NOT
-retired and EntranceField is NOT integration-ready: with the scheduler
-authoritative, `airsuite` @600 evals/case falls 48/48 -> 39/48. It is a
-COVERAGE COST, not a capability deficit (48/48 at 1800; at 3600 it beats
-legacy on every axis). The single blocker is the minimum-coverage unit
-being charged at full shot price. See `Docs/AirRecSpec.md` section 23.
+**STATUS 2026-08-19 (session 12k): the Air bound is CERTIFIED; the
+scheduler is NOT authoritative and EntranceField is NOT
+integration-ready.** Gates B1-B7 are green and
+`Entrance::UBoardHeading` is in the certified registry. ScoutCheap
+cut the mandatory coverage prefix from 23.8% to 2.0% of a cheap
+query (11.6x) and improved every AirSuite budget. But at EQUAL
+compute on the frozen AirRec fixture, in BOUNDARY mode where
+`n_dom = 1`, the scheduler recovers 18/32 against legacy 29/32 -
+a second gap that coverage cannot explain and that the
+single-query probe never saw. Legacy stays. See
+`Docs/AirRecSpec.md` sections 23-24.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -349,6 +352,69 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-19 (session 12k, SCOUTCHEAP - the coverage cost is gone, and a
+  SECOND capability gap surfaced): the one authorised focused change is
+  built, gated and measured; the integration decision is still NO, for a
+  reason unrelated to coverage. `A_COVER` (ScoutCheap) is now a distinct
+  action identity from `A_SHOOT`: final target only, CLOSED FORM ONLY, no
+  intermediate nodes / no second-stage exact ranking / no
+  m1/m2/GN/deepen/precision. `shoot()` gained an explicit rollout-depth
+  argument fixed by the ACTION, never the budget (escalation 4, coverage
+  `RefTune::cover_top`, default 0). Coverage stays the deterministic
+  prefix - one per unresolved domain before any escalation - so the
+  prefix law is untouched (S1/S2/S3 green). **New gate S10 (coverage
+  conservatism)**: at 40 evals all 6 actions are coverage and nothing
+  else runs; at 1400 there are exactly 6, one per domain, costing 12
+  evals; zero uncertified eliminations; escalation still reached. A
+  coverage action that finds nothing yields UNRESOLVED and may NEVER
+  conclude a heading interval is unreachable - only a certified bound
+  eliminates a domain, which is precisely what makes it safe to be this
+  cheap. Board **24/24** (P1-P7, S1-S10, B1-B7).
+  **CORRECTION to session 12j.** That entry put the mandatory prefix at
+  "240 of 600 evals (40%)", inferred from the CHARGED price
+  `kCostShot = 40` (the runner's affordability reserve), not measured.
+  Measured over all 48 AirSuite cases: full-price coverage = 6,680 evals
+  = 139/case = **23.8%**; ScoutCheap = 576 evals = **12/case = 2.0%**.
+  Real and large, just not 40% - and now **11.6x** smaller.
+  CONTROLLED COMPARISON (identical fixture/methods/bounds, new
+  `--sched` / `--cover-top` / `--suite-budget` flags): AirSuite @600
+  legacy 48/48 (<=16u 40, p95 19.8u) | v1 full-coverage 39/48 (29,
+  47.8u) | **v1 ScoutCheap 40/48 (35, 47.8u)**; @1800 48/48 for all
+  three, <=16u 45 / 36 / **40**; @3600 all 48/48, <=16u 47 / 48 / **48**
+  and ScoutCheap edges legacy on p50 and p95. The 6000 single-query
+  differential is unchanged (v1 998k rmin 12.6u), confirming the change
+  touched the cheap prefix and nothing else. So ScoutCheap helps
+  everywhere and hurts nowhere - the advisor's "helps only modestly"
+  branch on AirSuite.
+  **THE DECISION IS STILL NO, ON NEW EVIDENCE.** AirRec is the
+  constructive known-reachable yardstick. At EQUAL compute (3000
+  ev/case, m pinned to 2, frozen fixture `de1b000e431a84fb`): legacy
+  recovers **29/32** (<=8u 28, rp p50 1.0u p95 8.8u); v1 ScoutCheap
+  **18/32** (17, 4.7u, 33.8u); v1 full-coverage 18/32. Zero bound
+  falsifications either way. **AirRec L1 is BOUNDARY mode where
+  `n_dom = 1`** - one domain, so there is no coverage prefix worth
+  speaking of, no domain spread and no fairness discipline to blame, and
+  indeed the two coverage arms are IDENTICAL at 18/32. This is a second,
+  independent gap: the scheduler's method ladder does not expose, on a
+  single domain, what legacy's fixed interleaved sequence does. Against
+  the standing integration criterion - reaches full generic capability
+  under escalation - that fails, on the suite built to answer exactly
+  that question. Legacy NOT retired, `scheduler` default stays 0,
+  EntranceField NOT integration-ready.
+  Recorded alongside: **the scheduler path never consults
+  `RefTune::shoot_m`** (`tune_m` is read only at the three legacy call
+  sites), so AirRec's m-curve cannot be computed for the scheduler arm -
+  its 17/18/18 is the same machinery measured three times, not a
+  representation curve. The 29-vs-18 comparison avoids that trap by
+  pinning m and equalising the budget. PROCESS NOTE: two separate
+  capability gaps, found by two different suites, neither visible to the
+  single-query capability probe that reported 97% and would have waved
+  both through. Generic suites are the gate; one query is an anecdote.
+  Regressions unchanged at default config: airsuite 48/48 gap 242k,
+  airrec fixture VERIFIED, wishparity PASS, strafelaw float-ULP exact,
+  carve 3/3 M1.4 PASS, airsolve 3/3 M1.3 PASS. Full detail:
+  `Docs/AirRecSpec.md` section 24.
 
 - 2026-08-19 (session 12j, THE BOUND IS CERTIFIED - AND THE RETIREMENT
   GATE FAILED): B5 and B7 built; both green; `Entrance::UBoardHeading`

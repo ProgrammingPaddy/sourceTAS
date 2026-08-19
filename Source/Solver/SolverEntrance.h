@@ -417,6 +417,12 @@ namespace Entrance {
 		// the budget. The legacy path is removed once the scheduler's
 		// prefix/monotonicity/determinism/fairness gates are green.
 		int scheduler = 0;
+		// Second-stage exact-rollout depth of the MANDATORY COVERAGE
+		// action. 0 = ScoutCheap (closed form only, the default);
+		// 4 = the old full-price coverage shot, kept ONLY so the
+		// controlled comparison is reproducible without a recompile.
+		// A configuration choice, never a budget-derived one.
+		int cover_top = 0;
 		// BOUNDARY MODE (Layer-1 recoverability): non-null = solve the
 		// free-air boundary problem (S0, Q, T, theta) instead of a
 		// face strike. Points at {th_lo, th_hi} (radians, absolute).
@@ -516,6 +522,16 @@ namespace Entrance {
 		int   dom_spent[6] = { 0, 0, 0, 0, 0, 0 };
 		int   dom_acts[6] = { 0, 0, 0, 0, 0, 0 };
 		int   dom_m2[6] = { 0, 0, 0, 0, 0, 0 };
+		// CHEAP COVERAGE (2026-08-19). The mandatory first touch of each
+		// heading domain is a distinct, much cheaper action than the
+		// guided shot it used to be; these record what that prefix
+		// actually costs so the operational efficiency claim is measured,
+		// not asserted.
+		int   sched_cover = 0;      // coverage actions executed
+		int   sched_cover_ev = 0;   // evals they consumed
+		int   dom_cover[6] = { 0, 0, 0, 0, 0, 0 };
+		// 0 = UNRESOLVED, 1 = PROVED_IRRELEVANT, 2 = PARTITIONED.
+		int   dom_state[6] = { 0, 0, 0, 0, 0, 0 };
 		float bnd_rp = 1e30f;
 		float bnd_rth = 1e30f;
 		float bnd_s = 0.f;
