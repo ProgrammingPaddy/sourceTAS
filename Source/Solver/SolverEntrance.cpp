@@ -280,6 +280,14 @@ namespace Entrance {
 			float wt = 1.f;      // terminal-heading weight
 			float blend = 0.35f; // final fraction where wt engages
 			float we = 0.3f;     // gain-sacrifice reluctance (SOFT)
+			// Second-stage EXACT-ENGINE rollout ranking (advisor:
+			// cheap closed form -> shortlist -> exact short rollout
+			// -> choose). Search machinery only; costs are charged
+			// by the caller. 0 = closed-form only.
+			int exact_top = 0;   // exact-rollout the top-K candidates
+			// Extra sim ticks spent on exact rollouts (the caller
+			// converts to flight-equivalents for budget charging).
+			int rollout_ticks = 0;
 		};
 
 		void GuidedShootSeq(const PlayerState& entry, const World& w,
@@ -289,7 +297,8 @@ namespace Entrance {
 		                    const Steer::CtlState& ctl0,
 		                    const GuideWeights& gw,
 		                    std::vector<signed char>* side_out,
-		                    std::vector<float>* cosa_out) {
+		                    std::vector<float>* cosa_out,
+		                    int* rollout_out = nullptr) {
 			side_out->clear();
 			cosa_out->clear();
 			if (targets.empty())
@@ -316,124 +325,188 @@ namespace Entrance {
 				float bc = 1.f;
 				if (s2d > 1.f) {
 					const float h = atan2f(s.vel.Y, s.vel.X);
-					float bestJ = FLT_MAX;
+					const int lk = kLook < t_end - k
+						? kLook : (t_end - k > 1 ? t_end - k : 1);
+					// Shared cost on a predicted lookahead-end state.
+					auto costOf = [&](float hh, float ss, float px,
+						float py, float sac) {
+						const int rem = t_end - k - lk;
+						if (rem > 0) {
+							const float sav = sqrtf(ss * ss + cap2
+								* static_cast<float>(rem) * 0.5f);
+							const float D = sav * p.dt
+								* static_cast<float>(rem);
+							px += cosf(hh) * D;
+							py += sinf(hh) * D;
+						}
+						const float dxq = tg.x - px;
+						const float dyq = tg.y - py;
+						float J = gw.wp
+							* (dxq * dxq + dyq * dyq) * 1e-4f;
+						if (final_tg && tg.use_theta
+							&& static_cast<float>(N - k)
+								<= gw.blend
+								* static_cast<float>(N))
+							J += gw.wt * ThetaIntervalDist2(hh,
+								tg.th_lo, tg.th_hi) * 100.f;
+						if (!final_tg) {
+							// REMAINING-RESIDUAL: a node reached
+							// beautifully that leaves an
+							// unsolvable final problem is a bad
+							// node (closed-form feasibility).
+							const GuideTarget& fin =
+								targets.back();
+							const int rem2 = N - t_end;
+							if (rem2 > 0) {
+								const float mid = Steer::WrapPi(
+									fin.th_lo + 0.5f
+									* Steer::WrapPi(fin.th_hi
+										- fin.th_lo));
+								const float need = fabsf(
+									Steer::WrapPi(mid - hh));
+								Strafe::TickLaw lr = Strafe::Law(
+									p, ss, 1.f, s.ducked);
+								const float tfree = lr.TurnRad(
+									0.f, 1.f)
+									* static_cast<float>(rem2);
+								const float tshort = need - tfree;
+								if (tshort > 0.f)
+									J += 50.f * tshort * tshort;
+								const float ddx = fin.x - px;
+								const float ddy = fin.y - py;
+								const float drem = sqrtf(ddx * ddx
+									+ ddy * ddy);
+								const float reach = Envelope::DMax(
+									ss, rem2, p);
+								const float rshort = drem - reach;
+								if (rshort > 0.f)
+									J += 4e-4f * rshort * rshort;
+							}
+						}
+						J += gw.we * sac * 1e-3f
+							/ static_cast<float>(lk);
+						return J;
+					};
+					// Candidates: constant cosa AND within-side
+					// linear (a -> b) profiles - the dwell law fixes
+					// the SIDE for six ticks, never the wish angle;
+					// braking turns may need the angle to evolve
+					// inside one side.
+					struct Cand2 {
+						int si;
+						float a, b, J;
+					};
+					std::vector<Cand2> cands;
 					for (int si = -1; si <= 1; ++si) {
 						if (si != 0 && cur != 0 && si != cur
 							&& age < min_gap)
-							continue;   // illegal flip
-						const int nca = si == 0 ? 1 : 7;
-						for (int ci = 0; ci < nca; ++ci) {
-							const float c = si == 0 ? 1.f
-								: cgrid[ci];
-							// Short-horizon law-model rollout:
-							// hold this wish for kLook ticks.
-							float hh = h, ss = s2d;
-							float px = s.pos.X, py = s.pos.Y;
+							continue;
+						if (si == 0) {
+							cands.push_back({ 0, 1.f, 1.f, 0.f });
+							continue;
+						}
+						for (int ci = 0; ci < 7; ++ci)
+							cands.push_back({ si, cgrid[ci],
+								cgrid[ci], 0.f });
+						static const float pg[4][2] = {
+							{ 0.9f, 0.2f }, { 0.2f, 0.9f },
+							{ 0.f, -0.5f }, { -0.5f, 0.3f } };
+						for (int pi3 = 0; pi3 < 4; ++pi3)
+							cands.push_back({ si, pg[pi3][0],
+								pg[pi3][1], 0.f });
+					}
+					// Stage 1: closed-form law rollout ranks all.
+					for (Cand2& cd : cands) {
+						float hh = h, ss = s2d;
+						float px = s.pos.X, py = s.pos.Y;
+						float sac = 0.f;
+						for (int j = 0; j < lk; ++j) {
+							const float c = cd.si == 0 ? 1.f
+								: cd.a + (cd.b - cd.a)
+								* (lk > 1 ? static_cast<float>(j)
+									/ static_cast<float>(lk - 1)
+									: 0.f);
+							if (cd.si != 0) {
+								Strafe::TickLaw law = Strafe::Law(
+									p, ss, 1.f, s.ducked);
+								const float s2c = 1.f - c * c;
+								const float tr = law.TurnRad(c,
+									s2c > 0.f ? sqrtf(s2c) : 0.f);
+								hh = Steer::WrapPi(hh
+									+ (cd.si > 0 ? tr : -tr));
+								const float nv2 = law.NewSpeed2(c);
+								sac += ss * ss + cap2
+									- (nv2 > 0.f ? nv2 : 0.f);
+								ss = nv2 > 0.f ? sqrtf(nv2) : 0.f;
+							} else {
+								sac += cap2;
+							}
+							px += cosf(hh) * ss * p.dt;
+							py += sinf(hh) * ss * p.dt;
+						}
+						cd.J = costOf(hh, ss, px, py, sac);
+					}
+					std::sort(cands.begin(), cands.end(),
+						[](const Cand2& x, const Cand2& y) {
+							return x.J < y.J;
+						});
+					size_t pick = 0;
+					// Stage 2: EXACT-ENGINE short rollout of the
+					// shortlist (search machinery; replay remains
+					// the only truth; ticks are charged).
+					if (gw.exact_top > 0 && cands.size() > 1) {
+						const size_t K = static_cast<size_t>(
+							gw.exact_top) < cands.size()
+							? static_cast<size_t>(gw.exact_top)
+							: cands.size();
+						float bestJx = FLT_MAX;
+						for (size_t qi = 0; qi < K; ++qi) {
+							PlayerState sim = s;
 							float sac = 0.f;
-							const int lk = kLook < t_end - k
-								? kLook : (t_end - k > 1
-									? t_end - k : 1);
 							for (int j = 0; j < lk; ++j) {
-								if (si != 0) {
-									Strafe::TickLaw law =
-										Strafe::Law(p, ss, 1.f,
-											s.ducked);
-									const float s2c = 1.f - c * c;
-									const float tr = law.TurnRad(
-										c, s2c > 0.f
-											? sqrtf(s2c) : 0.f);
-									hh = Steer::WrapPi(hh
-										+ (si > 0 ? tr : -tr));
-									const float nv2 =
-										law.NewSpeed2(c);
-									const float full2 = ss * ss
-										+ cap2;
-									sac += full2 - (nv2 > 0.f
-										? nv2 : 0.f);
-									ss = nv2 > 0.f ? sqrtf(nv2)
-										: 0.f;
-								} else {
-									sac += cap2;   // null: no gain
-								}
-								px += cosf(hh) * ss * p.dt;
-								py += sinf(hh) * ss * p.dt;
+								const float sj = Len2D(sim.vel);
+								if (sj < 1.f)
+									break;
+								const float hj = atan2f(sim.vel.Y,
+									sim.vel.X);
+								const float c = cands[qi].si == 0
+									? 1.f
+									: cands[qi].a + (cands[qi].b
+										- cands[qi].a)
+									* (lk > 1
+										? static_cast<float>(j)
+										/ static_cast<float>(
+											lk - 1) : 0.f);
+								float yj = hj * 57.2957795f;
+								float fj = 0.f, sm = 0.f;
+								if (cands[qi].si != 0)
+									Air::WishInputs(hj,
+										cands[qi].si, c, &yj,
+										&fj, &sm);
+								const float pre2 = sj * sj + cap2;
+								MoveTick(sim, w, p, 0.f, yj, fj,
+									sm, 0.f, hold, nullptr);
+								const float post = Len2D(sim.vel);
+								sac += pre2 - post * post;
+								if (rollout_out)
+									(*rollout_out)++;
+								if (sim.on_ground)
+									break;
 							}
-							// Straight-run remainder to the active
-							// target's tick (guidance estimate
-							// only; the engine judges).
-							const int rem = t_end - k - lk;
-							if (rem > 0) {
-								const float sav = sqrtf(ss * ss
-									+ cap2 * static_cast<float>(
-										rem) * 0.5f);
-								const float D = sav * p.dt
-									* static_cast<float>(rem);
-								px += cosf(hh) * D;
-								py += sinf(hh) * D;
-							}
-							const float dxq = tg.x - px;
-							const float dyq = tg.y - py;
-							float J = gw.wp
-								* (dxq * dxq + dyq * dyq) * 1e-4f;
-							if (final_tg && tg.use_theta
-								&& static_cast<float>(N - k)
-									<= gw.blend
-									* static_cast<float>(N)) {
-								J += gw.wt * ThetaIntervalDist2(
-									hh, tg.th_lo, tg.th_hi)
-									* 100.f;
-							}
-							if (!final_tg) {
-								// REMAINING-RESIDUAL (advisor): a
-								// node reached beautifully that
-								// leaves an unsolvable final
-								// (Q, theta) problem is a bad
-								// node. Optimistic closed-form
-								// feasibility of the remainder.
-								const GuideTarget& fin =
-									targets.back();
-								const int rem2 = N - t_end;
-								if (rem2 > 0) {
-									const float mid = Steer::WrapPi(
-										fin.th_lo + 0.5f
-										* Steer::WrapPi(fin.th_hi
-											- fin.th_lo));
-									const float need = fabsf(
-										Steer::WrapPi(mid - hh));
-									Strafe::TickLaw lr =
-										Strafe::Law(p, ss, 1.f,
-											s.ducked);
-									const float tfree =
-										lr.TurnRad(0.f, 1.f)
-										* static_cast<float>(rem2);
-									const float tshort = need
-										- tfree;
-									if (tshort > 0.f)
-										J += 50.f * tshort
-											* tshort;
-									const float ddx = fin.x - px;
-									const float ddy = fin.y - py;
-									const float drem = sqrtf(
-										ddx * ddx + ddy * ddy);
-									const float reach =
-										Envelope::DMax(ss, rem2,
-											p);
-									const float rshort = drem
-										- reach;
-									if (rshort > 0.f)
-										J += 4e-4f * rshort
-											* rshort;
-								}
-							}
-							J += gw.we * sac * 1e-3f
-								/ static_cast<float>(lk);
-							if (J < bestJ) {
-								bestJ = J;
-								bs = si;
-								bc = c;
+							const float sx = Len2D(sim.vel);
+							const float hx = sx > 1.f
+								? atan2f(sim.vel.Y, sim.vel.X)
+								: h;
+							const float Jx = costOf(hx, sx,
+								sim.pos.X, sim.pos.Y, sac);
+							if (Jx < bestJx) {
+								bestJx = Jx;
+								pick = qi;
 							}
 						}
 					}
+					bs = cands[pick].si;
+					bc = cands[pick].a;
 				}
 				float yaw_deg = s2d > 1.f
 					? atan2f(s.vel.Y, s.vel.X) * 57.2957795f : 0.f;
@@ -768,11 +841,18 @@ namespace Entrance {
 				if (best.evals - fl0 >= gbudget
 					|| best.evals >= budget)
 					return;
+				GuideWeights g2 = gw;
+				// Second-stage exact rollouts only when the budget
+				// affords them; their sim ticks are charged as
+				// flight-equivalents.
+				g2.exact_top = budget >= 600 ? 4 : 0;
+				int ro = 0;
 				GuidedShootSeq(entry, w, p, tgts, N, min_gap,
-					entry_ctl, gw, &gsd, &gcs);
-				best.evals++;
+					entry_ctl, g2, &gsd, &gcs, &ro);
+				const int cost = 1 + ro / (N > 0 ? N : 1);
+				best.evals += cost;
 				if (flights_counter)
-					(*flights_counter)++;
+					(*flights_counter) += cost;
 				if (!gsd.empty())
 					ev_sched(gsd, gcs, nullptr);
 			};
@@ -790,8 +870,9 @@ namespace Entrance {
 			// around the closed-form arrival estimate; each interval
 			// independently establishes its reachable class - the
 			// numerical implementation of theta -> s_A*(theta)).
-			const float iv[3][2] = { { -0.25f, 0.25f },
-				{ 0.2f, 0.8f }, { -0.8f, -0.2f } };
+			const float iv[6][2] = { { -0.25f, 0.25f },
+				{ 0.2f, 0.8f }, { -0.8f, -0.2f }, { 0.8f, 1.9f },
+				{ -1.9f, -0.8f }, { 1.9f, -1.9f } };
 			for (int ii = 0; ii < 3; ++ii) {
 				std::vector<GuideTarget> tg(1,
 					final_tgt(iv[ii][0], iv[ii][1]));
@@ -801,6 +882,17 @@ namespace Entrance {
 				shoot(tg, gw);
 				gw.wp = 6.f;
 				gw.we = 0.05f;
+				shoot(tg, gw);
+			}
+			// FULL-DOMAIN coverage (advisor: estimates may order,
+			// never erase headings) - the far intervals each get a
+			// shot so no terminal class silently disappears.
+			for (int ii = 3; ii < 6; ++ii) {
+				std::vector<GuideTarget> tg(1,
+					final_tgt(iv[ii][0], iv[ii][1]));
+				GuideWeights gw;
+				gw.wp = 2.f;
+				gw.we = 0.3f;
 				shoot(tg, gw);
 			}
 			// m = 1: intervals x symmetric laterals; then node-TIME
@@ -852,6 +944,129 @@ namespace Entrance {
 					gw.wp = 2.f;
 					gw.we = 0.3f;
 					shoot(tg, gw);
+				}
+			}
+			// m = 2 (generic): first node at the winner's corridor,
+			// second free node closer to the target with symmetric
+			// lateral variants - depart -> develop -> close, with
+			// nothing about the shape encoded.
+			{
+				const float l2s[3] = { 0.f, 0.4f, -0.4f };
+				for (int li = 0; li < 3; ++li) {
+					float b2 = bmag[win_bi] + l2s[li];
+					if (b2 > 0.95f) b2 = 0.95f;
+					if (b2 < -0.95f) b2 = -0.95f;
+					std::vector<GuideTarget> tg;
+					tg.push_back(node_at(0.3f,
+						bmag[win_bi] * 0.6f));
+					tg.push_back(node_at(0.62f, b2));
+					tg.push_back(final_tgt(iv[win_ii][0],
+						iv[win_ii][1]));
+					GuideWeights gw;
+					gw.wp = 2.f;
+					gw.we = 0.3f;
+					shoot(tg, gw);
+				}
+			}
+			// OUTCOME-SPACE GAUSS-NEWTON on the winning node
+			// (advisor: attack the ill-conditioning in state
+			// coordinates - finite-difference the replay residual
+			// w.r.t. the node position, damped least-squares step).
+			// Evaluations replay directly; the final polished
+			// schedule is fed through ev_sched for crediting.
+			if (best.ok && budget - best.evals > 20) {
+				float nx = entry.pos.X + 0.45f * rx
+					+ bmag[win_bi] * rl * 0.5f * eqx;
+				float ny = entry.pos.Y + 0.45f * ry
+					+ bmag[win_bi] * rl * 0.5f * eqy;
+				const float th_mid = Steer::WrapPi(th_arr
+					+ 0.5f * (iv[win_ii][0] + iv[win_ii][1]));
+				auto eval_node = [&](float x2, float y2,
+					float* r_out) {
+					GuideTarget n1;
+					n1.x = x2;
+					n1.y = y2;
+					n1.until = static_cast<int>(0.45f
+						* static_cast<float>(N));
+					std::vector<GuideTarget> tg;
+					tg.push_back(n1);
+					tg.push_back(final_tgt(iv[win_ii][0],
+						iv[win_ii][1]));
+					GuideWeights gw;
+					gw.wp = 4.f;
+					gw.we = 0.15f;
+					gw.exact_top = 0;
+					std::vector<signed char> s2;
+					std::vector<float> c2;
+					GuidedShootSeq(entry, w, p, tg, N, min_gap,
+						entry_ctl, gw, &s2, &c2);
+					best.evals += 2;
+					if (flights_counter)
+						(*flights_counter) += 2;
+					if (s2.empty()) {
+						r_out[0] = 1e4f;
+						r_out[1] = 1e4f;
+						r_out[2] = 1e4f;
+						return;
+					}
+					vt.max_ticks = static_cast<int>(s2.size())
+						+ 8;
+					Air::Result ar = Air::FlyWishSchedule(entry,
+						w, p, vt, g, s2, c2,
+						static_cast<int>(s2.size()) + 8);
+					if (!ar.hit || ar.dot >= 0.f
+						|| ar.struck_brush >= 0) {
+						r_out[0] = 1e4f;
+						r_out[1] = 1e4f;
+						r_out[2] = 1e4f;
+						return;
+					}
+					ev_sched(s2, c2, nullptr);
+					r_out[0] = ar.pos.X - q.X;
+					r_out[1] = ar.pos.Y - q.Y;
+					const float tha = atan2f(ar.v1.Y, ar.v1.X);
+					r_out[2] = sqrtf(ThetaIntervalDist2(tha,
+						Steer::WrapPi(th_mid - 0.15f),
+						Steer::WrapPi(th_mid + 0.15f))) * 200.f;
+				};
+				float R0[3];
+				eval_node(nx, ny, R0);
+				for (int it = 0; it < 3
+					&& budget - best.evals > 8; ++it) {
+					if (fabsf(R0[0]) > 5e3f)
+						break;
+					const float dstep = 24.f;
+					float R1[3], R2[3];
+					eval_node(nx + dstep, ny, R1);
+					eval_node(nx, ny + dstep, R2);
+					float Jm[3][2];
+					for (int r2 = 0; r2 < 3; ++r2) {
+						Jm[r2][0] = (R1[r2] - R0[r2]) / dstep;
+						Jm[r2][1] = (R2[r2] - R0[r2]) / dstep;
+					}
+					// (J^T J + lambda I) dx = -J^T R  (2x2 solve)
+					float a11 = 0.5f, a12 = 0.f, a22 = 0.5f;
+					float b1 = 0.f, b2 = 0.f;
+					for (int r2 = 0; r2 < 3; ++r2) {
+						a11 += Jm[r2][0] * Jm[r2][0];
+						a12 += Jm[r2][0] * Jm[r2][1];
+						a22 += Jm[r2][1] * Jm[r2][1];
+						b1 -= Jm[r2][0] * R0[r2];
+						b2 -= Jm[r2][1] * R0[r2];
+					}
+					const float det = a11 * a22 - a12 * a12;
+					if (fabsf(det) < 1e-6f)
+						break;
+					float dx = (b1 * a22 - b2 * a12) / det;
+					float dy = (b2 * a11 - b1 * a12) / det;
+					const float dl = sqrtf(dx * dx + dy * dy);
+					if (dl > 160.f) {
+						dx *= 160.f / dl;
+						dy *= 160.f / dl;
+					}
+					nx += dx;
+					ny += dy;
+					eval_node(nx, ny, R0);
 				}
 			}
 		}

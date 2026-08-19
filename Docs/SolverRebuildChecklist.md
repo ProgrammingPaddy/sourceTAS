@@ -864,6 +864,35 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 10d, TWO-STAGE SELECTOR + FULL-DOMAIN
+  FRONTIER + GN NODE POLISH): advisor's next directive executed:
+  (1) within-side cosa PROFILES in the lookahead (linear a->b pairs
+  - the dwell law fixes the SIDE for six ticks, never the wish
+  angle; braking turns can now evolve the angle inside one side);
+  (2) EXACT-ENGINE second-stage ranking - closed forms rank ~23
+  candidates, top-4 get 6-tick exact rollouts, sim ticks charged as
+  flight-equivalents (budget-gated >= 600); (3) FULL-CIRCLE heading
+  coverage - 6 intervals span the whole domain, near ones get full
+  treatment, far ones one shot each (estimates ORDER, never erase);
+  (4) m=2 generic second node (depart->develop->close, symmetric
+  laterals); (5) OUTCOME-SPACE GAUSS-NEWTON on the winning node -
+  finite-difference Jacobian of the replay residual w.r.t. node
+  position, damped 2x2 least-squares steps (state coordinates, not
+  schedule coordinates). MEASURED (airsuite): mean sandwich gap
+  401k -> 366k; steep-fall class 12/16 -> 16/16 PERFECT; but
+  BUDGET DILUTION shifted failures to the ascending class (+150:
+  16/16 -> 12/16) and cost f3 rediscovery this run (floor 759k
+  stands, f0 new floor 895k, f2 950k stands) - the machinery
+  breadth now exceeds fixed per-case budgets. NEXT (advisor's top
+  priority, not yet built): THE CONSTRUCTIVE RECOVERABILITY SUITE
+  (airrec) - synthetic hidden legal wish schedules create known-
+  reachable (S0,Q,T,theta,E) problems; cold solve must recover;
+  oracle simultaneously falsifies any U < E_oracle; oracle
+  witnesses live in the TEST FIXTURE, never production bank/seeds;
+  tolerance-ladder reporting (32/16/8/4/2/1u); then adaptive
+  budget allocation driven by conditioning measurements, and the
+  nested-ceiling gap attribution (U0>=U1>=...>=H*). Level B only
+  on measured systematic failure after all that.
 - 2026-08-18 (session 10c, TERMINAL-CLASS CONDITIONING + bank-as-
   witness-store + airsuite v1): advisor's 15-point directive
   executed in order. DIAGNOSIS SHARPENED: multiple shooting had
