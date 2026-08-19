@@ -548,6 +548,99 @@ another argument for the scheduler. (d) `strafelaw` prints "EXACT
 0.05: the printed verdict and the exit code disagree (cosmetic, but a
 gate should not lie in either direction).
 
+## 13d. What the adversarial review caught (session 12, same day)
+
+The session-12 diff was reviewed by three independent agents against
+the standing-laws rubric. Seven real defects were found — including one
+of high severity introduced by this very session — and all seven were
+fixed before the work was accepted. Recording them because the *class*
+of each is instructive.
+
+1. **HIGH — the plateau relocated, not removed.** In boundary mode the
+   value tier fired on the weighted ordering residual
+   `rp + 250·rth ≤ tol`, while success requires `rp ≤ radius` **and**
+   `rth ≤ 1e-4`. The tier was a strict *superset* of the success set,
+   so at tol = 8 it accepted heading error up to 0.032 rad — 320× the
+   admissible value — and the search switched to maximising speed with
+   the heading channel still wide open. That is exactly the pathology
+   continuation exists to remove, moved from the position channel into
+   the heading channel, and it contradicted §13b as written in this
+   same commit. **Fix:** feasibility is now a *predicate on both
+   channels*; the weighted sum survives only as the descent ordering.
+   *Lesson:* when a spec says "subject to A **and** B", a scalarised
+   proxy for the gate is not the gate.
+
+2. **HIGH — stale elite outcomes.** Elites cache a search key plus the
+   raw (residual, value) used to recompute it when the tolerance
+   tightens. `deepen()` improved an elite's schedule without updating
+   the raw triple, so a re-key could score a 3u witness as the 12u
+   schedule it had replaced. **Fix:** the evaluator publishes its raw
+   outcome; every accept path refreshes it.
+
+3. **MEDIUM — the reserved share was a race, not a reservation.**
+   Continuation was triggered by "half the budget spent", tested only
+   *after* an unbounded-cost round, which both preempted the value
+   phase and could still be inert at small budgets. **Fix:** an
+   explicit `phase1_cap` splits the budget deterministically. The
+   accompanying claim "no value metric can regress from it" was
+   **false** and is removed; the honest statement is that crediting
+   stays pinned to the caller's radius, so no *contract* changes, but
+   at a fixed budget a reallocated search can certainly report less.
+   The measured f0 rediscovery drop is a live instance.
+
+4. **MEDIUM — a fix that loosened the coarse case.** Scaling the scout
+   dedupe radius as `max(4·tol, 8)` improved fine tolerances and
+   *tripled* it (32u → 115u) for the production field builder, which
+   never continues — with only three scout slots, that collapses
+   endpoint diversity, the pool's entire purpose. **Fix:** clamped to
+   never exceed the original 32u. *Lesson:* a formula introduced for
+   one regime must be checked at the regimes it silently also covers.
+
+5. **MEDIUM — the pinning bug was only half fixed.** The node-winner
+   key was corrected, but Gauss-Newton pass 2 still built its seed from
+   `bmag[win_bi]`, and `win_bi` is no longer assigned at all — so pass
+   2 stayed pinned to the chord centreline regardless of which chart
+   won. **Fix:** both pass-2 nodes now come from the winning chart and
+   node time.
+
+6. **MEDIUM — an unbounded advisory penalty.** The curvature to-go
+   estimate diverges when the target lies directly behind (κ → 0 while
+   |φ| → π): measured J up to 1.3e10 against a position term of ~18,
+   making sidestepping look cheaper than turning. **Fix:** the arc
+   length is clamped between the chord and the half-circle.
+
+7. **MEDIUM — a never-live residual channel.** `shot_key()` and the
+   convergence counter read `strike_rmin`, which is never written when
+   a solve produces no clean strike at all, so the hardest face-mode
+   cases still had a pinned winner and hit dry within a few rounds.
+   **Fix:** an always-live best-residual channel across every outcome
+   class.
+
+**What the review confirmed clean** (verified, not assumed): all 38
+TickLaw call sites repo-wide carry correct units and none is mirrored;
+the type migration is a numeric no-op, so the one hard cull
+(`Field::BrakeTurnPeak`) is bit-identical; crediting of
+`best.H`/bins/`iv_L`/tangent is keyed to the original radius and never
+to the tightened tolerance; no bank write path changed and a floor
+still requires a strictly higher H, so budget reallocation cannot lower
+a banked floor; `Field::Build` and `fieldexact` pass no tune, so
+`key_of` reduces exactly to the previous face scoring; airrec passes
+only (S0, Q, T[, θ]) with seeds and `on_strike` null and no bank
+writes; no new erasing prune anywhere — every new `continue` is a
+proposal-degeneracy guard, and both the GN gate and the dry gate
+*widened*; the new vocabulary literals are band-normalised proposal
+ordering only; and the arc-chart closed form was verified numerically
+(endpoints, radius, centre, and the |φ| > π major arc), with an
+orthonormal right-handed chord frame.
+
+One process finding worth keeping: `Steer::Controller` is shared by the
+FROZEN carve and assembly paths, so repairing it changed their
+behaviour and the emitted `.tas` frames. That is a *repair* of a
+measured defect rather than an architectural change, and it was
+re-certified by running both legacy gates — `airsolve` 3/3 (arrivals at
+dot −67/−36/−20 versus the tape's −115/−206/−142) and `carve` 3/3
+PASS, a gate that had been red 2/3 since the dwell-6 law landed.
+
 ## 14. v1 implementation map (session 11)
 
 - `Air::FlyWishSchedule` gains a free-flight branch (`t.face < 0`):

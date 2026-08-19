@@ -1,4 +1,4 @@
-﻿# Solver Rebuild â€” Build Plan & Living Checklist
+# Solver Rebuild â€” Build Plan & Living Checklist
 
 **This is the status document.** Design and testimony live in
 `Docs/SolverRebuild.md`; the narrative log lives in
@@ -396,12 +396,16 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   advisory, never a bound. FIXTURES (item 3): airrec-fixture-v2 +
   manifest hashing the whole oracle set BY BIT PATTERN plus params/law
   versions; prints VERIFIED/DRIFT; measured de1b000e431a84fb, verified
-  across runs. TWO CURVES (item 7): CURVE[iso] L1 15/18/20 of 32
-  (47/56/63%) vs CURVE[cap] funded 1x/2x/3x L1 15/24/30 of 32
-  (47/75/94%), L2 11/12/12 of 12; the persistent high-curvature class
-  (dh_tot above median) goes 4/15 -> 10/15 -> 14/15 on the capability
-  curve; cap m2 ladder 8u:27 4u:22 2u:18 1u:14 of 32, rp p50 1.3u p95
-  6.8u; 0 bound falsifications in every run. => THE ADVISOR'S OWN
+  across runs. TWO CURVES (item 7), FINAL (post-review, fixture hash
+  de1b000e431a84fb VERIFIED): CURVE[iso] L1 16/14/14 of 32 vs
+  CURVE[cap] funded 1x/2x/3x L1 16/20/29 of 32 (50/63/91%), L2
+  11/11/12 of 12; the persistent high-curvature class (dh_tot above
+  median) goes 4/15 -> 7/15 -> 14/15 on the capability curve; cap m2
+  ladder 8u:28 4u:23 2u:15 1u:11 of 32, rp p50 2.0u p95 9.1u; 0 bound
+  falsifications in any run. NOTE the iso curve now DECLINES (16 ->
+  14 -> 14): at equal compute the extra machinery is a net loss, which
+  makes the dilution finding sharper than the pre-review numbers
+  (91% funded vs 44% at flat spend) and the scheduler case airtight. => THE ADVISOR'S OWN
   SCALING SHAPE: sequential shooting is sound, LEVEL B NOT NEEDED; what
   remains is ALLOCATION (m=2 cannibalizes its own refinement budget at
   fixed spend - exactly the iso-vs-cap separation), so the next build
@@ -410,9 +414,12 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   everywhere). OTHER MEASURED: airsuite 40/48 -> 48/48 STRUCK (first
   full coverage) and mean sandwich gap 366k -> 261k best-ever (note the
   mean is conditioned on struck cases, so it is not directly comparable
-  across coverage changes); humanexact f2 519k -> 931k at 0u = EXACT-
-  POINT ROW RESOLVED AT THE LITERAL COORDINATE for the first time (-14k
-  from the human's 945k), f3 276k -> 804k (new 805k floor banked); f0
+  across coverage changes); humanexact f2 519k -> 947k at 9u = THE FIRST
+  EVER PASS ON AN ADMISSIBLE HUMAN ROW (+2k ABOVE the human's 945k;
+  during the session an intermediate build also RESOLVED the <=4u row
+  at 931k/0u, and after the review fixes the <=4u row is unresolved
+  again while near16 passes - both facts reported, neither averaged),
+  f3 276k -> 796k (new 805k floor banked earlier in the session); f0
   REGRESSED 890k -> 750k at 14u (floor 895k stands - reported as failed
   rediscovery, never as regression) and is the one short-horizon
   low-curvature stratum the new gain-biased seeds and curvature to-go
@@ -425,8 +432,33 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
   rungs (its 600-eval budget cannot reach the continuation phase - the
   same allocation finding); `strafelaw` prints EXACT at threshold 4.0
   but exits 2 at threshold 0.05 (cosmetic disagreement between verdict
-  and exit code). ExitField, carve integration and Phase B remain
-  FROZEN.
+  and exit code). ADVERSARIAL REVIEW (3 agents vs the standing-laws
+  rubric) FOUND SEVEN REAL DEFECTS INCLUDING ONE HIGH-SEVERITY ONE
+  INTRODUCED THIS SESSION - all fixed before acceptance, all recorded
+  in Docs/AirRecSpec.md 13d: (1) the boundary value tier fired on the
+  WEIGHTED SUM rather than the feasibility predicate, so the plateau
+  was relocated into the heading channel (accepting 320x the
+  admissible heading error) - the exact defect continuation exists to
+  remove; (2) deepen() improved elites without refreshing their raw
+  outcome, so a tolerance re-key could score a 3u witness as the 12u
+  schedule it replaced; (3) the reserved share was a race tested after
+  an unbounded round (now an explicit phase1_cap), and its
+  accompanying claim that no value metric can regress was FALSE and is
+  removed; (4) the tolerance-scaled scout dedupe LOOSENED the coarse
+  case 32u -> 115u for Field::Build (clamped); (5) GN pass 2 still
+  seeded from bmag[win_bi], which is no longer assigned, so it stayed
+  pinned to the chord centreline; (6) the curvature to-go diverged
+  behind the target (J up to 1.3e10, rewarding sidestepping over
+  turning) - arc length now clamped between chord and half-circle;
+  (7) shot_key/dry read strike_rmin, never written when no clean
+  strike exists, so the hardest cases kept a pinned winner. Review
+  also CONFIRMED clean: all 38 TickLaw sites correct, the type
+  migration a numeric no-op (so Field::BrakeTurnPeak is bit-identical),
+  crediting keyed to the original radius, no bank path changed, no new
+  erasing prune, airrec quarantine intact, arc geometry verified
+  numerically. Legacy gates re-certified after the controller repair:
+  airsolve 3/3 PASS, carve 3/3 PASS. ExitField, carve integration and
+  Phase B remain FROZEN.
 
 - 2026-08-19 (session 11, AIRREC BUILT - the constructive
   recoverability suite; the stored-basis convention MEASURED and the

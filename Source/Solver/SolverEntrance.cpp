@@ -384,10 +384,23 @@ namespace Entrance {
 									? 2.f * ly / r2 : 0.f;
 								const float phi = 2.f * atan2f(ly, lx);
 								// Arc length of that circle (chord when
-								// the turn is negligible).
-								const float arc = fabsf(kap) > 1e-6f
-									? fabsf(phi / kap)
-									: sqrtf(r2);
+								// the turn is negligible). BOUNDED: as
+								// ly -> 0 with lx < 0 (target directly
+								// BEHIND) kappa -> 0 while |phi| -> pi,
+								// so phi/kappa diverges - measured up to
+								// 1.3e10, which swamped every other term
+								// and made sidestepping look cheaper than
+								// turning. The arc can never be shorter
+								// than the chord nor longer than the
+								// half-circle through both points, so
+								// clamp it there.
+								const float chord = sqrtf(r2);
+								float arc = fabsf(kap) > 1e-6f
+									? fabsf(phi / kap) : chord;
+								const float arc_max = 1.57079633f
+									* chord;
+								if (arc < chord) arc = chord;
+								if (arc > arc_max) arc = arc_max;
 								Strafe::TickLaw lr = Strafe::Law(
 									p, ss, 1.f, s.ducked);
 								const float tfree = lr.TurnRad(
@@ -728,6 +741,11 @@ namespace Entrance {
 		// saturation, humanexact's floor, the bank) silently changes
 		// meaning, and continuation can only ADD tight witnesses.
 		float tol = radius;
+		// Last evaluation's raw outcome (published for deepen) and the
+		// best residual over EVERY outcome class (always live).
+		float ev_res = 1e30f, ev_val = -1e30f;
+		float ev_rp = 1e30f, ev_rth = 0.f;
+		float best_any_res = 1e30f;
 		const float prec = tune && tune->precision > 0.f
 			? tune->precision : radius;
 		// ---- THE TERMINAL-HEADING FRONTIER + THE SCOUT POOL (ruling
@@ -745,9 +763,14 @@ namespace Entrance {
 			// RAW OUTCOME kept alongside the cached key so tightening
 			// the active tolerance can re-key every elite for free
 			// instead of re-flying it (the stale-cache hazard the
-			// plateau audit flagged).
-			float res = 1e30f;   // monotone residual (see key_of)
+			// plateau audit flagged). rp/rth are kept SEPARATELY from
+			// the ordering residual because feasibility is a
+			// PREDICATE on both channels, not a threshold on their
+			// weighted sum (see key_of).
+			float res = 1e30f;   // monotone residual (ordering only)
 			float val = -1e30f;  // value inside the tolerance
+			float rp = 1e30f;    // positional residual
+			float rth = 0.f;     // heading residual (radians)
 		};
 		std::vector<BinElite> bins(kBins);
 		std::vector<BinElite> scouts(3);
@@ -759,8 +782,23 @@ namespace Entrance {
 		// set), then a value tier that engages only inside the active
 		// tolerance. Tiers: clean strike < no-strike < contact-assisted
 		// rejection, so any strike outranks any miss.
-		auto key_of = [&](float res, float val) {
-			return res <= tol ? 1e7f + val : -res;
+		// Heading feasibility width: the terminal heading must lie
+		// INSIDE the requested interval (ThetaIntervalDist2 returns 0
+		// there), so the admissible heading residual is ~0, not a
+		// tolerance-scaled slack.
+		const float kThFeas = 1e-4f;
+		// FEASIBILITY IS A PREDICATE ON BOTH CHANNELS. Keying the value
+		// tier on the weighted sum (rp + kThetaW*rth <= tol) admits a
+		// strict SUPERSET of the success set - at tol=8 it would accept
+		// rth up to 0.032 rad while success needs 1e-4 - which
+		// re-creates the very plateau this continuation exists to
+		// remove, relocated from the position channel into the heading
+		// channel. The weighted sum stays as the ORDERING residual
+		// (it gives a usable descent direction); the tier switch uses
+		// the predicate.
+		auto key_of = [&](float res, float val, float rp, float rth) {
+			const bool feas = rp <= tol && rth <= kThFeas;
+			return feas ? 1e7f + val : -res;
 		};
 		// Schedule admissibility against the BOUNDARY control state
 		// (Invariant 9: the dwell law crosses operator seams).
@@ -829,6 +867,8 @@ namespace Entrance {
 			// val = what the value phase maximizes inside tol.
 			float resid = 1e9f;
 			float val = -1e30f;
+			float res_p = 1e30f;   // positional channel
+			float res_th = 0.f;    // heading channel
 			bool strike = false;      // in-RADIUS (crediting contract)
 			float H = -1e30f;
 			float th_term = 0.f;
@@ -852,6 +892,8 @@ namespace Entrance {
 					// shared with the Gauss-Newton residual so the
 					// optimizer descends the metric the search ranks.
 					resid = rp + kThetaW * rth;
+					res_p = rp;
+					res_th = rth;
 					val = sT;   // the s_A* quantity
 					if (resid < best.bnd_rp + kThetaW * best.bnd_rth) {
 						best.bnd_rp = rp;
@@ -893,6 +935,8 @@ namespace Entrance {
 					ar.end_state.vel) + 2.f * p.gravity * gs
 					* (ar.pos.Z - zmin);
 				resid = d;
+				res_p = d;
+				res_th = 0.f;
 				val = Hs;
 				// Exactness ladder: EVERY clean strike reports its
 				// distance to q; per-rung best value AND ITS WITNESS
@@ -919,14 +963,37 @@ namespace Entrance {
 			// key cannot let a hard strike poison best.H.
 			const bool tan_block = tangent_mode && !bnd
 				&& -ar.dot > kTanEps;
-			const float sc = tan_block ? -resid : key_of(resid, val);
+			const float sc = tan_block ? -resid
+				: key_of(resid, val, res_p, res_th);
+			// Published so deepen()/perturb() can keep an accepted
+			// elite's RAW outcome in step with its cached key - the
+			// key is recomputed on every tolerance advance, and a
+			// stale raw triple would demote a tight witness as if it
+			// were the loose schedule it replaced.
+			ev_res = resid;
+			ev_val = val;
+			ev_rp = res_p;
+			ev_rth = res_th;
+			// A MISS RESIDUAL that is always live: without it,
+			// shot_key()/progress() read strike_rmin (never written
+			// when no clean strike exists at all), so the node winner
+			// stayed pinned and dry hit 4 within a few rounds on
+			// exactly the hardest face-mode cases.
+			if (resid < best_any_res)
+				best_any_res = resid;
 			// Scout pool: endpoint-diverse top-3 by raw score. The
 			// dedupe radius SCALES WITH THE ACTIVE TOLERANCE: a fixed
 			// 32u was coarser than every rung below 32u, so all
 			// candidates converging on q collapsed into one slot and
 			// the pool could not hold a diverse set at 8u/4u/1u.
 			{
-				const float dedup = 4.f * tol > 8.f ? 4.f * tol : 8.f;
+				// Finer as the tolerance tightens, but never COARSER than
+			// the original 32u: the formula must not loosen endpoint
+			// diversity for the coarse callers (Field::Build at grid
+			// 32 would have gone to 115u with only 3 slots).
+			float dedup = 4.f * tol;
+			if (dedup < 8.f) dedup = 8.f;
+			if (dedup > 32.f) dedup = 32.f;
 				int slot = -1;
 				for (int i2 = 0; i2 < 3; ++i2)
 					if (scouts[static_cast<size_t>(i2)].has
@@ -955,6 +1022,8 @@ namespace Entrance {
 					sl.H = H;
 					sl.res = resid;
 					sl.val = val;
+					sl.rp = res_p;
+					sl.rth = res_th;
 					sl.epos = epos;
 					sl.runs = src_runs ? *src_runs
 						: runs_from_sched(sd, cs);
@@ -973,6 +1042,8 @@ namespace Entrance {
 					be.H = H;
 					be.res = resid;
 					be.val = val;
+					be.rp = res_p;
+					be.rth = res_th;
 					be.dot = ar.dot;
 					be.epos = epos;
 					be.runs = src_runs ? *src_runs
@@ -1511,15 +1582,16 @@ namespace Entrance {
 				}
 				// ---- Pass 2: FULL ACTIVE NODE VECTOR (m=2) ----
 				if (budget - best.evals > 60) {
-					float xi[4] = {
-						entry.pos.X + 0.3f * rx + bmag[win_bi]
-							* 0.6f * rl * 0.5f * eqx,
-						entry.pos.Y + 0.3f * ry + bmag[win_bi]
-							* 0.6f * rl * 0.5f * eqy,
-						entry.pos.X + 0.62f * rx + bmag[win_bi]
-							* rl * 0.5f * eqx,
-						entry.pos.Y + 0.62f * ry + bmag[win_bi]
-							* rl * 0.5f * eqy };
+					// Seeds from the WINNING CHART and node time. The old
+					// form hard-coded the chord centreline via
+					// bmag[win_bi], and win_bi is no longer assigned at
+					// all - so pass 2 was pinned regardless of which
+					// chart or lateral actually won.
+					GuideTarget s2a = node_from(win_chart,
+						win_lam * 0.65f, win_p1 * 0.6f);
+					GuideTarget s2b = node_from(win_chart,
+						win_lam * 0.65f + 0.32f, win_p1);
+					float xi[4] = { s2a.x, s2a.y, s2b.x, s2b.y };
 					auto evalxi = [&](const float* x4,
 						float* r_out) {
 						GuideTarget nds[2];
@@ -1648,6 +1720,10 @@ namespace Entrance {
 							if (sc > pe.sc) {
 								pe.sc = sc;
 								pe.runs = t2;
+								pe.res = ev_res;
+								pe.val = ev_val;
+								pe.rp = ev_rp;
+								pe.rth = ev_rth;
 								moved = true;
 							}
 						}
@@ -1671,6 +1747,10 @@ namespace Entrance {
 						if (sc > pe.sc) {
 							pe.sc = sc;
 							pe.runs = t2;
+							pe.res = ev_res;
+							pe.val = ev_val;
+							pe.rp = ev_rp;
+							pe.rth = ev_rth;
 							moved = true;
 						}
 					}
@@ -1704,6 +1784,10 @@ namespace Entrance {
 					if (sc >= pe.sc) {
 						pe.sc = sc;
 						pe.runs = t2;
+						pe.res = ev_res;
+						pe.val = ev_val;
+						pe.rp = ev_rp;
+						pe.rth = ev_rth;
 						moved = true;
 					}
 				}
@@ -1723,6 +1807,10 @@ namespace Entrance {
 					if (sc > pe.sc) {
 						pe.sc = sc;
 						pe.runs = t2;
+						pe.res = ev_res;
+						pe.val = ev_val;
+						pe.rp = ev_rp;
+						pe.rth = ev_rth;
 						moved = true;
 					}
 				}
@@ -1755,6 +1843,10 @@ namespace Entrance {
 					r.len += dl;
 			}
 			pe.sc = ev(pe.runs);
+			pe.res = ev_res;
+			pe.val = ev_val;
+			pe.rp = ev_rp;
+			pe.rth = ev_rth;
 			deepen(pe, 0.12f, 2);
 		};
 		// Resolution rungs; the finest is SPEED-DERIVED (airrec
@@ -1788,7 +1880,8 @@ namespace Entrance {
 				hits += scouts[static_cast<size_t>(s3)].has ? 1 : 0;
 			const float rmin = best.strike_rmin < 1e29f
 				? best.strike_rmin
-				: (best.bnd_rp < 1e29f ? best.bnd_rp : 1e30f);
+				: (best.bnd_rp < 1e29f ? best.bnd_rp
+					: best_any_res);
 			// Relative epsilon on H: 1e-3 absolute is below float ULP
 			// at H ~ 1e6 and therefore meaningless there.
 			const float hEps = fabsf(last_H) > 1.f
@@ -1808,11 +1901,23 @@ namespace Entrance {
 		auto rekey = [&]() {
 			for (BinElite& b2 : bins)
 				if (b2.has)
-					b2.sc = key_of(b2.res, b2.val);
+					b2.sc = key_of(b2.res, b2.val, b2.rp,
+						b2.rth);
 			for (BinElite& s3 : scouts)
 				if (s3.has)
-					s3.sc = key_of(s3.res, s3.val);
+					s3.sc = key_of(s3.res, s3.val, s3.rp,
+						s3.rth);
 		};
+		// EXPLICIT BUDGET RESERVATION. The value phase gets a bounded,
+		// documented share and the requested tolerance gets the rest -
+		// rather than the value phase running until it happens to
+		// converge (measured: at 600 evals it never did, so continuation
+		// never fired at all) or being preempted mid-round by a race on
+		// the eval counter. Truth is unaffected either way: this splits
+		// RESOLUTION, and crediting stays pinned to the caller's
+		// original radius.
+		const int phase1_cap = prec < radius
+			? (budget * 3) / 5 : budget;
 		int rung_i = 0;   // next kLadder rung the continuation targets
 		while (best.evals < budget && dry < 4) {
 			// Scouts always get the full schedule.
@@ -1883,8 +1988,7 @@ namespace Entrance {
 			// a guaranteed minimum share of the budget (the advisor's
 			// "every unresolved domain receives minimum exploration",
 			// applied to resolution rather than to regions).
-			const bool half_spent = best.evals * 2 >= budget;
-			if ((dry >= 4 || half_spent) && prec < tol
+			if ((dry >= 4 || best.evals >= phase1_cap) && prec < tol
 				&& best.evals < budget) {
 				float next = prec;
 				while (rung_i < 6 && kLadder[rung_i] >= tol)
