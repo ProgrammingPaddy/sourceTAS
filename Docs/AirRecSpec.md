@@ -923,3 +923,110 @@ eval-equivalents per guided shot with exact rollouts on, so budgets
 below roughly 1500 are almost entirely coverage. That is a direct
 argument for the scheduler's cheap-scout-first escalation over flying
 every shot at every domain, and it is now enforced as P3.
+
+---
+
+## 17. Scheduler v0 — the build spec (next session starts here)
+
+Filed 2026-08-19 after the ruling. The scheduler is specified in §15.4;
+this section records the **implementation contract** and the one hard
+law that the aborted first attempt clarified.
+
+### 17.1 The elevated invariant
+
+> **The requested budget may terminate the solve; it may never influence
+> what the solver would do next.**
+
+This is stronger than "same results at larger budgets". It forbids any
+budget-derived *skip*, not just budget-derived *content*. Session 12c
+already removed budget-derived content (`exact_top` no longer flips at
+600 evals). What remains is the guided phase's `gbudget = budget / 3`
+truncation: it does not merely stop the solve, it *skips ahead* to the
+refinement rounds, so `run(B1)` executes refinement actions that
+`run(B2)` reaches only later — not a literal prefix.
+
+**Measured constraint on the fix** (this is why the truncation cannot
+simply be deleted): the guided sequence costs ~25 eval-equivalents per
+shot, so 40 shots ≈ 1000. Deleting the truncation without an interleaving
+scheduler starved every 600-eval query and cost airsuite **48/48 → 38/48**.
+The truncation is therefore load-bearing *until* the scheduler exists to
+interleave coverage with refinement. Remove them together, never
+separately.
+
+### 17.2 Atomic work units
+
+Actions must be small enough that prefix containment is testable below
+the round level, and each action's content must be a pure function of
+(config, results so far, bounds, conditioning):
+
+    Scout(domain, method, proposal_id)
+    Shoot(domain, chart, m, node_seed)
+    ExactRank(domain, candidate_id)
+    Deepen(domain, witness_id, move_id)
+    GNIteration(domain, witness_id, iteration)
+    PrecisionStep(domain, rung)
+    SplitHeading(domain)
+
+An action whose internal cost is several engine-tick equivalents is
+acceptable **only** if that cost is fixed and known in advance, and the
+runner refuses to *start* it without enough remaining budget. The runner
+then **stops** — it must never skip an unaffordable action in favour of a
+cheaper later one, because that reorders the stream.
+
+### 17.3 Domain state
+
+    D = (Q region, T branch, I_theta)
+    per D: L_D, U_D, R_D, kappa_D, C_D (spent), M_D (method history),
+           sigma_D (RESOLVED/UNRESOLVED)
+
+Chord/curvature charts, m0/m1/m2, scouts, GN and precision continuation
+are **methods applied to a domain**, never separate physical branches.
+Within a single `RefSolve` call Q and T are fixed, so the live axis is
+`I_theta` — the six heading intervals are the v0 domains.
+
+### 17.4 The v0 priority rule (deliberately simple)
+
+1. every unresolved domain gets a minimum cheap scout;
+2. mark RESOLVED (with a recorded proof) any domain where
+   `U_D <= L* + eps`;
+3. competitive domains get m=0 coverage;
+4. escalate poorly-converging competitive domains to m=1, then m=2;
+5. precision-continue feasible witnesses down the tolerance ladder;
+6. GN/deepen where residual or value improvement remains plausible;
+7. split heading/spatial domains when the coarse representation is
+   itself the unresolved issue.
+
+**Importance is `U_D − L*` only.** κ, residual history and chart history
+select *how* to refine and *what it will cost* — never *whether the
+domain matters*. Each method carries an exploration-debt floor `F_{D,m}`
+so a new method cannot starve an older generic one before certified
+bounds make its domain irrelevant (the f0 lesson, generalised).
+
+### 17.5 Properties to add alongside (extend `airprops`)
+
+- **Trace prefix**: for `B1 < B2 < B3`, compare recorded action
+  ID/content hashes — `Trace(B1) ≺ Trace(B2) ≺ Trace(B3)` literally, not
+  just equal final results.
+- **Lower-bound monotonicity**: `L(B1) ≤ L(B2) ≤ L(B3)` with the
+  persistent bank disabled.
+- **Determinism**: identical (start state, query, version, config) ⇒
+  identical action prefix and witnesses.
+- **Certified-prune stability**: every domain elimination records the
+  bound ID/version and the numerical inequality that caused it — the
+  start of proof-carrying prunes.
+
+### 17.6 Sequencing
+
+`scheduler v0` (prove: budget independence, cheap coverage, progressive
+m0→m1→m2, fairness, monotonicity) → **nested ceilings U0…U4** (today
+most heading domains share one loose global ceiling, so `U_D − L*` has
+little information content and tuning against it would be tuning against
+noise) → `scheduler v1` + `CURVE[scheduled]` + `R(B)` → adversarial
+review → generous AirRec escalation run → **the integration-ready
+decision**.
+
+### 17.7 Level B is off the active roadmap
+
+Formally moved from *pending escalation* to **inactive contingency**.
+Reopen only if a future generic known-reachable class stays flat under
+sufficiently funded sequential m0→m1→m2.

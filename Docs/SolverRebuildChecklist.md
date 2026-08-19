@@ -341,6 +341,42 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 
 ## Change log
 
+- 2026-08-19 (session 12d, SCHEDULER PREP - spec filed, one law
+  sharpened, NO code shipped). Advisor elevated the prefix law to
+  replay-truth status: THE REQUESTED BUDGET MAY TERMINATE THE SOLVE; IT
+  MAY NEVER INFLUENCE WHAT THE SOLVER WOULD DO NEXT. That forbids
+  budget-derived SKIPS, not just budget-derived content. Session 12c had
+  already removed the content dependence (exact_top no longer flips at
+  600 evals); the remaining violation is the guided phase's
+  `gbudget = budget/3`, which does not stop the solve but SKIPS AHEAD to
+  the refinement rounds, so run(B1) executes actions run(B2) reaches
+  later - not a literal prefix. ATTEMPTED and REVERTED: removing the
+  truncation alone. MEASURED CONSTRAINT (the reason it must not be
+  removed without the scheduler): the guided sequence costs ~25
+  eval-equivalents per shot, so 40 shots ~ 1000, and deleting the
+  truncation starved every 600-eval query - airsuite fell 48/48 -> 38/48
+  earlier the same day. The truncation is load-bearing UNTIL the
+  scheduler interleaves coverage with refinement; the two must be
+  removed together, never separately. A partial refactor also corrupted
+  line endings (2548 doubled CRs) - reverted via git checkout, tree
+  restored to the verified 48c0765 state and re-verified: airprops 7/7
+  GREEN, airsuite 48/48 gap 242k. FILED: Docs/AirRecSpec.md 17 = the
+  scheduler v0 build contract (the elevated invariant; the atomic action
+  list Scout/Shoot/ExactRank/Deepen/GNIteration/PrecisionStep/
+  SplitHeading with fixed known costs and a runner that STOPS rather
+  than skips an unaffordable action; domain state D = (Q region, T
+  branch, I_theta) with charts/m-levels/GN/precision as METHODS not
+  branches; the seven-step v0 priority rule; importance = U_D - L* ONLY
+  with kappa/residual/chart history selecting HOW to refine and what it
+  costs; per-method exploration-debt floors F_{D,m} generalising the f0
+  lesson; the four scheduler properties - trace-prefix on action content
+  hashes, lower-bound monotonicity with the bank disabled, deterministic
+  replay, and proof-carrying prune records; and the sequencing rule that
+  nested ceilings come BEFORE scheduler tuning because today's domains
+  share one loose global ceiling so U_D - L* carries little
+  information). LEVEL B formally moved from pending escalation to
+  INACTIVE CONTINGENCY. NEXT: build scheduler v0 to that contract.
+
 - 2026-08-19 (session 12c, THE RULING'S "IMMEDIATELY" ITEMS + THE
   PROPERTY GATE. Advisor ruling received: DO NOT BUILD LEVEL B, BUILD
   THE SCHEDULER; full text + the two Stage-A finish lines in
