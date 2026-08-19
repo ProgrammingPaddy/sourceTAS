@@ -34,36 +34,106 @@
 namespace Solver {
 namespace Strafe {
 
+	// ---- SEMANTIC UNITS AT THE PHYSICS/SEARCH BOUNDARY (advisor
+	// 2026-08-19, after a mirrored-model bug crippled the guided
+	// shooter's action vocabulary) ----
+	//
+	// TWO different cosines exist in this codebase and they are NOT
+	// interchangeable:
+	//
+	//  * TRUE WISH COS - cos of the angle between the wish direction
+	//    and the CURRENT VELOCITY. This law is written in these units
+	//    (it mirrors the SDK's addspeed = wishspd - dot(v, wishdir)).
+	//    Gain is maximal at 0 (perpendicular); c >= cap/v is INERT
+	//    (addspeed <= 0, the engine does nothing); c < 0 is a braking
+	//    turn.
+	//
+	//  * STORED CANONICAL COS - the value carried in a (side, cosa)
+	//    wish schedule, i.e. Air::WishInputs / Air::FlyWishSchedule
+	//    units, which is what witnesses, the bank and repfit store.
+	//
+	// The bridge between them is MEASURED, not assumed - the
+	// `wishparity` gate flies one exact engine tick against this law
+	// over a grid of (speed, stored cosa, side) and discriminates the
+	// hypotheses. Measured 2026-08-19 (168 rows, max |dspeed^2| err
+	// 0.5 = float-ULP scale, max |dheading| err 7.2e-07 rad, rotation
+	// sign -side in 98/98 turning rows):
+	//
+	//    the stored basis realizes its wish at wh + pi, so
+	//        true cos      = -stored cos
+	//        rotation side = -stored side
+	//
+	// It is a FULL PI ROTATION, not merely a cosine negation - any
+	// model that predicts TURN DIRECTION from a stored schedule is
+	// mirrored even after the cosine is negated. TickLaw therefore
+	// accepts ONLY the true-wish type, so the compiler refuses a naked
+	// stored value at every call site.
+	struct TrueWishCos {
+		float v = 0.f;
+		explicit TrueWishCos(float c) : v(c) {}
+	};
+
+	// The perpendicular wish: maximum gain, maximum free turn rate. The
+	// ONE value that is identical in both bases (cos 0 == -cos 0), so
+	// free-rate queries are convention-immune.
+	static const TrueWishCos kPerp(0.f);
+
+	// THE BRIDGE. Stored canonical -> the law's units. Every crossing
+	// must route through these two functions.
+	inline TrueWishCos ToTrueWishCos(float stored_cosa) {
+		return TrueWishCos(-stored_cosa);
+	}
+	inline int ToTrueRotSide(int stored_side) {
+		return -stored_side;
+	}
+	// ...and back, for code that must emit a stored schedule from a
+	// true-basis decision (e.g. the heading controller).
+	inline float ToStoredWishCos(TrueWishCos true_cosa) {
+		return -true_cosa.v;
+	}
+	inline int ToStoredSide(int true_rot_side) {
+		return -true_rot_side;
+	}
+
 	struct TickLaw {
 		float cap;      // effective per-tick projection cap (30)
 		float budget;   // accel * wishspeed * dt * sfric
 		float v;        // current horizontal speed
 
-		// Accel magnitude applied for a wish at cos(alpha) = c/v.
-		float Accel(float cosa) const {
-			const float add = cap - v * cosa;
+		// Accel magnitude applied for a wish at TRUE cos(alpha).
+		float Accel(TrueWishCos cosa) const {
+			const float add = cap - v * cosa.v;
 			if (add <= 0.f) return 0.f;
 			return add < budget ? add : budget;
 		}
 		// Squared-speed after the tick for a wish at angle alpha.
-		float NewSpeed2(float cosa) const {
+		float NewSpeed2(TrueWishCos cosa) const {
 			const float a = Accel(cosa);
-			return v * v + 2.f * v * a * cosa + a * a;
+			return v * v + 2.f * v * a * cosa.v + a * a;
 		}
-		// Heading rotation (radians, toward the wish side) for angle alpha.
-		float TurnRad(float cosa, float sina) const {
+		// Heading rotation MAGNITUDE-with-sina-sign (radians). The
+		// caller owns which way that rotation points: with a TRUE
+		// rotation side, +TurnRad turns toward +side.
+		float TurnRad(TrueWishCos cosa, float sina) const {
 			const float a = Accel(cosa);
-			return atan2f(a * sina, v + a * cosa);
+			return atan2f(a * sina, v + a * cosa.v);
+		}
+		// The width of the ACTIVE band in true-cos units: c in
+		// [0, cap/v] spans max-gain-max-turn to inert. At v = 900 this
+		// is 0.033 - a fixed grid over [-1,1] cannot resolve it, so
+		// vocabularies must be speed-normalized by this quantity.
+		float BandCos() const {
+			return v > cap ? cap / v : 1.f;
 		}
 		// The optimum: perpendicular wish in the cap-limited regime, else
 		// the budget boundary v*cosa = cap - budget.
-		float OptCos() const {
-			if (budget >= cap || v <= 0.f) return 0.f;
+		TrueWishCos OptCos() const {
+			if (budget >= cap || v <= 0.f) return TrueWishCos(0.f);
 			float c = (cap - budget) / v;
-			return c > 1.f ? 1.f : c;
+			return TrueWishCos(c > 1.f ? 1.f : c);
 		}
 		float OptGain2() const {
-			const float c = OptCos() * v;
+			const float c = OptCos().v * v;
 			const float a = Accel(OptCos());
 			return 2.f * c * a + a * a;
 		}

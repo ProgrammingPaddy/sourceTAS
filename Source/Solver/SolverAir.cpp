@@ -112,7 +112,7 @@ namespace Air {
 							fabsf(WrapPi(phi_t - hcur));
 						Strafe::TickLaw tl = Strafe::Law(p, s2dn,
 							1.f, s.ducked);
-						const float rate = tl.TurnRad(0.f, 1.f);
+						const float rate = tl.TurnRad(Strafe::kPerp, 1.f);
 						if (!term_latch && rate > 1e-5f
 							&& n_hit <= need / rate + 1.f)
 							term_latch = true;

@@ -327,6 +327,107 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 ## Change log
 
+- 2026-08-19 (session 12, THE CONVENTION WAS A FULL PI ROTATION - and
+  the capability curve SETTLES LEVEL B: DO NOT BUILD IT. Full detail in
+  Docs/AirRecSpec.md 13b (the ruling) and 13c (the measured answers to
+  all nine gates); this entry is the index.) METHOD: a 5-agent
+  read-only audit fan-out first (TickLaw consumers repo-wide, plateau
+  scoring paths, representational caps + envelope APIs, airrec harness
+  anchors, standing-laws rubric) - it found four reinforcing plateau
+  mechanisms, three live pre-existing bugs, a premise correction
+  (airsuite's acceptance radius is 28u NOT 16u) and the reason the
+  m-curve looked flat (at 600-1000 evals only ~7-13 of 37 enumerated
+  guided shots ever ran, so THE M=2 PASS AND NODE-TIME ADAPTATION HAD
+  NEVER EXECUTED at production budgets). NEW GATE `wishparity`: one
+  exact engine tick vs the closed-form law over 168 (speed, stored
+  cosa, side) rows, DISCRIMINATING two hypotheses instead of assuming
+  one. VERDICT H2 by seven orders of magnitude (max |dspeed^2| err 0.5
+  = float-ULP vs 2.38M; max |dheading| err 7.2e-07 rad vs pi; rotation
+  follows -side in 98/98 turning rows): the stored basis realizes its
+  wish at wh+pi so true cos = -stored AND realized rotation = -stored
+  side. SESSION 11 FIXED ONLY THE COSINE - every modelled turn still
+  pointed the wrong way. WORSE, THE CONTROLLER WAS INERT: the probe
+  showed the heading error FROZEN (0.1500 -> 0.1500 over 25 ticks, 0/4
+  converging) because a braking request mirrored to true cos ~ +0.9,
+  far above cap/v, so addspeed <= 0 and the engine did nothing - the
+  true root cause of the historical "heading channel incomplete
+  (66-282u misses)" verdict. After the fix 4/4 targets converge to
+  0.0000 rad within 5 ticks. HARDENING: Strafe::TrueWishCos is now a
+  real type and TickLaw accepts ONLY it (the compiler refuses a naked
+  stored value); ToTrueWishCos/ToTrueRotSide/ToStoredWishCos/
+  ToStoredSide carry the measured bridge; all ~25 consumers audited and
+  classified; Steer::Controller's duplicate emitter now converts
+  explicitly; certified bounds (Field::BrakeTurnPeak - the one
+  hard-cull - and the priced-brake scan) verified convention-CLEAN BY
+  CONSTRUCTION (no stored value can reach them). VOCABULARY: the active
+  band is true cos in [0, cap/v] = 0.033 wide at v=900, so a fixed grid
+  over [-1,1] cannot resolve it - the old candidate AND seed grids were,
+  in true units, a spread of braking turns plus one max-gain point with
+  NO sustained-gain member; both are now speed-normalized fractions of
+  the band, converted at the boundary. PLATEAU (advisor item 2): one
+  monotone residual channel (strike < miss < clean-air rejection - the
+  old negative band had three incommensurate quantities so a converging
+  candidate's score DROPPED before it jumped), value tier only inside
+  the ACTIVE tolerance, tolerance tightened down the rungs between
+  rounds with elites re-keyed from stored raw outcomes (no re-flying),
+  tolerance-scaled scout dedupe (32u was coarser than every rung below
+  32u), residual-gated Gauss-Newton in BOTH modes (face mode gated on
+  best.ok = off exactly when needed), per-rung witnesses, and a
+  RESERVED budget share for the precision phase (measured: at 600 evals
+  the value phase never converged so continuation never fired at all).
+  Crediting stays pinned to `radius` so no external contract changed.
+  THREE PRE-EXISTING BUGS FIXED: dry incremented on its FIRST round for
+  any solve that never struck (-1e30f + 1e-3f == -1e30f in single
+  precision) cutting the hardest cases off after 4 rounds; the `sc >=
+  1e7f` crediting gate silently dropped any strike with negative H
+  (airrec passes zmin = 0); the node winner keyed on best.H so
+  unstruck cases pinned m=2 and both GN passes to (interval 0, lateral
+  0). CHARTS (item 4): chord chart's lateral now scales with a broad
+  OPTIMISTIC REACHABLE SLICE (Envelope::DMax forward from P0 and
+  backward from Q) instead of +-0.5*chord, which was the only lateral
+  generator and therefore a hard representational limit; new CURVATURE
+  chart generates nodes from generic (lambda, phi) on the circular arc
+  through P0 and Q, both signs, broad range; proposals INTERLEAVED
+  round-robin so no chart is starved by truncation; m=2 and GN seeds
+  build on the winning chart/node-time. CURVATURE-AWARE TO-GO (item 6):
+  kappa = 2y/(x^2+y^2), phi = 2 atan2(y,x) in the local frame gives
+  required turn, arc length and implied terminal tangent, compared
+  against remaining ticks, free-turn AND braking-turn capacity -
+  advisory, never a bound. FIXTURES (item 3): airrec-fixture-v2 +
+  manifest hashing the whole oracle set BY BIT PATTERN plus params/law
+  versions; prints VERIFIED/DRIFT; measured de1b000e431a84fb, verified
+  across runs. TWO CURVES (item 7): CURVE[iso] L1 15/18/20 of 32
+  (47/56/63%) vs CURVE[cap] funded 1x/2x/3x L1 15/24/30 of 32
+  (47/75/94%), L2 11/12/12 of 12; the persistent high-curvature class
+  (dh_tot above median) goes 4/15 -> 10/15 -> 14/15 on the capability
+  curve; cap m2 ladder 8u:27 4u:22 2u:18 1u:14 of 32, rp p50 1.3u p95
+  6.8u; 0 bound falsifications in every run. => THE ADVISOR'S OWN
+  SCALING SHAPE: sequential shooting is sound, LEVEL B NOT NEEDED; what
+  remains is ALLOCATION (m=2 cannibalizes its own refinement budget at
+  fixed spend - exactly the iso-vs-cap separation), so the next build
+  is the adaptive refinement scheduler (competitive unresolved bound gap
+  as the VALUE signal, kappa as DIFFICULTY only, minimum exploration
+  everywhere). OTHER MEASURED: airsuite 40/48 -> 48/48 STRUCK (first
+  full coverage) and mean sandwich gap 366k -> 261k best-ever (note the
+  mean is conditioned on struck cases, so it is not directly comparable
+  across coverage changes); humanexact f2 519k -> 931k at 0u = EXACT-
+  POINT ROW RESOLVED AT THE LITERAL COORDINATE for the first time (-14k
+  from the human's 945k), f3 276k -> 804k (new 805k floor banked); f0
+  REGRESSED 890k -> 750k at 14u (floor 895k stands - reported as failed
+  rediscovery, never as regression) and is the one short-horizon
+  low-curvature stratum the new gain-biased seeds and curvature to-go
+  serve least; repfit per-tick rows unchanged (dp 0.0/0.0/0.1u - the
+  executor was never touched, only the models that predict it).
+  DEFERRED WITH REASONS: the oracle-projection diagnostic (its question
+  - do node coordinates explain the failing class - is already answered
+  affirmatively by the capability curve and the dh_tot split; still
+  worth building as a permanent instrument); airsuite's own sub-8u
+  rungs (its 600-eval budget cannot reach the continuation phase - the
+  same allocation finding); `strafelaw` prints EXACT at threshold 4.0
+  but exits 2 at threshold 0.05 (cosmetic disagreement between verdict
+  and exit code). ExitField, carve integration and Phase B remain
+  FROZEN.
+
 - 2026-08-19 (session 11, AIRREC BUILT - the constructive
   recoverability suite; the stored-basis convention MEASURED and the
   stage-1 mirror bug caught+fixed; spec doc filed as

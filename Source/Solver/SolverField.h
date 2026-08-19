@@ -121,7 +121,7 @@ namespace Field {
 			const float s = Envelope::SMax(s0,
 				static_cast<int>(k), p);
 			Strafe::TickLaw law = Strafe::Law(p, s, 1.f, ducked);
-			total += law.TurnRad(0.f, 1.f) * (n
+			total += law.TurnRad(Strafe::kPerp, 1.f) * (n
 				/ static_cast<float>(buckets));
 		}
 		return total;
@@ -159,11 +159,14 @@ namespace Field {
 	inline float BrakeTurnPeak(float s, const MoveParams& p,
 	                           bool ducked) {
 		Strafe::TickLaw law = Strafe::Law(p, s, 1.f, ducked);
-		float best = law.TurnRad(0.f, 1.f);
+		float best = law.TurnRad(Strafe::kPerp, 1.f);
 		for (int i = 1; i <= 16; ++i) {
+			// Literal TRUE-basis scan points (no stored value can reach
+			// this function - it takes only speed/params/ducked, so the
+			// bound is convention-clean by construction).
 			const float c = -static_cast<float>(i) / 16.f;
 			const float s2 = 1.f - c * c;
-			const float tr = law.TurnRad(c,
+			const float tr = law.TurnRad(Strafe::TrueWishCos(c),
 				s2 > 0.f ? sqrtf(s2) : 0.f);
 			if (tr > best)
 				best = tr;
@@ -319,11 +322,15 @@ namespace Field {
 							const float cc = -static_cast<float>(
 								ci) / 8.f;
 							const float ss = 1.f - cc * cc;
-							const float tr2 = lb.TurnRad(cc,
+							// Literal TRUE-basis scan points (nothing
+							// stored reaches the priced-brake bound).
+							const float tr2 = lb.TurnRad(
+								Strafe::TrueWishCos(cc),
 								ss > 0.f ? sqrtf(ss) : 0.f);
 							if (tr2 <= 1e-6f)
 								continue;
-							const float nv2 = lb.NewSpeed2(cc);
+							const float nv2 = lb.NewSpeed2(
+								Strafe::TrueWishCos(cc));
 							const float c2 = vb2 * vb2 - nv2;
 							const float eff = c2 / tr2;
 							if (eff < beff) {
@@ -400,7 +407,7 @@ namespace Field {
 						Steer::WrapPi(az_dep - sm.phi));
 					Strafe::TickLaw tl = Strafe::Law(p, pv, 1.f,
 						ducked);
-					const float rate = tl.TurnRad(0.f, 1.f);
+					const float rate = tl.TurnRad(Strafe::kPerp, 1.f);
 					const float turn_dist = rate > 1e-5f
 						? turn / rate * pv * p.dt : 1e9f;
 					// Climb: the ride TRAVELS the runway first -

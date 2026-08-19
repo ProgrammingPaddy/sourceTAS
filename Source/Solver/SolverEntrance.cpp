@@ -8,6 +8,7 @@
 #include "SolverAir.h"
 #include "SolverBoard.h"
 #include "SolverEnvelope.h"
+#include "SolverField.h"
 #include "SolverSteer.h"
 #include "SolverStrafe.h"
 #include "SolverWorld.h"
@@ -46,7 +47,7 @@ namespace Entrance {
 		inline void StepHeading(float& h, float& s, float tgt,
 		                        const MoveParams& p, bool ducked) {
 			Strafe::TickLaw lk = Strafe::Law(p, s, 1.f, ducked);
-			const float w = lk.TurnRad(0.f, 1.f);
+			const float w = lk.TurnRad(Strafe::kPerp, 1.f);
 			const float d = Steer::WrapPi(tgt - h);
 			h = Steer::WrapPi(h + (d > w ? w : (d < -w ? -w : d)));
 		}
@@ -165,7 +166,7 @@ namespace Entrance {
 				for (int k = 0; k < ss.len[j]; ++k) {
 					Strafe::TickLaw lk = Strafe::Law(p, s, 1.f,
 						entry.ducked);
-					h = Steer::WrapPi(h + lk.TurnRad(0.f, 1.f)
+					h = Steer::WrapPi(h + lk.TurnRad(Strafe::kPerp, 1.f)
 						* ss.rate[j]);
 					prof->push_back(h);
 					s = sqrtf(s * s + cap2);
@@ -350,37 +351,74 @@ namespace Entrance {
 							J += gw.wt * ThetaIntervalDist2(hh,
 								tg.th_lo, tg.th_hi) * 100.f;
 						if (!final_tg) {
-							// REMAINING-RESIDUAL: a node reached
-							// beautifully that leaves an
-							// unsolvable final problem is a bad
-							// node (closed-form feasibility).
+							// REMAINING-RESIDUAL, CURVATURE-AWARE
+							// (advisor 2026-08-19). The old form asked
+							// "can a STRAIGHT line still reach the
+							// final target, and is there enough
+							// free-turn budget for the heading?" - which
+							// is structurally misleading for exactly the
+							// class that fails: long sustained-turn
+							// flights. Instead, put the predicted state
+							// at the origin with velocity along +x and
+							// the target at (x, y); the circle tangent
+							// to the current heading through the target
+							// has curvature and sweep
+							//     kappa = 2y / (x^2 + y^2)
+							//     phi   = 2 * atan2(y, x)
+							// giving required turn, arc length and the
+							// implied terminal tangent in closed form.
+							// Advisory guidance only - never a bound,
+							// and it encodes no map knowledge.
 							const GuideTarget& fin =
 								targets.back();
 							const int rem2 = N - t_end;
 							if (rem2 > 0) {
-								const float mid = Steer::WrapPi(
-									fin.th_lo + 0.5f
-									* Steer::WrapPi(fin.th_hi
-										- fin.th_lo));
-								const float need = fabsf(
-									Steer::WrapPi(mid - hh));
+								const float ddx = fin.x - px;
+								const float ddy = fin.y - py;
+								const float ch = cosf(hh);
+								const float sh2 = sinf(hh);
+								const float lx = ddx * ch + ddy * sh2;
+								const float ly = -ddx * sh2 + ddy * ch;
+								const float r2 = lx * lx + ly * ly;
+								const float kap = r2 > 1e-3f
+									? 2.f * ly / r2 : 0.f;
+								const float phi = 2.f * atan2f(ly, lx);
+								// Arc length of that circle (chord when
+								// the turn is negligible).
+								const float arc = fabsf(kap) > 1e-6f
+									? fabsf(phi / kap)
+									: sqrtf(r2);
 								Strafe::TickLaw lr = Strafe::Law(
 									p, ss, 1.f, s.ducked);
 								const float tfree = lr.TurnRad(
-									0.f, 1.f)
+									Strafe::kPerp, 1.f)
 									* static_cast<float>(rem2);
-								const float tshort = need - tfree;
+								// Braking turns buy more rotation per
+								// tick than the free rate (at a speed
+								// cost the optimizer owns), so the
+								// admissible turn budget is the larger.
+								const float tbrake = Field::
+									BrakeTurnPeak(ss, p, s.ducked)
+									* static_cast<float>(rem2);
+								const float tcap = tfree > tbrake
+									? tfree : tbrake;
+								const float tshort = fabsf(phi) - tcap;
 								if (tshort > 0.f)
 									J += 50.f * tshort * tshort;
-								const float ddx = fin.x - px;
-								const float ddy = fin.y - py;
-								const float drem = sqrtf(ddx * ddx
-									+ ddy * ddy);
+								// Distance debt measured along the ARC
+								// the closure actually requires.
 								const float reach = Envelope::DMax(
 									ss, rem2, p);
-								const float rshort = drem - reach;
+								const float rshort = arc - reach;
 								if (rshort > 0.f)
 									J += 4e-4f * rshort * rshort;
+								// Implied terminal tangent vs the
+								// requested interval: closing on this
+								// circle arrives at heading hh + phi.
+								if (fin.use_theta)
+									J += 25.f * ThetaIntervalDist2(
+										Steer::WrapPi(hh + phi),
+										fin.th_lo, fin.th_hi);
 							}
 						}
 						J += gw.we * sac * 1e-3f
@@ -396,7 +434,28 @@ namespace Entrance {
 						int si;
 						float a, b, J;
 					};
+					// THE ACTION VOCABULARY, SPEED-NORMALIZED
+					// (wishparity 2026-08-19). The law's ACTIVE band
+					// is true cos in [0, cap/v] - only 0.033 wide at
+					// v=900 - so a fixed grid over [-1,1] cannot
+					// resolve it: the old cgrid was, in true units,
+					// a spread of BRAKING turns plus one max-gain
+					// point, which is why sustained-gain arcs were
+					// unreachable. Candidates are therefore generated
+					// in TRUE units as fractions of the band (gain
+					// side: max-free-turn -> nearly straight) plus
+					// absolute braking values (turn harder than free,
+					// pay speed), then converted to STORED units at
+					// the boundary. No fitted constants: the band
+					// edge is the law's own cap/v.
 					std::vector<Cand2> cands;
+					Strafe::TickLaw law0 = Strafe::Law(p, s2d, 1.f,
+						s.ducked);
+					const float band = law0.BandCos();
+					static const float gfrac[5] = { 0.f, 0.25f, 0.5f,
+						0.75f, 0.95f };
+					static const float bcos[4] = { -0.15f, -0.35f,
+						-0.6f, -0.85f };
 					for (int si = -1; si <= 1; ++si) {
 						if (si != 0 && cur != 0 && si != cur
 							&& age < min_gap)
@@ -405,46 +464,55 @@ namespace Entrance {
 							cands.push_back({ 0, 1.f, 1.f, 0.f });
 							continue;
 						}
-						for (int ci = 0; ci < 7; ++ci)
-							cands.push_back({ si, cgrid[ci],
-								cgrid[ci], 0.f });
-						// THE ACTIVE GAIN BAND (airrec 2026-08-19:
-						// realized cos(rho) = -stored c, so gains
-						// live in stored c near (-cap/s, +cap/s) -
-						// SPEED-DERIVED band candidates, straighter
-						// (-) and tighter (+) gain arcs. Without
-						// these the vocabulary cannot express
-						// sustained-gain carve arcs at speed.
-						if (s2d > p.air_speed_cap) {
-							const float bw = p.air_speed_cap
-								/ s2d;
-							cands.push_back({ si, -0.95f * bw,
-								-0.95f * bw, 0.f });
-							cands.push_back({ si, -0.5f * bw,
-								-0.5f * bw, 0.f });
-							cands.push_back({ si, 0.5f * bw,
-								0.5f * bw, 0.f });
+						for (int gi = 0; gi < 5; ++gi) {
+							const float st = Strafe::ToStoredWishCos(
+								Strafe::TrueWishCos(gfrac[gi]
+									* band));
+							cands.push_back({ si, st, st, 0.f });
 						}
+						for (int bi3 = 0; bi3 < 4; ++bi3) {
+							const float st = Strafe::ToStoredWishCos(
+								Strafe::TrueWishCos(bcos[bi3]));
+							cands.push_back({ si, st, st, 0.f });
+						}
+						// WITHIN-SIDE evolving profiles (a -> b): the
+						// dwell law fixes the SIDE for six ticks,
+						// never the wish angle - braking turns may
+						// need the angle to evolve inside one side.
+						// Expressed as (true a -> true b) pairs.
 						static const float pg[4][2] = {
-							{ 0.9f, 0.2f }, { 0.2f, 0.9f },
-							{ 0.f, -0.5f }, { -0.5f, 0.3f } };
-						for (int pi3 = 0; pi3 < 4; ++pi3)
-							cands.push_back({ si, pg[pi3][0],
-								pg[pi3][1], 0.f });
+							{ -0.6f, 0.f }, { 0.f, -0.6f },
+							{ 0.5f, -0.3f }, { -0.3f, 0.9f } };
+						for (int pi3 = 0; pi3 < 4; ++pi3) {
+							const float a2 = pg[pi3][0] < 0.f
+								? pg[pi3][0]
+								: pg[pi3][0] * band;
+							const float b2 = pg[pi3][1] < 0.f
+								? pg[pi3][1]
+								: pg[pi3][1] * band;
+							cands.push_back({ si,
+								Strafe::ToStoredWishCos(
+									Strafe::TrueWishCos(a2)),
+								Strafe::ToStoredWishCos(
+									Strafe::TrueWishCos(b2)),
+								0.f });
+						}
 					}
 					// Stage 1: closed-form law rollout ranks all.
-					// CONVENTION BRIDGE (airrec 2026-08-19): the
-					// stored basis realizes its wish at wh + pi, so
-					// the TRUE wish-from-velocity cosine handed to
-					// the law is the NEGATION of the stored value.
-					// Before this bridge the model evaluated every
-					// candidate's speed effect mirrored (brakes
-					// ranked as inert, inert as brakes) - measured
-					// constructively by the recoverability suite.
+					// THE CONVENTION BRIDGE, BOTH HALVES (measured by
+					// `wishparity`, 2026-08-19: 168 rows, rotation
+					// sign -side in 98/98 turning rows). The stored
+					// basis realizes its wish at wh + pi, so the true
+					// cosine is the negation AND the realized rotation
+					// is the negated side. Session 11 fixed only the
+					// cosine and left every modelled turn pointing the
+					// wrong way - the guided shooter was ranking the
+					// side that steers AWAY from its target.
 					for (Cand2& cd : cands) {
 						float hh = h, ss = s2d;
 						float px = s.pos.X, py = s.pos.Y;
 						float sac = 0.f;
+						const int rot = Strafe::ToTrueRotSide(cd.si);
 						for (int j = 0; j < lk; ++j) {
 							const float c = cd.si == 0 ? 1.f
 								: cd.a + (cd.b - cd.a)
@@ -454,12 +522,13 @@ namespace Entrance {
 							if (cd.si != 0) {
 								Strafe::TickLaw law = Strafe::Law(
 									p, ss, 1.f, s.ducked);
-								const float ce = -c;
-								const float s2c = 1.f - ce * ce;
+								const Strafe::TrueWishCos ce =
+									Strafe::ToTrueWishCos(c);
+								const float s2c = 1.f - ce.v * ce.v;
 								const float tr = law.TurnRad(ce,
 									s2c > 0.f ? sqrtf(s2c) : 0.f);
 								hh = Steer::WrapPi(hh
-									+ (cd.si > 0 ? tr : -tr));
+									+ (rot > 0 ? tr : -tr));
 								const float nv2 = law.NewSpeed2(
 									ce);
 								sac += ss * ss + cap2
@@ -642,6 +711,25 @@ namespace Entrance {
 		}
 		std::vector<signed char> sbuf;
 		std::vector<float> cbuf;
+		// ---- ACTIVE TOLERANCE CONTINUATION (advisor 2026-08-19) ----
+		// The measured cliff (~30/48 within 16u, ZERO within 8u) was
+		// partly solver-induced: the score discarded the positional
+		// residual the instant it crossed the acceptance radius, so a
+		// candidate had every reason to reach 15.9u and then spend the
+		// rest of the budget on speed. `tol` is the ACTIVE tolerance
+		// the value phase switches at; it is tightened between
+		// refinement rounds down to `prec` so the residual gradient
+		// never flattens:
+		//     minimise residual until feasible at tol,
+		//     then maximise value subject to residual <= tol.
+		// CREDITING IS SEPARATE AND STAYS PINNED TO `radius`: best.H,
+		// the bins, iv_L and the tangent slot keep their original
+		// region contract, so no external consumer (fieldexact
+		// saturation, humanexact's floor, the bank) silently changes
+		// meaning, and continuation can only ADD tight witnesses.
+		float tol = radius;
+		const float prec = tune && tune->precision > 0.f
+			? tune->precision : radius;
 		// ---- THE TERMINAL-HEADING FRONTIER + THE SCOUT POOL (ruling
 		// 2026-08-18): bins preserve terminal-state diversity; scouts
 		// maximize the probability of entering difficult endpoint
@@ -654,10 +742,26 @@ namespace Entrance {
 			float dot = 0.f;
 			Vec3  epos;
 			std::vector<WishRun> runs;
+			// RAW OUTCOME kept alongside the cached key so tightening
+			// the active tolerance can re-key every elite for free
+			// instead of re-flying it (the stale-cache hazard the
+			// plateau audit flagged).
+			float res = 1e30f;   // monotone residual (see key_of)
+			float val = -1e30f;  // value inside the tolerance
 		};
 		std::vector<BinElite> bins(kBins);
 		std::vector<BinElite> scouts(3);
 		const float kPi2 = 3.14159265f;
+		// THE SEARCH KEY. One monotone residual channel all the way in
+		// (the audit found three incommensurate quantities sharing the
+		// negative band, so a converging candidate's score could DROP
+		// before it jumped - a barrier immediately before the success
+		// set), then a value tier that engages only inside the active
+		// tolerance. Tiers: clean strike < no-strike < contact-assisted
+		// rejection, so any strike outranks any miss.
+		auto key_of = [&](float res, float val) {
+			return res <= tol ? 1e7f + val : -res;
+		};
 		// Schedule admissibility against the BOUNDARY control state
 		// (Invariant 9: the dwell law crosses operator seams).
 		auto sched_legal = [&](const std::vector<signed char>& sd) {
@@ -716,10 +820,16 @@ namespace Entrance {
 				(*flights_counter)++;
 			Air::Result ar = Air::FlyWishSchedule(entry, w, p, vt,
 				g, sd, cs, bnd ? total : total + 8);
-			const Vec3 epos = ar.hit ? ar.pos
-				: (ar.miss_dist < 1e8f ? ar.closest : ar.end_pos);
-			float sc;
-			bool strike = false;
+			const Vec3 epos = bnd ? ar.end_pos
+				: (ar.hit ? ar.pos
+					: (ar.miss_dist < 1e8f ? ar.closest
+						: ar.end_pos));
+			// resid = ONE monotone channel (tier offsets keep any
+			// strike above any miss above any clean-air rejection);
+			// val = what the value phase maximizes inside tol.
+			float resid = 1e9f;
+			float val = -1e30f;
+			bool strike = false;      // in-RADIUS (crediting contract)
 			float H = -1e30f;
 			float th_term = 0.f;
 			if (bnd) {
@@ -727,8 +837,8 @@ namespace Entrance {
 				// a hard failure; otherwise score the terminal state
 				// against (Q, theta-interval).
 				if (ar.struck_brush >= 0 || ar.grounded) {
-					sc = -1e6f - (ar.miss_dist < 1e8f
-						? ar.miss_dist : 0.f);
+					resid = 1e6f + (ar.miss_dist < 1e8f
+						? ar.miss_dist : 1e8f);
 				} else {
 					const float rp = Len(ar.end_pos - q);
 					const Vec3& vT = ar.end_state.vel;
@@ -738,24 +848,42 @@ namespace Entrance {
 						th_term,
 						Steer::WrapPi(th_arr + ivt[0][0]),
 						Steer::WrapPi(th_arr + ivt[0][1])));
-					sc = -(rp + 250.f * rth);
-					if (sc > -(best.bnd_rp
-						+ 250.f * best.bnd_rth)) {
+					// One weight for the heading/position trade,
+					// shared with the Gauss-Newton residual so the
+					// optimizer descends the metric the search ranks.
+					resid = rp + kThetaW * rth;
+					val = sT;   // the s_A* quantity
+					if (resid < best.bnd_rp + kThetaW * best.bnd_rth) {
 						best.bnd_rp = rp;
 						best.bnd_rth = rth;
 						best.bnd_s = sT;
 					}
+					// Boundary mode gets the same exactness ladder as
+					// face mode (it had none - the two modes reported
+					// the ladder through different fields).
+					if (rp < best.strike_rmin) {
+						best.strike_rmin = rp;
+						best.strike_rmin_th = th_term;
+					}
+					for (int r2 = 0; r2 < 6; ++r2)
+						if (resid <= kLadder[r2]
+							&& sT > best.rung_E[r2]) {
+							best.rung_E[r2] = sT;
+							best.rung_side[r2] = sd;
+							best.rung_cosa[r2] = cs;
+							best.rung_res[r2] = resid;
+						}
 					if (rp <= radius && rth <= 1e-4f) {
 						strike = true;
-						H = sT;   // the s_A* quantity
-						sc = 1e7f + H;
+						H = sT;
 					}
 				}
 			} else if (!ar.hit || ar.dot >= 0.f) {
-				sc = -(ar.miss_dist < 1e8f ? ar.miss_dist : 1e8f);
+				resid = 1e5f + (ar.miss_dist < 1e8f
+					? ar.miss_dist : 1e8f);
 			} else if (ar.struck_brush >= 0) {
 				best.contact_assisted++;
-				sc = -Len(ar.pos - q) - 500.f;
+				resid = 1e6f + Len(ar.pos - q);
 			} else {
 				if (on_strike)
 					on_strike(ar, sd, cs, total + 8);
@@ -764,34 +892,46 @@ namespace Entrance {
 				const float Hs = Dot(ar.end_state.vel,
 					ar.end_state.vel) + 2.f * p.gravity * gs
 					* (ar.pos.Z - zmin);
+				resid = d;
+				val = Hs;
 				// Exactness ladder: EVERY clean strike reports its
-				// distance to q; per-rung best H feeds the
-				// tolerance dashboard (advisor 2026-08-19).
+				// distance to q; per-rung best value AND ITS WITNESS
+				// (a rung you cannot hand back is only observable,
+				// never usable - advisor 2026-08-19).
 				if (d < best.strike_rmin) {
 					best.strike_rmin = d;
 					best.strike_rmin_th = th_term;
 				}
 				for (int r2 = 0; r2 < 6; ++r2)
-					if (d <= kLadder[r2] && Hs > best.rung_E[r2])
+					if (d <= kLadder[r2] && Hs > best.rung_E[r2]) {
 						best.rung_E[r2] = Hs;
-				if (d > radius) {
-					sc = -d;
-				} else {
+						best.rung_side[r2] = sd;
+						best.rung_cosa[r2] = cs;
+						best.rung_res[r2] = d;
+					}
+				if (d <= radius) {
 					strike = true;
 					H = Hs;
-					if (tangent_mode && -ar.dot > kTanEps)
-						sc = 1e5f - fabsf(ar.dot);
-					else
-						sc = 1e7f + H;
 				}
 			}
-			// Scout pool: endpoint-diverse top-3 by raw score.
+			// tangent_mode keeps its own admission band explicitly
+			// rather than through a score constant, so a lexicographic
+			// key cannot let a hard strike poison best.H.
+			const bool tan_block = tangent_mode && !bnd
+				&& -ar.dot > kTanEps;
+			const float sc = tan_block ? -resid : key_of(resid, val);
+			// Scout pool: endpoint-diverse top-3 by raw score. The
+			// dedupe radius SCALES WITH THE ACTIVE TOLERANCE: a fixed
+			// 32u was coarser than every rung below 32u, so all
+			// candidates converging on q collapsed into one slot and
+			// the pool could not hold a diverse set at 8u/4u/1u.
 			{
+				const float dedup = 4.f * tol > 8.f ? 4.f * tol : 8.f;
 				int slot = -1;
 				for (int i2 = 0; i2 < 3; ++i2)
 					if (scouts[static_cast<size_t>(i2)].has
 						&& Len(scouts[static_cast<size_t>(i2)]
-							.epos - epos) < 32.f) {
+							.epos - epos) < dedup) {
 						slot = i2;
 						break;
 					}
@@ -813,6 +953,8 @@ namespace Entrance {
 					sl.has = true;
 					sl.sc = sc;
 					sl.H = H;
+					sl.res = resid;
+					sl.val = val;
 					sl.epos = epos;
 					sl.runs = src_runs ? *src_runs
 						: runs_from_sched(sd, cs);
@@ -829,6 +971,8 @@ namespace Entrance {
 					be.has = true;
 					be.sc = sc;
 					be.H = H;
+					be.res = resid;
+					be.val = val;
 					be.dot = ar.dot;
 					be.epos = epos;
 					be.runs = src_runs ? *src_runs
@@ -845,7 +989,14 @@ namespace Entrance {
 						if (H > best.iv_L[i3])
 							best.iv_L[i3] = H;
 					}
-				if (sc >= 1e7f && H > best.H) {
+				// THE CREDITING GATE. Keyed on the in-radius `strike`
+				// bool plus the explicit tangent condition - never on
+				// "sc >= 1e7", which silently dropped any strike whose
+				// H was negative (reachable whenever a caller's zmin
+				// sits above the contact z, e.g. airrec's zmin = 0)
+				// and which a lexicographic key would have broken
+				// outright.
+				if (!tan_block && H > best.H) {
 					best.ok = true;
 					best.H = H;
 					best.flight = ar;
@@ -870,8 +1021,30 @@ namespace Entrance {
 			return ev_sched(sbuf, cbuf, &runs);
 		};
 		// ---- SEED GRID (deterministic; th_arr hoisted above) ----
+		// s_to = the STORED side that rotates TOWARD th_arr. The
+		// wanted rotation sign is sign(th_arr - h0); the stored label
+		// is its mirror (wishparity 2026-08-19). Before this the seed
+		// grid's "toward" side turned away - masked for the one_run
+		// family (both signs are enumerated) but not for the composite
+		// two_run seeds, whose turn-then-turn ordering was reversed.
 		const signed char s_to = static_cast<signed char>(
-			Steer::WrapPi(th_arr - h0) >= 0.f ? 1 : -1);
+			Strafe::ToStoredSide(
+				Steer::WrapPi(th_arr - h0) >= 0.f ? 1 : -1));
+		// Seed cosa values are generated in TRUE units and converted,
+		// so "gain" seeds actually gain: the active band is only
+		// cap/v wide (0.033 at v=900), and the previous literal stored
+		// values (0.9, 0.4, -0.4 ...) were, in true units, a set of
+		// hard brakes and inert ticks with no sustained-gain member.
+		const float band0 = Strafe::Law(p, s0, 1.f,
+			entry.ducked).BandCos();
+		auto st_gain = [&](float frac) {
+			return Strafe::ToStoredWishCos(
+				Strafe::TrueWishCos(frac * band0));
+		};
+		auto st_brake = [&](float true_c) {
+			return Strafe::ToStoredWishCos(
+				Strafe::TrueWishCos(true_c));
+		};
 		auto one_run = [&](signed char sd, float c0, float c1) {
 			std::vector<WishRun> runs(1);
 			runs[0].len = N;
@@ -898,18 +1071,18 @@ namespace Entrance {
 		for (int m2 = 0; m2 < 2; ++m2) {
 			const signed char sd = m2 ? static_cast<signed char>(
 				-s_to) : s_to;
-			seeds.push_back(one_run(sd, 0.0f, 0.9f));
-			seeds.push_back(one_run(sd, 0.4f, 0.9f));
-			seeds.push_back(one_run(sd, 0.9f, 0.9f));
-			seeds.push_back(one_run(sd, 0.0f, -0.4f));
-			seeds.push_back(one_run(sd, -0.5f, 0.5f));
+			seeds.push_back(one_run(sd, st_gain(0.f), st_gain(0.f)));
+			seeds.push_back(one_run(sd, st_gain(0.f), st_gain(0.9f)));
+			seeds.push_back(one_run(sd, st_gain(0.9f), st_gain(0.f)));
+			seeds.push_back(one_run(sd, st_brake(-0.3f), st_gain(0.f)));
+			seeds.push_back(one_run(sd, st_brake(-0.7f), st_brake(-0.2f)));
 		}
 		seeds.push_back(two_run(static_cast<signed char>(-s_to),
-			0.5f, N / 2, s_to, 0.2f, 0.9f));
+			st_brake(-0.3f), N / 2, s_to, st_gain(0.5f), st_gain(0.f)));
 		seeds.push_back(two_run(static_cast<signed char>(-s_to),
-			0.9f, N / 3, s_to, 0.0f, 0.8f));
-		seeds.push_back(two_run(s_to, 0.0f, N / 2,
-			static_cast<signed char>(-s_to), 0.3f, 0.9f));
+			st_brake(-0.7f), N / 3, s_to, st_gain(0.f), st_gain(0.8f)));
+		seeds.push_back(two_run(s_to, st_gain(0.f), N / 2,
+			static_cast<signed char>(-s_to), st_brake(-0.4f), st_gain(0.f)));
 		{
 			std::vector<WishRun> coast(1);
 			coast[0].len = N;
@@ -1015,50 +1188,156 @@ namespace Entrance {
 			const float lam0 = 0.45f;
 			const float bmag[7] = { 0.f, 0.3f, -0.3f, 0.6f,
 				-0.6f, 0.95f, -0.95f };
-			float track_best = best.H;
+			// NODE-WINNER KEY. Was `best.H` with a +1.f epsilon: on any
+			// case that had not yet struck, best.H stayed at -1e30f
+			// forever, so win_ii/win_bi were PINNED at (0, 0) and both
+			// the m=2 pass and both Gauss-Newton passes were locked to
+			// heading interval 0 with zero lateral offset - exactly the
+			// cases that needed the extra structure got none of it. The
+			// key is now residual-first and always live (and the same
+			// quantity in a residual phase).
+			auto shot_key = [&]() {
+				const float rmin = best.strike_rmin < 1e29f
+					? best.strike_rmin
+					: (best.bnd_rp < 1e29f ? best.bnd_rp : 1e9f);
+				return best.ok ? 1e7f + best.H : -rmin;
+			};
+			float track_best = shot_key();
 			int win_ii = 0, win_bi = 0;
-			auto node_at = [&](float lam, float bm) {
+			int win_chart = 0;
+			float win_p1 = 0.f;
+			float win_lam = 0.45f;
+			// ---- TWO COORDINATE CHARTS OVER THE SAME FREE NODES
+			// (advisor 2026-08-19) ----
+			// Neither chart defines admissibility; neither may exclude
+			// the other's candidates. If some future case is poorly
+			// represented by both, ADD coordinates - never declare the
+			// trajectory impossible.
+			//
+			// The lateral extent now comes from a BROAD OPTIMISTIC
+			// REACHABLE SLICE, not a fixed fraction of the chord: at
+			// lambda*N ticks the node can be at most DMax(s0, n1) from
+			// the start, and must still be within DMax(SMax, N-n1) of
+			// the target. The old +-0.5*chord was a HARD
+			// representational limit (the only lateral generator in the
+			// code), so no node outside it could ever be proposed.
+			auto slice_w = [&](float lam) {
+				const int n1 = static_cast<int>(lam
+					* static_cast<float>(N));
+				if (n1 < 1 || n1 >= N)
+					return 0.25f * rl;
+				const float r0 = Envelope::DMax(s0, n1, p);
+				const float r1 = Envelope::DMax(
+					Envelope::SMax(s0, n1, p), N - n1, p);
+				const float d0 = lam * rl;
+				const float d1 = (1.f - lam) * rl;
+				const float w0 = r0 * r0 > d0 * d0
+					? sqrtf(r0 * r0 - d0 * d0) : 0.f;
+				const float w1 = r1 * r1 > d1 * d1
+					? sqrtf(r1 * r1 - d1 * d1) : 0.f;
+				float w = w0 < w1 ? w0 : w1;
+				// Keep a floor so the chart still proposes when the
+				// optimistic slice is degenerate (a proposal is never
+				// an admissibility claim).
+				if (w < 0.15f * rl)
+					w = 0.15f * rl;
+				return w;
+			};
+			// CHART 0 - chord: P0 + lam*(Q-P0) + b*w(lam)*e_perp.
+			auto node_chord = [&](float lam, float bfrac) {
+				const float w = slice_w(lam) * bfrac;
 				GuideTarget n1;
-				n1.x = entry.pos.X + lam * rx
-					+ bm * rl * 0.5f * eqx;
-				n1.y = entry.pos.Y + lam * ry
-					+ bm * rl * 0.5f * eqy;
+				n1.x = entry.pos.X + lam * rx + w * eqx;
+				n1.y = entry.pos.Y + lam * ry + w * eqy;
 				n1.until = static_cast<int>(lam
 					* static_cast<float>(N));
 				return n1;
 			};
+			// CHART 1 - curvature: the point at arc fraction lam along
+			// the circular arc from P0 to Q whose TOTAL SIGNED SWEEP is
+			// phi. Excellent exactly where the chord chart is worst
+			// (large accumulated turn). Closed form in the chord frame:
+			// R = L / (2 sin(phi/2)), centre (L/2, -R cos(phi/2)),
+			// angle(t) = pi/2 + phi/2 - t*phi.
+			auto node_arc = [&](float lam, float phi) {
+				GuideTarget n1;
+				const float sp = sinf(0.5f * phi);
+				if (fabsf(sp) < 1e-3f || rl < 1.f)
+					return node_chord(lam, 0.f);
+				const float R = rl / (2.f * sp);
+				const float cx = 0.5f * rl;
+				const float cy = -R * cosf(0.5f * phi);
+				const float th2 = 1.57079633f + 0.5f * phi
+					- lam * phi;
+				const float lx = cx + R * cosf(th2);
+				const float ly = cy + R * sinf(th2);
+				n1.x = entry.pos.X + lx * epx + ly * eqx;
+				n1.y = entry.pos.Y + lx * epy + ly * eqy;
+				n1.until = static_cast<int>(lam
+					* static_cast<float>(N));
+				return n1;
+			};
+			auto node_from = [&](int chart, float lam, float p1) {
+				return chart == 1 ? node_arc(lam, p1)
+					: node_chord(lam, p1);
+			};
 			if (tune_m >= 1) {
-				for (int ii = 0; ii < n_near; ++ii)
-					for (int bi2 = 0; bi2 < 7; ++bi2) {
-						std::vector<GuideTarget> tg;
-						tg.push_back(node_at(lam0, bmag[bi2]));
-						tg.push_back(final_tgt(ivt[ii][0],
-							ivt[ii][1]));
-						GuideWeights gw;
-						gw.wp = 2.f;
-						gw.we = 0.3f;
-						shoot(tg, gw, ii);
-						if (best.H > track_best + 1.f) {
-							track_best = best.H;
-							win_ii = ii;
-							win_bi = bi2;
-						}
+				// INTERLEAVED PROPOSAL ORDER. The guided phase has a
+				// hard budget share and each shot costs ~25 eval-
+				// equivalents once exact rollouts are on, so a family
+				// APPENDED after another is systematically starved
+				// (measured: at 600-1000 evals only the first ~7-13 of
+				// the enumerated shots ever ran, which is why the m=2
+				// pass and the node-time adaptation had never executed
+				// at production budgets). Charts and intervals are
+				// therefore round-robined, coarse parameters first.
+				struct NodeProp { int chart; int ii; float p1; };
+				std::vector<NodeProp> props;
+				static const float bf[7] = { 0.f, 0.6f, -0.6f, 0.3f,
+					-0.3f, 0.95f, -0.95f };
+				static const float phis[6] = { 0.9f, -0.9f, 1.9f,
+					-1.9f, 2.7f, -2.7f };
+				for (int r3 = 0; r3 < 7; ++r3)
+					for (int ii = 0; ii < n_near; ++ii) {
+						props.push_back({ 0, ii, bf[r3] });
+						if (r3 < 6)
+							props.push_back({ 1, ii, phis[r3] });
 					}
+				for (const NodeProp& np : props) {
+					std::vector<GuideTarget> tg;
+					tg.push_back(node_from(np.chart, lam0, np.p1));
+					tg.push_back(final_tgt(ivt[np.ii][0],
+						ivt[np.ii][1]));
+					GuideWeights gw;
+					gw.wp = 2.f;
+					gw.we = 0.3f;
+					shoot(tg, gw, np.ii);
+					if (shot_key() > track_best) {
+						track_best = shot_key();
+						win_ii = np.ii;
+						win_chart = np.chart;
+						win_p1 = np.p1;
+					}
+				}
 				// Node-time adaptation (a numerical resolution
 				// axis, not admissibility): retry the winning node
-				// earlier/later.
+				// earlier/later, on its own chart.
 				const float lams[4] = { 0.3f, 0.38f, 0.55f,
 					0.65f };
 				for (int li = 0; li < 4; ++li) {
 					std::vector<GuideTarget> tg;
-					tg.push_back(node_at(lams[li],
-						bmag[win_bi]));
+					tg.push_back(node_from(win_chart, lams[li],
+						win_p1));
 					tg.push_back(final_tgt(ivt[win_ii][0],
 						ivt[win_ii][1]));
 					GuideWeights gw;
 					gw.wp = 2.f;
 					gw.we = 0.3f;
 					shoot(tg, gw, win_ii);
+					if (shot_key() > track_best) {
+						track_best = shot_key();
+						win_lam = lams[li];
+					}
 				}
 			}
 			// m = 2 (generic): first node at the winner's corridor,
@@ -1066,15 +1345,25 @@ namespace Entrance {
 			// lateral variants - depart -> develop -> close, with
 			// nothing about the shape encoded.
 			if (tune_m >= 2) {
+				// depart -> develop -> close, on the WINNER'S CHART and
+				// around its winning node time, with the second node's
+				// chart parameter varied both ways.
 				const float l2s[3] = { 0.f, 0.4f, -0.4f };
+				float lamA = win_lam * 0.65f;
+				float lamB = win_lam * 0.65f + 0.32f;
+				if (lamA < 0.12f) lamA = 0.12f;
+				if (lamB > 0.88f) lamB = 0.88f;
 				for (int li = 0; li < 3; ++li) {
-					float b2 = bmag[win_bi] + l2s[li];
-					if (b2 > 0.95f) b2 = 0.95f;
-					if (b2 < -0.95f) b2 = -0.95f;
+					float p2 = win_p1 + (win_chart == 1
+						? l2s[li] * 1.5f : l2s[li]);
+					if (win_chart == 0) {
+						if (p2 > 0.95f) p2 = 0.95f;
+						if (p2 < -0.95f) p2 = -0.95f;
+					}
 					std::vector<GuideTarget> tg;
-					tg.push_back(node_at(0.3f,
-						bmag[win_bi] * 0.6f));
-					tg.push_back(node_at(0.62f, b2));
+					tg.push_back(node_from(win_chart, lamA,
+						win_p1 * 0.6f));
+					tg.push_back(node_from(win_chart, lamB, p2));
 					tg.push_back(final_tgt(ivt[win_ii][0],
 						ivt[win_ii][1]));
 					GuideWeights gw;
@@ -1094,8 +1383,15 @@ namespace Entrance {
 			// damped least squares (J^T J + lambda I) dxi = -J^T R.
 			// Every evaluation replays and is charged; schedules
 			// enter the frontier only through ev_sched.
+			// GN GATE, RESIDUAL-BASED IN BOTH MODES. Face mode gated on
+			// `best.ok` ("a strike inside radius already exists"),
+			// which switched the one true residual minimiser OFF
+			// exactly when a tight tolerance is requested and the
+			// search is still 20u out. Boundary mode was already
+			// residual-gated; now they are symmetric.
 			if (tune_m >= 2
-				&& (best.ok || (bnd && best.bnd_rp < 500.f))
+				&& ((bnd ? best.bnd_rp : best.strike_rmin) < 500.f
+					|| best.ok)
 				&& budget - best.evals > 20) {
 				const float th_lo_w = Steer::WrapPi(th_arr
 					+ ivt[win_ii][0]);
@@ -1153,14 +1449,14 @@ namespace Entrance {
 					r_out[0] = px - q.X;
 					r_out[1] = py - q.Y;
 					r_out[2] = sqrtf(ThetaIntervalDist2(tha,
-						th_lo_w, th_hi_w)) * 200.f;
+						th_lo_w, th_hi_w)) * kThetaW;
 				};
 				// ---- Pass 1: single node, 2 variables ----
 				{
-					float nx = entry.pos.X + 0.45f * rx
-						+ bmag[win_bi] * rl * 0.5f * eqx;
-					float ny = entry.pos.Y + 0.45f * ry
-						+ bmag[win_bi] * rl * 0.5f * eqy;
+					GuideTarget seed1 = node_from(win_chart, win_lam,
+						win_p1);
+					float nx = seed1.x;
+					float ny = seed1.y;
 					auto eval1 = [&](float x2, float y2,
 						float* r_out) {
 						GuideTarget n1;
@@ -1471,14 +1767,64 @@ namespace Entrance {
 		const float ksteps[4] = { 0.3f, 0.12f, 0.05f, kfine };
 		const int lsteps[4] = { 6, 2, 2, 1 };
 		int dry = 0;
-		float last_best = -1e30f;
+		// MULTI-CHANNEL CONVERGENCE. dry used to increment on best.H
+		// alone, which (a) never moves during a residual-reduction
+		// phase, so a continuation search would "converge" instantly,
+		// and (b) had a live bug: best.H and last_best both start at
+		// -1e30f and -1e30f + 1e-3f == -1e30f in single precision, so
+		// any solve that never struck incremented dry on its FIRST
+		// round and got exactly 4 refinement rounds - cutting off the
+		// hardest cases, the ones with the most budget left.
+		float last_H = -1e30f;
+		float last_res = 1e30f;
+		int   last_hits = 0;
+		auto progress = [&]() {
+			int hits = 0;
+			for (int i4 = 0; i4 < 6; ++i4)
+				hits += best.iv_hits[i4] > 0 ? 1 : 0;
+			for (int b2 = 0; b2 < kBins; ++b2)
+				hits += bins[static_cast<size_t>(b2)].has ? 1 : 0;
+			for (int s3 = 0; s3 < 3; ++s3)
+				hits += scouts[static_cast<size_t>(s3)].has ? 1 : 0;
+			const float rmin = best.strike_rmin < 1e29f
+				? best.strike_rmin
+				: (best.bnd_rp < 1e29f ? best.bnd_rp : 1e30f);
+			// Relative epsilon on H: 1e-3 absolute is below float ULP
+			// at H ~ 1e6 and therefore meaningless there.
+			const float hEps = fabsf(last_H) > 1.f
+				? fabsf(last_H) * 1e-6f : 1e-3f;
+			bool moved = false;
+			if (best.H > last_H + hEps) moved = true;
+			if (rmin < last_res - 1e-4f) moved = true;
+			if (hits > last_hits) moved = true;
+			last_H = best.H;
+			last_res = rmin;
+			last_hits = hits;
+			return moved;
+		};
+		// Re-key every surviving elite after the active tolerance
+		// changes: each carries its raw (residual, value) so the key is
+		// recomputed for free rather than re-flying ~27 schedules.
+		auto rekey = [&]() {
+			for (BinElite& b2 : bins)
+				if (b2.has)
+					b2.sc = key_of(b2.res, b2.val);
+			for (BinElite& s3 : scouts)
+				if (s3.has)
+					s3.sc = key_of(s3.res, s3.val);
+		};
+		int rung_i = 0;   // next kLadder rung the continuation targets
 		while (best.evals < budget && dry < 4) {
 			// Scouts always get the full schedule.
 			for (int rd = 0; rd < 4 && best.evals < budget; ++rd)
 				for (int si2 = 0; si2 < 3; ++si2)
 					deepen(scouts[static_cast<size_t>(si2)],
 						ksteps[rd], lsteps[rd]);
-			// Then the top bins by H + the softest-|dot| bin.
+			// Then the top bins by the SEARCH KEY (was by .H alone,
+			// which spent the refinement budget on the fastest bins
+			// rather than the ones that can still improve) + the
+			// softest-|dot| bin, which is meaningless in boundary mode
+			// where free flight never sets a clip dot.
 			std::vector<int> order;
 			for (int b2 = 0; b2 < kBins; ++b2)
 				if (bins[static_cast<size_t>(b2)].has)
@@ -1486,15 +1832,16 @@ namespace Entrance {
 			if (!order.empty()) {
 				std::sort(order.begin(), order.end(),
 					[&](int a2, int b3) {
-						return bins[static_cast<size_t>(a2)].H
-							> bins[static_cast<size_t>(b3)].H;
+						return bins[static_cast<size_t>(a2)].sc
+							> bins[static_cast<size_t>(b3)].sc;
 					});
 				int soft = order[0];
-				for (int b2 : order)
-					if (fabsf(bins[static_cast<size_t>(b2)].dot)
-						< fabsf(bins[static_cast<size_t>(soft)]
-							.dot))
-						soft = b2;
+				if (!bnd)
+					for (int b2 : order)
+						if (fabsf(bins[static_cast<size_t>(b2)].dot)
+							< fabsf(bins[static_cast<size_t>(soft)]
+								.dot))
+							soft = b2;
 				std::vector<int> work(order.begin(),
 					order.begin() + static_cast<long long>(
 						order.size() > 4 ? 4 : order.size()));
@@ -1517,11 +1864,41 @@ namespace Entrance {
 			}
 			if (best.evals < budget && scouts[0].has)
 				perturb(scouts[0]);
-			if (best.H <= last_best + 1e-3f)
+			if (!progress())
 				dry++;
 			else
 				dry = 0;
-			last_best = best.H;
+			// TOLERANCE CONTINUATION: when this round converged and a
+			// finer tolerance was requested, tighten to the next rung
+			// and keep going - the residual gradient is restored
+			// instead of the search declaring victory at the coarse
+			// radius. Advancing only BETWEEN rounds (never inside
+			// deepen) keeps the elite cache coherent; rekey() refreshes
+			// the keys from the raw outcomes.
+			// A RESERVED SHARE for the precision phase. Measured
+			// 2026-08-19: at 600 evals/case the value phase never
+			// converged, so continuation never fired and the sub-8u
+			// rungs stayed at zero - the cliff persisted for a pure
+			// ALLOCATION reason. The requested tolerance therefore gets
+			// a guaranteed minimum share of the budget (the advisor's
+			// "every unresolved domain receives minimum exploration",
+			// applied to resolution rather than to regions).
+			const bool half_spent = best.evals * 2 >= budget;
+			if ((dry >= 4 || half_spent) && prec < tol
+				&& best.evals < budget) {
+				float next = prec;
+				while (rung_i < 6 && kLadder[rung_i] >= tol)
+					rung_i++;
+				if (rung_i < 6 && kLadder[rung_i] > prec)
+					next = kLadder[rung_i];
+				if (next < tol) {
+					tol = next;
+					rekey();
+					dry = 0;
+					last_res = 1e30f;
+					last_hits = 0;
+				}
+			}
 		}
 		return best;
 	}
@@ -1622,7 +1999,7 @@ namespace Entrance {
 					Strafe::TickLaw ll = Strafe::Law(p,
 						Envelope::SMax(s0, split, p), 1.f,
 						entry.ducked);
-					const float wl = ll.TurnRad(0.f, 1.f);
+					const float wl = ll.TurnRad(Strafe::kPerp, 1.f);
 					const int tat = wl > 1e-5f
 						? static_cast<int>(fabsf(ta) / wl) + 1
 						: split;

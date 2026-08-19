@@ -163,6 +163,12 @@ namespace Entrance {
 	// curve, not a single hit/miss bit.
 	constexpr float kLadder[6] = { 32.f, 16.f, 8.f, 4.f, 2.f, 1.f };
 
+	// The ONE position/heading trade weight (units of u per radian),
+	// shared by the boundary search metric and the Gauss-Newton
+	// residual so the optimizer descends exactly what the search ranks
+	// (they were 250 and 200 - inconsistent).
+	constexpr float kThetaW = 250.f;
+
 	// Optional search-machinery tuning (advisor 2026-08-19). Defaults
 	// reproduce the production solve; airrec sweeps shoot_m to measure
 	// the recovery CURVE (the Level-B trigger is its shape).
@@ -172,6 +178,17 @@ namespace Entrance {
 		// outcome-space Gauss-Newton. Base seeds/frontier/deepen/
 		// scouts always run.
 		int shoot_m = 2;
+		// ACTIVE TOLERANCE CONTINUATION (advisor 2026-08-19): the
+		// finest positional tolerance this query actually wants. 0 =
+		// off (region/field semantics: stop at `radius`). When set,
+		// the refinement loop first maximizes value at `radius` as
+		// usual, THEN tightens the active tolerance down the kLadder
+		// rungs to this value, minimizing the residual at each rung -
+		// so the value contract never regresses and the exact-point
+		// rungs stop being reachable only by luck. Exact-point queries
+		// (humanexact, ladder, airrec) set it; cell/field queries
+		// (Build, fieldexact) must not.
+		float precision = 0.f;
 		// BOUNDARY MODE (Layer-1 recoverability): non-null = solve the
 		// free-air boundary problem (S0, Q, T, theta) instead of a
 		// face strike. Points at {th_lo, th_hi} (radians, absolute).
@@ -209,6 +226,15 @@ namespace Entrance {
 		float strike_rmin_th = 0.f;
 		float rung_E[6] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f,
 			-1e30f };
+		// PER-RUNG WITNESSES. A rung that can be reported but not
+		// handed back is only observable, never usable - it could
+		// neither be credited to a Rec nor banked. Each rung now
+		// carries the schedule that achieved it and its realized
+		// residual, so a tightened result is a first-class witness.
+		std::vector<signed char> rung_side[6];
+		std::vector<float> rung_cosa[6];
+		float rung_res[6] = { 1e30f, 1e30f, 1e30f, 1e30f, 1e30f,
+			1e30f };
 		// PER-INTERVAL heading coverage {L_i, hits, shots} about
 		// iv_ref (the closed-form arrival estimate). L_i = best
 		// in-radius witness whose terminal heading lies in interval i;

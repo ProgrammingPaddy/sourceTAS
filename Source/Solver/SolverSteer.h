@@ -42,9 +42,16 @@ namespace Steer {
 		                        // (large default = unconstrained)
 	};
 
+	// NOTE ON UNITS (2026-08-19): every cosa in this file is a TRUE
+	// wish-from-velocity cosine - the law's own units. The stored
+	// canonical basis is a full pi rotation away (Strafe::ToTrueWishCos
+	// / ToStoredSide carry the measured bridge), so anything emitting
+	// engine inputs from these values MUST convert first. The
+	// `wishparity` gate is the standing check.
 	inline float TurnAt(const Strafe::TickLaw& law, float cosa) {
 		const float s2 = 1.f - cosa * cosa;
-		return law.TurnRad(cosa, s2 > 0.f ? sqrtf(s2) : 0.f);
+		return law.TurnRad(Strafe::TrueWishCos(cosa),
+			s2 > 0.f ? sqrtf(s2) : 0.f);
 	}
 
 	// The cosa in [0, min(1, cap/v)] whose TurnRad equals want
@@ -106,7 +113,7 @@ namespace Steer {
 				? atan2f(s.vel.Y, s.vel.X) : theta;
 			const float e = WrapPi(theta - h);
 			Strafe::TickLaw law = Strafe::Law(p, s2d, 1.f, s.ducked);
-			const float maxturn = law.TurnRad(0.f, 1.f);
+			const float maxturn = law.TurnRad(Strafe::kPerp, 1.f);
 			int want = side;
 			if (e > 0.02f) want = 1;
 			else if (e < -0.02f) want = -1;
@@ -129,14 +136,35 @@ namespace Steer {
 				const float ae = fabsf(e);
 				const bool with_side = (side > 0) == (e > 0.f)
 					&& ae > 1e-4f;
-				const float cosa = (with_side && ae < maxturn)
+				// TRUE-basis request: which wish cosine achieves the
+				// wanted rotation, and which way that rotation points.
+				const float true_cosa = (with_side && ae < maxturn)
 					? CosForTurn(law, ae)
 					: (with_side ? CosForBrakeTurn(law, ae) : law.cap
 						/ (s2d > law.cap ? s2d : law.cap));
-				const float alpha = acosf(cosa > 1.f ? 1.f : cosa);
-				const float wh = h + (side > 0 ? alpha : -alpha);
-				*smove = -450.f * static_cast<float>(side);
-				*yaw_deg = (wh + (side > 0 ? 1.f : -1.f)
+				const int true_rot_side = side;
+				// THE BRIDGE (measured by `wishparity`, 2026-08-19):
+				// the engine-input emitter realizes its wish at wh + pi,
+				// so BOTH the cosine and the side invert on the way out.
+				// Before this conversion the controller was emitting a
+				// braking request as true cos ~ +0.9, which is far above
+				// cap/v and therefore COMPLETELY INERT - measured: the
+				// heading error stood still (0.1500 -> 0.1500 over 25
+				// ticks, 0/4 targets converging). That is the root cause
+				// of the historical "per-tick heading mirroring" failure
+				// recorded in SolverAir.h.
+				const float stored_cosa = Strafe::ToStoredWishCos(
+					Strafe::TrueWishCos(true_cosa));
+				const int stored_side = Strafe::ToStoredSide(
+					true_rot_side);
+				float sc = stored_cosa;
+				if (sc > 1.f) sc = 1.f;
+				if (sc < -1.f) sc = -1.f;
+				const float alpha = acosf(sc);
+				const float wh = h
+					+ (stored_side > 0 ? alpha : -alpha);
+				*smove = -450.f * static_cast<float>(stored_side);
+				*yaw_deg = (wh + (stored_side > 0 ? 1.f : -1.f)
 					* kSteerPi * 0.5f) * 57.2957795f;
 			} else if (!coast) {
 				*yaw_deg = theta * 57.2957795f;

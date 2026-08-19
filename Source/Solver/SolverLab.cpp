@@ -1796,8 +1796,8 @@ namespace {
 			const float sp2 = s.vel.X * s.vel.X + s.vel.Y * s.vel.Y;
 			const float heading = atan2f(s.vel.Y, s.vel.X);
 			Strafe::TickLaw law = Strafe::Law(o.params, v, kSf[si], du != 0);
-			const float ana2 = law.NewSpeed2(cosf(alpha));
-			const float anaT = law.TurnRad(cosf(alpha), sinf(alpha));
+			const float ana2 = law.NewSpeed2(Strafe::TrueWishCos(cosf(alpha)));
+			const float anaT = law.TurnRad(Strafe::TrueWishCos(cosf(alpha)), sinf(alpha));
 			const float dg = fabsf(sp2 - ana2);
 			const float dt = fabsf(heading - anaT);
 			if (dg > max_dg) {
@@ -1823,11 +1823,11 @@ namespace {
 			const float v = kV[vi];
 			Strafe::TickLaw law = Strafe::Law(o.params, v, 1.f, false);
 			const float g0 = sqrtf(v * v + law.OptGain2()) - v;
-			const float t0 = law.TurnRad(0.f, 1.f) * 57.29578f;
+			const float t0 = law.TurnRad(Strafe::kPerp, 1.f) * 57.29578f;
 			const float cb = cosf(Deg2Rad(75.f));   // 15 deg off perp
 			const float sb = sinf(Deg2Rad(75.f));
-			const float gb = sqrtf(law.NewSpeed2(cb)) - v;
-			const float tb = law.TurnRad(cb, sb) * 57.29578f;
+			const float gb = sqrtf(law.NewSpeed2(Strafe::TrueWishCos(cb))) - v;
+			const float tb = law.TurnRad(Strafe::TrueWishCos(cb), sb) * 57.29578f;
 			printf("  %6.0f  %9.4f  %12.4f | %12.4f  %9.4f\n",
 				v, g0, t0, gb, tb);
 		}
@@ -5170,7 +5170,8 @@ namespace {
 								const float c = -static_cast<float>(
 									ci) / 16.f;
 								const float s2 = 1.f - c * c;
-								const float tr2 = law.TurnRad(c,
+								const float tr2 = law.TurnRad(
+									Strafe::TrueWishCos(c),
 									s2 > 0.f ? sqrtf(s2) : 0.f);
 								if (tr2 > btr) {
 									btr = tr2;
@@ -5180,7 +5181,8 @@ namespace {
 							if (btr <= 1e-5f)
 								break;
 							excess -= btr;
-							const float v2 = law.NewSpeed2(bc);
+							const float v2 = law.NewSpeed2(
+										Strafe::TrueWishCos(bc));
 							v = v2 > 0.f ? sqrtf(v2) : 0.f;
 						}
 						deliver2 = deliver0 - (s2d * s2d - v * v);
@@ -6666,9 +6668,15 @@ namespace {
 			int flights = 0;
 			// One frontier solve yields BOTH BestBoard and
 			// FastestTangent (the ruling's one-frontier design).
+			// EXACT-POINT QUERY: continue the tolerance to this
+			// command's own stated bar (4u) so H(Q_h) >= E_h is
+			// finally evaluated AT Q_h instead of up to 16u away.
+			Entrance::RefTune hx_tune;
+			hx_tune.precision = 4.f;
 			Entrance::RefResult rr = Entrance::RefSolve(fe.sep, w,
 				o.params, g, fe.fidx, fe.cp, 16.f, n_h, 2000,
-				false, &flights, fc.zmin, fe.sep_ctl);
+				false, &flights, fc.zmin, fe.sep_ctl, nullptr,
+				nullptr, nullptr, &hx_tune);
 			// The human's own reversal cadence vs the dwell law.
 			int reversals = 0, viol = 0, mind = 100000;
 			{
@@ -6943,7 +6951,7 @@ namespace {
 					atan2f(vb.Y, vb.X) - atan2f(va.Y, va.X));
 				Strafe::TickLaw law = Strafe::Law(o.params, sa,
 					1.f, ducked[static_cast<size_t>(t2)] != 0);
-				const float wr = law.TurnRad(0.f, 1.f);
+				const float wr = law.TurnRad(Strafe::kPerp, 1.f);
 				const float ft = wr > 1e-6f ? dh / wr : 0.f;
 				if (fabsf(ft) > fmax)
 					fmax = fabsf(ft);
@@ -7364,10 +7372,16 @@ namespace {
 			// (2) BASIN STABILITY: optimizer handed the exact
 			// schedule.
 			int fl = 0;
+			// The basin test is a SOUNDNESS issue at 16u: the seed's
+			// own residual is ~0, so a coarse radius lets the
+			// optimizer walk 15u away and still score as holding the
+			// basin.
+			Entrance::RefTune ld_tune;
+			ld_tune.precision = 4.f;
 			Entrance::RefResult r0 = Entrance::RefSolve(fe.sep, w,
 				o.params, g, fe.fidx, fe.cp, 16.f, t1 - t0, 800,
 				false, &fl, fc.zmin, fe.sep_ctl, nullptr, &hside,
-				&hcosa);
+				&hcosa, &ld_tune);
 			printf("ladder:   optimizer from exact schedule: %s "
 				"%.0fk (dot %.1f) vs E_h %.0fk | %s\n",
 				r0.ok ? "H" : "NONE",
@@ -7431,7 +7445,7 @@ namespace {
 						fe.sep, w, o.params, g, fe.fidx, fe.cp,
 						16.f, t1 - t0, 800, false, &fl2,
 						fc.zmin, fe.sep_ctl, nullptr, &hside,
-						&pc);
+						&pc, &ld_tune);
 					if (rp.ok && rp.H >= eh - 2000.f)
 						rec++;
 				}
@@ -7485,6 +7499,12 @@ namespace {
 			int n = 0, hit = 0;
 		};
 		Agg by_hz[2], by_sp[2], by_vz[3];
+		// Crediting stays pinned to the 28u acceptance radius (this
+		// is the feasibility/bound suite); continuation only ADDS
+		// pressure toward the exactness rungs the report measures,
+		// so no value metric can regress from it.
+		Entrance::RefTune as_tune;
+		as_tune.precision = 1.f;
 		const int hzs[2] = { 30, 55 };
 		const float sps[2] = { 400.f, 900.f };
 		const float vzs[3] = { 150.f, -100.f, -400.f };
@@ -7533,7 +7553,9 @@ namespace {
 						Entrance::RefResult rr =
 							Entrance::RefSolve(st, w, o.params, g,
 								static_cast<int>(fi), q, 28.f, Hn,
-								600, false, &fl, fc.zmin);
+								600, false, &fl, fc.zmin,
+								Steer::CtlState(), nullptr, nullptr,
+								nullptr, &as_tune);
 						const float sa = Envelope::SMax(s0, Hn,
 							o.params);
 						const float va = Envelope::VzAfter(vz0,
@@ -7607,6 +7629,223 @@ namespace {
 			by_vz[2].hit, by_vz[2].n);
 		fflush(stdout);
 		return 0;
+	}
+
+	// ================= wishparity: THE CONVENTION PARITY GATE
+	// (advisor 2026-08-19: "make it difficult for this class of bug to
+	// exist again"). The stored canonical (side, cosa) basis and the
+	// closed-form Strafe::TickLaw are written in DIFFERENT semantic
+	// units, and one mirrored bridge silently crippled the guided
+	// shooter's whole action vocabulary. This gate settles the
+	// convention EMPIRICALLY - one exact engine tick against the law
+	// over a grid of (speed, stored cosa, side) - and is a permanent
+	// regression gate at the physics/search interface.
+	//
+	// It discriminates two hypotheses instead of assuming one:
+	//   H1: true wish cos = +stored, realized rotation = +side
+	//   H2: true wish cos = -stored, realized rotation = -side
+	// Whichever reproduces the engine IS the convention. Reported, not
+	// assumed - the same discipline that caught the original bug.
+	int CmdWishParity(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("wishparity: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		float zhigh = -1e30f;
+		for (const Route::Face& fc : g.faces)
+			if (fc.centroid.Z > zhigh)
+				zhigh = fc.centroid.Z;
+		zhigh += 3000.f;
+		const float cap = p.air_speed_cap;
+		const float sps[6] = { 50.f, 150.f, 400.f, 900.f, 1600.f,
+			2400.f };
+		// Absolute cos samples PLUS band-relative ones: the active
+		// free-turn band is only cap/v wide in cos units (0.033 at
+		// v=900), so a fixed grid cannot resolve it - the parity gate
+		// must probe inside it or it proves nothing about gain.
+		struct Row {
+			float s0, c;
+			int side;
+			float ds2_meas, dh_meas;
+			float e1s, e1h, e2s, e2h;
+		};
+		std::vector<Row> rows;
+		double m1s = 0.0, m1h = 0.0, m2s = 0.0, m2h = 0.0;
+		int n1s = 0, n2s = 0, sign1 = 0, sign2 = 0, nsign = 0;
+		for (int si = 0; si < 6; ++si) {
+			const float s0 = sps[si];
+			const float bw = s0 > cap ? cap / s0 : 1.f;
+			float cs[14] = { 1.f, 0.9f, 0.6f, 0.3f, 0.05f, 0.f,
+				-0.05f, -0.3f, -0.6f, -0.9f, -1.f,
+				-bw, -0.5f * bw, 0.5f * bw };
+			for (int ci = 0; ci < 14; ++ci)
+				for (int sd = -1; sd <= 1; sd += 2) {
+					PlayerState st;
+					st.pos = Vec3(0.f, 0.f, zhigh);
+					st.vel = Vec3(s0, 0.f, 0.f);
+					st.ducked = false;
+					st.hull_state = 0;
+					st.on_ground = false;
+					float yaw = 0.f, fm = 0.f, sm = 0.f;
+					Air::WishInputs(0.f, sd, cs[ci], &yaw, &fm,
+						&sm);
+					TickEvents ev;
+					MoveTick(st, w, p, 0.f, yaw, fm, sm, 0.f, 0,
+						&ev);
+					if (ev.ncontacts > 0 || st.on_ground) {
+						printf("wishparity: CONTACT in open air "
+							"at s%.0f c%.2f side%+d - probe "
+							"altitude invalid\n", s0, cs[ci],
+							sd);
+						return 1;
+					}
+					const float s1 = Len2D(st.vel);
+					Row r;
+					r.s0 = s0;
+					r.c = cs[ci];
+					r.side = sd;
+					r.ds2_meas = s1 * s1 - s0 * s0;
+					r.dh_meas = Steer::WrapPi(atan2f(st.vel.Y,
+						st.vel.X));
+					Strafe::TickLaw law = Strafe::Law(p, s0, 1.f,
+						false);
+					// H1: stored IS true, rotation follows +side.
+					{
+						const Strafe::TrueWishCos c(cs[ci]);
+						const float s2 = 1.f - c.v * c.v;
+						const float tr = law.TurnRad(c,
+							s2 > 0.f ? sqrtf(s2) : 0.f);
+						const float nv2 = law.NewSpeed2(c);
+						r.e1s = (nv2 - s0 * s0) - r.ds2_meas;
+						r.e1h = (sd > 0 ? tr : -tr) - r.dh_meas;
+					}
+					// H2 (the DOCUMENTED convention): true = -stored,
+					// rotation follows -side. Routed through the same
+					// bridge functions production uses, so this row is
+					// a genuine test of them, not a restatement.
+					{
+						const Strafe::TrueWishCos c =
+							Strafe::ToTrueWishCos(cs[ci]);
+						const int rot = Strafe::ToTrueRotSide(sd);
+						const float s2 = 1.f - c.v * c.v;
+						const float tr = law.TurnRad(c,
+							s2 > 0.f ? sqrtf(s2) : 0.f);
+						const float nv2 = law.NewSpeed2(c);
+						r.e2s = (nv2 - s0 * s0) - r.ds2_meas;
+						r.e2h = (rot > 0 ? tr : -tr) - r.dh_meas;
+					}
+					if (fabsf(r.e1s) > m1s) { m1s = fabsf(r.e1s); n1s = static_cast<int>(rows.size()); }
+					if (fabsf(r.e2s) > m2s) { m2s = fabsf(r.e2s); n2s = static_cast<int>(rows.size()); }
+					if (fabsf(r.e1h) > m1h) m1h = fabsf(r.e1h);
+					if (fabsf(r.e2h) > m2h) m2h = fabsf(r.e2h);
+					if (fabsf(r.dh_meas) > 1e-6f) {
+						nsign++;
+						const float p1 = (sd > 0 ? 1.f : -1.f);
+						if (p1 * r.dh_meas > 0.f) sign1++;
+						else sign2++;
+					}
+					rows.push_back(r);
+				}
+		}
+		printf("=== WISHPARITY (one exact engine tick vs the closed-"
+			"form law; %d rows) ===\n", static_cast<int>(rows.size()));
+		printf("wishparity: H1 (true=+stored, rot=+side): max |dspeed2 "
+			"err| %.3f, max |dheading err| %.3e rad\n", m1s, m1h);
+		printf("wishparity: H2 (true=-stored, rot=-side): max |dspeed2 "
+			"err| %.3f, max |dheading err| %.3e rad\n", m2s, m2h);
+		printf("wishparity: measured rotation sign follows +side in "
+			"%d/%d turning rows, -side in %d/%d\n", sign1, nsign,
+			sign2, nsign);
+		// The engine decides. Tolerances are the strafelaw prover's own
+		// certified scale (Docs/EngineParityReference.md): float-ULP in
+		// speed^2 of ~1e7, ~1e-8 rad.
+		const bool h1 = m1s < 1.0 && m1h < 1e-5;
+		const bool h2 = m2s < 1.0 && m2h < 1e-5;
+		printf("wishparity: VERDICT %s\n", h1 && !h2
+			? "H1 - the stored basis IS the law's true-wish basis"
+			: (h2 && !h1
+				? "H2 - stored cos and stored side are BOTH mirrored "
+				  "relative to the law (full pi rotation)"
+				: (h1 && h2 ? "AMBIGUOUS (grid too weak)"
+					: "NEITHER - the law does not model the engine "
+					  "under either convention")));
+		if (!h1 && !h2) {
+			printf("wishparity:   worst H1 row s%.0f c%.2f side%+d "
+				"(meas dspeed2 %.1f dh %+.5f)\n",
+				rows[static_cast<size_t>(n1s)].s0,
+				rows[static_cast<size_t>(n1s)].c,
+				rows[static_cast<size_t>(n1s)].side,
+				rows[static_cast<size_t>(n1s)].ds2_meas,
+				rows[static_cast<size_t>(n1s)].dh_meas);
+			printf("wishparity:   worst H2 row s%.0f c%.2f side%+d "
+				"(meas dspeed2 %.1f dh %+.5f)\n",
+				rows[static_cast<size_t>(n2s)].s0,
+				rows[static_cast<size_t>(n2s)].c,
+				rows[static_cast<size_t>(n2s)].side,
+				rows[static_cast<size_t>(n2s)].ds2_meas,
+				rows[static_cast<size_t>(n2s)].dh_meas);
+		}
+		// Sample rows, including inside the free-turn band, so the
+		// report shows what each convention CLAIMS vs what happened.
+		printf("wishparity: sample rows (stored c | measured dspeed2, "
+			"dheading | H1 err | H2 err)\n");
+		for (size_t i = 0; i < rows.size(); i += 7) {
+			const Row& r = rows[i];
+			printf("wishparity:   s%-5.0f c%+.4f side%+d | %+9.1f "
+				"%+.5f | %+8.1f %+.5f | %+8.1f %+.5f\n", r.s0, r.c,
+				r.side, r.ds2_meas, r.dh_meas, r.e1s, r.e1h, r.e2s,
+				r.e2h);
+		}
+		// ---- Closed-loop probe: does Steer::Controller actually
+		// converge on a requested heading? (The controller carries a
+		// DUPLICATE of the emitter mapping; if its units are mirrored
+		// its per-tick correction pushes the wrong way.)
+		printf("wishparity: --- Steer::Controller convergence probe "
+			"---\n");
+		const float tgts[4] = { 0.15f, 0.5f, 1.2f, -0.8f };
+		int conv = 0;
+		for (int ti = 0; ti < 4; ++ti) {
+			PlayerState st;
+			st.pos = Vec3(0.f, 0.f, zhigh);
+			st.vel = Vec3(800.f, 0.f, 0.f);
+			st.ducked = false;
+			st.hull_state = 0;
+			st.on_ground = false;
+			Steer::Controller ctl;
+			const float theta = tgts[ti];
+			float e0 = fabsf(Steer::WrapPi(theta));
+			float e5 = e0, e24 = e0;
+			for (int k = 0; k < 25; ++k) {
+				float yaw = 0.f, fm = 0.f, sm = 0.f;
+				ctl.Tick(st, p, theta, k, &yaw, &fm, &sm);
+				TickEvents ev;
+				MoveTick(st, w, p, 0.f, yaw, fm, sm, 0.f, 0, &ev);
+				const float e = fabsf(Steer::WrapPi(theta
+					- atan2f(st.vel.Y, st.vel.X)));
+				if (k == 4) e5 = e;
+				if (k == 24) e24 = e;
+			}
+			const bool ok = e24 < e0;
+			if (ok) conv++;
+			printf("wishparity:   target %+.2f rad | |e| %.4f -> "
+				"%.4f (t5) -> %.4f (t25) | %s\n", theta, e0, e5,
+				e24, ok ? "converges" : "DIVERGES");
+		}
+		printf("wishparity: controller %d/4 targets converge\n", conv);
+		printf("wishparity: %s\n", ((h1 != h2) && conv == 4)
+			? "PASS - convention determined and the controller tracks"
+			: "FAIL - see rows above");
+		fflush(stdout);
+		return (h1 != h2) && conv == 4 ? 0 : 2;
 	}
 
 	// ================= airrec: THE CONSTRUCTIVE RECOVERABILITY
@@ -8003,6 +8242,88 @@ namespace {
 			"dwell law min_gap %d)\n", n1,
 			static_cast<int>(L1.size()), n2,
 			static_cast<int>(L2.size()), budget, min_gap);
+		// ---- FIXTURE VERSION + MANIFEST (advisor 2026-08-19) ----
+		// airrec is becoming the Stage-A yardstick, so every m-curve
+		// must be compared against IDENTICAL known-reachable problems.
+		// The generator is versioned; the manifest is a hash over the
+		// full oracle set (strata, horizon, start state, schedule and
+		// the realized boundary condition, all by BIT PATTERN - the
+		// bank's decimal-text idiom is lossy and could not certify
+		// identity). Changing generator semantics, strata, ranges or
+		// the physics convention creates a NEW version.
+		{
+			const char* kFixtureVer = "airrec-fixture-v2";
+			unsigned long long fh = 1469598103934665603ULL;
+			auto mixf = [&](float v) {
+				unsigned u;
+				memcpy(&u, &v, sizeof(u));
+				fh = EFFnv64(&u, sizeof(u), fh);
+			};
+			auto mixi = [&](int v) {
+				fh = EFFnv64(&v, sizeof(v), fh);
+			};
+			auto mix_oracle = [&](const RecOracle& oc, int layer) {
+				mixi(layer);
+				mixi(oc.ok ? 1 : 0);
+				mixi(oc.rev); mixi(oc.prof); mixi(oc.dwell);
+				mixi(oc.T); mixi(oc.face); mixi(oc.min_dwell);
+				mixf(oc.S0.pos.X); mixf(oc.S0.pos.Y);
+				mixf(oc.S0.pos.Z);
+				mixf(oc.S0.vel.X); mixf(oc.S0.vel.Y);
+				mixf(oc.S0.vel.Z);
+				mixf(oc.Q.X); mixf(oc.Q.Y); mixf(oc.Q.Z);
+				mixf(oc.th); mixf(oc.sT); mixf(oc.vzT); mixf(oc.E);
+				for (size_t k2 = 0; k2 < oc.side.size(); ++k2) {
+					mixi(static_cast<int>(
+						oc.side[k2]));
+					mixf(oc.cosa[k2]);
+				}
+			};
+			for (const RecOracle& oc : L1)
+				mix_oracle(oc, 1);
+			for (const RecOracle& oc : L2)
+				mix_oracle(oc, 2);
+			// Params and law versions belong to fixture identity: the
+			// same schedule under different physics is a different
+			// problem.
+			mixf(p.dt); mixf(p.gravity); mixf(p.airaccelerate);
+			mixf(p.air_speed_cap); mixf(p.maxspeed);
+			mixf(p.strafe_rate_max);
+			std::string manifest = std::string(
+				"C:\\Users\\Connor\\Documents\\SourceTAS\\"
+				"recordings\\") + kFixtureVer + ".manifest";
+			char line[256];
+			snprintf(line, sizeof(line),
+				"%s|L1 %d|L2 %d|hash %016llx|em1 dwell6 clip1\n",
+				kFixtureVer, static_cast<int>(L1.size()),
+				static_cast<int>(L2.size()), fh);
+			std::string prev;
+			if (FILE* fr = fopen(manifest.c_str(), "rb")) {
+				char buf[256];
+				if (fgets(buf, sizeof(buf), fr))
+					prev = buf;
+				fclose(fr);
+			}
+			if (prev.empty()) {
+				if (FILE* fw = fopen(manifest.c_str(), "wb")) {
+					fputs(line, fw);
+					fclose(fw);
+				}
+				printf("airrec: FIXTURE %s hash %016llx (manifest "
+					"created - all later curves compare against "
+					"THIS set)\n", kFixtureVer, fh);
+			} else if (prev == line) {
+				printf("airrec: FIXTURE %s hash %016llx VERIFIED "
+					"against the manifest (curves are "
+					"apples-to-apples)\n", kFixtureVer, fh);
+			} else {
+				printf("airrec: FIXTURE DRIFT - manifest says [%s] "
+					"but this run generated [%s]. The oracle set "
+					"changed: bump the fixture version; do NOT "
+					"compare curves across versions.\n",
+					prev.c_str(), line);
+			}
+		}
 		for (const RecOracle& oc : L1)
 			if (!oc.ok)
 				printf("airrec: L1 UNCONSTRUCTIBLE r%d p%d dw%d: "
@@ -8012,11 +8333,32 @@ namespace {
 				printf("airrec: L2 f%d UNCONSTRUCTIBLE r%d p%d: "
 					"%s\n", oc.face, oc.rev, oc.prof, oc.why);
 		// ---------- cold solves per machinery level ----------
+		// TWO CURVES, NOT ONE (advisor 2026-08-19). A single fixed-
+		// budget curve cannot distinguish "m=2 barely helps" from
+		// "m=2 helps a lot but cannibalises its own refinement
+		// budget" - completely different architectural conclusions,
+		// and budget dilution is now MEASURED (at 600-1000 evals the
+		// later proposal families never execute at all).
+		//   ISO - identical total compute per level: production
+		//         efficiency, recovery bought per unit compute.
+		//   CAP - each level funded so its own added degrees of
+		//         freedom are actually exercised rather than starving
+		//         the earlier lanes: does extra shooting structure
+		//         genuinely enlarge the reachable basin?
+		// A budget-diluted curve is NOT a Level-B verdict.
 		const int m_lo = o.rec_m >= 0 ? o.rec_m : 0;
 		const int m_hi = o.rec_m >= 0 ? o.rec_m : 2;
-		int curve1[3] = { -1, -1, -1 };
-		int curve2[3] = { -1, -1, -1 };
+		int curve1[2][3] = { { -1, -1, -1 }, { -1, -1, -1 } };
+		int curve2[2][3] = { { -1, -1, -1 }, { -1, -1, -1 } };
+		for (int mode = 0; mode <= 1; ++mode)
 		for (int m = m_lo; m <= m_hi; ++m) {
+			// CAP multiplier m0/m1/m2 = 1x/2x/3x, matching the
+			// proposal families each level adds (single-target shots;
+			// + the two-chart node sweep and node-time adaptation;
+			// + the second node and both Gauss-Newton passes).
+			// Reported so the funding is never implicit.
+			const int bud = mode == 0 ? budget : budget * (m + 1);
+			const char* mtag = mode == 0 ? "iso" : "cap";
 			struct MAgg {
 				int n = 0, ok = 0, fals = 0;
 				int rung[6] = { 0, 0, 0, 0, 0, 0 };
@@ -8046,9 +8388,10 @@ namespace {
 				Entrance::RefTune tn;
 				tn.shoot_m = m;
 				tn.bnd_theta = thiv;
+				tn.precision = 1.f;   // measured to 1u; drive to it
 				int fl = 0;
 				Entrance::RefResult rr = Entrance::RefSolve(
-					oc.S0, w, p, g, -1, oc.Q, 8.f, oc.T, budget,
+					oc.S0, w, p, g, -1, oc.Q, 8.f, oc.T, bud,
 					false, &fl, 0.f, Steer::CtlState(), nullptr,
 					nullptr, nullptr, &tn);
 				const bool rec = rr.ok;
@@ -8109,10 +8452,11 @@ namespace {
 					continue;
 				Entrance::RefTune tn;
 				tn.shoot_m = m;
+				tn.precision = 1.f;   // measured to 1u; drive to it
 				int fl = 0;
 				Entrance::RefResult rr = Entrance::RefSolve(
 					oc.S0, w, p, g, oc.face, oc.Q, 32.f, oc.T,
-					budget, false, &fl, oc.zmin,
+					bud, false, &fl, oc.zmin,
 					Steer::CtlState(), nullptr, nullptr,
 					nullptr, &tn);
 				const float rmin = rr.strike_rmin;
@@ -8172,20 +8516,20 @@ namespace {
 			auto agg_print = [&](const char* tag, MAgg& a) {
 				if (!a.n)
 					return;
-				printf("airrec: m%d %s: recover %d/%d | ladder "
+				printf("airrec: [%s] m%d %s: recover %d/%d | ladder "
 					"32:%d 16:%d 8:%d 4:%d 2:%d 1:%d | rp p50 "
 					"%.1f p95 %.1f | rth p50 %.3f p95 %.3f | "
 					"E-rec p50 %.1f%% | ev/case %lld | "
-					"falsified %d\n", m, tag, a.ok, a.n,
+					"falsified %d\n", mtag, m, tag, a.ok, a.n,
 					a.rung[0], a.rung[1], a.rung[2], a.rung[3],
 					a.rung[4], a.rung[5], pct(a.rp, 0.5f),
 					pct(a.rp, 0.95f), pct(a.rth, 0.5f),
 					pct(a.rth, 0.95f),
 					100.f * pct(a.efrac, 0.5f),
 					a.n ? a.ev / a.n : 0, a.fals);
-				printf("airrec: m%d %s by rev: 0:%d/%d 1:%d/%d "
+				printf("airrec: [%s] m%d %s by rev: 0:%d/%d 1:%d/%d "
 					"2:%d/%d 3:%d/%d | by prof: const %d/%d "
-					"smooth %d/%d aggr %d/%d brake %d/%d\n", m,
+					"smooth %d/%d aggr %d/%d brake %d/%d\n", mtag, m,
 					tag, a.rev_ok[0], a.rev_n[0], a.rev_ok[1],
 					a.rev_n[1], a.rev_ok[2], a.rev_n[2],
 					a.rev_ok[3], a.rev_n[3], a.prof_ok[0],
@@ -8194,24 +8538,32 @@ namespace {
 					a.prof_n[3]);
 			};
 			agg_print("L1", a1);
-			printf("airrec: m%d L1 features: dh_tot<=%.2frad "
-				"%d/%d vs > %d/%d\n", m, dh_med, lo_ok, lo_n,
+			printf("airrec: [%s] m%d L1 features: dh_tot<=%.2frad "
+				"%d/%d vs > %d/%d\n", mtag, m, dh_med, lo_ok, lo_n,
 				hi_ok, hi_n);
 			agg_print("L2", a2);
 			if (m >= 0 && m < 3) {
-				curve1[m] = a1.ok;
-				curve2[m] = a2.ok;
+				curve1[mode][m] = a1.ok;
+				curve2[mode][m] = a2.ok;
 			}
 			fflush(stdout);
 		}
-		if (m_lo != m_hi)
-			printf("airrec: CURVE L1 m0 %d m1 %d m2 %d of %d | L2 "
-				"m0 %d m1 %d m2 %d of %d  (Level-B trigger reads "
-				"the SHAPE: scaling curve = sequential shooting "
-				"suffices; flat curve with known-reachable "
-				"failures = build defect shooting)\n", curve1[0],
-				curve1[1], curve1[2], n1, curve2[0], curve2[1],
-				curve2[2], n2);
+		if (m_lo != m_hi) {
+			for (int mo = 0; mo <= 1; ++mo)
+				printf("airrec: CURVE[%s] L1 m0 %d m1 %d m2 %d of "
+					"%d | L2 m0 %d m1 %d m2 %d of %d%s\n",
+					mo == 0 ? "iso" : "cap",
+					curve1[mo][0], curve1[mo][1], curve1[mo][2],
+					n1, curve2[mo][0], curve2[mo][1],
+					curve2[mo][2], n2,
+					mo == 0 ? "  (equal compute: efficiency)"
+						: "  (funded 1x/2x/3x: capability)");
+			printf("airrec: LEVEL-B READS THE SHAPE OF THE CAPABILITY "
+				"CURVE. Scaling (e.g. 31%%->64%%->93%%) = sequential "
+				"shooting suffices; flat with a persistent "
+				"known-reachable class = build defect-based "
+				"multiple shooting.\n");
+		}
 		fflush(stdout);
 		return 0;
 	}
@@ -11005,6 +11357,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "wishparity" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdWishParity(argv[2], o);
 	}
 	if (cmd == "ladder" && argc >= 4) {
 		ReplayOpts o;
