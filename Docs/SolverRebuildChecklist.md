@@ -864,6 +864,38 @@ status and the 2026-08-16 changelog tail for exactly where it stands).
 
 - 2026-08-17 (session 7, PATH-SOLVER FIDELITY - tried and measured, reverted to best): three trace models for the constructed flight, each pathgate-measured: (1) full-gain trace (COMMITTED, 2a420d9): f0 CONSTRUCTS at -110.0 vs human -115.1 in one eval; f2 no-plan at 96u; f3 trace-exec divergence (cap-rejected in the solver, harmless). (2) no-gain-on-holds (the controller's literal exact-landing semantics): LOST f0 - the real controller weaves/gains through the dense-knot spline. (3) full command-mirror with turn-weave-turn generator: WORSE (f0 miss 191) - command-level mirroring desyncs from the controller's flip state and drift compounds. Padding note: the no-padding spline stretch (n knots over n+8) accidentally compensates full-gain optimism on f0 - keep as committed. CONTROLLER SEMANTICS LEARNED (SolverSteer read): lands each commanded step at the gain that turn requires (full step = full gain, zero step = zero gain), blocked flips are null ticks (weave branch wishes at the no-accel point), coast on blocked+large-error. NEXT (the honest fix, from the data): CLOSED-LOOP construction - fly the plan on the real engine and Newton-correct psi from the measured miss (2-3 engine evals; the engine IS the trace; still ~500x cheaper than search). Then re-run pathgate for 3/3 and let constructed flights carry the solve.
 
+- 2026-08-18 (session 10c, TERMINAL-CLASS CONDITIONING + bank-as-
+  witness-store + airsuite v1): advisor's 15-point directive
+  executed in order. DIAGNOSIS SHARPENED: multiple shooting had
+  conditioned POSITION, not the TERMINAL-STATE CLASS - the solve is
+  (Q, T, theta) jointly. BUILT: (1) GuideTarget carries a terminal-
+  heading INTERVAL (cost = squared distance outside it); shots run
+  PER INTERVAL over a generic coarse partition (the numerical
+  implementation of theta -> s_A*(theta)); (2) intermediate-node
+  cost gains the REMAINING-RESIDUAL term (closed-form feasibility
+  of the final (Q,theta) from the predicted node state: free-turn
+  shortfall + reach shortfall) - a node reached beautifully that
+  leaves an unsolvable final problem now scores badly; (3) node-
+  TIME adaptation (retry the winning node at 0.30/0.38/0.55/0.65
+  of the flight); (4) BANK = WITNESS STORE: entries now carry the
+  FULL raw start state (pos/vel/duck/side/age), realized contact,
+  and witness-content hash - region/exact floors are DERIVED
+  queries; replay-and-reindex migration becomes possible for any
+  future key-semantics change (the age-cap orphaning cannot recur
+  silently); (5) humanexact headline relabeled L(near16u) - a 13u
+  strike is NEAR, never exact; (6) AIRSUITE v1 - the synthetic
+  certification matrix (faces x horizon {30,55} x speed {400,900}
+  x vz {+150,-100,-400}, region targets, NO TAPE ANYWHERE):
+  strike rates + sandwich gaps aggregated per dimension - the
+  generality law's teeth. MEASURED: f3 recovered 366k -> 759k
+  (matches its floor) under interval conditioning; f0 892k stable;
+  f2 cold class STILL open (664k near vs floor 950k standing).
+  REMAINING per advisor order: exact-engine short rollouts for
+  final action ranking (deferred - cost knob), m=2, Level B only
+  if airsuite shows systematic conditioning failure. Stage-A
+  success = the GENERIC operator (airsuite can block Stage A even
+  with green fixtures).
+
 - 2026-08-18 (session 10b, GENERALITY CORRECTION + multi-node
   shooting v1 + the bank migration lesson): user + advisor scope
   correction RECORDED AS LAW - the human run and surf_basictest are

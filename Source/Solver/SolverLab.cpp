@@ -5907,6 +5907,15 @@ namespace {
 		float H = -1e30f;
 		int horizon = 0;
 		std::string src;
+		// FULL raw start state + realized contact (advisor: entries
+		// are witnesses, not face floors; the raw state enables
+		// replay-and-reindex migration when key semantics change,
+		// and the realized contact gives region/exact queries their
+		// correct domain).
+		Vec3 spos, svel;
+		int sducked = 0, sside = 0, sage = 1000;
+		Vec3 cp;
+		unsigned long long whash = 0;
 		std::vector<signed char> side;
 		std::vector<float> cosa;
 	};
@@ -5981,10 +5990,15 @@ namespace {
 			EFBankEntry be;
 			int n = 0;
 			char srcbuf[32] = { 0 };
-			if (sscanf_s(ln.c_str() + p1 + 1, "%31[^|]|%f|%d|%d",
+			const int got = sscanf_s(ln.c_str() + p1 + 1,
+				"%31[^|]|%f|%d|%d|%f %f %f|%f %f %f|%d %d %d|"
+				"%f %f %f|%llx",
 				srcbuf, static_cast<unsigned>(sizeof(srcbuf)),
-				&be.H, &be.horizon, &n) != 4
-				|| n < 0 || n > 4096)
+				&be.H, &be.horizon, &n, &be.spos.X, &be.spos.Y,
+				&be.spos.Z, &be.svel.X, &be.svel.Y, &be.svel.Z,
+				&be.sducked, &be.sside, &be.sage, &be.cp.X,
+				&be.cp.Y, &be.cp.Z, &be.whash);
+			if (got < 4 || n < 0 || n > 4096)
 				continue;
 			be.src = srcbuf;
 			be.side.resize(static_cast<size_t>(n));
@@ -6015,10 +6029,17 @@ namespace {
 		if (fopen_s(&f, path.c_str(), "w") != 0 || !f)
 			return;
 		for (const auto& kv : bank) {
-			fprintf(f, "%s|%s|%.1f|%d|%d\n", kv.first.c_str(),
-				kv.second.src.c_str(), kv.second.H,
-				kv.second.horizon,
-				static_cast<int>(kv.second.side.size()));
+			fprintf(f, "%s|%s|%.1f|%d|%d|%.4f %.4f %.4f|%.4f %.4f "
+				"%.4f|%d %d %d|%.2f %.2f %.2f|%016llx\n",
+				kv.first.c_str(), kv.second.src.c_str(),
+				kv.second.H, kv.second.horizon,
+				static_cast<int>(kv.second.side.size()),
+				kv.second.spos.X, kv.second.spos.Y,
+				kv.second.spos.Z, kv.second.svel.X,
+				kv.second.svel.Y, kv.second.svel.Z,
+				kv.second.sducked, kv.second.sside,
+				kv.second.sage, kv.second.cp.X, kv.second.cp.Y,
+				kv.second.cp.Z, kv.second.whash);
 			for (size_t i = 0; i < kv.second.side.size(); ++i)
 				fprintf(f, "%d %.6f\n",
 					static_cast<int>(kv.second.side[i]),
@@ -6690,7 +6711,7 @@ namespace {
 					: "FAIL - ADMISSIBLE WITNESS NOT MATCHED");
 			if (rr.ok)
 				printf("humanexact: t%4d f%d | E_h %.0fk (dot %.1f)"
-					" | H(Q_h) %.0fk (dot %.1f, %.0fu off, %d "
+					" | L(near16u) %.0fk (dot %.1f, %.0fu off, %d "
 					"flights) | gap %+.0fk | %s\n",
 					fe.tick, fe.fidx, eh / 1e3f,
 					Dot(fe.v1, fc.n), rr.H / 1e3f, rr.flight.dot,
@@ -6795,6 +6816,16 @@ namespace {
 					nb.horizon = rr.horizon;
 					nb.side = rr.wside;
 					nb.cosa = rr.wcosa;
+					nb.spos = fe.sep.pos;
+					nb.svel = fe.sep.vel;
+					nb.sducked = fe.sep.ducked ? 1 : 0;
+					nb.sside = fe.sep_ctl.side;
+					nb.sage = fe.sep_ctl.age;
+					nb.cp = rr.flight.pos;
+					nb.whash = EFFnv64(rr.wcosa.data(),
+						rr.wcosa.size() * sizeof(float),
+						EFFnv64(rr.wside.data(),
+							rr.wside.size()));
 					bank[bkey] = nb;
 					printf("humanexact:   bank: new floor %.0fk "
 						"recorded\n", rr.H / 1e3f);
@@ -7356,6 +7387,16 @@ namespace {
 					nb.src = "diagnostic";
 					nb.side = r0.wside;
 					nb.cosa = r0.wcosa;
+					nb.spos = fe.sep.pos;
+					nb.svel = fe.sep.vel;
+					nb.sducked = fe.sep.ducked ? 1 : 0;
+					nb.sside = fe.sep_ctl.side;
+					nb.sage = fe.sep_ctl.age;
+					nb.cp = r0.flight.pos;
+					nb.whash = EFFnv64(r0.wcosa.data(),
+						r0.wcosa.size() * sizeof(float),
+						EFFnv64(r0.wside.data(),
+							r0.wside.size()));
 					bank[bkey] = nb;
 					bank_dirty = true;
 					printf("ladder:   banked %.0fk (diagnostic "
@@ -7398,6 +7439,138 @@ namespace {
 			printf("ladder: witness bank -> %s\n",
 				bank_path.c_str());
 		}
+		fflush(stdout);
+		return 0;
+	}
+
+	// airsuite: THE GENERAL VALIDATION MATRIX (advisor 2026-08-18:
+	// the certification bed is a synthetic matrix over the problem
+	// class - start speed x vertical state x horizon x face
+	// orientation x target width - with tapes nowhere in it. The
+	// generality law's teeth: production must solve arbitrary
+	// boundary-value instances, not one map's three points.) Per
+	// case: place a clean-air start whose ballistics reach the
+	// target at the chosen horizon, run the production solve, and
+	// report strike class, replayed H, the certified optimistic
+	// ceiling U, and the sandwich gap G = U - H. Aggregates expose
+	// which corners of the class the current machinery fails.
+	int CmdAirSuite(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("airsuite: %s\n", err.c_str());
+			return 1;
+		}
+		const float grav = o.params.gravity;
+		const float dt = o.params.dt;
+		int total = 0, near_ok = 0, exact_ok = 0;
+		double gap_sum = 0.0;
+		int gap_n = 0;
+		struct Agg {
+			int n = 0, hit = 0;
+		};
+		Agg by_hz[2], by_sp[2], by_vz[3];
+		const int hzs[2] = { 30, 55 };
+		const float sps[2] = { 400.f, 900.f };
+		const float vzs[3] = { 150.f, -100.f, -400.f };
+		for (size_t fi = 0; fi < g.faces.size(); ++fi) {
+			const Route::Face& fc = g.faces[fi];
+			const float hn = sqrtf(fc.n.X * fc.n.X
+				+ fc.n.Y * fc.n.Y);
+			if (hn < 1e-4f)
+				continue;
+			const Vec3 q = fc.centroid;
+			for (int hi2 = 0; hi2 < 2; ++hi2)
+				for (int si2 = 0; si2 < 2; ++si2)
+					for (int vi2 = 0; vi2 < 3; ++vi2) {
+						const int Hn = hzs[hi2];
+						const float s0 = sps[si2];
+						const float vz0 = vzs[vi2];
+						const float T = static_cast<float>(Hn)
+							* dt;
+						// Ballistic start altitude for arrival at
+						// the target after Hn ticks.
+						const float z0 = q.Z - vz0 * T
+							+ 0.5f * grav * T * T;
+						// Start in front of the face at a fraction
+						// of the gain-law reach; lateral sign
+						// alternates by case for spread.
+						const float reach = Envelope::DMax(s0, Hn,
+							o.params);
+						const float dist = 0.8f * reach;
+						const float paz = atan2f(fc.n.Y, fc.n.X);
+						const float latsgn = ((fi + hi2 + si2
+							+ vi2) & 1) ? 0.45f : -0.45f;
+						const float outaz = paz + latsgn;
+						PlayerState st;
+						st.pos = Vec3(q.X + cosf(outaz) * dist,
+							q.Y + sinf(outaz) * dist, z0);
+						const float inaz = atan2f(
+							q.Y - st.pos.Y, q.X - st.pos.X);
+						const float voff = ((fi + vi2) & 1)
+							? 0.3f : -0.3f;
+						st.vel = Vec3(cosf(inaz + voff) * s0,
+							sinf(inaz + voff) * s0, vz0);
+						st.ducked = false;
+						st.hull_state = 0;
+						total++;
+						int fl = 0;
+						Entrance::RefResult rr =
+							Entrance::RefSolve(st, w, o.params, g,
+								static_cast<int>(fi), q, 28.f, Hn,
+								600, false, &fl, fc.zmin);
+						const float sa = Envelope::SMax(s0, Hn,
+							o.params);
+						const float va = Envelope::VzAfter(vz0,
+							Hn, o.params);
+						const float U = sa * sa + va * va
+							+ 2.f * grav * (q.Z - fc.zmin);
+						by_hz[hi2].n++;
+						by_sp[si2].n++;
+						by_vz[vi2].n++;
+						if (rr.ok) {
+							near_ok++;
+							by_hz[hi2].hit++;
+							by_sp[si2].hit++;
+							by_vz[vi2].hit++;
+							const float d = Len(rr.flight.pos
+								- q);
+							if (d <= 4.f)
+								exact_ok++;
+							gap_sum += static_cast<double>(
+								U - rr.H);
+							gap_n++;
+							printf("airsuite: f%d hz%d s%.0f "
+								"vz%+.0f | H %.0fk (dot %.1f, "
+								"%.0fu) | U %.0fk G %.0fk | %d "
+								"ev\n", static_cast<int>(fi), Hn,
+								s0, vz0, rr.H / 1e3f,
+								rr.flight.dot, d, U / 1e3f,
+								(U - rr.H) / 1e3f, rr.evals);
+						} else {
+							printf("airsuite: f%d hz%d s%.0f "
+								"vz%+.0f | NO STRIKE (%d ev) | U "
+								"%.0fk\n", static_cast<int>(fi),
+								Hn, s0, vz0, rr.evals, U / 1e3f);
+						}
+					}
+		}
+		printf("airsuite: %d/%d cases struck (%d exact<=4u) | mean "
+			"sandwich gap %.0fk\n", near_ok, total, exact_ok,
+			gap_n ? gap_sum / gap_n / 1e3 : 0.0);
+		printf("airsuite: by horizon: hz30 %d/%d hz55 %d/%d | by "
+			"speed: s400 %d/%d s900 %d/%d | by vz: +150 %d/%d "
+			"-100 %d/%d -400 %d/%d\n",
+			by_hz[0].hit, by_hz[0].n, by_hz[1].hit, by_hz[1].n,
+			by_sp[0].hit, by_sp[0].n, by_sp[1].hit, by_sp[1].n,
+			by_vz[0].hit, by_vz[0].n, by_vz[1].hit, by_vz[1].n,
+			by_vz[2].hit, by_vz[2].n);
 		fflush(stdout);
 		return 0;
 	}
@@ -10179,6 +10352,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 4, o))
 			return 1;
 		return CmdRepFit(argv[2], o, argv[3]);
+	}
+	if (cmd == "airsuite" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdAirSuite(argv[2], o);
 	}
 	if (cmd == "ladder" && argc >= 4) {
 		ReplayOpts o;

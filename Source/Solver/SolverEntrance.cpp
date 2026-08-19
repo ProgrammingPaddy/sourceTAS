@@ -255,10 +255,25 @@ namespace Entrance {
 		// and trusts nothing else.
 		struct GuideTarget {
 			float x = 0.f, y = 0.f;  // horizontal target
-			float theta = 0.f;       // desired terminal heading
+			// Terminal-heading INTERVAL (advisor: the solve is
+			// conditioned on (Q, T, theta) jointly - each heading
+			// interval independently establishes its best reachable
+			// class; cost = squared distance OUTSIDE the interval).
+			float th_lo = 0.f, th_hi = 0.f;
 			bool  use_theta = false; // only the final target sets it
 			int   until = 0;         // guide toward this through k < until
 		};
+
+		// Squared angular distance from h to the interval
+		// [th_lo, th_hi] (wrapped; 0 inside).
+		inline float ThetaIntervalDist2(float h, float lo, float hi) {
+			const float mid = Steer::WrapPi(lo
+				+ 0.5f * Steer::WrapPi(hi - lo));
+			const float half = 0.5f * fabsf(Steer::WrapPi(hi - lo));
+			const float d = fabsf(Steer::WrapPi(h - mid));
+			const float out = d - half;
+			return out > 0.f ? out * out : 0.f;
+		}
 
 		struct GuideWeights {
 			float wp = 2.f;      // endpoint attraction
@@ -364,9 +379,51 @@ namespace Entrance {
 								&& static_cast<float>(N - k)
 									<= gw.blend
 									* static_cast<float>(N)) {
-								const float dth = Steer::WrapPi(
-									tg.theta - hh);
-								J += gw.wt * dth * dth * 100.f;
+								J += gw.wt * ThetaIntervalDist2(
+									hh, tg.th_lo, tg.th_hi)
+									* 100.f;
+							}
+							if (!final_tg) {
+								// REMAINING-RESIDUAL (advisor): a
+								// node reached beautifully that
+								// leaves an unsolvable final
+								// (Q, theta) problem is a bad
+								// node. Optimistic closed-form
+								// feasibility of the remainder.
+								const GuideTarget& fin =
+									targets.back();
+								const int rem2 = N - t_end;
+								if (rem2 > 0) {
+									const float mid = Steer::WrapPi(
+										fin.th_lo + 0.5f
+										* Steer::WrapPi(fin.th_hi
+											- fin.th_lo));
+									const float need = fabsf(
+										Steer::WrapPi(mid - hh));
+									Strafe::TickLaw lr =
+										Strafe::Law(p, ss, 1.f,
+											s.ducked);
+									const float tfree =
+										lr.TurnRad(0.f, 1.f)
+										* static_cast<float>(rem2);
+									const float tshort = need
+										- tfree;
+									if (tshort > 0.f)
+										J += 50.f * tshort
+											* tshort;
+									const float ddx = fin.x - px;
+									const float ddy = fin.y - py;
+									const float drem = sqrtf(
+										ddx * ddx + ddy * ddy);
+									const float reach =
+										Envelope::DMax(ss, rem2,
+											p);
+									const float rshort = drem
+										- reach;
+									if (rshort > 0.f)
+										J += 4e-4f * rshort
+											* rshort;
+								}
 							}
 							J += gw.we * sac * 1e-3f
 								/ static_cast<float>(lk);
@@ -719,51 +776,81 @@ namespace Entrance {
 				if (!gsd.empty())
 					ev_sched(gsd, gcs, nullptr);
 			};
-			auto final_tgt = [&](float th_off) {
+			auto final_tgt = [&](float lo, float hi) {
 				GuideTarget t2;
 				t2.x = q.X;
 				t2.y = q.Y;
-				t2.theta = Steer::WrapPi(th_arr + th_off);
+				t2.th_lo = Steer::WrapPi(th_arr + lo);
+				t2.th_hi = Steer::WrapPi(th_arr + hi);
 				t2.use_theta = true;
 				t2.until = N;
 				return t2;
 			};
-			{
+			// Terminal-heading INTERVALS (generic coarse partition
+			// around the closed-form arrival estimate; each interval
+			// independently establishes its reachable class - the
+			// numerical implementation of theta -> s_A*(theta)).
+			const float iv[3][2] = { { -0.25f, 0.25f },
+				{ 0.2f, 0.8f }, { -0.8f, -0.2f } };
+			for (int ii = 0; ii < 3; ++ii) {
+				std::vector<GuideTarget> tg(1,
+					final_tgt(iv[ii][0], iv[ii][1]));
 				GuideWeights gw;
-				const float offs[3] = { 0.f, 0.3f, -0.3f };
-				for (int ti = 0; ti < 3; ++ti) {
-					std::vector<GuideTarget> tg(1,
-						final_tgt(offs[ti]));
-					gw.wp = 2.f;
-					gw.we = 0.3f;
-					shoot(tg, gw);
-					gw.wp = 6.f;
-					gw.we = 0.05f;
-					shoot(tg, gw);
-				}
+				gw.wp = 2.f;
+				gw.we = 0.3f;
+				shoot(tg, gw);
+				gw.wp = 6.f;
+				gw.we = 0.05f;
+				shoot(tg, gw);
 			}
-			{
-				const float lam = 0.45f;
-				const int tau1 = static_cast<int>(lam
+			// m = 1: intervals x symmetric laterals; then node-TIME
+			// adaptation around whichever shot advanced the best.
+			const float lam0 = 0.45f;
+			const float bmag[7] = { 0.f, 0.3f, -0.3f, 0.6f,
+				-0.6f, 0.95f, -0.95f };
+			float track_best = best.H;
+			int win_ii = 0, win_bi = 0;
+			auto node_at = [&](float lam, float bm) {
+				GuideTarget n1;
+				n1.x = entry.pos.X + lam * rx
+					+ bm * rl * 0.5f * eqx;
+				n1.y = entry.pos.Y + lam * ry
+					+ bm * rl * 0.5f * eqy;
+				n1.until = static_cast<int>(lam
 					* static_cast<float>(N));
-				const float bmag[7] = { 0.f, 0.3f, -0.3f, 0.6f,
-					-0.6f, 0.95f, -0.95f };
-				GuideWeights gw;
+				return n1;
+			};
+			for (int ii = 0; ii < 3; ++ii)
 				for (int bi2 = 0; bi2 < 7; ++bi2) {
-					GuideTarget n1;
-					n1.x = entry.pos.X + lam * rx
-						+ bmag[bi2] * rl * 0.5f * eqx;
-					n1.y = entry.pos.Y + lam * ry
-						+ bmag[bi2] * rl * 0.5f * eqy;
-					n1.until = tau1;
 					std::vector<GuideTarget> tg;
-					tg.push_back(n1);
-					tg.push_back(final_tgt(0.f));
+					tg.push_back(node_at(lam0, bmag[bi2]));
+					tg.push_back(final_tgt(iv[ii][0],
+						iv[ii][1]));
+					GuideWeights gw;
 					gw.wp = 2.f;
 					gw.we = 0.3f;
 					shoot(tg, gw);
-					gw.wp = 6.f;
-					gw.we = 0.05f;
+					if (best.H > track_best + 1.f) {
+						track_best = best.H;
+						win_ii = ii;
+						win_bi = bi2;
+					}
+				}
+			// Node-time adaptation (a numerical resolution axis,
+			// not admissibility): retry the winning node
+			// earlier/later.
+			{
+				const float lams[4] = { 0.3f, 0.38f, 0.55f,
+					0.65f };
+				for (int li = 0; li < 4; ++li) {
+					std::vector<GuideTarget> tg;
+					tg.push_back(node_at(lams[li],
+						bmag[win_bi]));
+					tg.push_back(final_tgt(iv[win_ii][0],
+						iv[win_ii][1]));
+					GuideWeights gw;
+					gw.wp = 2.f;
+					gw.we = 0.3f;
 					shoot(tg, gw);
 				}
 			}
