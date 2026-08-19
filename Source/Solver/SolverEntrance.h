@@ -327,6 +327,8 @@ namespace Entrance {
 		int sched_actions = 0;
 		int sched_m_used[3] = { 0, 0, 0 };
 		int sched_prec = 0;
+		int sched_deep = 0;
+		int sched_gn = 0;
 		float bnd_rp = 1e30f;
 		float bnd_rth = 1e30f;
 		float bnd_s = 0.f;

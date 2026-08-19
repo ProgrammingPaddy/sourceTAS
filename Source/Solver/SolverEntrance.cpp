@@ -1243,6 +1243,64 @@ namespace Entrance {
 			// theta -> s_A*(theta). Boundary mode has ONE given
 			// interval (row 0).
 			const int n_near = bnd ? 1 : 3;
+			// ---- GN single-node evaluator, hoisted so the SCHEDULER
+			// can run ONE Gauss-Newton iteration as one atomic action
+			// (the contract: an iteration, never "run GN until done").
+			auto gn_eval1 = [&](int ivx, float x2, float y2,
+				float* r_out) {
+				GuideTarget n1;
+				n1.x = x2;
+				n1.y = y2;
+				n1.until = static_cast<int>(0.45f
+					* static_cast<float>(N));
+				std::vector<GuideTarget> tg;
+				tg.push_back(n1);
+				tg.push_back(final_tgt(ivt[ivx][0], ivt[ivx][1]));
+				GuideWeights gw;
+				gw.wp = 4.f;
+				gw.we = 0.15f;
+				gw.exact_top = 0;
+				std::vector<signed char> s2;
+				std::vector<float> c2;
+				GuidedShootSeq(entry, w, p, tg, N, min_gap, entry_ctl,
+					gw, &s2, &c2);
+				best.evals += 2;
+				if (flights_counter)
+					(*flights_counter) += 2;
+				r_out[0] = 1e4f;
+				r_out[1] = 1e4f;
+				r_out[2] = 1e4f;
+				if (s2.empty())
+					return;
+				const int hz2 = bnd ? static_cast<int>(s2.size())
+					: static_cast<int>(s2.size()) + 8;
+				vt.max_ticks = hz2;
+				Air::Result ar = Air::FlyWishSchedule(entry, w, p, vt,
+					g, s2, c2, hz2);
+				float px, py, tha;
+				if (bnd) {
+					if (ar.struck_brush >= 0 || ar.grounded
+						|| static_cast<int>(s2.size()) != N)
+						return;
+					px = ar.end_pos.X;
+					py = ar.end_pos.Y;
+					const Vec3& vT = ar.end_state.vel;
+					tha = Len2D(vT) > 1.f ? atan2f(vT.Y, vT.X) : 0.f;
+				} else {
+					if (!ar.hit || ar.dot >= 0.f
+						|| ar.struck_brush >= 0)
+						return;
+					px = ar.pos.X;
+					py = ar.pos.Y;
+					tha = atan2f(ar.v1.Y, ar.v1.X);
+				}
+				ev_sched(s2, c2, nullptr);
+				r_out[0] = px - q.X;
+				r_out[1] = py - q.Y;
+				r_out[2] = sqrtf(ThetaIntervalDist2(tha,
+					Steer::WrapPi(th_arr + ivt[ivx][0]),
+					Steer::WrapPi(th_arr + ivt[ivx][1]))) * kThetaW;
+			};
 			// LEGACY FIXED SEQUENCE (regression baseline). Under the
 			// scheduler these same primitives are dispatched action by
 			// action instead of run as a phase.
@@ -1745,12 +1803,19 @@ namespace Entrance {
 		// never fired at all. budget_cur is the phase's ceiling and
 		// lifts to the full budget once the tolerance tightens.
 		int budget_cur = phase1_cap;
-		auto deepen = [&](BinElite& pe, float kstep, int lstep) {
+		// max_ev bounds ONE deepen action so its cost is fixed and
+		// known in advance (the anytime contract): the same first
+		// max_ev evaluations run every time from the same elite state,
+		// and repeated actions resume from the improved state.
+		auto deepen = [&](BinElite& pe, float kstep, int lstep,
+			int max_ev = 1 << 28) {
 			if (!pe.has)
 				return;
+			const int ev_start = best.evals;
 			bool moved = true;
 			int guard = 0;
-			while (moved && best.evals < budget_cur && guard++ < 8) {
+			while (moved && best.evals < budget_cur && guard++ < 8
+				&& best.evals - ev_start < max_ev) {
 				moved = false;
 				for (size_t j = 0; j < pe.runs.size(); ++j) {
 					for (size_t ki = 0; ki < pe.runs[j].ck.size();
@@ -2080,6 +2145,10 @@ namespace Entrance {
 					int   scouts = 0;
 					int   shots[3] = { 0, 0, 0 };
 					int   stall = 0;     // shots since R improved
+					int   deep = 0;      // DEEPEN actions run here
+					int   gn = 0;        // GN iterations run here
+					float gx = 0.f, gy = 0.f;   // GN iterate
+					bool  gn_init = false;
 					int   state = 0;   // DOM_UNRESOLVED
 				};
 				const int n_dom = bnd ? 1 : 6;
@@ -2102,7 +2171,8 @@ namespace Entrance {
 				for (Dom& d : dom)
 					d.U = U_global;
 				// ---- action algebra ----
-				enum { A_SCOUT = 1, A_SHOOT = 2, A_PRECISION = 3 };
+				enum { A_SCOUT = 1, A_SHOOT = 2, A_PRECISION = 3,
+					A_DEEPEN = 4, A_GNITER = 5 };
 				struct Act {
 					int type = 0;
 					int iv = 0;
@@ -2140,6 +2210,8 @@ namespace Entrance {
 				// cheaper action that fits".
 				const int kCostShot = 40;
 				const int kCostPrec = 1;
+				const int kCostDeep = 10;   // deepen bounded to 8 evals
+				const int kCostGN = 8;      // one iteration = 3 probes
 				// ---- NextAction: pure function of solver state ----
 				// (no budget, no remaining, no budget-derived flag)
 				auto next_action = [&](Act* out) {
@@ -2227,6 +2299,18 @@ namespace Entrance {
 						out->m = 2;
 						out->chart = d.shots[2] % 2;
 						out->idx = d.shots[2];
+					} else if (d.deep < 2 + d.gn) {
+						// local polish where a witness exists
+						out->type = A_DEEPEN;
+						out->m = d.m;
+						out->chart = 0;
+						out->idx = d.deep;
+					} else if (d.gn < 3 && best.ok) {
+						// outcome-space correction, ONE iteration
+						out->type = A_GNITER;
+						out->m = d.m;
+						out->chart = 0;
+						out->idx = d.gn;
 					} else if (prec < tol) {
 						out->type = A_PRECISION;
 						out->m = d.m;
@@ -2240,8 +2324,10 @@ namespace Entrance {
 						out->idx = d.shots[2];
 					}
 					out->iv = pick;
-					out->cost = out->type == A_PRECISION
-						? kCostPrec : kCostShot;
+					out->cost = out->type == A_PRECISION ? kCostPrec
+						: (out->type == A_DEEPEN ? kCostDeep
+							: (out->type == A_GNITER ? kCostGN
+								: kCostShot));
 					out->hash = act_hash(*out);
 					return true;
 				};
@@ -2272,6 +2358,71 @@ namespace Entrance {
 							rekey();
 						}
 						best.sched_prec++;
+					} else if (a.type == A_DEEPEN) {
+						// one BOUNDED deepen unit on this domain's
+						// best elite (bins hold strikes; scouts hold
+						// the residual-descent memory).
+						int bi2 = -1;
+						for (int b3 = 0; b3 < kBins; ++b3)
+							if (bins[static_cast<size_t>(b3)].has
+								&& (bi2 < 0
+									|| bins[static_cast<size_t>(b3)].sc
+										> bins[static_cast<size_t>(bi2)].sc))
+								bi2 = b3;
+						if (bi2 >= 0)
+							deepen(bins[static_cast<size_t>(bi2)],
+								0.12f, 2, 8);
+						else if (scouts[0].has)
+							deepen(scouts[0], 0.12f, 2, 8);
+						d.deep++;
+						best.sched_deep++;
+					} else if (a.type == A_GNITER) {
+						// ONE Gauss-Newton iteration, state carried
+						// on the domain so the action is atomic.
+						if (!d.gn_init) {
+							GuideTarget sd0 = node_from(0, 0.45f,
+								0.f);
+							d.gx = sd0.x;
+							d.gy = sd0.y;
+							d.gn_init = true;
+						}
+						float R0[3], R1[3], R2[3];
+						gn_eval1(a.iv, d.gx, d.gy, R0);
+						if (fabsf(R0[0]) < 5e3f) {
+							const float ds = 24.f;
+							gn_eval1(a.iv, d.gx + ds, d.gy, R1);
+							gn_eval1(a.iv, d.gx, d.gy + ds, R2);
+							float a11 = 0.5f, a12 = 0.f, a22 = 0.5f;
+							float b1 = 0.f, b2 = 0.f;
+							for (int r2 = 0; r2 < 3; ++r2) {
+								const float j0 = (R1[r2] - R0[r2])
+									/ ds;
+								const float j1 = (R2[r2] - R0[r2])
+									/ ds;
+								a11 += j0 * j0;
+								a12 += j0 * j1;
+								a22 += j1 * j1;
+								b1 -= j0 * R0[r2];
+								b2 -= j1 * R0[r2];
+							}
+							const float det = a11 * a22 - a12 * a12;
+							if (fabsf(det) > 1e-6f) {
+								float dx = (b1 * a22 - b2 * a12)
+									/ det;
+								float dy = (b2 * a11 - b1 * a12)
+									/ det;
+								const float dl = sqrtf(dx * dx
+									+ dy * dy);
+								if (dl > 160.f) {
+									dx *= 160.f / dl;
+									dy *= 160.f / dl;
+								}
+								d.gx += dx;
+								d.gy += dy;
+							}
+						}
+						d.gn++;
+						best.sched_gn++;
 					} else {
 						const int ivx = a.iv < n_near ? a.iv : a.iv;
 						std::vector<GuideTarget> tg;

@@ -1100,3 +1100,69 @@ removes, so on the scheduler path fairness/progress replaces it.
   §17.6 says prove semantics first, then build nested ceilings, and only
   then tune. Today all domains share one global ceiling, so `U_D − L*`
   carries almost no ranking information (visible as S5's zero prunes).
+
+---
+
+## 19. Scheduler action set complete (2026-08-19) — and the capability
+##     gap that must close before legacy retires
+
+`DEEPEN` and `GNIteration` are now scheduler actions obeying the same
+atomic/resumable model as everything else:
+
+- **DEEPEN** takes an explicit `max_ev` ceiling (8 evals per action)
+  instead of consuming an internally variable mini-budget. The same
+  first 8 evaluations run every time from the same elite state, and
+  repeated actions resume from the improved state.
+- **GNIteration** is *one* deterministic iteration, not "run GN until
+  done": the iterate `(gx, gy)` lives on the domain, and each action
+  evaluates the residual, two finite-difference probes, solves the
+  damped 2x2 system and steps once. A single-node evaluator was hoisted
+  to guided scope so both paths call the same code.
+
+**S6 action completeness (new gate): PASS** — at an unrestricted 6000,
+the stream reaches every mechanism the domain state demands:
+m0 18, m1 9, m2 133, deepen 30, gn 18, precision 3 across 211 actions.
+All thirteen gates (P1–P7, S1–S6) are green, and the legacy default is
+unchanged (airsuite 48/48, gap 242k).
+
+### The capability probe says: DO NOT retire legacy yet
+
+    capability probe @6000 | legacy H 1030k rmin 13.0u
+                           | scheduled H  965k rmin 17.1u
+
+Same query, same compute, different action order — which is expected and
+allowed — but the scheduler is **~6% short on value and coarser in
+residual**. Per §17/§18 the retirement rule is that the scheduler must
+*expose the capability the underlying methods already have*; it does not
+yet. So the legacy path stays as the regression baseline and `gbudget`
+stays with it.
+
+**The likely cause is exactly the one predicted.** Domain priority is
+`U_D − L*`, and today every heading domain carries the *same* global
+ceiling, so the competitive-gap signal is nearly constant: the scheduler
+spreads work by the (spent, index) tie-break rather than by genuine
+discrimination, and over-invests in m2 on domains a real ceiling would
+have shown to be irrelevant (m2 133 of 211 actions). That is the
+measured argument for doing ceilings **before** scheduler v1 tuning, and
+it is why S5 still reports zero prunes.
+
+### Revised order (advisor 2026-08-19)
+
+    finish actions (DONE) -> capability gate (FAILING, measured)
+      -> nested ceilings -> re-run capability -> retire legacy
+      -> scheduler v1 + CURVE[scheduled] + R(B)
+
+Next build is the **heading-interval board-energy ceiling**: with the
+arrival tick fixed, `v_z(T)` is fixed and the certified horizontal-speed
+ceiling `s <= s_max(T)` holds, so over the relaxed terminal set
+`v(theta, s) = (s cos theta, s sin theta, v_z(T))` with `theta in I_theta`
+and `0 <= s <= s_max(T)`, maximising the exact clip-loss law gives
+
+    U_board(I_theta) = max over that set of E_after(v, n)
+
+deliberately ignoring endpoint-displacement reachability, so the relaxed
+set is a superset of the reachable terminal states. Unlike today's global
+bound this differs between intervals, which is precisely what the
+scheduler needs. **To be derived and proven rather than adopted from the
+shorthand**, and to carry per-stage status: only CERTIFIED bounds may
+establish `U_D <= L* + eps`; ADVISORY ones may order work only.

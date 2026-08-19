@@ -7929,6 +7929,45 @@ namespace {
 				"carrying bound id + incumbent witness + the numeric "
 				"inequality", static_cast<int>(r3.prunes.size()));
 			check("S5 proof-carrying prunes", proofs, buf);
+			// S6 ACTION COMPLETENESS (advisor 2026-08-19): given a
+			// long unrestricted run and a query whose state demands
+			// them, the stream must actually reach every refinement
+			// mechanism - m0, m1, m2, DEEPEN, GN and precision. This
+			// is the remaining half of "the scheduler can expose the
+			// capability the methods already have".
+			{
+				Entrance::RefResult rc;
+				run_at(6000, &rc);
+				const bool complete = rc.sched_m_used[0] > 0
+					&& rc.sched_m_used[1] > 0
+					&& rc.sched_m_used[2] > 0
+					&& rc.sched_deep > 0 && rc.sched_gn > 0
+					&& rc.sched_prec > 0;
+				snprintf(buf, sizeof(buf), "at 6000: m0 %d m1 %d m2 "
+					"%d deepen %d gn %d precision %d | %d actions",
+					rc.sched_m_used[0], rc.sched_m_used[1],
+					rc.sched_m_used[2], rc.sched_deep, rc.sched_gn,
+					rc.sched_prec, rc.sched_actions);
+				check("S6 action completeness", complete, buf);
+				// CAPABILITY PROBE (not a gate yet): can the scheduler
+				// expose what the legacy path reaches on the same
+				// query at the same compute? Different action order is
+				// expected and fine.
+				Entrance::RefTune lg;
+				lg.precision = 4.f;
+				int flg = 0;
+				Entrance::RefResult rl = Entrance::RefSolve(st, w, p,
+					g, fi, q, 28.f, Hn, 6000, false, &flg, fc.zmin,
+					Steer::CtlState(), nullptr, nullptr, nullptr,
+					&lg);
+				printf("airprops: capability probe @6000 | legacy H "
+					"%.0fk rmin %.1fu | scheduled H %.0fk rmin "
+					"%.1fu\n",
+					rl.ok ? rl.H / 1e3f : 0.f,
+					rl.strike_rmin < 1e29f ? rl.strike_rmin : -1.f,
+					rc.ok ? rc.H / 1e3f : 0.f,
+					rc.strike_rmin < 1e29f ? rc.strike_rmin : -1.f);
+			}
 		}
 		printf("airprops: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "PROPERTY GATE GREEN"
