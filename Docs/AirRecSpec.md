@@ -532,6 +532,12 @@ DONE**, and they are the decision:
 | iso-budget (equal compute) | 16/32 (50%) | 14/32 (44%) | 14/32 (44%) |
 | capability (funded 1×/2×/3×) | 16/32 (50%) | **20/32 (63%)** | **29/32 (91%)** |
 
+> **SUPERSEDED 2026-08-19 (session 12j)** - these numbers predate the
+> session-12b defect fixes, which sit on the shared path. Same verified
+> fixture, measured now and deterministic across repeat runs: iso
+> 16/13/**18**, capability 16/**23**/29. The ruling is unchanged and
+> slightly stronger. See section 23.8.
+
 The iso curve *declines*, which is a stronger statement than the
 pre-review numbers made: at flat spend, added representation is a net
 loss. Capability m=2 ladder: 8u:28, 4u:23, 2u:15, 1u:11 of 32; rp p50
@@ -1387,3 +1393,231 @@ domain-scoped scoring inside `ev_sched` (a candidate's key would have to
 be evaluated against its own heading domain's tolerance). The domain
 `rung` counter exists and is tracked; the tolerance itself is shared.
 This is a v1 limitation, not a defect in the state machine.
+
+---
+
+## 23. B5/B7, the bound promoted — and the retirement gate that failed
+##     (2026-08-19)
+
+Session 12j. The two remaining Air gates were built, both are green, the
+interval board ceiling is **CERTIFIED**, and the legacy retirement that
+was supposed to follow is **BLOCKED** by a generic capability regression
+that only a suite-wide run exposes.
+
+### 23.1 B7 found a real unsafety: the ceiling bounded the wrong quantity
+
+B7 does not ask whether the ceiling produces a plausible number. It
+takes the ceiling's own **maximiser** — for every candidate class — and
+pushes that pre-contact state through `Board::PredictClipTickVel`, the
+same helper production owns, then demands agreement on the bounded
+quantity.
+
+It failed immediately, and the mismatch was exactly the one the advisor
+named: **velocity phase**.
+
+Production stores `H = |end_state.vel|^2 + 2 g gs (z - zmin)`, measured
+**after FinishGravity**. The relaxed set is written in **pre-clip**
+velocities (post StartGravity + air wish). With `G = gs g dt / 2` and
+`v+ = v- - n d`:
+
+    v_end     = v+ - (0,0,G)
+    |v_end|^2 = s^2 + v_z^2 - d^2 - 2 G v_z + 2 G n_z d + G^2
+              = s^2 - d^2 + (v_z - G)^2 + 2 G n_z d
+
+On an approaching arrival `d <= 0`, so for an upward-facing normal
+(`n_z >= 0`, every surfable ramp) the cross term is `<= 0` and may be
+dropped. The bound keeps its **exact closed form** with
+
+    base = (v_z - G)^2 + pot      instead of      v_z^2 + pot
+
+and the whole candidate structure is untouched — `1 - a^2 >= 0` still
+makes E convex in s, so `{0, S, -b/a}` is still the complete candidate
+set. For a downward-facing normal the cross term is `>= 0` and is added
+as an explicit conservative slack rather than dropped.
+
+Omitting `G` under-counted the true post-board energy by `2 G |v_z| - G^2`
+— the direction that makes an upper bound **unsafe**.
+
+### 23.2 Two more nominal-vs-credited mismatches, found by writing B5
+
+B5 forces the question "certified with respect to *what inputs*". Two
+answers were wrong:
+
+- **ARRIVAL TICK.** A face-mode strike is credited at any tick a
+  schedule of length `[8, n_cap]` can reach (the flight runs to
+  `total + 8`), not only at `N`. The ceiling was built at `N` alone.
+  Vertical motion in air is pure ballistics — no control touches `v_z` —
+  so the admissible window is **exact**: only ticks whose ballistic z
+  lands inside the acceptance ball can produce a credited strike. The
+  ceiling is now maximised over that window rather than evaluated at one
+  guessed endpoint (the candidate structure is not monotone in `v_z`).
+- **CONTACT HEIGHT.** Any contact within `radius` of q is credited, so
+  the potential term must use the top of the acceptance ball. At
+  radius 28 on surf gravity that is **44.8k of energy** the nominal form
+  silently omitted.
+
+Both apply to the broad energy ceiling as well, which was carrying the
+same three defects. It now uses `(v_z - G)^2`, the same tick window and
+the same acceptance-ball potential.
+
+### 23.3 The causal probe: which gate would actually have caught it
+
+Removing the gravity phase from the ceiling **only** (the authoritative
+helper untouched) reproduces the pre-fix condition exactly:
+
+| gate | correct | gravity phase removed |
+|---|---|---|
+| B2 dense relaxed-set | worst excess **0.0** | worst excess **15,166** FAIL |
+| B7 authoritative parity | worst residual **0.31** | **192/192** fail, worst **14,502** |
+| B5 constructive oracles | sharp margin 15k | sharp margin 9k — **still PASS** |
+
+So: **B5 validated but could not falsify.** The oracles simply never sat
+within 6k of the ceiling. B7's *exactness* requirement is what exposed
+it, and B2 only became capable of catching it once it was rerouted
+through the authoritative helper instead of re-deriving the energy the
+ceiling's own way. That is the advisor's wording holding up literally —
+a constructive pass is validation, never the proof.
+
+### 23.4 The gate board (23 of 23 green)
+
+| gate | result |
+|---|---|
+| B1 nested monotonicity | `U_board <= U_speed` on 12 intervals; largest tightening **684k** |
+| B2 dense falsification | 13,448 relaxed-set members **through the board helper**; worst excess **0.0** |
+| B3 partition exactness | parent vs max(children) over 10 splits; worst difference **0.0** |
+| B4 full-circle consistency | full circle 1188k = max of 4 quadrants 1188k |
+| B5 constructive oracles | **8 legal oracles**, violations speed/full/sharp **0/0/0**, tightest margin 256k/256k/**15k** |
+| B6 tangent sanity | returns exactly `s_max^2 + (v_z - G)^2 + pot` |
+| B7 authoritative parity | **192 maximisers**, candidates s0/smax/bnd **28/127/37**, bad theta/dot/energy **0/0/0**, worst residual **0.31** |
+
+B5 runs against **every** certified stage, not just the final bound:
+(1) the broad energy ceiling under the production recipe, (2) the
+heading-agnostic board ceiling under the same recipe, (3) the **sharp**
+form — the oracle's own arrival tick, its own contact height, a narrow
+interval around its realized heading, no acceptance slack at all.
+
+B7 covers all three candidate classes by sweeping `v_z` including a
+`v_z = 0` row: candidate A (`s = 0`) only ever wins where the interval
+admits no approaching arrival at any positive speed, which needs
+`b ~ 0`. Without that row it is dead code and the gate would have
+claimed coverage it did not have.
+
+**One test-side defect B7 found in itself:** the maximiser sits *on* an
+interval endpoint whenever the extremum of cos over the arc is an
+endpoint — the common case — so containment measured as an offset from
+the lower end wraps a `-1e-7` rounding error round to `2pi` and rejects
+a legal heading (14 of 192). Containment is now tested symmetrically
+about the arc midpoint.
+
+### 23.5 The bound is CERTIFIED
+
+The argument chain is complete: certified speed ceiling contains all
+legal arrivals (now over the exact tick window); the heading interval
+contains the domain; the relaxed terminal set is a superset; the
+analytical maximisation is exact over that relaxation (B3/B4/B6); the
+board-response implementation matches the authoritative helper (B7);
+interval/partition consistency is property-verified (B3/B4); and
+constructive oracles have found no violation (B5). So
+
+    H*(D) <= U_board(D)
+
+enters the certified registry. `d.U` now takes the interval ceiling
+whenever it is tighter, so it can establish `PROVED_IRRELEVANT` and not
+merely order work, and prunes carry which ceiling did the eliminating
+(`0x55300002` interval board vs `0x55300001` broad energy).
+
+**S5 still reports zero prunes, and that is the correct answer, not a
+bug.** Measured on the airprops query the tightest certified `U_D` is
+**1081k** while the incumbent `L*` is 998k–1030k. Nothing is provably
+irrelevant yet. Certification made pruning *possible*; tightness decides
+whether it *fires*.
+
+### 23.6 THE RETIREMENT GATE FAILED — legacy stays
+
+With the scheduler made authoritative (`RefTune::scheduler` default 2)
+the single-query capability probe still looked fine. The **generic
+suite** did not:
+
+| airsuite @600 evals/case | struck | <=16u | p95 rmin |
+|---|---|---|---|
+| legacy (default) | **48/48** | 40 | 19.8u |
+| scheduler v1 | **39/48** | 31 | 47.8u |
+
+The failures are not scattered — they are the whole hard class:
+`hz55 15/24`, `s900 15/24`, while `hz30 24/24` and `s400 24/24`.
+
+Budget scaling separates capability from cost:
+
+| budget/case | struck | <=16u | p95 rmin |
+|---|---|---|---|
+| 600 | 39/48 | 31 | 47.8u |
+| 1800 | 48/48 | 36 | 21.3u |
+| 3600 | **48/48** | **48** | **13.7u** |
+
+At 6x the budget the scheduler is **better than legacy on every axis**
+(48 within 16u vs legacy's 40; p95 13.7u vs 19.8u). So this is **not a
+capability deficit — it is a coverage cost**. The scheduler pays
+mandatory minimum coverage across all 6 heading domains before anything
+escalates: 6 scouts x `kCostShot` 40 = **240 of 600 evals (40%)**,
+leaving 360 to be split six ways. Legacy's guided phase concentrated
+instead.
+
+That cost is a *correct* consequence of the budget-oblivious law — the
+scheduler cannot know the budget is small, so it always pays coverage
+first — but 48/48 -> 39/48 on the generic suite at the operational
+budget is exactly the "important generic regression" the acceptance
+criteria forbid.
+
+**Ruling recorded: legacy is NOT retired, the default stays 0, and
+EntranceField is NOT declared integration-ready.** The single-query
+capability probe was never sufficient evidence; the suite was.
+
+The identified lead — and it is a lead, not a licence to reopen
+scheduler quality — is that the minimum-coverage unit is charged at full
+shot price. The advisor's own guidance ("smaller resumable units, never
+find a cheaper action that fits") points at a cheaper *coverage* unit,
+which would shorten the mandatory prefix without touching the anytime
+law. That is one focused change, and it is the only thing standing
+between here and retirement.
+
+### 23.7 Regression board after the change (legacy default, clean build)
+
+| suite | result |
+|---|---|
+| airprops | **23/23 PASS** (P1-P7, S1-S9, B1-B7) |
+| airsuite | 48/48 struck, mean gap 242k, <=16u 40, p50 13.4u — **unchanged** |
+| airrec | fixture `de1b000e431a84fb` **VERIFIED**; L1 32/32, L2 12/12 constructible |
+| wishparity | PASS, controller 4/4 targets converge |
+| strafelaw | closed form exact to float ULP; max abs dturn 8.3e-7 rad |
+| humanexact | f2 **PASS** (945k vs 945k); f0 FAIL -209k; f3 N/A (human outside the control law) |
+| carve | 3/3 unseeded, **M1.4 GATE PASS** |
+| airsolve | 3/3 unseeded, **M1.3 GATE PASS** |
+
+### 23.8 A stale record corrected
+
+The canonical airrec curve in section 13c predates the session-12b
+defect fixes (scout dedupe radius, GN pass-2 pin, curvature penalty,
+residual channel, boundary value tier), all of which sit on the shared
+path. Measured now, deterministic across repeat runs, same verified
+fixture hash:
+
+| curve | m=0 | m=1 | m=2 |
+|---|---|---|---|
+| iso-budget | 16/32 | 13/32 | **18/32** (was 14) |
+| capability | 16/32 | **23/32** (was 20) | 29/32 |
+
+The ruling it supports is unchanged and if anything stronger: the
+capability curve scales, so Level B stays off the roadmap. The iso curve
+still declines from m=0 to m=1.
+
+### 23.9 What is actually left before ExitField
+
+1. The coverage-unit cost, and **only** that — one change, measured on
+   `airsuite` at 600, not on a single query.
+2. If it restores 48/48: retire legacy + `gbudget` + phase-share
+   atomically, rebuild clean, rerun this whole board.
+3. Then the EntranceField integration decision.
+
+Not on the list, per standing ruling: the 998k->1030k single-query
+differential, per-domain tolerances, the displacement ceiling, or any
+further Air acceptance criterion.

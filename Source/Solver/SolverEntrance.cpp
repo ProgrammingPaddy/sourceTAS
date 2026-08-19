@@ -2175,19 +2175,53 @@ namespace Entrance {
 				std::vector<Dom> dom(static_cast<size_t>(n_dom));
 				for (int i = 0; i < n_dom; ++i)
 					dom[static_cast<size_t>(i)].iv = i;
-				// The certified ceiling available today is the global
-				// optimistic energy bound, identical across heading
-				// domains - so U_D - L* carries little ranking
-				// information yet. That is expected and is exactly why
-				// the nested ceiling ladder is the NEXT build; v0 is
-				// not tuned against this number.
-				const float U_global = bnd
-					? Envelope::SMax(s0, N, p)
-					: (Envelope::SMax(s0, N, p)
-						* Envelope::SMax(s0, N, p)
-						+ Envelope::VzAfter(entry.vel.Z, N, p, gs)
-						* Envelope::VzAfter(entry.vel.Z, N, p, gs)
-						+ 2.f * p.gravity * gs * (q.Z - zmin));
+				// ---- CERTIFIED INPUTS, NOT NOMINAL ONES (B5/B7,
+				// 2026-08-19). Both ceilings below bound the SAME
+				// quantity the operator credits: H = |end_state.vel|^2
+				// + 2 g gs (contact z - zmin), measured AFTER
+				// FinishGravity. Two nominal-vs-credited mismatches had
+				// to be closed before either could be called certified:
+				//
+				//  * ARRIVAL TICK. A face-mode strike is credited at any
+				//    tick a schedule of length [8, n_cap] can reach (the
+				//    flight runs to total + 8), not only at N. Vertical
+				//    motion in air is pure ballistics - no control
+				//    touches v_z - so the admissible window is EXACT:
+				//    only ticks whose ballistic z lands inside the
+				//    acceptance ball can produce a credited strike. The
+				//    ceiling is maximised over that window rather than
+				//    evaluated at one guessed endpoint (the candidate
+				//    structure is not monotone in v_z).
+				//  * CONTACT HEIGHT. Any contact within `radius` of q is
+				//    credited, so the potential term must use the top of
+				//    the acceptance ball, not q itself. At radius 28 on
+				//    surf gravity that is 44.8k of energy the nominal
+				//    form silently omitted.
+				const float zhi_acc = q.Z + radius;
+				const int k_cap = n_cap + 8;
+				int k_lo = 1, k_hi = k_cap;
+				if (bnd || !Envelope::ZWindow(entry.pos.Z, entry.vel.Z,
+					q.Z - radius, zhi_acc, p, k_cap, &k_lo, &k_hi, gs)) {
+					k_lo = 1;
+					k_hi = k_cap;
+				}
+				const float pot_c = 2.f * p.gravity * gs
+					* (zhi_acc - zmin);
+				const float gimp = 0.5f * p.gravity * gs * p.dt;
+				// The broad certified ceiling: drop the clip loss (-d^2
+				// <= 0) and the n_z cross term, keep the gravity phase.
+				float U_global = Envelope::SMax(s0, N, p);
+				if (!bnd) {
+					U_global = -1e30f;
+					for (int k = k_lo; k <= k_hi; ++k) {
+						const float sk = Envelope::SMax(s0, k, p);
+						const float vk = Envelope::VzAfter(entry.vel.Z,
+							k, p, gs) - gimp;
+						const float u = sk * sk + vk * vk + pot_c;
+						if (u > U_global)
+							U_global = u;
+					}
+				}
 				for (Dom& d : dom)
 					d.U = U_global;
 				// PER-DOMAIN CEILING: the interval-specific relaxed
@@ -2200,21 +2234,31 @@ namespace Entrance {
 				// is ADVISORY it may order work but never establish
 				// PROVED_IRRELEVANT.
 				if (!bnd) {
-					const float vzT = Envelope::VzAfter(entry.vel.Z,
-						N, p, gs);
-					const float sT = Envelope::SMax(s0, N, p);
-					const float pot = 2.f * p.gravity * gs
-						* (q.Z - zmin);
 					for (int i = 0; i < n_dom; ++i) {
 						Dom& d = dom[static_cast<size_t>(i)];
-						const float ub = UBoardHeading(facep->n, vzT,
-							sT, Steer::WrapPi(th_arr + ivt[i][0]),
-							Steer::WrapPi(th_arr + ivt[i][1]), pot);
+						const float tlo = Steer::WrapPi(th_arr
+							+ ivt[i][0]);
+						const float thi = Steer::WrapPi(th_arr
+							+ ivt[i][1]);
+						float ub = -1e30f;
+						for (int k = k_lo; k <= k_hi; ++k) {
+							const float u = UBoardHeading(facep->n,
+								Envelope::VzAfter(entry.vel.Z, k, p, gs),
+								gimp, Envelope::SMax(s0, k, p), tlo, thi,
+								pot_c);
+							if (u > ub)
+								ub = u;
+						}
 						d.U_adv = ub;
+						// PROMOTED TO CERTIFIED (2026-08-19, gates B1-B7).
+						// The interval ceiling now replaces the broad energy
+						// ceiling as the domain's certified U, so it may
+						// establish PROVED_IRRELEVANT and not merely order
+						// work. It is only ever taken when it is TIGHTER, so
+						// the certified value can never regress.
 						if (ub > -1e29f && ub < d.U)
-							d.U_order = ub;
-						else
-							d.U_order = d.U;
+							d.U = ub;
+						d.U_order = d.U;
 					}
 				} else {
 					for (Dom& d : dom)
@@ -2294,7 +2338,13 @@ namespace Entrance {
 							d.state = DOM_IRRELEVANT;
 							RefResult::PruneRec pr;
 							pr.domain = i;
-							pr.bound_id = 0x55300001u;  // energy ceiling v1
+							// Which ceiling actually did the eliminating - a
+							// prune that cannot name its bound is not
+							// proof-carrying.
+							pr.bound_id = (d.U_adv > -1e29f
+								&& d.U <= d.U_adv + 1e-3f)
+								? 0x55300002u    // interval board ceiling
+								: 0x55300001u;   // broad energy ceiling
 							pr.U = d.U;
 							pr.L_star = Lstar;
 							pr.eps = 0.f;

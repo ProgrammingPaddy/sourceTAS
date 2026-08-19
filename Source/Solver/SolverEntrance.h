@@ -225,20 +225,73 @@ namespace Entrance {
 	}
 
 	// The exact maximum of the relaxed set described above.
+	//
+	// GRAVITY PHASE (B7, 2026-08-19). The quantity production stores as
+	// H is measured on `end_state.vel`, i.e. AFTER FinishGravity, while
+	// v- is the PRE-clip velocity (post StartGravity + air wish). With
+	// the half-tick impulse G = gs*g*dt/2 and v+ = v- - n d:
+	//     v_end   = v+ - (0,0,G)
+	//     |v_end|^2 = s^2 + v_z^2 - d^2 - 2 G v_z + 2 G n_z d + G^2
+	//               = s^2 - d^2 + (v_z - G)^2 + 2 G n_z d.
+	// On an approaching arrival d <= 0, so for an UPWARD-facing normal
+	// (n_z >= 0, every surfable ramp) the cross term is <= 0 and may be
+	// dropped: the bound keeps its exact closed form with
+	//     base = (v_z - G)^2 + pot
+	// instead of v_z^2 + pot. Omitting G entirely UNDER-counted the true
+	// post-board energy by 2 G |v_z| - G^2 (~2.4k at v_z = -200), which
+	// is the direction that makes an upper bound unsafe. For a downward-
+	// facing normal the cross term is >= 0 and is added as an explicit
+	// conservative slack rather than dropped.
+	//
 	//   n        : unit face normal
 	//   vz       : pre-clip vertical component at the arrival tick
+	//   gimp     : G = gs * gravity * dt / 2, the half-tick impulse
 	//   smax     : certified horizontal-speed ceiling s_max(T)
 	//   th_lo/hi : the heading domain (circular interval)
 	//   pot      : 2 g (z_contact - zmin), the potential term the
 	//              stored H carries
-	inline float UBoardHeading(const Vec3& n, float vz, float smax,
-	                           float th_lo, float th_hi, float pot) {
+	//   arg      : optional maximizer, so B7 can push the analytical
+	//              argmax through the authoritative board helper
+
+	// The state that realizes the maximum. B7 exists because an
+	// optimizer that agrees on the NUMBER while disagreeing about the
+	// STATE would hide a semantic mismatch (velocity phase, gravity
+	// placement, normal convention) behind a coincidence.
+	struct UBoardArg {
+		float s = 0.f;      // horizontal speed at the maximizer
+		float a = 0.f;      // h cos(theta - phi) there
+		float d = 0.f;      // n . v- there
+		int   cand = -1;    // 0 = s.0, 1 = s.smax, 2 = approach boundary
+	};
+
+	inline float UBoardHeading(const Vec3& n, float vz, float gimp,
+	                           float smax, float th_lo, float th_hi,
+	                           float pot, UBoardArg* arg = nullptr) {
 		const float h = sqrtf(n.X * n.X + n.Y * n.Y);
 		const float b = n.Z * vz;
-		const float base = vz * vz + pot;
+		const float vze = vz - gimp;
+		float base = vze * vze + pot;
+		// n_z < 0: the dropped cross term 2 G n_z d is POSITIVE for an
+		// approaching arrival, so it must be added, not ignored.
+		if (n.Z < 0.f) {
+			const float dmax = fabsf(b) + smax * h;
+			base += 2.f * gimp * fabsf(n.Z) * dmax;
+		}
+		if (arg) {
+			arg->s = 0.f;
+			arg->a = 0.f;
+			arg->d = b;
+			arg->cand = -1;
+		}
 		if (h < 1e-5f) {
 			// Vertical normal: a == 0, so d == b for every arrival.
-			return b <= 0.f ? smax * smax + base - b * b : -1e30f;
+			if (b > 0.f)
+				return -1e30f;
+			if (arg) {
+				arg->s = smax;
+				arg->cand = 1;
+			}
+			return smax * smax + base - b * b;
 		}
 		const float phi = atan2f(n.Y, n.X);
 		float cmin = -1.f, cmax = 1.f;
@@ -246,13 +299,22 @@ namespace Entrance {
 		const float a_lo = h * cmin;
 		const float a_hi = h * cmax;
 		float best = -1e30f;
+		auto take = [&](float v, float s_at, float a_at, float d_at,
+			int cand) {
+			if (v <= best)
+				return;
+			best = v;
+			if (arg) {
+				arg->s = s_at;
+				arg->a = a_at;
+				arg->d = d_at;
+				arg->cand = cand;
+			}
+		};
 		// Candidate A: s = 0 (feasible only if the arrival is already
 		// approaching, i.e. b <= 0).
-		if (b <= 0.f) {
-			const float v = base - b * b;
-			if (v > best)
-				best = v;
-		}
+		if (b <= 0.f)
+			take(base - b * b, 0.f, a_lo, b, 0);
 		// Candidate B: s = smax, with the feasible `a` that puts the
 		// normal component closest to zero from the approaching side.
 		{
@@ -260,11 +322,8 @@ namespace Entrance {
 			float a_use = a_star < a_hi ? a_star : a_hi;
 			if (a_use >= a_lo) {
 				const float d = a_use * smax + b;
-				if (d <= 1e-4f) {
-					const float v = smax * smax + base - d * d;
-					if (v > best)
-						best = v;
-				}
+				if (d <= 1e-4f)
+					take(smax * smax + base - d * d, smax, a_use, d, 1);
 			}
 		}
 		// Candidate C: the approach boundary s = -b/a (zero clip loss).
@@ -284,11 +343,8 @@ namespace Entrance {
 			}
 			if (have) {
 				const float s = -b / a_use;
-				if (s >= 0.f && s <= smax + 1e-3f) {
-					const float v = s * s + base;
-					if (v > best)
-						best = v;
-				}
+				if (s >= 0.f && s <= smax + 1e-3f)
+					take(s * s + base, s, a_use, 0.f, 2);
 			}
 		}
 		return best;

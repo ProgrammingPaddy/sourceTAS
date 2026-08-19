@@ -15,6 +15,15 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-19 (session 12j): the Air bound is CERTIFIED; the
+scheduler is NOT yet authoritative.** Gates B1-B7 are green and
+`Entrance::UBoardHeading` is in the certified registry. Legacy is NOT
+retired and EntranceField is NOT integration-ready: with the scheduler
+authoritative, `airsuite` @600 evals/case falls 48/48 -> 39/48. It is a
+COVERAGE COST, not a capability deficit (48/48 at 1800; at 3600 it beats
+legacy on every axis). The single blocker is the minimum-coverage unit
+being charged at full shot price. See `Docs/AirRecSpec.md` section 23.
+
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
 sequential shooting has the expressive power (16/20/29 of 32 at
@@ -340,6 +349,127 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-19 (session 12j, THE BOUND IS CERTIFIED - AND THE RETIREMENT
+  GATE FAILED): B5 and B7 built; both green; `Entrance::UBoardHeading`
+  promoted **ADVISORY -> CERTIFIED**; legacy **NOT** retired.
+  **B7 found a real unsafety.** It pushes the ceiling's own maximiser
+  (all three candidate classes) through `Board::PredictClipTickVel` -
+  the helper production owns - and demands agreement on the bounded
+  quantity. The mismatch was velocity phase: production stores
+  `H = |end_state.vel|^2 + 2 g gs (z - zmin)` measured AFTER
+  FinishGravity, while the relaxed set is written in PRE-clip
+  velocities. With `G = gs g dt / 2`,
+  `|v_end|^2 = s^2 - d^2 + (v_z - G)^2 + 2 G n_z d`; on an approaching
+  arrival `d <= 0`, so for `n_z >= 0` the cross term drops and the bound
+  keeps its exact closed form with `base = (v_z - G)^2 + pot`. Omitting
+  `G` under-counted true energy by `2 G |v_z| - G^2` - the direction
+  that makes an upper bound UNSAFE. Writing B5 exposed two more
+  nominal-vs-credited mismatches: the ceiling was built at tick `N` only
+  though strikes are credited anywhere in `[8, n_cap] + 8` (fixed via
+  the EXACT ballistic z-window - no control touches `v_z`), and the
+  potential used `q.Z` though any contact within `radius` is credited
+  (44.8k of energy at radius 28). All three applied to the broad energy
+  ceiling too. CAUSAL PROBE (gravity phase removed from the ceiling
+  only): B7 192/192 fail worst 14,502; B2 worst excess 15,166; **B5
+  still PASSES** (sharp margin 15k -> 9k) - the constructive oracles
+  validated but could not falsify, exactly as the advisor's wording
+  requires. B2 only became able to catch it once rerouted through the
+  authoritative helper instead of re-deriving energy the ceiling's own
+  way. Gate board **23/23**: B5 8 legal oracles, violations 0/0/0 across
+  all three certified stages, tightest margin 256k/256k/**15k**; B7 192
+  maximisers, candidates 28/127/37, bad theta/dot/energy 0/0/0, worst
+  residual **0.31** on ~1.19e6. `d.U` now takes the interval ceiling
+  when tighter and prunes name which bound eliminated them. S5 still
+  reports **0 prunes and that is correct**: tightest `U_D` 1081k vs
+  `L*` 998k-1030k, so nothing is provably irrelevant yet - certification
+  made pruning possible, tightness decides whether it fires.
+  **THE RETIREMENT GATE FAILED.** With the scheduler authoritative the
+  single-query probe still looked fine; `airsuite` @600 evals/case went
+  **48/48 -> 39/48** (<=16u 40 -> 31, p95 19.8u -> 47.8u), concentrated
+  entirely in the hard class (hz55 15/24, s900 15/24; hz30 and s400
+  both 24/24). Budget scaling separates capability from cost: 1800 ->
+  48/48, 3600 -> 48/48 with **<=16u 48 and p95 13.7u, better than legacy
+  on every axis**. So it is a COVERAGE COST, not a capability deficit:
+  mandatory minimum coverage of 6 heading domains costs 6 x kCostShot 40
+  = 240 of 600 evals (40%) before anything escalates. That cost is a
+  correct consequence of the budget-oblivious law, but a 48/48 -> 39/48
+  generic regression at the operational budget is precisely the
+  "important generic regression" the acceptance criteria forbid. Legacy
+  stays, default stays 0, **EntranceField is NOT integration-ready**.
+  The single-query capability probe was never sufficient evidence - the
+  suite was. One identified lead, not a licence to reopen scheduler
+  quality: the coverage unit is charged at full shot price; a cheaper
+  coverage unit shortens the mandatory prefix without touching the
+  anytime law. Regressions after the change (legacy default, clean
+  build): airprops 23/23, airsuite 48/48 gap 242k unchanged, airrec
+  fixture `de1b000e431a84fb` VERIFIED (L1 32/32, L2 12/12), wishparity
+  PASS 4/4, strafelaw float-ULP exact, humanexact f2 PASS (945k vs
+  945k) / f0 -209k / f3 N/A, carve 3/3 M1.4 PASS, airsolve 3/3 M1.3
+  PASS. Also corrected a stale record: the canonical airrec curve in
+  AirRecSpec 13c predates the 12b shared-path fixes - measured now and
+  deterministic on the same verified fixture it is iso 16/13/**18**,
+  capability 16/**23**/29 (was 16/14/14 and 16/20/29); the do-not-build
+  Level-B ruling is unchanged and slightly stronger. Full detail:
+  `Docs/AirRecSpec.md` section 23.
+
+- 2026-08-19 (sessions 12e-12i, THE SCHEDULER - built, gated, and
+  measured; BACKFILLED into this log 2026-08-19 session 12j, which found
+  they had been recorded only in `Docs/AirRecSpec.md` 18-22).
+  **12e - scheduler v0** (`RefTune::scheduler = 1`): one deterministic
+  action stream; `NextAction()` is a pure function of solver state and
+  CANNOT see the requested or remaining budget; the Runner has exactly
+  one budget interaction - ask what is next, look up its fixed known
+  charge, execute if it fits, otherwise STOP, never skip. Domains
+  `D = (Q region, T branch, I_theta)` with THREE terminal states
+  (UNRESOLVED / PROVED_IRRELEVANT / PARTITIONED - a split is not a
+  resolution). Importance = `U_D - L*` only; kappa/stall/residual choose
+  HOW to refine, never WHETHER a domain matters. Gates S1-S5 green. S1
+  immediately caught a budget leak reasoning had missed: legacy
+  `gshots`/`gbudget` made scheduled actions no-ops.
+  **12f - action set complete** (deepen + one GN iteration as
+  first-class actions, S6). The capability gate was run BEFORE retiring
+  legacy, per the advisor's ordering correction, and it FAILED: legacy
+  1030k vs scheduled 965k at 6000 evals. Diagnosis: representation
+  adequate, scheduler semantics correct, scheduler INFORMATION
+  inadequate. S1 caught a second budget leak - `deepen()` consulted
+  `budget_cur`.
+  **12g - the interval board ceiling** `Entrance::UBoardHeading`, exact
+  in closed form: with `a(theta) = h cos(theta - phi)`, `b = n_z v_z`,
+  `d = a s + b`, E is convex in s because `|a| <= h <= 1`, so the
+  maximum sits at `s = 0`, `s = s_max` or the approach boundary
+  `s = -b/a`. `CosRange` is a separate property-tested function because
+  a circular-extrema mistake is the one error that makes the bound
+  UNSAFE rather than loose. Gates B1-B4/B6 green; wired ADVISORY.
+  **The causal experiment: the bound landed and the gap did NOT close**
+  (965k unchanged) - the missing-information hypothesis was NOT
+  supported. Per standing rule this did not justify building the
+  displacement ceiling; treating a scheduling defect with more bound
+  mathematics is the error the rule exists to prevent.
+  **12h - scheduler v1: allocation was the defect.** Same physics,
+  bounds, methods and action set; only the SERVICE DISCIPLINE changed to
+  deterministic weighted-fair virtual runtime plus a method lane ladder
+  that yields on stall. 965k -> **998k** with a BETTER residual (12.6u
+  vs 19.5u) and ~40% fewer actions (166 vs 257). Measured `U_D` spread
+  171k-184k, answering the advisor's diagnostic: the bound DOES
+  discriminate, so the fault had been policy, not information. New gates
+  S7 (no domain monopoly) and S8 (within-domain method fairness).
+  **12i - precision as an explicit rung state machine.** A domain
+  acquires precision debt only once it OWNS a witness at the ACTIVE
+  rung; the step then tightens exactly one rung and yields back to
+  ordinary refinement: find feasible -> tighten -> refine -> find
+  feasible. That closes both failure modes at once - no dormancy, no
+  runaway tightening. **S9 PASS** both halves: 2 steps, exactly the
+  kLadder rungs between the 28u acceptance radius and the 8u tolerance
+  with no skips, and 0 steps on an unreachable target. **Quality
+  unchanged at 998k** - the fix made precision CORRECT, not more
+  productive, which rules out precision starvation as the cause of the
+  remaining differential. Recorded honestly as a v1 simplification: the
+  active tolerance is still solve-wide, not per-domain (the per-domain
+  `rung` counter exists and is tracked; the tolerance is shared).
+  Advisor ruling closing 12i: stop pursuing the 998k->1030k differential
+  and do not implement per-domain tolerances - classify the shared
+  tolerance as certification-mature work, not an integration blocker.
 
 - 2026-08-19 (session 12d, SCHEDULER PREP - spec filed, one law
   sharpened, NO code shipped). Advisor elevated the prefix law to

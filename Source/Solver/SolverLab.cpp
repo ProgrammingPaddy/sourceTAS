@@ -7640,6 +7640,263 @@ namespace {
 		return 0;
 	}
 
+	// ================= airrec: THE CONSTRUCTIVE RECOVERABILITY
+	// SUITE (advisor 2026-08-19; Docs/AirRecSpec.md is the design of
+	// record). Hidden LEGAL wish schedules create known-reachable
+	// problems; production must recover them cold. Layer 1 = free-air
+	// boundary problems (S0, Q, T, theta) - tests the numerical
+	// shooting core. Layer 2 = clean face strikes - tests the actual
+	// Air->Board operator. QUARANTINE: oracle schedules/features live
+	// only in this harness; production receives (S0, Q, T[, theta]);
+	// nothing is banked and nothing is seeded. Every oracle is also a
+	// constructive floor: any certified ceiling below it is FALSIFIED
+	// (empirical validation only - passing is not certification).
+
+	namespace {
+
+	struct RecOracle {
+		bool  ok = false;
+		const char* why = "";
+		PlayerState S0;
+		std::vector<signed char> side;
+		std::vector<float> cosa;
+		int   T = 0;          // oracle arrival tick
+		Vec3  Q;              // boundary point / contact
+		float th = 0.f;       // terminal heading
+		float sT = 0.f;       // horizontal speed at T
+		float vzT = 0.f;
+		float E = 0.f;        // post-board energy (layer 2)
+		int   face = -1;      // layer 2 target face
+		float zmin = 0.f;
+		// Stratum labels + measured complexity features (harness
+		// only; production never sees these).
+		int   rev = 0, prof = 0, dwell = 0;
+		int   min_dwell = 0;
+		float dh_tot = 0.f, dh_max = 0.f, sac = 0.f;
+		int   brake = 0;
+	};
+
+	// Deterministic legal schedule for one control-complexity
+	// stratum: rev+1 alternating side segments (each >= min_gap, so
+	// legal from a fresh CtlState by construction), cosa profile by
+	// class. Encodes control-space coverage, never trajectory shapes.
+	void RecSchedule(int rev, int prof, int dwell_style, int T,
+	                 int min_gap, unsigned seed,
+	                 std::vector<signed char>* side,
+	                 std::vector<float>* cosa, int* min_dwell) {
+		side->assign(static_cast<size_t>(T), 0);
+		cosa->assign(static_cast<size_t>(T), 1.f);
+		unsigned rng = seed * 2654435761u + 0x9e3779b9u;
+		auto fr = [&]() {
+			rng = rng * 1664525u + 1013904223u;
+			return static_cast<float>((rng >> 8) & 0xFFFF)
+				/ 65535.f;
+		};
+		const int nseg = rev + 1;
+		std::vector<int> len(static_cast<size_t>(nseg), 0);
+		int used = 0;
+		if (dwell_style == 0) {
+			// Near-minimum dwell: min_gap + 0..3, remainder to the
+			// last segment.
+			for (int i = 0; i + 1 < nseg; ++i) {
+				len[static_cast<size_t>(i)] = min_gap
+					+ static_cast<int>(fr() * 3.99f);
+				used += len[static_cast<size_t>(i)];
+			}
+			len[static_cast<size_t>(nseg) - 1] = T - used;
+		} else {
+			for (int i = 0; i < nseg; ++i)
+				len[static_cast<size_t>(i)] = T / nseg;
+			len[static_cast<size_t>(nseg) - 1] += T
+				- (T / nseg) * nseg;
+		}
+		bool bad = false;
+		for (int i = 0; i < nseg; ++i)
+			if (len[static_cast<size_t>(i)] < min_gap)
+				bad = true;
+		if (bad) {
+			for (int i = 0; i < nseg; ++i)
+				len[static_cast<size_t>(i)] = T / nseg;
+			len[static_cast<size_t>(nseg) - 1] += T
+				- (T / nseg) * nseg;
+		}
+		*min_dwell = 1 << 20;
+		for (int i = 0; i < nseg; ++i)
+			if (len[static_cast<size_t>(i)] < *min_dwell)
+				*min_dwell = len[static_cast<size_t>(i)];
+		// STORED-BASIS CONVENTION (measured 2026-08-19, smoke run):
+		// the canonical (side, cosa) executor realizes its wish at
+		// wh + pi, so stored cosa = +1 wishes BACKWARD (max brake)
+		// and the active gain band is small-NEGATIVE stored cosa
+		// (~ -cap/s). Profiles below are written in STORED units so
+		// the strata mean what they claim: gain flights gain.
+		const float ph = fr() * 6.2831853f;
+		signed char s = fr() < 0.5f ? static_cast<signed char>(-1)
+			: static_cast<signed char>(1);
+		int k = 0;
+		for (int i = 0; i < nseg; ++i) {
+			for (int j = 0; j < len[static_cast<size_t>(i)];
+				++j, ++k) {
+				(*side)[static_cast<size_t>(k)] = s;
+				float c = -0.02f;
+				switch (prof) {
+				case 0: c = -0.02f; break;               // near-max gain
+				case 1: c = 0.24f + 0.26f                // smooth vary:
+					* sinf(6.2831853f * static_cast<float>(k)
+						/ static_cast<float>(T) + ph);   // [-0.02, 0.5]
+					break;
+				case 2: c = (i & 1) ? 0.65f : -0.02f;    // aggressive
+					break;                               // gain<->brake
+				case 3: c = k < T / 3 ? 0.7f : -0.02f;   // brake->gain
+					break;
+				}
+				(*cosa)[static_cast<size_t>(k)] = c;
+			}
+			s = static_cast<signed char>(-s);
+		}
+	}
+
+	// Open-loop free flight with per-tick visibility (harness-side
+	// feature extraction). Fails on any contact or grounding. Fills
+	// the oracle's terminal state + complexity features.
+	bool RecFreeFly(const PlayerState& S0, const World& w,
+	                const MoveParams& p,
+	                const std::vector<signed char>& side,
+	                const std::vector<float>& cosa,
+	                RecOracle* out, std::vector<Vec3>* traj) {
+		PlayerState s = S0;
+		const int hold = s.ducked ? IN_DUCK : 0;
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		out->dh_tot = 0.f;
+		out->dh_max = 0.f;
+		out->sac = 0.f;
+		out->brake = 0;
+		const int T = static_cast<int>(side.size());
+		float h_prev = atan2f(S0.vel.Y, S0.vel.X);
+		for (int k = 0; k < T; ++k) {
+			const float s2d = Len2D(s.vel);
+			const float h = s2d > 1.f
+				? atan2f(s.vel.Y, s.vel.X) : h_prev;
+			float yaw = h * 57.2957795f, fm = 0.f, sm = 0.f;
+			if (side[static_cast<size_t>(k)] != 0 && s2d > 1.f) {
+				Air::WishInputs(h,
+					static_cast<int>(
+						side[static_cast<size_t>(k)]),
+					cosa[static_cast<size_t>(k)], &yaw, &fm,
+					&sm);
+				// Stored convention: POSITIVE cosa = braking wish.
+				if (cosa[static_cast<size_t>(k)] > 0.3f)
+					out->brake++;
+			}
+			const float pre2 = s2d * s2d + cap2;
+			TickEvents ev;
+			MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, hold, &ev);
+			if (traj)
+				traj->push_back(s.pos);
+			if (ev.ncontacts > 0 || s.on_ground)
+				return false;
+			const float post = Len2D(s.vel);
+			const float dsac = pre2 - post * post;
+			if (dsac > 0.f)
+				out->sac += dsac;
+			const float h2 = post > 1.f
+				? atan2f(s.vel.Y, s.vel.X) : h;
+			const float dh = fabsf(Steer::WrapPi(h2 - h));
+			out->dh_tot += dh;
+			if (dh > out->dh_max)
+				out->dh_max = dh;
+			h_prev = h2;
+		}
+		out->Q = s.pos;
+		out->sT = Len2D(s.vel);
+		out->vzT = s.vel.Z;
+		out->th = out->sT > 1.f ? atan2f(s.vel.Y, s.vel.X) : 0.f;
+		return true;
+	}
+
+	// Layer-2 oracle construction: free flight is TRANSLATION
+	// INVARIANT, so probe the hidden schedule once in open air, then
+	// translate the start so the trajectory crosses the target face
+	// near its centroid, and demand a clean single-plane strike from
+	// the TRUE replay. Retries over approach bearing and plane
+	// offset; failure is reported, never silently dropped.
+	bool RecBoardOracle(const World& w, const MoveParams& p,
+	                    const Route::Graph& g, int face_idx,
+	                    float s0, float vz0, int T,
+	                    const std::vector<signed char>& side,
+	                    const std::vector<float>& cosa,
+	                    float zhigh, RecOracle* out) {
+		const Route::Face& fc = g.faces[static_cast<size_t>(
+			face_idx)];
+		const float hn = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
+		if (hn < 1e-4f) {
+			out->why = "vertical-normal face";
+			return false;
+		}
+		const float paz = atan2f(fc.n.Y, fc.n.X);
+		const float voffs[5] = { 0.f, 0.3f, -0.3f, 0.6f, -0.6f };
+		const float eps[4] = { 4.f, 10.f, 1.f, 16.f };
+		for (int vo = 0; vo < 5; ++vo) {
+			const float inaz = Steer::WrapPi(paz + 3.14159265f
+				+ voffs[vo]);
+			PlayerState st;
+			st.pos = Vec3(0.f, 0.f, zhigh);
+			st.vel = Vec3(cosf(inaz) * s0, sinf(inaz) * s0, vz0);
+			st.ducked = false;
+			st.hull_state = 0;
+			RecOracle probe;
+			std::vector<Vec3> traj;
+			if (!RecFreeFly(st, w, p, side, cosa, &probe, &traj))
+				continue;
+			// The terminal velocity must actually approach the
+			// plane, or no translation can make it strike.
+			const float vdot = probe.sT * (cosf(probe.th) * fc.n.X
+				+ sinf(probe.th) * fc.n.Y) + probe.vzT * fc.n.Z;
+			if (vdot > -50.f)
+				continue;
+			const Vec3 dT = traj[static_cast<size_t>(T) - 1]
+				- st.pos;
+			for (int ei = 0; ei < 4; ++ei) {
+				PlayerState real = st;
+				real.pos = fc.centroid + Scale(fc.n, eps[ei])
+					- dT;
+				Air::Target vt;
+				vt.face = face_idx;
+				vt.dot_cap = 3000.f;
+				vt.aim = fc.centroid;
+				vt.max_ticks = T + 10;
+				Air::Result ar = Air::FlyWishSchedule(real, w, p,
+					vt, g, side, cosa, T + 10);
+				if (!ar.hit || ar.dot >= 0.f
+					|| ar.struck_brush >= 0)
+					continue;
+				if (ar.tick < T - 6 || ar.tick > T + 8)
+					continue;
+				out->ok = true;
+				out->S0 = real;
+				out->T = ar.tick;
+				out->Q = ar.pos;
+				out->th = atan2f(ar.v1.Y, ar.v1.X);
+				out->sT = Len2D(ar.v1);
+				out->vzT = ar.v1.Z;
+				out->E = Dot(ar.end_state.vel, ar.end_state.vel)
+					+ 2.f * p.gravity * real.gravity_scale
+					* (ar.pos.Z - fc.zmin);
+				out->face = face_idx;
+				out->zmin = fc.zmin;
+				out->dh_tot = probe.dh_tot;
+				out->dh_max = probe.dh_max;
+				out->sac = probe.sac;
+				out->brake = probe.brake;
+				return true;
+			}
+		}
+		out->why = "no clean-strike construction";
+		return false;
+	}
+
+	} // namespace
+
 	// ================= airprops: THE PROPERTY GATE (advisor
 	// 2026-08-19: "convert each of the seven adversarial-review defects
 	// into a regression/property test where possible"). Each property is
@@ -7954,6 +8211,7 @@ namespace {
 				// query at the same compute? Different action order is
 				// expected and fine.
 				Entrance::RefTune lg;
+				lg.scheduler = 0;   // pinned: the legacy baseline
 				lg.precision = 4.f;
 				int flg = 0;
 				Entrance::RefResult rl = Entrance::RefSolve(st, w, p,
@@ -8069,12 +8327,66 @@ namespace {
 		}
 		// ---- BOUND GATES for the interval-specific board ceiling.
 		// An unsafe upper bound is far worse than a loose one, so these
-		// run before the bound is allowed to prune anything.
+		// run before the bound is allowed to prune anything. Every gate
+		// below measures the ceiling against the quantity production
+		// actually credits: H = |end_state.vel|^2 + 2 g gs (z - zmin),
+		// taken AFTER FinishGravity.
 		{
+			const float gimp = 0.5f * p.gravity * p.dt;
 			const float vzT = Envelope::VzAfter(st.vel.Z, Hn, p);
 			const float sT = Envelope::SMax(700.f, Hn, p);
 			const float pot = 2.f * p.gravity * (q.Z - fc.zmin);
-			const float U_speed = sT * sT + vzT * vzT + pot;
+			const float U_speed = sT * sT + (vzT - gimp) * (vzT - gimp)
+				+ pot;
+			// THE AUTHORITATIVE BOARD RESPONSE. Board::
+			// PredictClipTickVel is the production helper and owns the
+			// whole tick: StartGravity -> ClipVelocity -> FinishGravity.
+			// The relaxed set is written in PRE-CLIP (post StartGravity)
+			// velocities, so the pre-StartGravity state that realises a
+			// given v- is v- + (0,0,G). Going through the helper - not a
+			// re-derivation - is the entire point of B7.
+			auto board_E = [&](const Vec3& v1) {
+				const Vec3 vpre(v1.X, v1.Y, v1.Z + gimp);
+				const Vec3 ve = Board::PredictClipTickVel(vpre, fc.n, p,
+					1.f);
+				return Dot(ve, ve) + pot;
+			};
+			// Recover a heading INSIDE the interval that realises a
+			// given a = h cos(theta - phi). If neither branch lands in
+			// the interval the maximiser is not a member of the domain
+			// and the bound is meaningless, so this is a hard failure.
+			auto theta_in = [&](float a, float lo, float hi,
+				float* th_out) {
+				const float hh = sqrtf(fc.n.X * fc.n.X
+					+ fc.n.Y * fc.n.Y);
+				if (hh < 1e-5f)
+					return false;
+				float c = a / hh;
+				if (c > 1.f) c = 1.f;
+				if (c < -1.f) c = -1.f;
+				const float phi = atan2f(fc.n.Y, fc.n.X);
+				const float da = acosf(c);
+				const float cd[2] = { phi + da, phi - da };
+				float wdt = hi - lo;
+				while (wdt < 0.f) wdt += 6.28318531f;
+				// The maximiser sits ON an interval endpoint whenever the
+				// extremum of cos over the arc is an endpoint - the common
+				// case - so containment must be tested SYMMETRICALLY about
+				// the arc midpoint. Measuring the offset from the lower end
+				// instead wraps a -1e-7 rounding error round to 2pi and
+				// rejects a legal heading.
+				const float mid = lo + 0.5f * wdt;
+				for (int i = 0; i < 2; ++i) {
+					float t = cd[i] - mid;
+					while (t > 3.14159265f) t -= 6.28318531f;
+					while (t < -3.14159265f) t += 6.28318531f;
+					if (fabsf(t) <= 0.5f * wdt + 1e-3f) {
+						*th_out = cd[i];
+						return true;
+					}
+				}
+				return false;
+			};
 			// B1 nested monotonicity: the interval bound may never
 			// exceed the broad speed ceiling it refines.
 			bool b1 = true;
@@ -8084,7 +8396,7 @@ namespace {
 					+ 6.2831853f * static_cast<float>(i) / 12.f;
 				const float hi = lo + 0.6f;
 				const float ub = Entrance::UBoardHeading(fc.n, vzT,
-					sT, lo, hi, pot);
+					gimp, sT, lo, hi, pot);
 				if (ub > -1e29f && ub > U_speed + 1.f)
 					b1 = false;
 				if (ub > -1e29f && U_speed - ub > worst_gap)
@@ -8094,8 +8406,9 @@ namespace {
 				"intervals; largest tightening %.0fk", worst_gap
 				/ 1e3f);
 			check("B1 nested bound monotonicity", b1, buf);
-			// B2 dense falsification: sample the RELAXED set directly
-			// and check no member exceeds the claimed maximum.
+			// B2 dense falsification: sample the RELAXED set directly,
+			// push every member through the AUTHORITATIVE board helper,
+			// and check none exceeds the claimed maximum.
 			bool b2 = true;
 			float worst_over = 0.f;
 			for (int i = 0; i < 8; ++i) {
@@ -8103,7 +8416,7 @@ namespace {
 					+ 6.2831853f * static_cast<float>(i) / 8.f;
 				const float hi = lo + 0.9f;
 				const float ub = Entrance::UBoardHeading(fc.n, vzT,
-					sT, lo, hi, pot);
+					gimp, sT, lo, hi, pot);
 				for (int ti = 0; ti <= 40; ++ti)
 					for (int si = 0; si <= 40; ++si) {
 						const float th = lo + (hi - lo)
@@ -8112,11 +8425,9 @@ namespace {
 							* static_cast<float>(si) / 40.f;
 						const Vec3 v(sp * cosf(th), sp * sinf(th),
 							vzT);
-						const float d = Dot(v, fc.n);
-						if (d > 0.f)
+						if (Dot(v, fc.n) > 0.f)
 							continue;   // not approaching
-						const float E = sp * sp + vzT * vzT - d * d
-							+ pot;
+						const float E = board_E(v);
 						if (E > ub + 1.f) {
 							b2 = false;
 							if (E - ub > worst_over)
@@ -8124,8 +8435,9 @@ namespace {
 						}
 					}
 			}
-			snprintf(buf, sizeof(buf), "13448 relaxed-set samples over "
-				"8 intervals; worst excess %.1f", worst_over);
+			snprintf(buf, sizeof(buf), "13448 relaxed-set members through "
+				"the board helper over 8 intervals; worst excess %.1f",
+				worst_over);
 			check("B2 dense relaxed-set falsification", b2, buf);
 			// B3 partition exactness: an exhaustive split of the same
 			// relaxation must give exactly the parent's maximum.
@@ -8136,11 +8448,11 @@ namespace {
 				const float hi = lo + 1.1f;
 				const float mid = 0.5f * (lo + hi);
 				const float up = Entrance::UBoardHeading(fc.n, vzT,
-					sT, lo, hi, pot);
+					gimp, sT, lo, hi, pot);
 				const float u1 = Entrance::UBoardHeading(fc.n, vzT,
-					sT, lo, mid, pot);
+					gimp, sT, lo, mid, pot);
 				const float u2 = Entrance::UBoardHeading(fc.n, vzT,
-					sT, mid, hi, pot);
+					gimp, sT, mid, hi, pot);
 				const float cmax = u1 > u2 ? u1 : u2;
 				if (up < -1e29f && cmax < -1e29f)
 					continue;
@@ -8154,14 +8466,14 @@ namespace {
 				"10 splits; worst |difference| %.1f", worst_split);
 			check("B3 heading partition exactness", b3, buf);
 			// B4 full-circle consistency.
-			const float full = Entrance::UBoardHeading(fc.n, vzT, sT,
-				-3.14159265f, 3.14159265f, pot);
+			const float full = Entrance::UBoardHeading(fc.n, vzT, gimp,
+				sT, -3.14159265f, 3.14159265f, pot);
 			float quart = -1e30f;
 			for (int i = 0; i < 4; ++i) {
 				const float lo = -3.14159265f
 					+ 1.57079633f * static_cast<float>(i);
-				const float u = Entrance::UBoardHeading(fc.n, vzT, sT,
-					lo, lo + 1.57079633f, pot);
+				const float u = Entrance::UBoardHeading(fc.n, vzT, gimp,
+					sT, lo, lo + 1.57079633f, pot);
 				if (u > quart)
 					quart = u;
 			}
@@ -8170,7 +8482,7 @@ namespace {
 				"quadrants %.0fk", full / 1e3f, quart / 1e3f);
 			check("B4 full-circle consistency", b4, buf);
 			// B6 tangent sanity: an interval that admits n.v = 0 at
-			// s = smax must return exactly smax^2 + vz^2 + pot.
+			// s = smax must return exactly smax^2 + (vz - G)^2 + pot.
 			const float h2 = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
 			bool b6 = true;
 			if (h2 > 1e-4f && sT > 1e-3f) {
@@ -8180,11 +8492,13 @@ namespace {
 					const float phi = atan2f(fc.n.Y, fc.n.X);
 					const float th_t = phi + dth;
 					const float ub = Entrance::UBoardHeading(fc.n,
-						vzT, sT, th_t - 0.05f, th_t + 0.05f, pot);
-					const float want = sT * sT + vzT * vzT + pot;
+						vzT, gimp, sT, th_t - 0.05f, th_t + 0.05f,
+						pot);
+					const float want = sT * sT + (vzT - gimp)
+						* (vzT - gimp) + pot;
 					b6 = fabsf(ub - want) < 2000.f;
 					snprintf(buf, sizeof(buf), "tangent-admitting "
-						"interval: U %.0fk vs smax^2+vz^2+pot "
+						"interval: U %.0fk vs smax^2+(vz-G)^2+pot "
 						"%.0fk", ub / 1e3f, want / 1e3f);
 				} else {
 					snprintf(buf, sizeof(buf), "no tangent arrival "
@@ -8195,6 +8509,195 @@ namespace {
 					"exercised");
 			}
 			check("B6 tangent sanity", b6, buf);
+			// ---- B7 AUTHORITATIVE BOARD PARITY ----
+			// Agreement on the NUMBER is not enough: the analytical
+			// argmax must be a LEGAL member of the domain (its heading
+			// inside the interval, its dot reproduced by the real
+			// normal convention) and the authoritative helper must
+			// return exactly the ceiling minus the one term the
+			// derivation explicitly drops,
+			//     U - E_auth = 2 G n_z |d|   (>= 0, zero at tangency),
+			// across ALL THREE candidate classes. A mismatch here is a
+			// semantic disagreement about velocity phase / gravity
+			// placement / clipping, never a tolerance to widen.
+			{
+				bool b7 = true;
+				int seen[3] = { 0, 0, 0 };
+				int n7 = 0, bad_th = 0, bad_d = 0, bad_e = 0;
+				float worst7 = 0.f;
+				const float vzs7[4] = { 0.f, -100.f, -300.f, -600.f };
+				const float sms7[3] = { 300.f, 650.f, 1000.f };
+				for (int vi = 0; vi < 4; ++vi)
+					for (int si = 0; si < 3; ++si)
+						for (int ii = 0; ii < 16; ++ii) {
+							const float lo = -3.14159265f + 6.2831853f
+								* static_cast<float>(ii) / 16.f;
+							const float hi = lo + (ii & 1 ? 0.9f
+								: 0.25f);
+							Entrance::UBoardArg ag;
+							const float ub = Entrance::UBoardHeading(
+								fc.n, vzs7[vi], gimp, sms7[si], lo, hi,
+								pot, &ag);
+							if (ub < -1e29f || ag.cand < 0)
+								continue;
+							n7++;
+							seen[ag.cand]++;
+							float th7 = 0.f;
+							if (!theta_in(ag.a, lo, hi, &th7)) {
+								b7 = false;
+								bad_th++;
+								continue;
+							}
+							const Vec3 v1(ag.s * cosf(th7),
+								ag.s * sinf(th7), vzs7[vi]);
+							const float dd = Dot(v1, fc.n);
+							if (fabsf(dd - ag.d) > 1e-2f
+								* (1.f + fabsf(ag.d))) {
+								b7 = false;
+								bad_d++;
+							}
+							const float Ea = board_E(v1);
+							const float drop = 2.f * gimp * fc.n.Z
+								* (-ag.d);
+							const float resid = fabsf(ub - Ea - drop);
+							if (resid > worst7)
+								worst7 = resid;
+							if (resid > 0.5f + 1e-5f * fabsf(ub)) {
+								b7 = false;
+								bad_e++;
+							}
+						}
+				// Candidate A (s = 0) only wins where the interval
+				// admits no approaching arrival at any positive speed,
+				// which needs b ~ 0 - the vz = 0 row exists to reach
+				// it. Coverage is reported either way.
+				const bool cover = seen[0] > 0 && seen[1] > 0
+					&& seen[2] > 0;
+				b7 = b7 && cover;
+				snprintf(buf, sizeof(buf), "%d maximisers | candidates "
+					"s0/smax/bnd %d/%d/%d | bad theta %d dot %d energy "
+					"%d | worst |U-Eauth-2Gnzd| %.2f", n7, seen[0],
+					seen[1], seen[2], bad_th, bad_d, bad_e, worst7);
+				check("B7 authoritative board parity", b7, buf);
+			}
+			// ---- B5 CONSTRUCTIVE ORACLE FALSIFICATION ----
+			// AirRec builds LEGAL flights whose realized post-board
+			// energy is known exactly. Any certified stage that sits
+			// below one of them is FALSIFIED. Passing is empirical
+			// validation of the implementation against constructive
+			// counterexamples - it is NOT the proof, which comes from
+			// the derivation. Run against EVERY stage, not just the
+			// final bound, so an unsafe rung cannot hide behind a safe
+			// one above it.
+			{
+				const int min_gap = static_cast<int>(
+					ceilf((1.f / p.dt) / p.strafe_rate_max));
+				float zhigh = -1e30f;
+				for (const Route::Face& f3 : g.faces)
+					if (f3.centroid.Z > zhigh)
+						zhigh = f3.centroid.Z;
+				const int hzs5[2] = { 34, 52 };
+				const float sps5[2] = { 500.f, 800.f };
+				const float vzs5[2] = { -60.f, -240.f };
+				std::vector<RecOracle> ocs;
+				int gen = 0;
+				for (size_t f4 = 0; f4 < g.faces.size()
+					&& static_cast<int>(ocs.size()) < 12; ++f4) {
+					const Route::Face& ff = g.faces[f4];
+					if (sqrtf(ff.n.X * ff.n.X + ff.n.Y * ff.n.Y)
+						< 1e-4f)
+						continue;
+					for (int cc = 0; cc < 2; ++cc, ++gen) {
+						RecOracle oc;
+						oc.rev = cc;
+						oc.prof = cc == 0 ? 0 : 2;
+						oc.dwell = 1;
+						const int T = hzs5[gen % 2];
+						if (T < (oc.rev + 1) * min_gap)
+							continue;
+						RecSchedule(oc.rev, oc.prof, oc.dwell, T,
+							min_gap, static_cast<unsigned>(
+								gen * 104729 + 11), &oc.side,
+							&oc.cosa, &oc.min_dwell);
+						if (RecBoardOracle(w, p, g,
+							static_cast<int>(f4), sps5[gen % 2],
+							vzs5[(gen / 2) % 2], T, oc.side, oc.cosa,
+							zhigh, &oc))
+							ocs.push_back(oc);
+					}
+				}
+				bool b5 = ocs.size() >= 4;
+				int viol[3] = { 0, 0, 0 };
+				float slack[3] = { 1e30f, 1e30f, 1e30f };
+				for (const RecOracle& oc : ocs) {
+					const Route::Face& ff = g.faces[
+						static_cast<size_t>(oc.face)];
+					const float gs5 = oc.S0.gravity_scale;
+					const float g5 = 0.5f * p.gravity * gs5 * p.dt;
+					const float s05 = Len2D(oc.S0.vel);
+					const float rad5 = 28.f;
+					const int kc = oc.T + 48;
+					int ka = 1, kb = kc;
+					if (!Envelope::ZWindow(oc.S0.pos.Z, oc.S0.vel.Z,
+						oc.Q.Z - rad5, oc.Q.Z + rad5, p, kc, &ka, &kb,
+						gs5)) {
+						ka = 1;
+						kb = kc;
+					}
+					const float pot5 = 2.f * p.gravity * gs5
+						* (oc.Q.Z + rad5 - oc.zmin);
+					// Stage 1: the broad certified energy ceiling.
+					float u1 = -1e30f, u2 = -1e30f;
+					for (int k = ka; k <= kb; ++k) {
+						const float sk = Envelope::SMax(s05, k, p);
+						const float vk = Envelope::VzAfter(
+							oc.S0.vel.Z, k, p, gs5) - g5;
+						const float e1 = sk * sk + vk * vk + pot5;
+						if (e1 > u1)
+							u1 = e1;
+						// Stage 2: the heading-agnostic board ceiling.
+						const float e2 = Entrance::UBoardHeading(ff.n,
+							Envelope::VzAfter(oc.S0.vel.Z, k, p, gs5),
+							g5, sk, -3.14159265f, 3.14159265f, pot5);
+						if (e2 > u2)
+							u2 = e2;
+					}
+					// Stage 3: the SHARP form - the oracle's own
+					// arrival tick, its own contact height, a narrow
+					// interval around its realized heading. No
+					// acceptance slack at all; this is the rung that
+					// the missing gravity phase would break.
+					const float u3 = Entrance::UBoardHeading(ff.n,
+						Envelope::VzAfter(oc.S0.vel.Z, oc.T, p, gs5),
+						g5, Envelope::SMax(s05, oc.T, p),
+						oc.th - 0.02f, oc.th + 0.02f,
+						2.f * p.gravity * gs5 * (oc.Q.Z - oc.zmin));
+					const float us[3] = { u1, u2, u3 };
+					for (int sidx = 0; sidx < 3; ++sidx) {
+						if (us[sidx] < -1e29f) {
+							viol[sidx]++;
+							b5 = false;
+							continue;
+						}
+						const float m = us[sidx] - oc.E;
+						if (m < slack[sidx])
+							slack[sidx] = m;
+						if (m < -1.f) {
+							viol[sidx]++;
+							b5 = false;
+						}
+					}
+				}
+				snprintf(buf, sizeof(buf), "%d legal oracles | "
+					"violations speed/full/sharp %d/%d/%d | tightest "
+					"margin %.0fk/%.0fk/%.0fk",
+					static_cast<int>(ocs.size()), viol[0], viol[1],
+					viol[2],
+					slack[0] < 1e29f ? slack[0] / 1e3f : 0.f,
+					slack[1] < 1e29f ? slack[1] / 1e3f : 0.f,
+					slack[2] < 1e29f ? slack[2] / 1e3f : 0.f);
+				check("B5 constructive oracle falsification", b5, buf);
+			}
 		}
 		printf("airprops: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "PROPERTY GATE GREEN"
@@ -8419,263 +8922,6 @@ namespace {
 		fflush(stdout);
 		return (h1 != h2) && conv == 4 ? 0 : 2;
 	}
-
-	// ================= airrec: THE CONSTRUCTIVE RECOVERABILITY
-	// SUITE (advisor 2026-08-19; Docs/AirRecSpec.md is the design of
-	// record). Hidden LEGAL wish schedules create known-reachable
-	// problems; production must recover them cold. Layer 1 = free-air
-	// boundary problems (S0, Q, T, theta) - tests the numerical
-	// shooting core. Layer 2 = clean face strikes - tests the actual
-	// Air->Board operator. QUARANTINE: oracle schedules/features live
-	// only in this harness; production receives (S0, Q, T[, theta]);
-	// nothing is banked and nothing is seeded. Every oracle is also a
-	// constructive floor: any certified ceiling below it is FALSIFIED
-	// (empirical validation only - passing is not certification).
-
-	namespace {
-
-	struct RecOracle {
-		bool  ok = false;
-		const char* why = "";
-		PlayerState S0;
-		std::vector<signed char> side;
-		std::vector<float> cosa;
-		int   T = 0;          // oracle arrival tick
-		Vec3  Q;              // boundary point / contact
-		float th = 0.f;       // terminal heading
-		float sT = 0.f;       // horizontal speed at T
-		float vzT = 0.f;
-		float E = 0.f;        // post-board energy (layer 2)
-		int   face = -1;      // layer 2 target face
-		float zmin = 0.f;
-		// Stratum labels + measured complexity features (harness
-		// only; production never sees these).
-		int   rev = 0, prof = 0, dwell = 0;
-		int   min_dwell = 0;
-		float dh_tot = 0.f, dh_max = 0.f, sac = 0.f;
-		int   brake = 0;
-	};
-
-	// Deterministic legal schedule for one control-complexity
-	// stratum: rev+1 alternating side segments (each >= min_gap, so
-	// legal from a fresh CtlState by construction), cosa profile by
-	// class. Encodes control-space coverage, never trajectory shapes.
-	void RecSchedule(int rev, int prof, int dwell_style, int T,
-	                 int min_gap, unsigned seed,
-	                 std::vector<signed char>* side,
-	                 std::vector<float>* cosa, int* min_dwell) {
-		side->assign(static_cast<size_t>(T), 0);
-		cosa->assign(static_cast<size_t>(T), 1.f);
-		unsigned rng = seed * 2654435761u + 0x9e3779b9u;
-		auto fr = [&]() {
-			rng = rng * 1664525u + 1013904223u;
-			return static_cast<float>((rng >> 8) & 0xFFFF)
-				/ 65535.f;
-		};
-		const int nseg = rev + 1;
-		std::vector<int> len(static_cast<size_t>(nseg), 0);
-		int used = 0;
-		if (dwell_style == 0) {
-			// Near-minimum dwell: min_gap + 0..3, remainder to the
-			// last segment.
-			for (int i = 0; i + 1 < nseg; ++i) {
-				len[static_cast<size_t>(i)] = min_gap
-					+ static_cast<int>(fr() * 3.99f);
-				used += len[static_cast<size_t>(i)];
-			}
-			len[static_cast<size_t>(nseg) - 1] = T - used;
-		} else {
-			for (int i = 0; i < nseg; ++i)
-				len[static_cast<size_t>(i)] = T / nseg;
-			len[static_cast<size_t>(nseg) - 1] += T
-				- (T / nseg) * nseg;
-		}
-		bool bad = false;
-		for (int i = 0; i < nseg; ++i)
-			if (len[static_cast<size_t>(i)] < min_gap)
-				bad = true;
-		if (bad) {
-			for (int i = 0; i < nseg; ++i)
-				len[static_cast<size_t>(i)] = T / nseg;
-			len[static_cast<size_t>(nseg) - 1] += T
-				- (T / nseg) * nseg;
-		}
-		*min_dwell = 1 << 20;
-		for (int i = 0; i < nseg; ++i)
-			if (len[static_cast<size_t>(i)] < *min_dwell)
-				*min_dwell = len[static_cast<size_t>(i)];
-		// STORED-BASIS CONVENTION (measured 2026-08-19, smoke run):
-		// the canonical (side, cosa) executor realizes its wish at
-		// wh + pi, so stored cosa = +1 wishes BACKWARD (max brake)
-		// and the active gain band is small-NEGATIVE stored cosa
-		// (~ -cap/s). Profiles below are written in STORED units so
-		// the strata mean what they claim: gain flights gain.
-		const float ph = fr() * 6.2831853f;
-		signed char s = fr() < 0.5f ? static_cast<signed char>(-1)
-			: static_cast<signed char>(1);
-		int k = 0;
-		for (int i = 0; i < nseg; ++i) {
-			for (int j = 0; j < len[static_cast<size_t>(i)];
-				++j, ++k) {
-				(*side)[static_cast<size_t>(k)] = s;
-				float c = -0.02f;
-				switch (prof) {
-				case 0: c = -0.02f; break;               // near-max gain
-				case 1: c = 0.24f + 0.26f                // smooth vary:
-					* sinf(6.2831853f * static_cast<float>(k)
-						/ static_cast<float>(T) + ph);   // [-0.02, 0.5]
-					break;
-				case 2: c = (i & 1) ? 0.65f : -0.02f;    // aggressive
-					break;                               // gain<->brake
-				case 3: c = k < T / 3 ? 0.7f : -0.02f;   // brake->gain
-					break;
-				}
-				(*cosa)[static_cast<size_t>(k)] = c;
-			}
-			s = static_cast<signed char>(-s);
-		}
-	}
-
-	// Open-loop free flight with per-tick visibility (harness-side
-	// feature extraction). Fails on any contact or grounding. Fills
-	// the oracle's terminal state + complexity features.
-	bool RecFreeFly(const PlayerState& S0, const World& w,
-	                const MoveParams& p,
-	                const std::vector<signed char>& side,
-	                const std::vector<float>& cosa,
-	                RecOracle* out, std::vector<Vec3>* traj) {
-		PlayerState s = S0;
-		const int hold = s.ducked ? IN_DUCK : 0;
-		const float cap2 = p.air_speed_cap * p.air_speed_cap;
-		out->dh_tot = 0.f;
-		out->dh_max = 0.f;
-		out->sac = 0.f;
-		out->brake = 0;
-		const int T = static_cast<int>(side.size());
-		float h_prev = atan2f(S0.vel.Y, S0.vel.X);
-		for (int k = 0; k < T; ++k) {
-			const float s2d = Len2D(s.vel);
-			const float h = s2d > 1.f
-				? atan2f(s.vel.Y, s.vel.X) : h_prev;
-			float yaw = h * 57.2957795f, fm = 0.f, sm = 0.f;
-			if (side[static_cast<size_t>(k)] != 0 && s2d > 1.f) {
-				Air::WishInputs(h,
-					static_cast<int>(
-						side[static_cast<size_t>(k)]),
-					cosa[static_cast<size_t>(k)], &yaw, &fm,
-					&sm);
-				// Stored convention: POSITIVE cosa = braking wish.
-				if (cosa[static_cast<size_t>(k)] > 0.3f)
-					out->brake++;
-			}
-			const float pre2 = s2d * s2d + cap2;
-			TickEvents ev;
-			MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, hold, &ev);
-			if (traj)
-				traj->push_back(s.pos);
-			if (ev.ncontacts > 0 || s.on_ground)
-				return false;
-			const float post = Len2D(s.vel);
-			const float dsac = pre2 - post * post;
-			if (dsac > 0.f)
-				out->sac += dsac;
-			const float h2 = post > 1.f
-				? atan2f(s.vel.Y, s.vel.X) : h;
-			const float dh = fabsf(Steer::WrapPi(h2 - h));
-			out->dh_tot += dh;
-			if (dh > out->dh_max)
-				out->dh_max = dh;
-			h_prev = h2;
-		}
-		out->Q = s.pos;
-		out->sT = Len2D(s.vel);
-		out->vzT = s.vel.Z;
-		out->th = out->sT > 1.f ? atan2f(s.vel.Y, s.vel.X) : 0.f;
-		return true;
-	}
-
-	// Layer-2 oracle construction: free flight is TRANSLATION
-	// INVARIANT, so probe the hidden schedule once in open air, then
-	// translate the start so the trajectory crosses the target face
-	// near its centroid, and demand a clean single-plane strike from
-	// the TRUE replay. Retries over approach bearing and plane
-	// offset; failure is reported, never silently dropped.
-	bool RecBoardOracle(const World& w, const MoveParams& p,
-	                    const Route::Graph& g, int face_idx,
-	                    float s0, float vz0, int T,
-	                    const std::vector<signed char>& side,
-	                    const std::vector<float>& cosa,
-	                    float zhigh, RecOracle* out) {
-		const Route::Face& fc = g.faces[static_cast<size_t>(
-			face_idx)];
-		const float hn = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
-		if (hn < 1e-4f) {
-			out->why = "vertical-normal face";
-			return false;
-		}
-		const float paz = atan2f(fc.n.Y, fc.n.X);
-		const float voffs[5] = { 0.f, 0.3f, -0.3f, 0.6f, -0.6f };
-		const float eps[4] = { 4.f, 10.f, 1.f, 16.f };
-		for (int vo = 0; vo < 5; ++vo) {
-			const float inaz = Steer::WrapPi(paz + 3.14159265f
-				+ voffs[vo]);
-			PlayerState st;
-			st.pos = Vec3(0.f, 0.f, zhigh);
-			st.vel = Vec3(cosf(inaz) * s0, sinf(inaz) * s0, vz0);
-			st.ducked = false;
-			st.hull_state = 0;
-			RecOracle probe;
-			std::vector<Vec3> traj;
-			if (!RecFreeFly(st, w, p, side, cosa, &probe, &traj))
-				continue;
-			// The terminal velocity must actually approach the
-			// plane, or no translation can make it strike.
-			const float vdot = probe.sT * (cosf(probe.th) * fc.n.X
-				+ sinf(probe.th) * fc.n.Y) + probe.vzT * fc.n.Z;
-			if (vdot > -50.f)
-				continue;
-			const Vec3 dT = traj[static_cast<size_t>(T) - 1]
-				- st.pos;
-			for (int ei = 0; ei < 4; ++ei) {
-				PlayerState real = st;
-				real.pos = fc.centroid + Scale(fc.n, eps[ei])
-					- dT;
-				Air::Target vt;
-				vt.face = face_idx;
-				vt.dot_cap = 3000.f;
-				vt.aim = fc.centroid;
-				vt.max_ticks = T + 10;
-				Air::Result ar = Air::FlyWishSchedule(real, w, p,
-					vt, g, side, cosa, T + 10);
-				if (!ar.hit || ar.dot >= 0.f
-					|| ar.struck_brush >= 0)
-					continue;
-				if (ar.tick < T - 6 || ar.tick > T + 8)
-					continue;
-				out->ok = true;
-				out->S0 = real;
-				out->T = ar.tick;
-				out->Q = ar.pos;
-				out->th = atan2f(ar.v1.Y, ar.v1.X);
-				out->sT = Len2D(ar.v1);
-				out->vzT = ar.v1.Z;
-				out->E = Dot(ar.end_state.vel, ar.end_state.vel)
-					+ 2.f * p.gravity * real.gravity_scale
-					* (ar.pos.Z - fc.zmin);
-				out->face = face_idx;
-				out->zmin = fc.zmin;
-				out->dh_tot = probe.dh_tot;
-				out->dh_max = probe.dh_max;
-				out->sac = probe.sac;
-				out->brake = probe.brake;
-				return true;
-			}
-		}
-		out->why = "no clean-strike construction";
-		return false;
-	}
-
-	} // namespace
 
 	int CmdAirRec(const std::string& map_path, const ReplayOpts& o) {
 		World w;
