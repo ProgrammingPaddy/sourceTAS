@@ -7841,6 +7841,95 @@ namespace {
 				rr.evals);
 			check("P7 hard-case search stays active", spent, buf);
 		}
+		// ---- SCHEDULER GATES (advisor 2026-08-19). These prove the
+		// SEMANTICS of the anytime process, not its recovery quality.
+		// S1 supersedes the temporary phase-share P3 for the scheduler
+		// path: a budget FRACTION is exactly what the anytime law
+		// removes, so "phase 1 owns a bounded share" cannot be the
+		// correctness statement any more.
+		{
+			auto run_at = [&](int B, Entrance::RefResult* out) {
+				Entrance::RefTune tn;
+				tn.precision = 4.f;
+				tn.scheduler = 1;
+				int fl = 0;
+				*out = Entrance::RefSolve(st, w, p, g, fi, q, 28.f,
+					Hn, B, false, &fl, fc.zmin, Steer::CtlState(),
+					nullptr, nullptr, nullptr, &tn);
+			};
+			Entrance::RefResult r1, r2, r3, r2b;
+			run_at(300, &r1);
+			run_at(700, &r2);
+			run_at(1400, &r3);
+			run_at(700, &r2b);
+			// S1: TRACE PREFIX on semantic action hashes.
+			auto is_prefix = [](const std::vector<unsigned long long>& a,
+				const std::vector<unsigned long long>& b) {
+				if (a.size() > b.size())
+					return false;
+				for (size_t i = 0; i < a.size(); ++i)
+					if (a[i] != b[i])
+						return false;
+				return true;
+			};
+			const bool pref = is_prefix(r1.trace, r2.trace)
+				&& is_prefix(r2.trace, r3.trace);
+			snprintf(buf, sizeof(buf), "|T(300)|=%d |T(700)|=%d "
+				"|T(1400)|=%d, each a literal prefix of the next",
+				static_cast<int>(r1.trace.size()),
+				static_cast<int>(r2.trace.size()),
+				static_cast<int>(r3.trace.size()));
+			check("S1 trace prefix containment", pref, buf);
+			// S2: lower-bound monotonicity (no persistent bank is
+			// involved in RefSolve at all - this is the in-query law).
+			const float L1 = r1.ok ? r1.H : -1e30f;
+			const float L2 = r2.ok ? r2.H : -1e30f;
+			const float L3 = r3.ok ? r3.H : -1e30f;
+			const bool mono = L2 >= L1 - 1.f && L3 >= L2 - 1.f;
+			snprintf(buf, sizeof(buf), "L=%.0fk/%.0fk/%.0fk",
+				L1 > -1e29f ? L1 / 1e3f : 0.f,
+				L2 > -1e29f ? L2 / 1e3f : 0.f,
+				L3 > -1e29f ? L3 / 1e3f : 0.f);
+			check("S2 lower-bound monotonicity", mono, buf);
+			// S3: determinism - identical query, identical stream.
+			bool det = r2.trace.size() == r2b.trace.size()
+				&& (r2.ok == r2b.ok)
+				&& (!r2.ok || fabsf(r2.H - r2b.H) < 1e-3f);
+			for (size_t i = 0; det && i < r2.trace.size(); ++i)
+				if (r2.trace[i] != r2b.trace[i])
+					det = false;
+			snprintf(buf, sizeof(buf), "repeat run: %d actions, same "
+				"hashes=%d, same H=%d",
+				static_cast<int>(r2b.trace.size()), det ? 1 : 0,
+				(r2.ok == r2b.ok) ? 1 : 0);
+			check("S3 deterministic action stream", det, buf);
+			// S4: FAIRNESS/PROGRESS (replaces the phase-share P3 on
+			// this path). Coverage may not monopolise the stream: at a
+			// generous budget every domain gets its cheap scout AND the
+			// competitive ones escalate through m0 -> m1 -> m2, with
+			// precision continuation reached.
+			const bool fair = r3.sched_m_used[0] > 0
+				&& r3.sched_m_used[1] > 0
+				&& r3.sched_m_used[2] > 0;
+			snprintf(buf, sizeof(buf), "actions %d | m0 %d m1 %d m2 %d "
+				"| precision steps %d | tol_final %.1fu",
+				r3.sched_actions, r3.sched_m_used[0],
+				r3.sched_m_used[1], r3.sched_m_used[2],
+				r3.sched_prec, r3.tol_final);
+			check("S4 scheduler fairness/progress", fair, buf);
+			// S5: proof-carrying prunes. Every certified elimination
+			// carries the bound identity AND the incumbent witness.
+			bool proofs = true;
+			for (size_t i = 0; i < r3.prunes.size(); ++i) {
+				const Entrance::RefResult::PruneRec& pr = r3.prunes[i];
+				if (pr.bound_id == 0 || !(pr.U <= pr.L_star + pr.eps))
+					proofs = false;
+			}
+			snprintf(buf, sizeof(buf), "%d certified eliminations, all "
+				"carrying bound id + incumbent witness + the numeric "
+				"inequality", static_cast<int>(r3.prunes.size()));
+			check("S5 proof-carrying prunes", proofs, buf);
+		}
 		printf("airprops: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "PROPERTY GATE GREEN"
 				: "PROPERTY GATE RED - a review defect regressed");

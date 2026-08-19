@@ -648,6 +648,11 @@ namespace Entrance {
 		// problem. All search machinery runs unchanged on the score.
 		const bool bnd = tune && tune->bnd_theta;
 		const int tune_m = tune ? tune->shoot_m : 2;
+		// The anytime SCHEDULER path (immutable config, never
+		// budget-derived). While 0, the legacy phased path runs and
+		// remains the regression baseline.
+		const bool use_sched = tune && tune->scheduler != 0;
+		const bool legacy_seq = !use_sched;
 		if (!bnd && (face_idx < 0
 			|| face_idx >= static_cast<int>(g.faces.size())))
 			return best;
@@ -1194,9 +1199,14 @@ namespace Entrance {
 			const float eqx = -epy, eqy = epx;
 			auto shoot = [&](const std::vector<GuideTarget>& tgts,
 				const GuideWeights& gw, int iv_i) {
-				if (gshots >= kGuidedShots
-					|| best.evals - fl0 >= gbudget
-					|| best.evals >= budget)
+				// The legacy phase self-limits; the SCHEDULER owns
+				// ordering, so on that path only the runner may stop
+				// the stream (a self-limit here made scheduled
+				// actions silent no-ops - caught by S1).
+				if (legacy_seq && (gshots >= kGuidedShots
+					|| best.evals - fl0 >= gbudget))
+					return;
+				if (best.evals >= budget)
 					return;
 				gshots++;
 				if (iv_i >= 0 && iv_i < 6)
@@ -1233,7 +1243,10 @@ namespace Entrance {
 			// theta -> s_A*(theta). Boundary mode has ONE given
 			// interval (row 0).
 			const int n_near = bnd ? 1 : 3;
-			for (int ii = 0; ii < n_near; ++ii) {
+			// LEGACY FIXED SEQUENCE (regression baseline). Under the
+			// scheduler these same primitives are dispatched action by
+			// action instead of run as a phase.
+			for (int ii = 0; legacy_seq && ii < n_near; ++ii) {
 				std::vector<GuideTarget> tg(1,
 					final_tgt(ivt[ii][0], ivt[ii][1]));
 				GuideWeights gw;
@@ -1249,7 +1262,7 @@ namespace Entrance {
 			// shot so no terminal class silently disappears. One
 			// shot is COVERAGE ONLY: an interval without a witness
 			// stays UNRESOLVED (iv_hits == 0), never "unreachable".
-			if (!bnd)
+			if (!bnd && legacy_seq)
 				for (int ii = 3; ii < 6; ++ii) {
 					std::vector<GuideTarget> tg(1,
 						final_tgt(ivt[ii][0], ivt[ii][1]));
@@ -1356,7 +1369,7 @@ namespace Entrance {
 				return chart == 1 ? node_arc(lam, p1)
 					: node_chord(lam, p1);
 			};
-			if (tune_m >= 1) {
+			if (legacy_seq && tune_m >= 1) {
 				// INTERLEAVED PROPOSAL ORDER. The guided phase has a
 				// hard budget share and each shot costs ~25 eval-
 				// equivalents once exact rollouts are on, so a family
@@ -1420,7 +1433,7 @@ namespace Entrance {
 			// second free node closer to the target with symmetric
 			// lateral variants - depart -> develop -> close, with
 			// nothing about the shape encoded.
-			if (tune_m >= 2) {
+			if (legacy_seq && tune_m >= 2) {
 				// depart -> develop -> close, on the WINNER'S CHART and
 				// around its winning node time, with the second node's
 				// chart parameter varied both ways.
@@ -1465,7 +1478,7 @@ namespace Entrance {
 			// exactly when a tight tolerance is requested and the
 			// search is still 20u out. Boundary mode was already
 			// residual-gated; now they are symmetric.
-			if (tune_m >= 2
+			if (legacy_seq && tune_m >= 2
 				&& ((bnd ? best.bnd_rp : best.strike_rmin) < 500.f
 					|| best.ok)
 				&& budget - best.evals > 20) {
@@ -1699,7 +1712,8 @@ namespace Entrance {
 					}
 				}
 			}
-		}
+		// (the guided scope stays OPEN: deepen/perturb and the
+		// scheduler below dispatch these same primitives)
 		// deepen(): local refinement of one elite (knot/length moves,
 		// the resolution ladder, reversal insertion).
 		// EXPLICIT BUDGET RESERVATION. The value phase gets a bounded,
@@ -1942,7 +1956,7 @@ namespace Entrance {
 					s3.sc = key_of(s3.res, s3.val, s3.rp,
 						s3.rth);
 		};
-		while (best.evals < budget && dry < 4) {
+		while (legacy_seq && best.evals < budget && dry < 4) {
 			// Scouts always get the full schedule.
 			for (int rd = 0; rd < 4 && best.evals < budget_cur; ++rd)
 				for (int si2 = 0; si2 < 3; ++si2)
@@ -2034,6 +2048,273 @@ namespace Entrance {
 					dry = 0;
 					last_res = 1e30f;
 					last_hits = 0;
+				}
+			}
+		}
+			// ================= SCHEDULER v0 (advisor 2026-08-19,
+			// contract in Docs/AirRecSpec.md 17) =================
+			// ONE deterministic action stream. NextAction() is a pure
+			// function of solver state - it CANNOT see the requested or
+			// remaining budget - and the Runner has exactly one
+			// interaction with the budget: ask what happens next, look
+			// up its fixed known charge, execute it if it fits,
+			// otherwise STOP. It never skips an unaffordable action in
+			// favour of a cheaper later one, because that reorders the
+			// stream and breaks run(B1) < run(B2) as a literal prefix.
+			if (use_sched) {
+				// Domain = (Q region, T branch, I_theta). Q and T are
+				// fixed for one RefSolve call, so the live axis is the
+				// heading interval. THREE terminal states, not two:
+				// PARTITIONED is not RESOLVED (a split replaces a
+				// domain with children that cover it).
+				enum { DOM_UNRESOLVED = 0, DOM_IRRELEVANT = 1,
+					DOM_PARTITIONED = 2 };
+				struct Dom {
+					int   iv = 0;
+					float L = -1e30f;    // best witnessed value here
+					float U = 1e30f;     // certified ceiling
+					float R = 1e30f;     // best residual here
+					float kappa = 0.f;   // conditioning estimate
+					int   spent = 0;
+					int   m = 0;         // current shooting level
+					int   scouts = 0;
+					int   shots[3] = { 0, 0, 0 };
+					int   stall = 0;     // shots since R improved
+					int   state = 0;   // DOM_UNRESOLVED
+				};
+				const int n_dom = bnd ? 1 : 6;
+				std::vector<Dom> dom(static_cast<size_t>(n_dom));
+				for (int i = 0; i < n_dom; ++i)
+					dom[static_cast<size_t>(i)].iv = i;
+				// The certified ceiling available today is the global
+				// optimistic energy bound, identical across heading
+				// domains - so U_D - L* carries little ranking
+				// information yet. That is expected and is exactly why
+				// the nested ceiling ladder is the NEXT build; v0 is
+				// not tuned against this number.
+				const float U_global = bnd
+					? Envelope::SMax(s0, N, p)
+					: (Envelope::SMax(s0, N, p)
+						* Envelope::SMax(s0, N, p)
+						+ Envelope::VzAfter(entry.vel.Z, N, p, gs)
+						* Envelope::VzAfter(entry.vel.Z, N, p, gs)
+						+ 2.f * p.gravity * gs * (q.Z - zmin));
+				for (Dom& d : dom)
+					d.U = U_global;
+				// ---- action algebra ----
+				enum { A_SCOUT = 1, A_SHOOT = 2, A_PRECISION = 3 };
+				struct Act {
+					int type = 0;
+					int iv = 0;
+					int m = 0;
+					int chart = 0;
+					int idx = 0;
+					int cost = 0;
+					unsigned long long hash = 0;
+				};
+				// A SEMANTIC content hash: what the action IS, never
+				// where it lives. Includes the solver-identity bits so
+				// traces from different configurations never compare
+				// equal.
+				auto act_hash = [&](const Act& a) {
+					unsigned long long h = 1469598103934665603ULL;
+					auto mix = [&](unsigned long long v) {
+						h ^= v;
+						h *= 1099511628211ULL;
+					};
+					mix(static_cast<unsigned long long>(a.type));
+					mix(static_cast<unsigned long long>(a.iv + 1));
+					mix(static_cast<unsigned long long>(a.m + 1));
+					mix(static_cast<unsigned long long>(a.chart + 1));
+					mix(static_cast<unsigned long long>(a.idx + 1));
+					mix(static_cast<unsigned long long>(tune_m + 1));
+					mix(static_cast<unsigned long long>(N));
+					mix(static_cast<unsigned long long>(
+						bnd ? 7u : 3u));
+					return h;
+				};
+				// Conservative FIXED charge per action class. The
+				// runner refuses to start an action it cannot pay for
+				// in full; if leftover budget ever becomes wasteful the
+				// answer is SMALLER resumable units, never "find a
+				// cheaper action that fits".
+				const int kCostShot = 40;
+				const int kCostPrec = 1;
+				// ---- NextAction: pure function of solver state ----
+				// (no budget, no remaining, no budget-derived flag)
+				auto next_action = [&](Act* out) {
+					// 1. minimum cheap exposure: every unresolved
+					//    domain gets a scout before anything escalates.
+					for (int i = 0; i < n_dom; ++i) {
+						Dom& d = dom[static_cast<size_t>(i)];
+						if (d.state == DOM_UNRESOLVED
+							&& d.scouts == 0) {
+							out->type = A_SCOUT;
+							out->iv = i;
+							out->m = 0;
+							out->chart = 0;
+							out->idx = 0;
+							out->cost = kCostShot;
+							out->hash = act_hash(*out);
+							return true;
+						}
+					}
+					// 2. certified irrelevance: a domain whose ceiling
+					//    cannot beat the incumbent is PROVED_IRRELEVANT
+					//    and its elimination is recorded with both the
+					//    bound identity and the incumbent witness.
+					const float Lstar = best.ok ? best.H : -1e30f;
+					for (int i = 0; i < n_dom; ++i) {
+						Dom& d = dom[static_cast<size_t>(i)];
+						if (d.state != DOM_UNRESOLVED || !best.ok)
+							continue;
+						if (d.U <= Lstar) {
+							d.state = DOM_IRRELEVANT;
+							RefResult::PruneRec pr;
+							pr.domain = i;
+							pr.bound_id = 0x55300001u;  // energy ceiling v1
+							pr.U = d.U;
+							pr.L_star = Lstar;
+							pr.eps = 0.f;
+							pr.witness_id = best.wcosa.empty() ? 0ULL
+								: static_cast<unsigned long long>(
+									best.horizon) * 1000003ULL
+									+ best.wside.size();
+							best.prunes.push_back(pr);
+						}
+					}
+					// 3. pick the competitive domain: importance is the
+					//    certified competitive gap ONLY. kappa, stall
+					//    and residual history choose HOW to refine it,
+					//    never WHETHER it matters. Ties break on the
+					//    stable (spent, index) order - never on
+					//    container iteration or wall-clock state.
+					int pick = -1;
+					float best_gap = -1e30f;
+					for (int i = 0; i < n_dom; ++i) {
+						const Dom& d = dom[static_cast<size_t>(i)];
+						if (d.state != DOM_UNRESOLVED)
+							continue;
+						const float gap = d.U - (best.ok ? best.H
+							: -1e30f);
+						if (pick < 0 || gap > best_gap + 1e-3f
+							|| (fabsf(gap - best_gap) <= 1e-3f
+								&& (d.spent < dom[static_cast<size_t>(
+									pick)].spent))) {
+							pick = i;
+							best_gap = gap;
+						}
+					}
+					if (pick < 0)
+						return false;   // every domain resolved
+					Dom& d = dom[static_cast<size_t>(pick)];
+					// 4. method selection from the domain's own state.
+					//    Exploration debt activates PROGRESSIVELY: a
+					//    domain earns chart/m-level debt only after
+					//    cheap coverage shows it is still competitive.
+					if (d.shots[0] < 2) {
+						out->type = A_SHOOT;
+						out->m = 0;
+						out->chart = d.shots[0] % 2;
+						out->idx = d.shots[0];
+					} else if (d.m < 1 || (d.m == 1 && d.stall < 2)) {
+						out->type = A_SHOOT;
+						out->m = 1;
+						out->chart = d.shots[1] % 2;
+						out->idx = d.shots[1];
+					} else if (d.m < 2 || d.stall < 4) {
+						out->type = A_SHOOT;
+						out->m = 2;
+						out->chart = d.shots[2] % 2;
+						out->idx = d.shots[2];
+					} else if (prec < tol) {
+						out->type = A_PRECISION;
+						out->m = d.m;
+						out->chart = 0;
+						out->idx = static_cast<int>(tol);
+					} else {
+						// keep refining the hardest competitive domain
+						out->type = A_SHOOT;
+						out->m = 2;
+						out->chart = (d.shots[2] + 1) % 2;
+						out->idx = d.shots[2];
+					}
+					out->iv = pick;
+					out->cost = out->type == A_PRECISION
+						? kCostPrec : kCostShot;
+					out->hash = act_hash(*out);
+					return true;
+				};
+				// ---- the Runner: the ONLY place the budget is read ----
+				int guard_actions = 0;
+				while (guard_actions++ < 4096) {
+					Act a;
+					if (!next_action(&a))
+						break;
+					if (best.evals + a.cost > budget)
+						break;   // stop, never skip
+					best.trace.push_back(a.hash);
+					best.sched_actions++;
+					Dom& d = dom[static_cast<size_t>(a.iv)];
+					const int ev0 = best.evals;
+					const float r0 = best.strike_rmin < 1e29f
+						? best.strike_rmin
+						: (best.bnd_rp < 1e29f ? best.bnd_rp
+							: best_any_res);
+					if (a.type == A_PRECISION) {
+						float next = prec;
+						while (rung_i < 6 && kLadder[rung_i] >= tol)
+							rung_i++;
+						if (rung_i < 6 && kLadder[rung_i] > prec)
+							next = kLadder[rung_i];
+						if (next < tol) {
+							tol = next;
+							rekey();
+						}
+						best.sched_prec++;
+					} else {
+						const int ivx = a.iv < n_near ? a.iv : a.iv;
+						std::vector<GuideTarget> tg;
+						if (a.m >= 1)
+							tg.push_back(node_from(a.chart,
+								a.m >= 2 ? 0.3f : 0.45f,
+								a.chart == 1
+									? (a.idx % 2 ? 1.9f : -1.9f)
+									: (a.idx % 2 ? 0.6f : -0.6f)));
+						if (a.m >= 2)
+							tg.push_back(node_from(a.chart, 0.62f,
+								a.chart == 1
+									? (a.idx % 2 ? -0.9f : 0.9f)
+									: (a.idx % 2 ? -0.3f : 0.3f)));
+						tg.push_back(final_tgt(ivt[ivx][0],
+							ivt[ivx][1]));
+						GuideWeights gw;
+						gw.wp = a.type == A_SCOUT ? 2.f : 4.f;
+						gw.we = a.type == A_SCOUT ? 0.3f : 0.15f;
+						shoot(tg, gw, ivx);
+						if (a.type == A_SCOUT)
+							d.scouts++;
+						else if (a.m >= 0 && a.m < 3)
+							d.shots[a.m]++;
+						if (a.m > d.m)
+							d.m = a.m;
+						if (a.m >= 0 && a.m < 3)
+							best.sched_m_used[a.m]++;
+					}
+					d.spent += best.evals - ev0;
+					const float r1 = best.strike_rmin < 1e29f
+						? best.strike_rmin
+						: (best.bnd_rp < 1e29f ? best.bnd_rp
+							: best_any_res);
+					if (r1 < r0 - 1e-3f) {
+						d.stall = 0;
+						d.R = r1;
+					} else {
+						d.stall++;
+					}
+					d.kappa = static_cast<float>(d.stall);
+					if (best.ok && best.H > d.L)
+						d.L = best.H;
 				}
 			}
 		}

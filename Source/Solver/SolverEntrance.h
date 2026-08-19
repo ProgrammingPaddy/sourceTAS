@@ -232,6 +232,12 @@ namespace Entrance {
 		// (humanexact, ladder, airrec) set it; cell/field queries
 		// (Build, fieldexact) must not.
 		float precision = 0.f;
+		// IMMUTABLE DEVELOPMENT SWITCH (advisor 2026-08-19): 0 = the
+		// legacy phased path (regression baseline), 1 = the anytime
+		// SCHEDULER path. Part of solver identity, never derived from
+		// the budget. The legacy path is removed once the scheduler's
+		// prefix/monotonicity/determinism/fairness gates are green.
+		int scheduler = 0;
 		// BOUNDARY MODE (Layer-1 recoverability): non-null = solve the
 		// free-air boundary problem (S0, Q, T, theta) instead of a
 		// face strike. Points at {th_lo, th_hi} (radians, absolute).
@@ -299,6 +305,28 @@ namespace Entrance {
 		int   evals_phase1 = 0;   // spent before the first tightening
 		int   win_chart = -1;     // 0 = chord, 1 = curvature, -1 = none
 		float tol_final = 0.f;
+		// THE ACTION TRACE: semantic content hashes, in execution
+		// order, for the prefix property. Bounded so a long solve
+		// cannot grow it without limit; the bound is a constant, not
+		// a budget-derived quantity.
+		std::vector<unsigned long long> trace;
+		// PROOF-CARRYING PRUNES: one row per certified domain
+		// elimination - the bound identity AND the incumbent witness
+		// that justified the comparison (advisor: L* is monotone, so
+		// a valid prune stays valid, but the constructive witness
+		// makes the future certificate auditable).
+		struct PruneRec {
+			int   domain = -1;
+			unsigned bound_id = 0;   // which ceiling + version
+			float U = 0.f;
+			float L_star = 0.f;
+			float eps = 0.f;
+			unsigned long long witness_id = 0;   // the L* witness
+		};
+		std::vector<PruneRec> prunes;
+		int sched_actions = 0;
+		int sched_m_used[3] = { 0, 0, 0 };
+		int sched_prec = 0;
 		float bnd_rp = 1e30f;
 		float bnd_rth = 1e30f;
 		float bnd_s = 0.f;

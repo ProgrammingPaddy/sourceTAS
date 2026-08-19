@@ -1030,3 +1030,73 @@ decision**.
 Formally moved from *pending escalation* to **inactive contingency**.
 Reopen only if a future generic known-reachable class stays flat under
 sufficiently funded sequential m0→m1→m2.
+
+---
+
+## 18. Scheduler v0 — built, semantics green (2026-08-19)
+
+Built beside the legacy phased path behind `RefTune::scheduler` (an
+immutable config bit, never budget-derived). The legacy path remains the
+default and the regression baseline; measured unchanged after the change
+(airsuite 48/48, gap 242k, wishparity PASS, carve 3/3).
+
+**Architecture as specified.** `NextAction(state)` is a pure function of
+solver state and *cannot see* the requested or remaining budget. The
+Runner has exactly one interaction with the budget: ask what happens
+next, look up its fixed known charge, execute if it fits, otherwise
+**stop** — never skip an unaffordable action in favour of a cheaper later
+one.
+
+**Domains** are `D = (Q region, T branch, I_theta)`; Q and T are fixed
+per `RefSolve` call, so the live axis is the heading interval. Three
+terminal states are distinguished — `UNRESOLVED`, `PROVED_IRRELEVANT`,
+`PARTITIONED` — so a future `SplitHeading` replaces a domain with
+children rather than "resolving" it. Charts, m-levels and precision are
+methods applied to a domain, not branches.
+
+**v0 priority rule:** every unresolved domain gets its cheap scout first;
+domains whose certified ceiling cannot beat the incumbent are marked
+`PROVED_IRRELEVANT` with a proof record; the competitive domain with the
+largest `U_D − L*` is chosen (ties broken on the stable (spent, index)
+order — never container iteration or wall-clock); then its *own state*
+selects the method, escalating m0 → m1 → m2 → precision as stalls
+accumulate. Importance is the certified gap only; stall/κ choose *how*.
+Exploration debt activates progressively: cheap coverage first, method
+debt only once a domain proves competitive.
+
+**Action identity** is a semantic content hash over (type, domain,
+m-level, chart, index, tune level, horizon, mode) — never an address or
+container order.
+
+### Gates (S1–S5, all green)
+
+| gate | result |
+|---|---|
+| S1 trace prefix containment | \|T(300)\|=11 ≺ \|T(700)\|=29 ≺ \|T(1400)\|=65, literal prefixes |
+| S2 lower-bound monotonicity | L = 0k / 925k / 925k |
+| S3 deterministic action stream | repeat run: identical hashes and identical H |
+| S4 fairness/progress | 65 actions: m0 18, m1 9, m2 35, 3 precision steps, tol_final 4.0u |
+| S5 proof-carrying prunes | records carry bound id + incumbent witness + the inequality (0 fired: today's single global ceiling never drops below L*, which is exactly what the nested ladder fixes) |
+
+**S1 caught a real bug on its first run**: `shoot()`'s legacy internal
+limiters (`gshots`, `gbudget`) still fired on the scheduler path, so
+scheduled actions became silent no-ops, the runner never spent budget,
+and all three traces ran to the 4096-action guard. Those limiters are now
+legacy-only — the scheduler owns ordering, the runner owns stopping.
+
+**S4's "phase-share" predecessor is superseded on this path.** P3 (phase
+1 owns a bounded budget share) remains correct *for the legacy path* and
+is retained there; a budget fraction is precisely what the anytime law
+removes, so on the scheduler path fairness/progress replaces it.
+
+### Still to do before the scheduler becomes authoritative
+
+- `DEEPEN` and `GNIteration` are not yet scheduler actions (the scheduler
+  currently dispatches Scout/Shoot/Precision); both remain in the legacy
+  path. Acceptance item 8 is therefore only partly met.
+- `gbudget` still exists for the legacy path and comes out with it, per
+  §17.1 — the two must be removed together.
+- No quality claim is made for the scheduler path yet, deliberately:
+  §17.6 says prove semantics first, then build nested ceilings, and only
+  then tune. Today all domains share one global ceiling, so `U_D − L*`
+  carries almost no ranking information (visible as S5's zero prunes).
