@@ -7967,6 +7967,69 @@ namespace {
 					rl.strike_rmin < 1e29f ? rl.strike_rmin : -1.f,
 					rc.ok ? rc.H / 1e3f : 0.f,
 					rc.strike_rmin < 1e29f ? rc.strike_rmin : -1.f);
+				// ---- THE ALLOCATION DIFFERENTIAL: identical query,
+				// bounds and methods; ONLY the service discipline
+				// changes between v0 and v1.
+				Entrance::RefTune t1;
+				t1.precision = 4.f;
+				t1.scheduler = 2;         // v1: weighted-fair service
+				int f1b = 0;
+				Entrance::RefResult rv1 = Entrance::RefSolve(st, w, p,
+					g, fi, q, 28.f, Hn, 6000, false, &f1b, fc.zmin,
+					Steer::CtlState(), nullptr, nullptr, nullptr, &t1);
+				printf("airprops: allocation differential @6000 | v0 H "
+					"%.0fk rmin %.1fu acts %d (m2 %d prec %d gn %d) | "
+					"v1 H %.0fk rmin %.1fu acts %d (m2 %d prec %d gn "
+					"%d)\n",
+					rc.ok ? rc.H / 1e3f : 0.f,
+					rc.strike_rmin < 1e29f ? rc.strike_rmin : -1.f,
+					rc.sched_actions, rc.sched_m_used[2],
+					rc.sched_prec, rc.sched_gn,
+					rv1.ok ? rv1.H / 1e3f : 0.f,
+					rv1.strike_rmin < 1e29f ? rv1.strike_rmin : -1.f,
+					rv1.sched_actions, rv1.sched_m_used[2],
+					rv1.sched_prec, rv1.sched_gn);
+				// PER-DOMAIN SPREAD: largest tightening versus the old
+				// global ceiling is NOT the same as spread BETWEEN
+				// domains, so measure the spread directly.
+				float umin = 1e30f, umax = -1e30f;
+				int served = 0, maxshare = 0, tot_acts = 0;
+				for (int i = 0; i < 6; ++i) {
+					if (rv1.dom_U[i] > 0.f) {
+						if (rv1.dom_U[i] < umin) umin = rv1.dom_U[i];
+						if (rv1.dom_U[i] > umax) umax = rv1.dom_U[i];
+					}
+					tot_acts += rv1.dom_acts[i];
+					if (rv1.dom_acts[i] > 0) served++;
+					if (rv1.dom_acts[i] > maxshare)
+						maxshare = rv1.dom_acts[i];
+				}
+				printf("airprops: U_D spread min %.0fk max %.0fk range "
+					"%.0fk | v1 domains served %d/6, largest share "
+					"%d%%\n",
+					umin < 1e29f ? umin / 1e3f : 0.f,
+					umax > -1e29f ? umax / 1e3f : 0.f,
+					(umax > -1e29f && umin < 1e29f)
+						? (umax - umin) / 1e3f : 0.f,
+					served, tot_acts ? maxshare * 100 / tot_acts : 0);
+				// S7 no-monopoly: importance may bias service, never
+				// imply starvation.
+				const bool s7 = served >= 2 && tot_acts > 0
+					&& maxshare * 100 < tot_acts * 90;
+				snprintf(buf, sizeof(buf), "%d of 6 domains served; "
+					"largest share %d%% of %d actions", served,
+					tot_acts ? maxshare * 100 / tot_acts : 0,
+					tot_acts);
+				check("S7 cross-domain no-monopoly", s7, buf);
+				// S8 within-domain method fairness: precision and GN
+				// must not be starved by endless shooting.
+				const bool s8 = rv1.sched_prec > 0 && rv1.sched_gn > 0
+					&& rv1.sched_deep > 0;
+				snprintf(buf, sizeof(buf), "v1 precision %d gn %d "
+					"deepen %d (v0 had %d/%d/%d)", rv1.sched_prec,
+					rv1.sched_gn, rv1.sched_deep, rc.sched_prec,
+					rc.sched_gn, rc.sched_deep);
+				check("S8 within-domain method fairness", s8, buf);
 			}
 		}
 		// ---- BOUND GATES for the interval-specific board ceiling.

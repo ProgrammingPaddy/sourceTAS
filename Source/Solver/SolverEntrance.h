@@ -452,6 +452,14 @@ namespace Entrance {
 		int sched_prec = 0;
 		int sched_deep = 0;
 		int sched_gn = 0;
+		// PER-DOMAIN DIAGNOSTIC (the advisor's first ask: largest
+		// tightening vs the old ceiling is NOT the same as spread
+		// BETWEEN domains, so the spread is measured directly).
+		float dom_U[6] = { 0, 0, 0, 0, 0, 0 };
+		float dom_L[6] = { 0, 0, 0, 0, 0, 0 };
+		int   dom_spent[6] = { 0, 0, 0, 0, 0, 0 };
+		int   dom_acts[6] = { 0, 0, 0, 0, 0, 0 };
+		int   dom_m2[6] = { 0, 0, 0, 0, 0, 0 };
 		float bnd_rp = 1e30f;
 		float bnd_rth = 1e30f;
 		float bnd_s = 0.f;

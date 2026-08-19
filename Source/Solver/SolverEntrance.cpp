@@ -651,7 +651,13 @@ namespace Entrance {
 		// The anytime SCHEDULER path (immutable config, never
 		// budget-derived). While 0, the legacy phased path runs and
 		// remains the regression baseline.
-		const bool use_sched = tune && tune->scheduler != 0;
+		const int  sched_ver = tune ? tune->scheduler : 0;
+		const bool use_sched = sched_ver != 0;
+		// v1 = SERVICE DISCIPLINE. Importance still comes only from
+		// U_D - L*; v1 adds deterministic weighted-fair service so
+		// raw max-gap cannot monopolise the stream, plus within-domain
+		// method yielding. No budget enters either.
+		const bool fair_sched = sched_ver >= 2;
 		const bool legacy_seq = !use_sched;
 		if (!bnd && (face_idx < 0
 			|| face_idx >= static_cast<int>(g.faces.size())))
@@ -2158,6 +2164,9 @@ namespace Entrance {
 					int   deep = 0;      // DEEPEN actions run here
 					int   gn = 0;        // GN iterations run here
 					float gx = 0.f, gy = 0.f;   // GN iterate
+					float V = 0.f;       // virtual service time
+					int   lane = 0;      // current method lane
+					int   lane_stall = 0;
 					bool  gn_init = false;
 					int   state = 0;   // DOM_UNRESOLVED
 				};
@@ -2303,6 +2312,7 @@ namespace Entrance {
 					//    container iteration or wall-clock state.
 					int pick = -1;
 					float best_gap = -1e30f;
+					float best_V = 1e30f;
 					for (int i = 0; i < n_dom; ++i) {
 						const Dom& d = dom[static_cast<size_t>(i)];
 						if (d.state != DOM_UNRESOLVED)
@@ -2311,7 +2321,21 @@ namespace Entrance {
 						// PRUNING below uses only the certified one.
 						const float gap = d.U_order
 							- (best.ok ? best.H : -1e30f);
-						if (pick < 0 || gap > best_gap + 1e-3f
+						if (fair_sched) {
+							// WEIGHTED-FAIR SERVICE: pick the least
+							// virtual time. Importance biases service
+							// (a bigger gap accrues virtual time more
+							// slowly) but can never starve a peer -
+							// raw argmax(gap) serviced ONE domain
+							// forever whenever its gap never moved.
+							if (pick < 0 || d.V < best_V - 1e-9f
+								|| (fabsf(d.V - best_V) <= 1e-9f
+									&& i < pick)) {
+								pick = i;
+								best_V = d.V;
+								best_gap = gap;
+							}
+						} else if (pick < 0 || gap > best_gap + 1e-3f
 							|| (fabsf(gap - best_gap) <= 1e-3f
 								&& (d.spent < dom[static_cast<size_t>(
 									pick)].spent))) {
@@ -2326,6 +2350,56 @@ namespace Entrance {
 					//    Exploration debt activates PROGRESSIVELY: a
 					//    domain earns chart/m-level debt only after
 					//    cheap coverage shows it is still competitive.
+					if (fair_sched) {
+						// LANE LADDER. A stalled method yields; a
+						// stalled DOMAIN does not become irrelevant
+						// (only a certified bound may do that).
+						// Lanes: 0 m0, 1 m1, 2 m2, 3 deepen, 4 gn,
+						// 5 precision - after two unproductive
+						// actions the lane advances, wrapping over
+						// the refinement lanes so precision and GN
+						// cannot be starved by more shooting.
+						int ln = d.lane;
+						for (int tries = 0; tries < 6; ++tries) {
+							bool ok_lane = true;
+							if (ln == 0 && d.shots[0] >= 2)
+								ok_lane = false;
+							if (ln == 1 && d.shots[1] >= 2)
+								ok_lane = false;
+							if (ln == 4 && !best.ok)
+								ok_lane = false;
+							if (ln == 5 && !(prec < tol))
+								ok_lane = false;
+							if (ok_lane)
+								break;
+							ln = ln >= 5 ? 2 : ln + 1;
+						}
+						d.lane = ln;
+						if (ln == 5) {
+							out->type = A_PRECISION;
+							out->idx = static_cast<int>(tol);
+						} else if (ln == 4) {
+							out->type = A_GNITER;
+							out->idx = d.gn;
+						} else if (ln == 3) {
+							out->type = A_DEEPEN;
+							out->idx = d.deep;
+						} else {
+							out->type = A_SHOOT;
+							out->m = ln;
+							out->chart = d.shots[ln] % 2;
+							out->idx = d.shots[ln];
+						}
+						out->iv = pick;
+						out->m = ln <= 2 ? ln : d.m;
+						out->cost = out->type == A_PRECISION
+							? kCostPrec
+							: (out->type == A_DEEPEN ? kCostDeep
+								: (out->type == A_GNITER ? kCostGN
+									: kCostShot));
+						out->hash = act_hash(*out);
+						return true;
+					}
 					if (d.shots[0] < 2) {
 						out->type = A_SHOOT;
 						out->m = 0;
@@ -2495,19 +2569,59 @@ namespace Entrance {
 							best.sched_m_used[a.m]++;
 					}
 					d.spent += best.evals - ev0;
+					best.dom_acts[a.iv < 6 ? a.iv : 5]++;
+					if (a.type == A_SHOOT && a.m == 2)
+						best.dom_m2[a.iv < 6 ? a.iv : 5]++;
+					if (fair_sched) {
+						// Virtual time advances by cost weighted by
+						// the domain's unresolved potential: a bigger
+						// gap accrues more slowly and is therefore
+						// serviced more often, without starving peers.
+						float gref = 1.f;
+						for (int i2 = 0; i2 < n_dom; ++i2) {
+							const Dom& dd = dom[static_cast<size_t>(
+								i2)];
+							if (dd.state != DOM_UNRESOLVED)
+								continue;
+							const float gg = dd.U_order
+								- (best.ok ? best.H : 0.f);
+							if (gg > gref)
+								gref = gg;
+						}
+						float gd = d.U_order
+							- (best.ok ? best.H : 0.f);
+						if (gd < 1.f)
+							gd = 1.f;
+						d.V += static_cast<float>(a.cost)
+							* (gref / gd);
+					}
 					const float r1 = best.strike_rmin < 1e29f
 						? best.strike_rmin
 						: (best.bnd_rp < 1e29f ? best.bnd_rp
 							: best_any_res);
 					if (r1 < r0 - 1e-3f) {
 						d.stall = 0;
+						d.lane_stall = 0;
 						d.R = r1;
 					} else {
 						d.stall++;
+						d.lane_stall++;
+						// A stalled LANE yields to the next eligible
+						// method; the domain itself stays competitive.
+						if (fair_sched && d.lane_stall >= 2) {
+							d.lane = d.lane >= 5 ? 2 : d.lane + 1;
+							d.lane_stall = 0;
+						}
 					}
 					d.kappa = static_cast<float>(d.stall);
 					if (best.ok && best.H > d.L)
 						d.L = best.H;
+				}
+				for (int i = 0; i < n_dom && i < 6; ++i) {
+					best.dom_U[i] = dom[static_cast<size_t>(i)].U_order;
+					best.dom_L[i] = dom[static_cast<size_t>(i)].L;
+					best.dom_spent[i] =
+						dom[static_cast<size_t>(i)].spent;
 				}
 			}
 		}

@@ -1249,3 +1249,77 @@ points at cause 2.
 **Per the standing rule this does NOT justify building the displacement
 ceiling yet** — that would be treating a scheduling-policy defect with
 more bound mathematics.
+
+---
+
+## 21. Scheduler v1 — allocation was the defect (2026-08-19)
+
+Only the **service discipline** changed. Same physics, same bounds, same
+methods, same action set; `RefTune::scheduler = 2` selects v1.
+
+### The causal differential @6000, identical query
+
+| path | H | rmin | actions | m2 | precision | GN |
+|---|---|---|---|---|---|---|
+| legacy | 1030k | 13.0u | — | — | — | — |
+| scheduler v0 | 965k | 19.5u | 257 | 214 | 3 | 6 |
+| **scheduler v1** | **998k** | **12.6u** | **163** | **49** | 3 | 41 |
+
+v1 closes **half the value gap** (965k → 998k against legacy's 1030k)
+and **beats legacy on residual** (12.6u vs 13.0u) while using *fewer*
+actions — 163 versus 257. The diagnosis is settled: the differential was
+an allocation defect, not missing bound information and not a semantic
+difference between schedulerized and legacy methods.
+
+### The two mechanisms
+
+1. **Weighted-fair service replaces `argmax(U_D − L*)`.** Raw max-gap
+   is a monopoly: if every action on the top domain leaves its ceiling
+   unchanged and finds no better witness, its gap stays largest forever
+   and it is serviced forever. v1 keeps importance exactly as defined —
+   unresolved potential is `U_D − L*`, κ remains difficulty only, only
+   certified U may prune — and adds a deterministic **virtual service
+   time**: each action advances `V_D` by `cost × (G_ref / G_D)`, and the
+   eligible domain with least `V_D` runs next. A bigger gap accrues
+   virtual time more slowly and so earns more service, but no peer can
+   be starved. No budget enters the calculation, so prefixes and
+   determinism survive (S1/S3 still green).
+2. **Lane yielding inside a domain.** A stalled *method* yields; a
+   stalled *domain* does not become irrelevant. After two unproductive
+   actions the lane advances over m0 → m1 → m2 → deepen → GN →
+   precision, wrapping across the refinement lanes so shooting cannot
+   starve the others.
+
+The service statistics show both working: m2 collapsed 214 → 49, GN rose
+6 → 41, deepen 10 → 46, and all **6 of 6 domains are served with the
+largest share at 25%**.
+
+### The spread diagnostic answers the advisor's first question
+
+    U_D spread: min 1009k  max 1180k  range 171k
+
+So the interval bound *does* discriminate between heading domains (171k
+of spread, distinct from B1's 684k tightening against the old global
+ceiling). Candidate (1) — "the bound cannot rank" — is refuted;
+candidate (2) — "the policy could not exploit it" — is confirmed.
+
+### New gates
+
+- **S7 cross-domain no-monopoly**: 6/6 domains served, largest share
+  25% of 163 actions. Importance may bias service; it may not imply
+  starvation.
+- **S8 within-domain method fairness**: precision 3, GN 41, deepen 46
+  (v0 had 3/6/10) — precision and GN can no longer be starved by
+  endless shooting.
+
+All **20 gates green**; legacy default unchanged (airsuite 48/48, gap
+242k).
+
+### Remaining before legacy retires
+
+v1 is ~32k short of legacy (998k vs 1030k) and precision service is
+still only 3 actions, which is the next thing to look at — the precision
+lane is gated on `prec < tol` and the tolerance advances only via a
+`PRECISION` action, so the lane can go dormant once the rung is taken.
+B5 and B7 remain unbuilt, so `UBoardHeading` stays **ADVISORY** and S5
+still reports zero prunes.
