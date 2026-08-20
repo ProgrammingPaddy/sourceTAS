@@ -119,6 +119,21 @@ namespace Solver {
 
 		const Hulls& HullDims() const { return hulls_; }
 
+		// ---- HARNESS-ONLY WORLD CONSTRUCTION (ExitField event unit
+		// fixtures, advisor 2026-08-19g: "build tiny controlled
+		// synthetic geometries - physics/event unit fixtures, not map
+		// routes"). AddTestBrush appends one convex brush from raw
+		// outward planes, running EXACTLY the same finalize the BSP
+		// loader runs (hull expansion, axial gates); FinalizeTestWorld
+		// builds the grid. Leaf tables stay absent, which exercises the
+		// grid-fallback trace path real leaf-less maps already use.
+		// PRODUCTION NEVER CALLS THESE - collision truth for real maps
+		// is Load() alone.
+		bool AddTestBrush(const std::vector<Vec3>& n,
+		                  const std::vector<float>& d,
+		                  const Hulls& hulls);
+		void FinalizeTestWorld();
+
 		// ---- TRIGGER VOLUMES (user directive 2026-08-15: total parity
 		// includes triggers - gravity, push, teleport). Parsed from the
 		// entity lump + brush models; the touch test is the same

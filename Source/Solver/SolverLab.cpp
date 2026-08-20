@@ -8008,6 +8008,14 @@ namespace {
 				sm = fr() < 0.5f ? -137.5f : 137.5f;
 				rate = (fr() - 0.5f) * 1.5f;
 				break;
+			case 8:                      // hard brake (wish backward):
+				fm = -450.f;             // slides down-face toward the
+				rate = 0.f;              // valley / floor geometry
+				break;
+			case 9:                      // downhill dive: strong ramp
+				sm = fr() < 0.5f ? -450.f : 450.f;
+				rate = (3.f + fr() * 2.f) * (fr() < 0.5f ? 1.f : -1.f);
+				break;
 			}
 			for (int j = 0; j < len; ++j, ++k) {
 				NativeTick nt;
@@ -8102,19 +8110,13 @@ namespace {
 				return;
 			}
 			if (!on_face) {
-				// The peek tick's INPUT joins the witness (the
-				// existence proof of a clean-air continuation); its
-				// tick is not booked and its state not recorded.
-				out->side.push_back(
-					static_cast<signed char>(ct.side));
-				out->cosa.push_back(ct.cosa);
-				out->duck.push_back(in[k].btn & IN_DUCK ? 1 : 0);
-				out->mag.push_back(ct.mag);
-				if (ct.analog)
-					out->any_analog = true;
+				// THE SEPARATION TICK IS BOOKED (seam re-amendment
+				// 2026-08-19g): the ride owns the tick that actually
+				// produced clean air; S+ is the boundary after it.
+				push_tick();
 				out->kind = Ride::kAirExit;
-				out->ticks = static_cast<int>(k);
-				out->end_state = prev;
+				out->ticks = static_cast<int>(k) + 1;
+				out->end_state = s;
 				return;
 			}
 			push_tick();
@@ -8133,7 +8135,8 @@ namespace {
 	               const Route::Graph& g, int face_idx, float s0,
 	               float vz0, float along, int entry_kind,
 	               const Steer::CtlState& ctl,
-	               Ride::BoundaryState* out) {
+	               Ride::BoundaryState* out, float down_frac = 0.f,
+	               bool aim_downhill = false) {
 		const Route::Face& fc = g.faces[static_cast<size_t>(face_idx)];
 		const float hn = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
 		if (hn < 1e-4f)
@@ -8141,11 +8144,37 @@ namespace {
 		const float paz = atan2f(fc.n.Y, fc.n.X);
 		// Approach from off the face: mostly into the plane with an
 		// along-face component so rides can run in both directions.
-		const float inaz = Steer::WrapPi(paz + 3.14159265f
-			+ along);
+		// down_frac places the board part-way toward the face's low
+		// edge and aim_downhill points the entry velocity down-slope -
+		// the deterministic construction for CONTACT_TRANSFER / GROUND
+		// event fixtures (rides that run off the bottom into whatever
+		// geometry is there).
+		float inaz = Steer::WrapPi(paz + 3.14159265f + along);
+		Vec3 base = fc.centroid;
+		const float dl = Len(fc.downhill);
+		if (down_frac != 0.f && dl > 1e-4f) {
+			const Vec3 dn = Scale(fc.downhill, 1.f / dl);
+			float ext = 0.f;
+			for (const Vec3& v : fc.verts) {
+				// signed extent along downhill; negative down_frac
+				// places UP-slope (the event fixtures start high and
+				// ride the whole face down into the bottom geometry)
+				const float e = Dot(v - fc.centroid, dn)
+					* (down_frac < 0.f ? -1.f : 1.f);
+				if (e > ext)
+					ext = e;
+			}
+			base = fc.centroid + Scale(dn, ext * down_frac);
+			if (aim_downhill)
+				inaz = Steer::WrapPi(atan2f(dn.Y, dn.X) + along);
+		}
 		PlayerState st;
-		st.pos = fc.centroid + Scale(fc.n, 40.f);
-		st.pos.Z += 20.f;
+		// The down-slope construction runs nearly parallel to the
+		// plane, so a 40u standoff overshoots the polygon before the
+		// fall reaches the surface (measured: 16/16 board failures).
+		// Hug the plane instead.
+		st.pos = base + Scale(fc.n, aim_downhill ? 10.f : 40.f);
+		st.pos.Z += aim_downhill ? 5.f : 20.f;
 		st.vel = Vec3(cosf(inaz) * s0, sinf(inaz) * s0, vz0);
 		st.ducked = entry_kind == 1;
 		st.hull_state = entry_kind == 1 ? 1 : 0;
@@ -8271,10 +8300,14 @@ namespace {
 			const Route::Face& fc = g.faces[fi2];
 			if (sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y) < 1e-4f)
 				continue;
-			for (int st2 = 0; st2 < 8; ++st2)
+			for (int st2 = 0; st2 < 10; ++st2)
 				for (int en = 0; en < 3; ++en, ++gen) {
 					if (en != 0 && st2 > 3)
 						continue;   // entry variants on core strata
+					// Strata 8/9 are the EVENT fixtures: boards placed
+					// down-face aimed down-slope, so rides run off the
+					// bottom into whatever geometry is there.
+					const bool evfix = st2 >= 8;
 					const float s0 = (gen % 2) ? 900.f : 450.f;
 					const float vz0 = (gen % 3 == 2) ? -350.f : -80.f;
 					const float along = ((gen % 4) - 1.5f) * 0.45f;
@@ -8291,7 +8324,7 @@ namespace {
 					fx.stratum = st2;
 					fx.entry = en;
 					if (!RideBoard(w, p, g, fx.face, s0, vz0, along,
-						en, ctl, &fx.B)) {
+						en, ctl, &fx.B, evfix ? 0.55f : 0.f, evfix)) {
 						if (en == 2) disc_h2++; else disc_board++;
 						continue;
 					}
@@ -8322,7 +8355,7 @@ namespace {
 				}
 		}
 		{
-			int by_st[8] = { 0,0,0,0,0,0,0,0 };
+			int by_st[10] = { 0,0,0,0,0,0,0,0,0,0 };
 			int by_kind[5] = { 0,0,0,0,0 };
 			int faces_hit = 0, last_face = -1;
 			int with_ctl = 0, hull2 = 0;
@@ -8343,13 +8376,13 @@ namespace {
 				static_cast<int>(fixes.size()), gen, disc_board,
 				disc_short, disc_degen, disc_illegal, disc_h2);
 			printf("exitfit:   strata hold/ramp/fwd/coast/duck/duckoff/"
-				"chord/analog %d/%d/%d/%d/%d/%d/%d/%d | events "
-				"exit/xfer/ground/end/hzn %d/%d/%d/%d/%d | faces %d | "
-				"carried-ctl %d | hull2 entries %d\n",
+				"chord/analog/brake/dive %d/%d/%d/%d/%d/%d/%d/%d/%d/"
+				"%d | events exit/xfer/ground/end/hzn %d/%d/%d/%d/%d "
+				"| faces %d | carried-ctl %d | hull2 entries %d\n",
 				by_st[0], by_st[1], by_st[2], by_st[3], by_st[4],
-				by_st[5], by_st[6], by_st[7], by_kind[0], by_kind[1],
-				by_kind[2], by_kind[3], by_kind[4], faces_hit,
-				with_ctl, hull2);
+				by_st[5], by_st[6], by_st[7], by_st[8], by_st[9],
+				by_kind[0], by_kind[1], by_kind[2], by_kind[3],
+				by_kind[4], faces_hit, with_ctl, hull2);
 		}
 
 		// ---- X1 CONTROL COMPLETENESS. Bitwise reproduction of a native
@@ -8403,7 +8436,18 @@ namespace {
 						atan2f(ny, nx) - atan2f(cy, cx)));
 					if (dd > worst_dir)
 						worst_dir = dd;
-					if (dd > 2e-5f)
+					// The cosa chart QUANTIZES angle near the
+					// degenerate directions: cos then acos loses
+					// resolution as sqrt(ulp) at alpha in {0, pi}
+					// (measured 8.3e-05 rad on brake-stratum ticks
+					// with |cosa| ~ 1). That is a property of the
+					// stored parameterization, not of the inverter -
+					// and the packet witness (X1b) is bitwise exact
+					// regardless. Well-conditioned band: 2e-5.
+					const float tol_dir =
+						fabsf(fx.nat.cosa[k]) > 0.999f ? 2e-4f
+							: 2e-5f;
+					if (dd > tol_dir)
 						bad_wish++;
 					if ((nmag >= p.maxspeed) != (cmag >= p.maxspeed)
 						|| (nmag < p.maxspeed
@@ -8765,6 +8809,376 @@ namespace {
 				break;
 			}
 			check("X7 carve reference regression", ok, det);
+		}
+
+		// ---- X1b EXACT WITNESS REPLAY (advisor 2026-08-19g): search
+		// coordinates are compact and approximate-friendly; the
+		// ACCEPTED witness is the frozen MoveInput packet sequence and
+		// must replay BIT-FOR-BIT through FlyRideInputs. Two claims:
+		// (a) a canonical run's captured packets reproduce it exactly;
+		// (b) a native ride's own packets reproduce it exactly - the
+		// 0.7u inversion drift lives in re-EMISSION, and the packet
+		// witness removes it entirely.
+		{
+			bool ok = true;
+			int n = 0, bad_can = 0, bad_nat = 0;
+			for (const Fix& fx : fixes) {
+				n++;
+				// (a) canonical -> packets -> bitwise replay
+				std::vector<PlayerState> traj;
+				std::vector<Ride::MoveInput> pk;
+				Ride::Result ra = Ride::FlyRideSchedule(fx.B, w, p, g,
+					fx.nat.side, fx.nat.cosa, fx.nat.duck,
+					fx.nat.any_analog ? &fx.nat.mag : nullptr, &traj,
+					nullptr, &pk);
+				std::vector<PlayerState> tb;
+				Ride::Result rb = Ride::FlyRideInputs(fx.B, w, p, g,
+					pk, &tb);
+				bool same = rb.kind == ra.kind && rb.ticks == ra.ticks
+					&& memcmp(&rb.end_state, &ra.end_state,
+						sizeof(PlayerState)) == 0
+					&& tb.size() == traj.size();
+				for (size_t t2 = 0; same && t2 < tb.size(); ++t2)
+					if (memcmp(&tb[t2], &traj[t2],
+						sizeof(PlayerState)) != 0)
+						same = false;
+				if (!same) {
+					bad_can++;
+					ok = false;
+				}
+				// (b) native packets -> bitwise replay of the native
+				// ride itself
+				std::vector<Ride::MoveInput> np;
+				for (int k = 0; k < fx.nat.ticks; ++k) {
+					Ride::MoveInput mi;
+					mi.yaw = fx.raw[static_cast<size_t>(k)].yaw;
+					mi.fmove = fx.raw[static_cast<size_t>(k)].fmove;
+					mi.smove = fx.raw[static_cast<size_t>(k)].smove;
+					mi.buttons = fx.raw[static_cast<size_t>(k)].btn;
+					np.push_back(mi);
+				}
+				std::vector<PlayerState> tn;
+				Ride::Result rn = Ride::FlyRideInputs(fx.B, w, p, g,
+					np, &tn);
+				bool same2 = rn.kind == fx.nat.kind
+					&& rn.ticks == fx.nat.ticks
+					&& memcmp(&rn.end_state, &fx.nat.end_state,
+						sizeof(PlayerState)) == 0
+					&& tn.size() == fx.nat.traj.size();
+				for (size_t t2 = 0; same2 && t2 < tn.size(); ++t2)
+					if (memcmp(&tn[t2], &fx.nat.traj[t2],
+						sizeof(PlayerState)) != 0)
+						same2 = false;
+				if (!same2) {
+					bad_nat++;
+					ok = false;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d fixtures: canonical packets "
+				"bitwise %d bad, NATIVE packets bitwise %d bad - the "
+				"packet witness is the executable proof object", n,
+				bad_can, bad_nat);
+			check("X1b exact witness replay", ok && n >= 20, buf);
+		}
+
+		// ---- X3 COAST-THROUGH-DWELL (advisor 2026-08-19g): coasting
+		// must not erase strafe history. side = 0 keeps the last
+		// nonzero side and the dwell age CONTINUES INCREMENTING - a
+		// reversal after coasts is judged against the age accumulated
+		// through them, in both directions (too-young refused, aged
+		// exactly to the minimum accepted). And fields the executor
+		// ignores on a coast tick are physically meaningless: two
+		// schedules differing only in coast-tick cosa must ride
+		// bitwise identically, and CanonSchedule maps them to one
+		// canonical form.
+		{
+			Ride::BoundaryState B0;
+			bool have = false;
+			for (const Fix& fx : fixes)
+				if (fx.nat.kind == Ride::kAirExit
+					&& fx.nat.ticks >= 12) {
+					B0 = fx.B;
+					have = true;
+					break;
+				}
+			bool ok = false;
+			char det[240] = "no fixture";
+			if (have) {
+				B0.ctl.side = 1;
+				B0.ctl.age = 1;
+				// [+1, +1, coast, coast, -1]: age 1+4 = 5 < 6 REFUSED
+				std::vector<signed char> sa;
+				sa.push_back(1); sa.push_back(1);
+				sa.push_back(0); sa.push_back(0);
+				sa.push_back(-1);
+				std::vector<float> ca(5, 0.1f);
+				std::vector<unsigned char> da(5, 0);
+				Ride::Result r1 = Ride::FlyRideSchedule(B0, w, p, g,
+					sa, ca, da);
+				// [+1, +1, coast, coast, coast, -1]: age 1+5 = 6
+				// ACCEPTED - proving coasts INCREMENT age (a frozen
+				// age would refuse this one too)
+				std::vector<signed char> sb = sa;
+				sb.insert(sb.begin() + 2, static_cast<signed char>(0));
+				std::vector<float> cb(6, 0.1f);
+				std::vector<unsigned char> db(6, 0);
+				Ride::Result r2 = Ride::FlyRideSchedule(B0, w, p, g,
+					sb, cb, db);
+				// coast-cosa physical identity + canonicalization
+				std::vector<float> cb2 = cb;
+				cb2[2] = 0.37f;
+				cb2[3] = -0.61f;
+				std::vector<PlayerState> ta, tb;
+				Ride::Result r3a = Ride::FlyRideSchedule(B0, w, p, g,
+					sb, cb, db, nullptr, &ta);
+				Ride::Result r3b = Ride::FlyRideSchedule(B0, w, p, g,
+					sb, cb2, db, nullptr, &tb);
+				bool ident = r3a.kind == r3b.kind
+					&& r3a.ticks == r3b.ticks
+					&& ta.size() == tb.size();
+				for (size_t t2 = 0; ident && t2 < ta.size(); ++t2)
+					if (memcmp(&ta[t2], &tb[t2],
+						sizeof(PlayerState)) != 0)
+						ident = false;
+				Ride::CanonSchedule(sb, &cb2, nullptr);
+				bool canon = true;
+				for (size_t t2 = 0; t2 < sb.size(); ++t2)
+					if (sb[t2] == 0 && cb2[t2] != 1.f)
+						canon = false;
+				ok = !r1.legal && r1.illegal_tick == 4 && r2.legal
+					&& ident && canon;
+				snprintf(det, sizeof(det), "reversal after 2 coasts "
+					"(age 5) REFUSED@%d; after 3 coasts (age 6) "
+					"ACCEPTED=%d - coasts keep side, age increments "
+					"through them | coast-cosa variants ride bitwise "
+					"identical=%d, CanonSchedule pins them=%d",
+					r1.illegal_tick, r2.legal ? 1 : 0, ident ? 1 : 0,
+					canon ? 1 : 0);
+			}
+			check("X3 coast-through-dwell invariant", ok, det);
+		}
+
+		// ---- XE EVENT COVERAGE + TYPED TRANSITIONS (advisor
+		// 2026-08-19g): CONTACT_TRANSFER / GROUND / END must be
+		// exercised deterministically, not awaited from blind
+		// generation, and each physical event must build a typed
+		// ExitTransition whose witness carries exactly the booked
+		// ticks. HORIZON must REFUSE to build one.
+		{
+			int n_xfer = 0, n_ground = 0, n_end = 0;
+			int mk_bad = 0;
+			int xfer_face = -2;
+			// Targeted rides, ADJACENCY-DRIVEN (map-generic): for every
+			// candidate transfer edge in the route graph, board `from`
+			// up-slope aimed at `to`'s centroid and hold a gain-band
+			// wish (stored cosa ~ -0.02, the wish that presses INTO the
+			// face the way real rides do - a pure coast micro-skips off
+			// within ~10 ticks). Rides that reach the neighbouring
+			// brush produce CONTACT_TRANSFER; rides that die into the
+			// valley floor produce GROUND. Both are exact engine
+			// events, not constructions.
+			for (const Route::Edge& eg : g.edges) {
+				if (eg.from < 0 || eg.to < 0)
+					continue;
+				const Route::Face& fa = g.faces[
+					static_cast<size_t>(eg.from)];
+				const Route::Face& fb = g.faces[
+					static_cast<size_t>(eg.to)];
+				const float aim = atan2f(fb.centroid.Y
+					- fa.centroid.Y, fb.centroid.X - fa.centroid.X);
+				for (int v2 = 0; v2 < 2; ++v2) {
+					Ride::BoundaryState B2;
+					// `along` rotates the board approach so the
+					// post-board velocity leans toward the target.
+					const float paz2 = atan2f(fa.n.Y, fa.n.X);
+					const float lean = Steer::WrapPi(aim
+						- Steer::WrapPi(paz2 + 3.14159265f));
+					if (!RideBoard(w, p, g, eg.from, 420.f, -150.f,
+						0.6f * lean, 0, Steer::CtlState(), &B2,
+						-0.3f, false))
+						continue;
+					const int Mv = 240;
+					std::vector<signed char> sd(Mv,
+						static_cast<signed char>(v2 ? -1 : 1));
+					std::vector<float> cs(Mv, -0.02f);
+					std::vector<unsigned char> dk(Mv, 0);
+					std::vector<Ride::MoveInput> pk;
+					Ride::Result rr = Ride::FlyRideSchedule(B2, w, p,
+						g, sd, cs, dk, nullptr, nullptr, nullptr,
+						&pk);
+					if (rr.kind == Ride::kContactTransfer
+						|| rr.kind == Ride::kGround) {
+						Ride::ExitTransition tr;
+						if (!Ride::MakeTransition(rr, g, pk, &tr)
+							|| tr.dt != rr.ticks
+							|| static_cast<int>(tr.witness.size())
+								!= rr.ticks
+							|| tr.kind != rr.kind) {
+							mk_bad++;
+							continue;
+						}
+						if (rr.kind == Ride::kContactTransfer) {
+							n_xfer++;
+							if (xfer_face == -2)
+								xfer_face = tr.board_face;
+						} else {
+							n_ground++;
+						}
+					}
+				}
+			}
+			// SYNTHETIC VALLEY (advisor 2026-08-19g: tiny controlled
+			// geometry as a physics/event UNIT fixture, not a map
+			// route). Two wedges whose surf slopes meet at a crease:
+			// riding one slope down MUST contact the other brush -
+			// the deterministic CONTACT_TRANSFER construction that
+			// open real maps cannot supply (measured: 24/24 adjacency
+			// probes on basictest end in air; its ramps never touch
+			// within ride scope).
+			{
+				World sw;
+				const float nz2 = 0.624695f, ny2 = 0.780869f;
+				std::vector<Vec3> na;
+				std::vector<float> da;
+				// Wedge A: slope outward n = (0, -ny, +nz) through the
+				// origin, box x in [-512, 512], y in [0, 500], z in
+				// [-260, 320].
+				na.push_back(Vec3(0.f, -ny2, nz2)); da.push_back(0.f);
+				na.push_back(Vec3(1.f, 0.f, 0.f)); da.push_back(512.f);
+				na.push_back(Vec3(-1.f, 0.f, 0.f)); da.push_back(512.f);
+				na.push_back(Vec3(0.f, 1.f, 0.f)); da.push_back(500.f);
+				na.push_back(Vec3(0.f, -1.f, 0.f)); da.push_back(0.f);
+				na.push_back(Vec3(0.f, 0.f, 1.f)); da.push_back(320.f);
+				na.push_back(Vec3(0.f, 0.f, -1.f)); da.push_back(260.f);
+				bool okw = sw.AddTestBrush(na, da, o.hulls);
+				// Wedge B: mirrored slope n = (0, +ny, +nz), y in
+				// [-500, 0] - the crease is the y = 0, z = 0 line.
+				std::vector<Vec3> nb;
+				std::vector<float> db;
+				nb.push_back(Vec3(0.f, ny2, nz2)); db.push_back(0.f);
+				nb.push_back(Vec3(1.f, 0.f, 0.f)); db.push_back(512.f);
+				nb.push_back(Vec3(-1.f, 0.f, 0.f)); db.push_back(512.f);
+				nb.push_back(Vec3(0.f, 1.f, 0.f)); db.push_back(0.f);
+				nb.push_back(Vec3(0.f, -1.f, 0.f)); db.push_back(500.f);
+				nb.push_back(Vec3(0.f, 0.f, 1.f)); db.push_back(320.f);
+				nb.push_back(Vec3(0.f, 0.f, -1.f)); db.push_back(260.f);
+				okw = okw && sw.AddTestBrush(nb, db, o.hulls);
+				sw.FinalizeTestWorld();
+				Route::Graph sg;
+				std::string serr;
+				okw = okw && Route::Build(sw, &sg, 2000.f, &serr)
+					&& sg.faces.size() >= 2;
+				int fa = -1, fb2 = -1;
+				for (size_t i2 = 0; okw && i2 < sg.faces.size(); ++i2) {
+					if (sg.faces[i2].n.Y < -0.5f)
+						fa = static_cast<int>(i2);
+					if (sg.faces[i2].n.Y > 0.5f)
+						fb2 = static_cast<int>(i2);
+				}
+				if (okw && fa >= 0 && fb2 >= 0) {
+					Ride::BoundaryState B2;
+					// vz matched to the slope (down-slope 420 u/s on a
+					// 0.78/0.62 plane needs vz ~ -525 to run ALONG it;
+					// -480 leans gently in) so the drop-in boards near
+					// the placement instead of flying the crease.
+					const bool bok = RideBoard(sw, p, sg, fa, 420.f,
+						-480.f, 0.f, 0, Steer::CtlState(), &B2,
+						-0.7f, true);
+					if (bok) {
+						const int Mv = 300;
+						for (int v2 = 0; v2 < 2; ++v2) {
+							std::vector<signed char> sd(Mv,
+								static_cast<signed char>(
+									v2 ? -1 : 1));
+							std::vector<float> cs(Mv, -0.02f);
+							std::vector<unsigned char> dk(Mv, 0);
+							std::vector<Ride::MoveInput> pk;
+							Ride::Result rr = Ride::FlyRideSchedule(
+								B2, sw, p, sg, sd, cs, dk, nullptr,
+								nullptr, nullptr, &pk);
+							if (rr.kind != Ride::kContactTransfer)
+								continue;
+							Ride::ExitTransition tr;
+							if (!Ride::MakeTransition(rr, sg, pk,
+								&tr) || tr.dt != rr.ticks
+								|| tr.kind != rr.kind) {
+								mk_bad++;
+								continue;
+							}
+							n_xfer++;
+							if (xfer_face == -2)
+								xfer_face = tr.board_face;
+							break;
+						}
+					}
+				}
+			}
+			// Natural fixtures count too (the reshuffled pool found
+			// GROUND on its own).
+			for (const Fix& fx : fixes) {
+				if (fx.nat.kind == Ride::kContactTransfer)
+					n_xfer++;
+				if (fx.nat.kind == Ride::kGround)
+					n_ground++;
+			}
+			// END: arm a zone straddling a known ride's mid path.
+			bool end_ok = false;
+			int end_tick = -1;
+			for (const Fix& fx : fixes) {
+				if (fx.nat.kind != Ride::kAirExit
+					|| fx.nat.ticks < 10)
+					continue;
+				const PlayerState& mid = fx.nat.traj[
+					static_cast<size_t>(fx.nat.ticks / 2)];
+				const Vec3 zmin(mid.pos.X - 48.f, mid.pos.Y - 48.f,
+					mid.pos.Z - 48.f);
+				const Vec3 zmax(mid.pos.X + 48.f, mid.pos.Y + 48.f,
+					mid.pos.Z + 48.f);
+				std::vector<Ride::MoveInput> pk;
+				Ride::Result rr = Ride::FlyRideSchedule(fx.B, w, p, g,
+					fx.nat.side, fx.nat.cosa, fx.nat.duck,
+					fx.nat.any_analog ? &fx.nat.mag : nullptr,
+					nullptr, nullptr, &pk, &zmin, &zmax);
+				Ride::ExitTransition tr;
+				if (rr.kind == Ride::kEnd
+					&& Ride::MakeTransition(rr, g, pk, &tr)
+					&& tr.kind == Ride::kEnd
+					&& tr.dt == rr.ticks) {
+					end_ok = true;
+					end_tick = rr.ticks;
+					n_end++;
+				}
+				break;
+			}
+			// HORIZON refuses to become a transition.
+			bool hzn_refused = false;
+			for (const Fix& fx : fixes) {
+				if (fx.nat.ticks < 12)
+					continue;
+				const int cut = fx.nat.ticks / 2;
+				std::vector<signed char> sd(fx.nat.side.begin(),
+					fx.nat.side.begin() + cut);
+				std::vector<float> cs(fx.nat.cosa.begin(),
+					fx.nat.cosa.begin() + cut);
+				std::vector<unsigned char> dk(fx.nat.duck.begin(),
+					fx.nat.duck.begin() + cut);
+				std::vector<Ride::MoveInput> pk;
+				Ride::Result rr = Ride::FlyRideSchedule(fx.B, w, p, g,
+					sd, cs, dk, nullptr, nullptr, nullptr, &pk);
+				Ride::ExitTransition tr;
+				hzn_refused = rr.kind == Ride::kHorizon
+					&& !Ride::MakeTransition(rr, g, pk, &tr);
+				break;
+			}
+			const bool ok = n_xfer > 0 && n_ground > 0 && end_ok
+				&& hzn_refused && mk_bad == 0;
+			snprintf(buf, sizeof(buf), "CONTACT_TRANSFER x%d (first "
+				"resolves to route face %d) | GROUND x%d | END x%d "
+				"(zone entered t%d) | HORIZON refused a transition=%d "
+				"| %d MakeTransition defects", n_xfer, xfer_face,
+				n_ground, n_end, end_tick, hzn_refused ? 1 : 0,
+				mk_bad);
+			check("XE event coverage + typed transitions", ok, buf);
 		}
 
 		printf("exitfit: %d passed, %d failed | %s\n", pass, fail,

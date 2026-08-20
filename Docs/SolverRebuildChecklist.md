@@ -15,20 +15,16 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-19 (session 13): STAGE B (ExitField) is OPEN and
-stages 0-2 are GREEN.** Design of record: `Docs/ExitFieldSpec.md`
-(the set-valued transition relation R_F(B), the seams, laws
-B-A..B-F). Built: the EntranceField continuation frontier
-(BoardTransition lanes, gate R7), the canonical ride executor
-(`Ride::FlyRideSchedule`, SolverRide.h) and `exitfit` 7/7 GREEN -
-control basis `(side, cosa, duck)` proven at the input channel
-(worst wish-direction error 5.25e-06 rad over 42 hidden native
-rides), S_B = (complete PlayerState, CtlState, face) proven by 126
-bitwise checkpoint resumes. Known holes: no CONTACT_TRANSFER /
-GROUND / END fixture yet (required before stage 6). NEXT: stage 3,
-the witness-backed continuation frontier. EntranceField remains
-INTEGRATION-READY (session 12l); legacy RefSolve remains the
-production local engine.
+**STATUS 2026-08-19 (session 13b): ExitField stages 0-2 COMPLETE,
+stage 3 safe to begin.** The AIR_EXIT seam is closed under composition
+(the ride books the separation tick); witnesses are exact MoveInput
+packets replayed bitwise by `Ride::FlyRideInputs`; coast-through-dwell
+gated; CONTACT_TRANSFER / GROUND / END / HORIZON all exercised
+deterministically (transfer via the synthetic two-wedge valley -
+World::AddTestBrush, harness-only); `Ride::ExitTransition` +
+`MakeTransition` are the typed stage-3 records. exitfit 10/10; whole
+board green. NEXT: stage 3, the witness-backed event-partitioned
+continuation frontier. See `Docs/ExitFieldSpec.md` sessions 13 + 13b.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -363,6 +359,47 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-19 (session 13b, THE FIVE PRE-STAGE-3 CORRECTIONS - exitfit
+  10/10): advisor directive 2026-08-19g implemented in full. (1) THE
+  AIR_EXIT SEAM IS CLOSED UNDER COMPOSITION: the session-13 peek rule
+  is SUPERSEDED - the ride OWNS AND BOOKS the separation tick (dt
+  includes the first clean-air tick, S+ is the boundary after it, Air
+  begins at the next tick); an exit classified by a replaceable
+  unbooked input proved only "exists u: next tick separates". Every
+  event kind books its own tick uniformly via the shared ClassifyTick
+  helper, so the two executors cannot drift. Measured: X7's carve seam
+  difference (t25 vs t26) disappeared exactly. (2) SEARCH COORDINATES
+  vs EXACT WITNESS: `Ride::MoveInput` freezes precisely the MoveTick
+  arguments; `FlyRideInputs` is the authoritative packet replay. X1b:
+  canonical packets AND native packets replay BITWISE, 0 bad over 36
+  fixtures - the 0.7u inversion drift lived in re-emission and the
+  packet witness removes it. (3) COAST-THROUGH-DWELL gated (X3):
+  reversal after 2 coasts on age 1 refused at the right tick, after 3
+  accepted; coast-tick cosa variants ride bitwise identically and
+  CanonSchedule pins ignored fields. (4) DETERMINISTIC EVENT COVERAGE
+  (XE): GROUND x2 natural; END via a zone volume (t6); CONTACT_TRANSFER
+  measured impossible in ride scope on available real maps (24/24
+  basictest adjacency probes end in AIR; surf_climb extracts no faces;
+  surf_speed has 2 without contact) so per the advisor's directive a
+  SYNTHETIC two-wedge valley (World::AddTestBrush/FinalizeTestWorld,
+  harness-only, additive, exercising the leaf-less grid-fallback trace
+  path) delivers it: 20 face ticks then contact with the other wedge at
+  t21, board_face resolved. HORIZON refuses MakeTransition. (5) TYPED
+  TRANSITIONS: `Ride::ExitTransition` + `MakeTransition` (kind, exact
+  dt, s_plus + ctl_plus, board_face, packet witness); the assembler
+  dispatches on kind (AIR_EXIT -> Air/Entrance, CONTACT_TRANSFER ->
+  already a board contact, GROUND terminal, END finish, HORIZON no
+  transition). Honest note: the cosa chart quantizes angle ~sqrt(ulp)
+  near degenerate directions (8.3e-05 rad measured at |cosa| ~ 1 vs
+  5.25e-06 in-band) - a property of the parameterization, irrelevant to
+  packet-exact witnesses; X1 gate is angle-aware (2e-5 / 2e-4).
+  Clean-rebuild board: exitfit 10/10, efrefine 7/7, airprops 24/24,
+  airsuite 48/48 gap 242k, airrec VERIFIED, wishparity, strafelaw,
+  carve M1.4, airsolve M1.3. STAGE 3 IS SAFE TO BEGIN: witness-backed
+  event-partitioned frontier, proposals order-only, reopenable
+  compression, no approximate dominance, ExitDoomed advisory. Full
+  detail: `Docs/ExitFieldSpec.md` session 13b.
 
 - 2026-08-19 (session 13, EXITFIELD STAGES 0-2: the operator is defined,
   the canonical executor exists, and the representation gate is GREEN

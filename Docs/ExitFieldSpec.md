@@ -59,15 +59,19 @@ One canonical phase, end-of-tick boundaries, no pre-clip quantities:
   accepted board tick. This is exactly `Air::Result::end_state`
   ("the board tick belongs to this flight's last frame"). The mid-tick
   contact point `Q` is event METADATA, not state.
-- **AIR_EXIT**: separation is complete at the boundary after the last
-  ridden-face-contact tick. `S+` = that boundary state; `dt` = ticks
-  through it. **AMENDED session 13 (measured):** the confirming
-  no-contact PEEK tick's INPUT is part of the witness - it is the
-  existence proof that a clean-air continuation exists, and a witness
-  holding only the booked prefix cannot be classified standalone - but
-  its TICK is never booked: the next operator re-simulates it under
-  its own control, so the composed trajectory may lawfully differ
-  there. No tick is double-booked.
+- **AIR_EXIT** (RE-AMENDED 2026-08-19g - the session-13 peek rule is
+  SUPERSEDED): **the ride owns and books the separation tick.** An
+  exit classified by an unbooked input that the next operator is free
+  to replace is not closed under composition - it proves only
+  "exists u: next tick separates", and the composed trajectory could
+  lawfully diverge from the classification basis. So the first
+  clean-air tick is booked to the ride (`dt` includes it), `S+` is the
+  boundary AFTER it, the witness carries its input like any other
+  booked tick, and Air begins at the following tick. Every
+  ExitTransition is self-contained; no tick is double-booked.
+  (Measured confirmation: the carve seam bookkeeping difference
+  `t25 vs t26` disappeared exactly - X7 now agrees tick-for-tick and
+  in exit speed.)
 - **CONTACT_TRANSFER / GROUND / END**: the event tick belongs to the
   ride; `S+` = boundary after it (for CONTACT_TRANSFER this is the
   next face's `S_B`, same convention as EntranceField).
@@ -142,10 +146,9 @@ Initial hypothesis (per tick):
   `U_E(B, M)` (a universal finite ride bound is not assumed). Absence
   of a tight bound means UNRESOLVED, not impossible.
 - **B-C (finite schedule semantics).** Accepted witnesses store the
-  exact consumed prefix through the boundary event - plus, for
-  AIR_EXIT, the one-tick separation-witness input whose tick is never
-  booked (section 2, amended session 13). `HORIZON` => UNRESOLVED,
-  never an exit. Permanent property gate.
+  exact consumed prefix through the boundary event, separation tick
+  included (section 2, re-amended 2026-08-19g). `HORIZON` =>
+  UNRESOLVED, never an exit. Permanent property gate.
 - **B-D (reopenable compression, no approximate dominance).** v1
   performs NO approximate hard dominance pruning: exact-state
   dominance essentially never fires on float state, and anything
@@ -348,3 +351,86 @@ partition compression, no dominance pruning, plus the first
 `CONTACT_TRANSFER` fixtures. Then stage 4 (first certified
 `U_E(B, M)` envelope component), stage 5 (lazy Query/Refine), stage 6
 (face-to-face composition).
+
+### Session 13b (2026-08-19) — the five pre-stage-3 corrections; the
+### representation gate is 10/10
+
+The advisor's directive before stage 3, implemented in full.
+
+**1. The AIR_EXIT seam is closed under composition.** The session-13
+peek rule (input in the witness, tick never booked) proved only
+"exists u: next tick separates" — the next operator was free to replace
+that input and lawfully diverge from the classification basis. RE-AMENDED
+(spec section 2): **the ride owns and books the separation tick.** `dt`
+includes the first clean-air tick, `S+` is the boundary after it, the
+witness carries its input like any other booked tick, Air begins at the
+following tick. Every event kind now books its own tick uniformly, and
+the shared `ClassifyTick` helper means the two executors cannot drift.
+Measured confirmation: X7's carve seam difference (`t25 vs t26`)
+disappeared exactly — tick-for-tick and exit-speed agreement.
+
+**2. Search coordinates are separated from the exact witness.**
+`Ride::MoveInput` freezes PRECISELY the arguments `MoveTick` consumes
+(all six, pitch/umove included — an exact packet is exact);
+`FlyRideSchedule` records the packet of every booked tick;
+`Ride::FlyRideInputs` is the authoritative replay that consumes packets
+verbatim. **X1b: canonical packets replay bitwise AND a native ride's
+own packets replay the native ride bitwise — 0 bad over 36 fixtures.**
+Candidate generation may be approximate; accepted witness replay is
+exact — the 0.7u inversion drift lives in re-emission and the packet
+witness removes it entirely. The compact basis keeps its role as
+coverage-tested search coordinates.
+
+**3. Coast-through-dwell is a gated invariant (X3).** A reversal after
+two coasts on carried age 1 (age 5) is REFUSED at the right tick; after
+three coasts (age 6) it is ACCEPTED — coasting keeps the last nonzero
+side and the age increments through it, in both directions. Two
+schedules differing only in coast-tick cosa ride bitwise identically,
+and `Ride::CanonSchedule` pins the ignored fields so future frontier
+hashing cannot see phantom distinctions.
+
+**4. Event coverage is deterministic (XE).** CONTACT_TRANSFER, GROUND,
+END and HORIZON-refusal are all exercised:
+- **GROUND x2** arise naturally (rides into the valley floor).
+- **END** via a zone volume straddling a known ride path (entered t6).
+- **CONTACT_TRANSFER** required real work. Measured: 24/24
+  adjacency-driven probes on basictest end in AIR — its ramps never
+  touch within ride scope (historical "taps" were air-phase strikes);
+  surf_climb extracts no faces and surf_speed_the_movie has 2 with no
+  contact either. Per the advisor's synthetic-geometry directive,
+  `World::AddTestBrush`/`FinalizeTestWorld` (harness-only, additive,
+  running EXACTLY the loader's finalize path and exercising the
+  grid-fallback trace that leaf-less maps already use) builds a tiny
+  two-wedge valley; the ride boards wedge A, holds a gain wish 20 face
+  ticks and contacts wedge B at t21 — **CONTACT_TRANSFER with
+  `board_face` resolved to the other route face.** A physics/event
+  unit fixture, not a map route.
+- **HORIZON refuses MakeTransition** (no transition, UNRESOLVED).
+
+**5. Typed transitions exist.** `Ride::ExitTransition` (kind, exact
+`dt`, `s_plus` + carried `ctl_plus`, `board_face` for transfers, the
+exact packet witness, event metadata) + `MakeTransition`, which refuses
+HORIZON and short witnesses. The route assembler dispatches on kind:
+AIR_EXIT feeds Air/EntranceField; CONTACT_TRANSFER is already a board
+contact (no Air leg); GROUND terminal until a Ground operator exists;
+END is the finish.
+
+**One honest quantization note (X1 gate made angle-aware):** the cosa
+chart loses angular resolution as sqrt(ulp) near the degenerate
+directions (cos then acos), measured 8.3e-05 rad on brake-stratum
+ticks with |cosa| ~ 1 versus 5.25e-06 in the well-conditioned band.
+That is a property of the stored parameterization, not the inverter —
+and irrelevant to witnesses, which are packet-exact (X1b). The gate is
+2e-5 in-band, 2e-4 for |cosa| > 0.999, both reported.
+
+**The board: exitfit 10/10** (X1a, X1, X1b, XH, X2a, X2b, X2c, X3, X7,
+XE). Whole-board regression from a clean rebuild: efrefine 7/7,
+airprops 24/24, airsuite 48/48 (gap 242k), airrec fixture VERIFIED,
+wishparity, strafelaw, carve M1.4, airsolve M1.3.
+
+**Stage 3 is now safe to begin**: witness-backed, event-partitioned
+continuation frontier — Carve/controller/ExitMap as proposal/ordering
+only, every retained transition from exact canonical replay, reopenable
+partition compression, no approximate dominance. Then the first
+certified finite-horizon ExitEnvelope component, `ExitDoomed` staying
+advisory.

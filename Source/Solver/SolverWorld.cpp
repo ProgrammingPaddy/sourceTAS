@@ -671,6 +671,74 @@ namespace Solver {
 		return any;
 	}
 
+	// ---- HARNESS-ONLY WORLD CONSTRUCTION (see header). The finalize
+	// below is the same code path Load runs per brush: axial AABB from
+	// the plane set, hull expansions via HullExpand, origin-space
+	// gates. Planes must include full axial coverage (a box of six
+	// axial planes around the shape), same as compiled brushes.
+	bool World::AddTestBrush(const std::vector<Vec3>& n,
+	                         const std::vector<float>& d,
+	                         const Hulls& hulls) {
+		if (n.size() != d.size() || n.size() < 4)
+			return false;
+		hulls_ = hulls;
+		WorldBrush wb;
+		wb.id = 100000 + static_cast<int>(brushes.size());
+		wb.contents = 1;   // CONTENTS_SOLID
+		float mn[3] = { 1e30f, 1e30f, 1e30f };
+		float mx[3] = { -1e30f, -1e30f, -1e30f };
+		bool have_min[3] = { false, false, false };
+		bool have_max[3] = { false, false, false };
+		for (size_t i = 0; i < n.size(); ++i) {
+			wb.n.push_back(n[i]);
+			wb.d.push_back(d[i]);
+			// Real sides (pid >= 0): the face extractor skips pid < 0
+			// as compiler bevels, and test slopes must be faces.
+			wb.pid.push_back(static_cast<int>(i));
+			const float* nv = &n[i].X;
+			for (int a = 0; a < 3; ++a) {
+				if (nv[a] > 0.999f) {
+					if (d[i] < mx[a] || !have_max[a])
+						mx[a] = d[i];
+					have_max[a] = true;
+				} else if (nv[a] < -0.999f) {
+					if (-d[i] > mn[a] || !have_min[a])
+						mn[a] = -d[i];
+					have_min[a] = true;
+				}
+			}
+		}
+		if (!(have_min[0] && have_max[0] && have_min[1] && have_max[1]
+			&& have_min[2] && have_max[2]))
+			return false;   // full axial coverage required, as compiled
+		wb.bmin = Vec3(mn[0], mn[1], mn[2]);
+		wb.bmax = Vec3(mx[0], mx[1], mx[2]);
+		wb.nsides = static_cast<int>(n.size());
+		wb.d_stand.resize(wb.n.size());
+		wb.d_duck.resize(wb.n.size());
+		wb.d_unduck.resize(wb.n.size());
+		for (size_t i = 0; i < wb.n.size(); ++i) {
+			wb.d_stand[i] = wb.d[i] + HullExpand(wb.n[i],
+				hulls_.stand_min, hulls_.stand_max);
+			wb.d_duck[i] = wb.d[i] + HullExpand(wb.n[i],
+				hulls_.duck_min, hulls_.duck_max);
+			wb.d_unduck[i] = wb.d[i] + HullExpand(wb.n[i],
+				hulls_.unduck_min, hulls_.unduck_max);
+		}
+		wb.gmin_stand = wb.bmin - hulls_.stand_max;
+		wb.gmax_stand = wb.bmax - hulls_.stand_min;
+		wb.gmin_duck = wb.bmin - hulls_.duck_max;
+		wb.gmax_duck = wb.bmax - hulls_.duck_min;
+		wb.gmin_unduck = wb.bmin - hulls_.unduck_max;
+		wb.gmax_unduck = wb.bmax - hulls_.unduck_min;
+		brushes.push_back(wb);
+		return true;
+	}
+
+	void World::FinalizeTestWorld() {
+		BuildGrid();
+	}
+
 	void World::BuildGrid() {
 		cells_.clear();
 		nx_ = ny_ = nz_ = 0;
