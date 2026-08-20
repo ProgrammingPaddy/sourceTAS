@@ -2204,31 +2204,15 @@ namespace Entrance {
 				//    the acceptance ball, not q itself. At radius 28 on
 				//    surf gravity that is 44.8k of energy the nominal
 				//    form silently omitted.
-				const float zhi_acc = q.Z + radius;
+				// The recipe itself lives in UCertifiedFace (header) so the
+				// refinement layer and this path can never drift apart.
 				const int k_cap = n_cap + 8;
-				int k_lo = 1, k_hi = k_cap;
-				if (bnd || !Envelope::ZWindow(entry.pos.Z, entry.vel.Z,
-					q.Z - radius, zhi_acc, p, k_cap, &k_lo, &k_hi, gs)) {
-					k_lo = 1;
-					k_hi = k_cap;
-				}
-				const float pot_c = 2.f * p.gravity * gs
-					* (zhi_acc - zmin);
-				const float gimp = 0.5f * p.gravity * gs * p.dt;
-				// The broad certified ceiling: drop the clip loss (-d^2
-				// <= 0) and the n_z cross term, keep the gravity phase.
-				float U_global = Envelope::SMax(s0, N, p);
-				if (!bnd) {
-					U_global = -1e30f;
-					for (int k = k_lo; k <= k_hi; ++k) {
-						const float sk = Envelope::SMax(s0, k, p);
-						const float vk = Envelope::VzAfter(entry.vel.Z,
-							k, p, gs) - gimp;
-						const float u = sk * sk + vk * vk + pot_c;
-						if (u > U_global)
-							U_global = u;
-					}
-				}
+				unsigned bid_g = 0;
+				const float U_global = bnd
+					? Envelope::SMax(s0, N, p)
+					: UCertifiedFace(facep->n, entry.pos, entry.vel, gs, p,
+						q, radius, zmin, k_cap, -3.14159265f, 3.14159265f,
+						&bid_g);
 				for (Dom& d : dom)
 					d.U = U_global;
 				// PER-DOMAIN CEILING: the interval-specific relaxed
@@ -2247,15 +2231,10 @@ namespace Entrance {
 							+ ivt[i][0]);
 						const float thi = Steer::WrapPi(th_arr
 							+ ivt[i][1]);
-						float ub = -1e30f;
-						for (int k = k_lo; k <= k_hi; ++k) {
-							const float u = UBoardHeading(facep->n,
-								Envelope::VzAfter(entry.vel.Z, k, p, gs),
-								gimp, Envelope::SMax(s0, k, p), tlo, thi,
-								pot_c);
-							if (u > ub)
-								ub = u;
-						}
+						unsigned bid_i = 0;
+						const float ub = UCertifiedFace(facep->n, entry.pos,
+							entry.vel, gs, p, q, radius, zmin, k_cap, tlo,
+							thi, &bid_i);
 						d.U_adv = ub;
 						// PROMOTED TO CERTIFIED (2026-08-19, gates B1-B7).
 						// The interval ceiling now replaces the broad energy
@@ -3236,5 +3215,86 @@ namespace Entrance {
 		return m;
 	}
 
+
+	// ================= LAZY REFINEMENT (operator level) =================
+	// See SolverEntrance.h for the contract. The engine underneath is the
+	// PRODUCTION legacy RefSolve: sessions 12e-12k measured it at 29/32 on
+	// the frozen known-reachable AirRec L1 fixture against scheduler-v1's
+	// 18/32 at equal compute, in boundary mode where domain coverage and
+	// fairness cannot be the explanation. So the strong local optimizer
+	// stays, and the anytime contract wraps it.
+
+	static const RefProfile kProfiles[] = {
+		// name        budget  precision  shoot_m  id
+		{ "coarse",       600,      4.f,        2, 0x45460100u },
+		{ "medium",      1800,      2.f,        2, 0x45460101u },
+		{ "fine",        3600,      1.f,        2, 0x45460102u },
+		{ "exhaustive",  9000,      1.f,        2, 0x45460103u },
+	};
+
+	const RefProfile* Profiles(int* count) {
+		if (count)
+			*count = static_cast<int>(sizeof(kProfiles)
+				/ sizeof(kProfiles[0]));
+		return kProfiles;
+	}
+
+	bool RefineStep(QueryState* st, const PlayerState& entry,
+	                const World& w, const MoveParams& p,
+	                const Route::Graph& g, int face_idx, const Vec3& q,
+	                float radius, int n_hint, float zmin,
+	                const Steer::CtlState& entry_ctl) {
+		int np = 0;
+		const RefProfile* prof = Profiles(&np);
+		if (!st || st->level >= np)
+			return false;
+		if (face_idx < 0 || face_idx >= static_cast<int>(g.faces.size()))
+			return false;
+		const RefProfile& pr = prof[st->level];
+		const Route::Face& fc = g.faces[static_cast<size_t>(face_idx)];
+
+		// ---- U first: it does not depend on the search at all, so the
+		// ceiling is available even at level 0 with no witness. A query
+		// that finds nothing still returns a real (L, U, UNRESOLVED).
+		const int N = n_hint > 8 ? n_hint : 60;
+		unsigned bid = 0;
+		const float u_run = UCertifiedFace(fc.n, entry.pos, entry.vel,
+			entry.gravity_scale, p, q, radius, zmin, N + 48,
+			-3.14159265f, 3.14159265f, &bid);
+		if (u_run < st->U) {
+			st->U = u_run;
+			st->U_bound_id = bid;
+		}
+
+		// ---- the atomic action: one COMPLETE local solve, immutably
+		// configured. The caller's remaining budget never reaches in.
+		RefTune tn;
+		tn.shoot_m = pr.shoot_m;
+		tn.precision = pr.precision;
+		tn.scheduler = 0;         // production local engine
+		int fl = 0;
+		RefResult rr = RefSolve(entry, w, p, g, face_idx, q, radius, N,
+			pr.budget, false, &fl, zmin, entry_ctl, nullptr, nullptr,
+			nullptr, &tn);
+		st->evals += rr.evals;
+		st->level++;
+		st->applied.push_back(pr.id);
+
+		// ---- monotone merge. A worse run can never displace a better
+		// witness, and a search that failed changes nothing but the
+		// level counter.
+		if (rr.ok && rr.H > st->L) {
+			st->L = rr.H;
+			st->has_L = true;
+			st->wside = rr.wside;
+			st->wcosa = rr.wcosa;
+			st->horizon = rr.horizon;
+			st->L_res = rr.strike_rmin;
+		}
+		// Status is NEVER downgraded by a failed search. Only
+		// MarkIrrelevant, with a certified ceiling and an incumbent,
+		// may leave UNRESOLVED.
+		return true;
+	}
 } // namespace Entrance
 } // namespace Solver

@@ -15,17 +15,17 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-19 (session 12k): the Air bound is CERTIFIED; the
-scheduler is NOT authoritative and EntranceField is NOT
-integration-ready.** Gates B1-B7 are green and
-`Entrance::UBoardHeading` is in the certified registry. ScoutCheap
-cut the mandatory coverage prefix from 23.8% to 2.0% of a cheap
-query (11.6x) and improved every AirSuite budget. But at EQUAL
-compute on the frozen AirRec fixture, in BOUNDARY mode where
-`n_dom = 1`, the scheduler recovers 18/32 against legacy 29/32 -
-a second gap that coverage cannot explain and that the
-single-query probe never saw. Legacy stays. See
-`Docs/AirRecSpec.md` sections 23-24.
+**STATUS 2026-08-19 (session 12l): EntranceField is
+INTEGRATION-READY. ExitField is UNFROZEN.** The anytime contract
+now lives ABOVE the local optimizer: `Entrance::RefineStep` runs a
+whole immutable profile as one atomic action and merges
+monotonically (L only rises, U only falls). `efrefine` 6/6 green.
+Legacy `RefSolve` (`scheduler = 0`) is the PRODUCTION local
+refinement engine - not deprecated; scheduler v1 is an
+EXPERIMENTAL path, NOT a prerequisite (it measures 18/32 against
+legacy 29/32 on frozen AirRec L1 at equal compute in boundary
+mode). NEXT: ExitField `exitfit` - canonical ride representation
+BEFORE any ride optimizer. See `Docs/AirRecSpec.md` 23-25.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -33,6 +33,14 @@ sequential shooting has the expressive power (16/20/29 of 32 at
 1x/2x/3x); the equal-compute curve (16/14/14) showed compute is being
 spent badly. Next build = the deterministic central refinement
 scheduler over domains D = (Q region, T branch, I_theta).
+
+> **PARTLY SUPERSEDED 2026-08-19 (session 12l).** The Level-B half
+> of this ruling STANDS. The "next build = the scheduler" half is
+> spent: the scheduler was built (v0, v1, ScoutCheap, S1-S10) and
+> measured, and it is NOT the production local engine. Legacy
+> `RefSolve` keeps that job; the anytime contract moved up to
+> `Entrance::RefineStep`. Do not read this paragraph as an
+> outstanding task.
 
 **SUPERSEDED HEADERS (kept for history, do not act on):** this document
 previously read "NOW -> M3 transfer refinement & assembly". M3-era
@@ -352,6 +360,69 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-19 (session 12l, THE ANYTIME BOUNDARY MOVES UP A LEVEL -
+  ENTRANCEFIELD IS INTEGRATION-READY): advisor ruling 2026-08-19d
+  implemented. Sessions 12e-12k had fused two responsibilities - LOCAL
+  TRAJECTORY OPTIMIZATION (legacy RefSolve is strong at it) and LAZY
+  MONOTONE COMPUTE ALLOCATION (what the full solver needs). Nothing
+  requires one piece of code to do both, so the anytime contract now
+  wraps the strong local engine instead of replacing it.
+  BUILT: `Entrance::RefProfile` (immutable versioned RESOLUTION levels,
+  not truth levels: coarse 600/4.0u, medium 1800/2.0u, fine 3600/1.0u,
+  exhaustive 9000/1.0u, each with a stable id); `Entrance::QueryState`
+  (L + its replayable witness, certified U + the bound id that produced
+  it, status, evals, ordered profile audit trail);
+  `Entrance::RefineStep` - ONE ATOMIC ACTION that runs the next profile
+  IN FULL with `scheduler = 0` and merges monotonically
+  `L_new = max(L_old, L_run)`, `U_new = min(U_old, U_certified)`;
+  `Entrance::MarkIrrelevant` - the ONLY door to PROVED_IRRELEVANT, which
+  refuses unless a certified ceiling is actually beaten by an incumbent.
+  The key realisation: `RefSolve(3600)` not being an action-prefix of
+  `RefSolve(600)` does not matter - they are two DIFFERENT atomic
+  actions, and the prefix law applies to the stream of actions, which is
+  where the global solver needs it. Also extracted
+  `Entrance::UCertifiedFace` (exact ballistic arrival-tick window +
+  FinishGravity phase + acceptance-ball potential + interval-vs-broad
+  attribution) so RefSolve and the refinement layer cannot drift.
+  NEW GATE `efrefine` **6/6 green**: R1 L monotone (830k -> 1022k ->
+  1030k -> 1030k, no witness forgotten); R2 U never loosens (1265k,
+  bound id 55300001); R3 sandwich holds and TIGHTENS (gap 435k ->
+  235k); R4 the final 57-tick witness replays to **1030k vs stored
+  1030k, err 0.00**; R5 deterministic for the same action sequence
+  (15,000 evals, 4 profiles, identical L/U/witness/profile-ids); R6
+  **failure never becomes impossibility** - an unreachable target fails
+  all 4 profiles and still returns status UNRESOLVED with a certified U,
+  and `MarkIrrelevant` is refused below U and granted above. R1 reaching
+  1030k is the point: the wrapper exposes the strong engine's FULL
+  strength rather than capping it.
+  **ENTRANCEFIELD: INTEGRATION-READY.** The old requirement -
+  scheduler-v1 must replace legacy RefSolve - is WITHDRAWN. The bar is a
+  deterministic, monotonic lazy refinement API around a strong local
+  solver, which `efrefine` certifies. Clean-rebuild board: efrefine 6/6,
+  airprops 24/24, airsuite 48/48 gap 242k, airrec fixture
+  `de1b000e431a84fb` VERIFIED capability 16/23/29, wishparity PASS,
+  strafelaw float-ULP exact, carve M1.4 PASS, airsolve M1.3 PASS,
+  humanexact f2 PASS. **EXITFIELD IS UNFROZEN.**
+  CLASSIFICATION recorded at the `RefTune::scheduler` declaration itself
+  so compaction cannot reinterpret it: `scheduler = 0` legacy RefSolve
+  is the PRODUCTION local refinement engine, not deprecated and not
+  scheduled for removal; `scheduler = 1/2` is an EXPERIMENTAL
+  refinement-scheduler research path and the source of the scheduling
+  laws now applied one level up, NOT a production replacement
+  requirement. Scheduler-v1's 18/32 is not an unresolved prerequisite -
+  it is the measured reason the path was not promoted. AirRec m-curves
+  taken in scheduler mode are INVALID as m-curves (scheduler mode never
+  consults `shoot_m`, so 17/18/18 is the same machinery three times);
+  only the equal-compute 29/32 vs 18/32 comparison is meaningful.
+  NEXT: ExitField, representation before optimization - `exitfit` must
+  show a canonical ride basis `u_k = (side, cos alpha, duck)` carried
+  with the full incoming boundary state exactly replays arbitrary legal
+  rides (ordinary/short/long, climb/descend, high/low speed, reversals
+  under the six-tick law, top/bottom/side exits, duck-off exits) before
+  any ride optimizer is built. Exact replay is truth; `carve` is
+  regression evidence; the corrected `Steer::Controller` is proposal
+  machinery only. Full detail: `Docs/AirRecSpec.md` section 25.
 
 - 2026-08-19 (session 12k, SCOUTCHEAP - the coverage cost is gone, and a
   SECOND capability gap surfaced): the one authorised focused change is

@@ -7928,6 +7928,219 @@ namespace {
 	// path - the two pure helpers are shared with production precisely
 	// so a test can never drift from it. One authoritative threshold set
 	// drives both the printed verdict and the exit code.
+	// ================= efrefine: THE OPERATOR-LEVEL ANYTIME GATE
+	// (advisor ruling 2026-08-19d). The anytime contract lives ABOVE
+	// the local optimizer: a whole fixed local solve is one atomic
+	// refinement action, and what must be monotone is the SANDWICH
+	// L <= H* <= U, not the internal evaluation order of two
+	// differently-configured solves. This gate proves exactly that,
+	// and proves that search failure never becomes physical
+	// impossibility.
+	int CmdEfRefine(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("efrefine: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[256];
+		auto check = [&](const char* name, bool ok, const char* detail) {
+			printf("efrefine: %-34s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", detail);
+			if (ok) pass++; else fail++;
+		};
+		int fi = -1;
+		for (size_t i = 0; i < g.faces.size(); ++i)
+			if (sqrtf(g.faces[i].n.X * g.faces[i].n.X
+				+ g.faces[i].n.Y * g.faces[i].n.Y) > 1e-4f) {
+				fi = static_cast<int>(i);
+				break;
+			}
+		if (fi < 0) {
+			printf("efrefine: no surfable face - cannot run\n");
+			return 1;
+		}
+		const Route::Face& fc = g.faces[static_cast<size_t>(fi)];
+		const Vec3 q = fc.centroid;
+		const int Hn = 44;
+		const float s0 = 700.f, vz0 = -100.f;
+		const float T = static_cast<float>(Hn) * p.dt;
+		const float z0 = q.Z - vz0 * T + 0.5f * p.gravity * T * T;
+		const float paz = atan2f(fc.n.Y, fc.n.X);
+		const float dist = 0.8f * Envelope::DMax(s0, Hn, p);
+		PlayerState st;
+		st.pos = Vec3(q.X + cosf(paz + 0.45f) * dist,
+			q.Y + sinf(paz + 0.45f) * dist, z0);
+		const float inaz = atan2f(q.Y - st.pos.Y, q.X - st.pos.X);
+		st.vel = Vec3(cosf(inaz + 0.3f) * s0,
+			sinf(inaz + 0.3f) * s0, vz0);
+		st.ducked = false;
+		st.hull_state = 0;
+
+		int nprof = 0;
+		const Entrance::RefProfile* prof = Entrance::Profiles(&nprof);
+		// Run the ladder, snapshotting after every atomic action.
+		std::vector<Entrance::QueryState> snap;
+		Entrance::QueryState qs;
+		snap.push_back(qs);
+		while (Entrance::RefineStep(&qs, st, w, p, g, fi, q, 28.f, Hn,
+			fc.zmin))
+			snap.push_back(qs);
+		const int nsteps = static_cast<int>(snap.size()) - 1;
+
+		// ---- R1 L MONOTONE. A later, stronger profile may never
+		// report a worse lower bound than an earlier one - that is the
+		// whole point of merging rather than replacing.
+		bool r1 = true;
+		for (size_t i = 1; i < snap.size(); ++i)
+			if (snap[i].has_L && snap[i - 1].has_L
+				&& snap[i].L < snap[i - 1].L - 1e-3f)
+				r1 = false;
+			else if (snap[i - 1].has_L && !snap[i].has_L)
+				r1 = false;   // a witness was FORGOTTEN
+		{
+			std::string s;
+			for (size_t i = 1; i < snap.size(); ++i) {
+				char t[48];
+				snprintf(t, sizeof(t), "%s%.0fk", i > 1 ? " -> " : "",
+					snap[i].has_L ? snap[i].L / 1e3f : 0.f);
+				s += t;
+			}
+			snprintf(buf, sizeof(buf), "%d profiles | L %s", nsteps,
+				s.c_str());
+		}
+		check("R1 L monotone non-decreasing", r1, buf);
+
+		// ---- R2 U MONOTONE. The certified ceiling may only tighten.
+		bool r2 = true;
+		for (size_t i = 1; i < snap.size(); ++i)
+			if (snap[i].U > snap[i - 1].U + 1e-3f)
+				r2 = false;
+		snprintf(buf, sizeof(buf), "U %.0fk -> %.0fk (bound id %08x), "
+			"never loosened", snap.size() > 1 ? snap[1].U / 1e3f : 0.f,
+			snap.back().U / 1e3f, snap.back().U_bound_id);
+		check("R2 U monotone non-increasing", r2, buf);
+
+		// ---- R3 THE SANDWICH HOLDS AND TIGHTENS. L <= U at every
+		// level, and the gap never widens.
+		bool r3 = true;
+		float gap0 = -1.f, gapN = -1.f;
+		for (size_t i = 1; i < snap.size(); ++i) {
+			if (!snap[i].has_L)
+				continue;
+			if (snap[i].L > snap[i].U + 1.f)
+				r3 = false;          // the bound would be FALSIFIED
+			const float gp = snap[i].U - snap[i].L;
+			if (gap0 < 0.f)
+				gap0 = gp;
+			gapN = gp;
+		}
+		if (gap0 >= 0.f && gapN > gap0 + 1.f)
+			r3 = false;
+		snprintf(buf, sizeof(buf), "L <= U at every level; gap %.0fk -> "
+			"%.0fk", gap0 < 0.f ? 0.f : gap0 / 1e3f,
+			gapN < 0.f ? 0.f : gapN / 1e3f);
+		check("R3 sandwich holds and tightens", r3, buf);
+
+		// ---- R4 WITNESSES SURVIVE AND REPLAY EXACTLY. The stored
+		// witness is the operator's whole claim: replay it through the
+		// exact engine and demand the recorded L back. A value that
+		// cannot be handed back is not a lower bound.
+		bool r4 = qs.has_L && !qs.wside.empty();
+		float replay_H = 0.f, replay_err = 0.f;
+		if (r4) {
+			Air::Target vt;
+			vt.face = fi;
+			vt.dot_cap = 3000.f;
+			vt.aim = q;
+			vt.max_ticks = qs.horizon + 8;
+			Air::Result ar = Air::FlyWishSchedule(st, w, p, vt, g,
+				qs.wside, qs.wcosa, qs.horizon + 8);
+			if (!ar.hit || ar.dot >= 0.f || ar.struck_brush >= 0) {
+				r4 = false;
+			} else {
+				replay_H = Dot(ar.end_state.vel, ar.end_state.vel)
+					+ 2.f * p.gravity * st.gravity_scale
+					* (ar.pos.Z - fc.zmin);
+				replay_err = fabsf(replay_H - qs.L);
+				if (replay_err > 1.f)
+					r4 = false;
+			}
+		}
+		snprintf(buf, sizeof(buf), "final witness %d ticks replays to "
+			"%.0fk vs stored %.0fk (|err| %.2f)", qs.horizon,
+			replay_H / 1e3f, qs.has_L ? qs.L / 1e3f : 0.f, replay_err);
+		check("R4 witness survives and replays", r4, buf);
+
+		// ---- R5 DETERMINISM. The same action sequence from the same
+		// start must reproduce the same cached state, byte for byte in
+		// the parts the global solver reads.
+		Entrance::QueryState qb;
+		while (Entrance::RefineStep(&qb, st, w, p, g, fi, q, 28.f, Hn,
+			fc.zmin)) {}
+		bool r5 = qb.level == qs.level && qb.has_L == qs.has_L
+			&& fabsf(qb.L - qs.L) < 1e-3f
+			&& fabsf(qb.U - qs.U) < 1e-3f
+			&& qb.evals == qs.evals
+			&& qb.wside.size() == qs.wside.size()
+			&& qb.applied.size() == qs.applied.size();
+		for (size_t i = 0; r5 && i < qb.wside.size(); ++i)
+			if (qb.wside[i] != qs.wside[i]
+				|| fabsf(qb.wcosa[i] - qs.wcosa[i]) > 1e-6f)
+				r5 = false;
+		for (size_t i = 0; r5 && i < qb.applied.size(); ++i)
+			if (qb.applied[i] != qs.applied[i])
+				r5 = false;
+		snprintf(buf, sizeof(buf), "repeat ladder: same L/U/evals/"
+			"witness/profile-ids = %d (%d evals, %d profiles)",
+			r5 ? 1 : 0, qb.evals, qb.level);
+		check("R5 deterministic for the same sequence", r5, buf);
+
+		// ---- R6 FAILURE IS NEVER IMPOSSIBILITY. Point the operator at
+		// a target no flight can reach. Every profile must fail, and
+		// the query must still come back UNRESOLVED with a real
+		// certified U - never PROVED_IRRELEVANT, and never a claim that
+		// the region is unreachable.
+		Entrance::QueryState qu;
+		const Vec3 qbad(q.X + 90000.f, q.Y + 90000.f, q.Z);
+		while (Entrance::RefineStep(&qu, st, w, p, g, fi, qbad, 28.f,
+			Hn, fc.zmin)) {}
+		const bool unres = !qu.has_L
+			&& qu.status == Entrance::QueryState::UNRESOLVED
+			&& qu.U < 1e29f && qu.U_bound_id != 0
+			&& qu.level == nprof;
+		// And the ONLY door to PROVED_IRRELEVANT is a certified ceiling
+		// beaten by an incumbent: refused below its own U, granted above.
+		const bool gate_lo = !Entrance::MarkIrrelevant(&qu, qu.U - 1.f);
+		const bool gate_hi = Entrance::MarkIrrelevant(&qu, qu.U + 1.f);
+		const bool r6 = unres && gate_lo && gate_hi;
+		snprintf(buf, sizeof(buf), "unreachable target: %d profiles all "
+			"failed, status UNRESOLVED, U %.0fk still certified "
+			"(%08x); MarkIrrelevant refused below U=%d granted above=%d",
+			qu.level, qu.U / 1e3f, qu.U_bound_id, gate_lo ? 1 : 0,
+			gate_hi ? 1 : 0);
+		check("R6 failure never becomes impossibility", r6, buf);
+
+		// ---- The profile ladder itself, for the record.
+		for (int i = 0; i < nprof; ++i)
+			printf("efrefine:   profile %d %-11s budget %5d precision "
+				"%.1fu m%d id %08x\n", i, prof[i].name, prof[i].budget,
+				prof[i].precision, prof[i].shoot_m, prof[i].id);
+		printf("efrefine: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "OPERATOR ANYTIME GATE GREEN"
+				: "OPERATOR ANYTIME GATE RED");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	int CmdAirProps(const std::string& map_path, const ReplayOpts& o) {
 		World w;
 		std::string err;
@@ -12286,6 +12499,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "efrefine" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdEfRefine(argv[2], o);
 	}
 	if (cmd == "airprops" && argc >= 3) {
 		ReplayOpts o;

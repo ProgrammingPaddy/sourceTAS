@@ -1789,3 +1789,178 @@ waved both through. Generic suites are the gate; one query is an anecdote.
 coverage cost per arm. Defaults reproduce the standing baselines
 exactly. This exists so the next comparison is a command, not a
 recompile — the last two sessions each lost time to that.
+
+---
+
+## 25. The anytime boundary moves up a level — EntranceField is
+##     INTEGRATION-READY (2026-08-19)
+
+Session 12l. The advisor's architectural ruling, implemented: the
+anytime contract belongs **above** the local optimizer, not inside it.
+
+### 25.1 The conflation that caused three sessions of work
+
+Two responsibilities had been fused into one piece of code:
+
+    local trajectory optimization    <- legacy RefSolve is strong at this
+    lazy monotone compute allocation <- what the full solver actually needs
+
+Sessions 12e–12k built a scheduler that was excellent at the second and
+materially worse at the first. The decisive evidence was AirRec L1 at
+equal compute in **boundary mode, where `n_dom = 1`** — so heading
+coverage, weighted fairness, ScoutCheap and cross-domain starvation are
+all ruled out — and legacy still recovers **29/32** against the
+scheduler's **18/32**.
+
+There is no architectural requirement that one piece of code do both.
+
+### 25.2 What was built
+
+**`Entrance::RefProfile`** — an immutable, versioned resolution level.
+Profiles are *resolution* levels, not truth levels.
+
+| # | name | budget | precision | m | id |
+|---|---|---|---|---|---|
+| 0 | coarse | 600 | 4.0u | 2 | `45460100` |
+| 1 | medium | 1800 | 2.0u | 2 | `45460101` |
+| 2 | fine | 3600 | 1.0u | 2 | `45460102` |
+| 3 | exhaustive | 9000 | 1.0u | 2 | `45460103` |
+
+**`Entrance::QueryState`** — persistent per-query refinement state:
+`L` with its replayable witness, certified `U` with the bound identity
+that produced it, status, cumulative evals, and the ordered audit trail
+of profile ids applied.
+
+**`Entrance::RefineStep`** — one atomic refinement action. It runs the
+next profile **in full**, with `scheduler = 0` (the production local
+engine), then merges monotonically:
+
+    L_new = max(L_old, L_run)        - a better witness is never lost
+    U_new = min(U_old, U_certified)  - a ceiling never loosens
+
+The outer budget may execute the next action or stop; it may never
+reach inside one. That `RefSolve(3600)` is not an action-prefix of
+`RefSolve(600)` is irrelevant — they are two *different* atomic
+actions, each immutably configured. The prefix law applies to the
+stream of actions, which is exactly where the global solver needs it.
+
+**`Entrance::MarkIrrelevant`** — the only door to `PROVED_IRRELEVANT`,
+and it refuses unless a certified ceiling is actually beaten by an
+incumbent.
+
+**`Entrance::UCertifiedFace`** — the certified-ceiling recipe (exact
+ballistic arrival-tick window, FinishGravity phase, acceptance-ball
+potential, interval-vs-broad attribution) extracted into one shared
+inline helper. `RefSolve` and the refinement layer now both call it, so
+they cannot drift — the same discipline already applied to `ScoutDedupe`
+and `ToGoSweep`.
+
+### 25.3 The operator-level anytime gate `efrefine` (6/6 green)
+
+| gate | result |
+|---|---|
+| R1 L monotone non-decreasing | 4 profiles, L **830k -> 1022k -> 1030k -> 1030k**; no witness ever forgotten |
+| R2 U monotone non-increasing | U 1265k, never loosened, bound id `55300001` |
+| R3 sandwich holds and tightens | `L <= U` at every level; gap **435k -> 235k** |
+| R4 witness survives and replays | final 57-tick witness replays to **1030k vs stored 1030k, err 0.00** |
+| R5 deterministic | repeat ladder: identical L/U/evals/witness/profile-ids (15,000 evals, 4 profiles) |
+| R6 failure is never impossibility | unreachable target: all 4 profiles fail, status **UNRESOLVED**, U still certified; `MarkIrrelevant` **refused** below U, **granted** above |
+
+R1's terminal value is the point worth noting: the operator reaches
+**1030k**, which is exactly what the legacy capability probe reaches.
+The wrapper exposes the strong engine's full strength rather than
+capping it.
+
+R6 is the gate that matters most for global correctness. A query that
+searched hard and found nothing returns `(no L, certified U,
+UNRESOLVED)`. Search failure never becomes physical impossibility.
+
+### 25.4 EntranceField: INTEGRATION-READY
+
+The old requirement — *scheduler-v1 must replace legacy RefSolve* — is
+withdrawn. The bar is now: **a deterministic, monotonic lazy refinement
+API around a strong local solver**, which is what `efrefine` certifies.
+
+Standing at the declaration:
+
+- **Correctness** — exact witness replay (R4), canonical control/seam
+  state, correct wish convention (`wishparity`), semantic feasibility
+  predicates (P1), no hidden clean-air contacts.
+- **Anytime** — action-stream prefix (S1), monotone L (S2, R1),
+  determinism (S3, R5), no domain monopoly (S7), method fairness (S8),
+  ordered precision (S9), coverage conservatism (S10), monotone
+  operator-level sandwich (R1–R3).
+- **Conservatism** — unresolved stays unresolved (R6), only certified
+  bounds prune (S5, R6), proof-carrying elimination, certified heading
+  ceiling (B1–B7).
+- **Capability** — the production engine reaches 48/48 AirSuite, 29/32
+  AirRec L1, and 1030k on the differential query.
+
+Board from a clean rebuild: `efrefine` 6/6 · `airprops` 24/24 ·
+`airsuite` 48/48 (gap 242k) · `airrec` fixture `de1b000e431a84fb`
+VERIFIED, capability 16/23/29 · `wishparity` PASS · `strafelaw`
+float-ULP exact · `carve` M1.4 PASS · `airsolve` M1.3 PASS ·
+`humanexact` f2 PASS, f0 open, f3 N/A.
+
+**ExitField is UNFROZEN.**
+
+### 25.5 Classification, recorded so compaction cannot reinterpret it
+
+Written at the `RefTune::scheduler` declaration itself, not only here:
+
+    scheduler = 0   LEGACY RefSolve = the PRODUCTION local refinement
+                    engine. Not deprecated, not scheduled for removal.
+    scheduler = 1/2 EXPERIMENTAL refinement-scheduler research path and
+                    the source of the scheduling laws now applied one
+                    level up. NOT a production replacement requirement.
+
+**Scheduler-v1's 18/32 is not an unresolved prerequisite.** It is the
+measured reason the experimental path was not promoted.
+
+**AirRec m-curves taken in scheduler mode are invalid as m-curves**,
+because scheduler mode never consults `RefTune::shoot_m` — a
+scheduler-arm "17/18/18" is the same machinery run three times. Only
+the equal-compute legacy-vs-scheduler comparison (29/32 vs 18/32, m
+pinned, budget equalised) is meaningful.
+
+### 25.6 What survives from the scheduler work
+
+Almost all of the concepts, now applied one level up:
+
+- budget does not define truth;
+- increasing work cannot forget witnesses;
+- only certified bounds prune;
+- unsearched means UNRESOLVED;
+- importance and numerical difficulty are different signals;
+- global allocation must avoid starvation;
+- every hard prune carries a proof.
+
+Weighted-fair virtual service and ScoutCheap remain useful reference
+implementations for the eventual *global* refinement scheduler, which
+will have dozens or thousands of competing unresolved transfer/route
+domains — a genuinely different allocation problem from "which
+numerical technique next for this one boundary-value problem".
+
+### 25.7 Next: ExitField, representation before optimization
+
+Same order that eventually worked for Air: prove the canonical basis
+reproduces the legal feasible set *before* building any optimizer.
+
+`exitfit` — does a direct canonical ride-input basis, initially
+`u_k = (side_k, cos alpha_k, duck_k)` carried with the full incoming
+boundary state `S_B = (p, v, face/contact state, side, dwell,
+duck/hull)`, exactly replay arbitrary legal ramp rides? Coverage must
+span ordinary rides, short and long, climbing and descending, high and
+low speed, reversals satisfying the six-tick law, top/bottom/side
+exits, and duck-off exits.
+
+Exact engine replay is truth. Existing `carve` behaviour is regression
+evidence only. The corrected `Steer::Controller` is proposal machinery
+only — neither defines the ride feasible set.
+
+Then, and only then:
+
+    ExitField(S_B) -> witnessed nondominated exit states
+
+and the composition `EntranceField -> ExitField -> face-to-face
+transfer` that the full-map solver has been waiting on.

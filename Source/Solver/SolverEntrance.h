@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "SolverAir.h"
+#include "SolverEnvelope.h"
 #include "SolverMove.h"
 #include "SolverRoute.h"
 #include "SolverSteer.h"
@@ -416,6 +417,32 @@ namespace Entrance {
 		// SCHEDULER path. Part of solver identity, never derived from
 		// the budget. The legacy path is removed once the scheduler's
 		// prefix/monotonicity/determinism/fairness gates are green.
+		// ------------------------------------------------------------
+		// CLASSIFICATION (advisor ruling 2026-08-19d). READ THIS BEFORE
+		// TREATING THE SCHEDULER AS AN UNFINISHED PREREQUISITE.
+		//
+		//   scheduler = 0  LEGACY RefSolve = the PRODUCTION local
+		//                  refinement engine. Not deprecated. Not
+		//                  scheduled for removal.
+		//   scheduler = 1  v0, scheduler = 2  v1 = an EXPERIMENTAL
+		//                  refinement-scheduler research path and the
+		//                  source of the scheduling laws now applied one
+		//                  level up (Entrance::RefineStep). It is NOT a
+		//                  production replacement requirement.
+		//
+		// Why: at EQUAL compute on the frozen AirRec L1 fixture, in
+		// BOUNDARY mode where n_dom = 1 - so heading coverage, weighted
+		// fairness, ScoutCheap and cross-domain starvation are all ruled
+		// out - legacy recovers 29/32 known-reachable problems and the
+		// scheduler 18/32. The deficit is inside the schedulerized
+		// method ladder. The full solver needs lazy monotone refinement;
+		// it does NOT need the local optimizer rewritten as that
+		// scheduler. See Docs/AirRecSpec.md sections 24-25.
+		//
+		// KNOWN LIMITATION of the experimental path: it never consults
+		// `shoot_m`, so any m-curve measured in scheduler mode is the
+		// same machinery run three times and is NOT an m0/m1/m2 result.
+		// ------------------------------------------------------------
 		int scheduler = 0;
 		// Second-stage exact-rollout depth of the MANDATORY COVERAGE
 		// action. 0 = ScoutCheap (closed form only, the default);
@@ -563,6 +590,140 @@ namespace Entrance {
 	                       = nullptr,
 	                   const std::vector<float>* seed_cosa = nullptr,
 	                   const RefTune* tune = nullptr);
+
+	// ================= LAZY REFINEMENT: the operator-level anytime
+	// API (advisor ruling 2026-08-19d) =================
+	//
+	// The anytime contract lives HERE, one level above the local
+	// optimizer, not inside it. Sessions 12e-12k established that the
+	// two responsibilities were conflated:
+	//
+	//   local trajectory optimization  <- legacy RefSolve is strong at
+	//                                     this (29/32 known-reachable)
+	//   lazy monotone compute allocation <- this layer
+	//
+	// So a WHOLE fixed local solve is one atomic refinement action. The
+	// outer/global budget may execute the next action or stop; it may
+	// never alter an action's internal configuration. That is why
+	// `RefSolve(3000)` not being an action-prefix of `RefSolve(600)`
+	// does not matter: they are two DIFFERENT atomic actions, each
+	// immutably configured.
+	//
+	// The property the global solver actually needs is the sandwich
+	// getting monotonically stronger:
+	//     L_D <= H*_D <= U_D,  L only rises, U only falls.
+
+	// An immutable, versioned resolution level. Profiles are RESOLUTION
+	// levels, not truth levels: failing at the deepest profile still
+	// means UNRESOLVED unless a certified bound says otherwise.
+	struct RefProfile {
+		const char* name;
+		int      budget;      // engine flights, fixed
+		float    precision;   // tolerance target, fixed
+		int      shoot_m;     // machinery level, fixed
+		unsigned id;          // stable identity across runs
+	};
+
+	// The ladder, in execution order. Deliberately short and based on
+	// demonstrated behaviour; full-map profiling decides later what
+	// resolutions are actually useful.
+	const RefProfile* Profiles(int* count);
+
+	// Persistent per-query refinement state. Everything here is
+	// monotone by construction - see RefineStep.
+	struct QueryState {
+		int   level = 0;        // profiles executed so far
+		int   evals = 0;        // cumulative engine flights
+		// ---- the lower bound: a REPLAYABLE witness, never an estimate
+		bool  has_L = false;
+		float L = -1e30f;
+		std::vector<signed char> wside;
+		std::vector<float> wcosa;
+		int   horizon = 0;
+		float L_res = 1e30f;    // the witness's residual to q
+		// ---- the certified upper bound
+		float U = 1e30f;
+		unsigned U_bound_id = 0;
+		// ---- status. UNRESOLVED is the only thing a failed search may
+		// conclude; PROVED_IRRELEVANT requires a certified bound and an
+		// incumbent, and is set only through MarkIrrelevant.
+		enum { UNRESOLVED = 0, PROVED_IRRELEVANT = 1 };
+		int   status = UNRESOLVED;
+		float irrel_Lstar = 0.f;
+		unsigned irrel_bound_id = 0;
+		// ---- audit trail: which profiles ran, in order
+		std::vector<unsigned> applied;
+	};
+
+	// The certified ceiling for a face-mode query over a heading
+	// interval, under the production recipe: the EXACT ballistic
+	// arrival-tick window, the FinishGravity phase term, and the
+	// acceptance-ball potential. Shared by RefSolve and the refinement
+	// layer precisely so the two can never drift.
+	inline float UCertifiedFace(const Vec3& n, const Vec3& epos,
+	                            const Vec3& evel, float gs,
+	                            const MoveParams& p, const Vec3& q,
+	                            float radius, float zmin, int k_cap,
+	                            float th_lo, float th_hi,
+	                            unsigned* bound_id) {
+		const float s0 = sqrtf(evel.X * evel.X + evel.Y * evel.Y);
+		const float zhi = q.Z + radius;
+		int k_lo = 1, k_hi = k_cap;
+		if (!Envelope::ZWindow(epos.Z, evel.Z, q.Z - radius, zhi, p,
+			k_cap, &k_lo, &k_hi, gs)) {
+			k_lo = 1;
+			k_hi = k_cap;
+		}
+		const float pot = 2.f * p.gravity * gs * (zhi - zmin);
+		const float gimp = 0.5f * p.gravity * gs * p.dt;
+		float u_speed = -1e30f, u_board = -1e30f;
+		for (int k = k_lo; k <= k_hi; ++k) {
+			const float sk = Envelope::SMax(s0, k, p);
+			const float vk = Envelope::VzAfter(evel.Z, k, p, gs);
+			const float ve = vk - gimp;
+			const float us = sk * sk + ve * ve + pot;
+			if (us > u_speed)
+				u_speed = us;
+			const float ub = UBoardHeading(n, vk, gimp, sk, th_lo,
+				th_hi, pot);
+			if (ub > u_board)
+				u_board = ub;
+		}
+		if (u_board > -1e29f && u_board < u_speed) {
+			if (bound_id) *bound_id = 0x55300002u;   // interval board
+			return u_board;
+		}
+		if (bound_id) *bound_id = 0x55300001u;       // broad energy
+		return u_speed;
+	}
+
+	// ONE ATOMIC REFINEMENT ACTION: run the next profile in full and
+	// merge its result monotonically. Returns false when the ladder is
+	// exhausted (nothing ran, nothing changed).
+	//
+	//   L_new = max(L_old, L_run)      - a better witness is never lost
+	//   U_new = min(U_old, U_certified) - a ceiling never loosens
+	//
+	// A profile that finds nothing leaves L untouched and the status
+	// UNRESOLVED. Search failure is NEVER physical impossibility.
+	bool RefineStep(QueryState* st, const PlayerState& entry,
+	                const World& w, const MoveParams& p,
+	                const Route::Graph& g, int face_idx, const Vec3& q,
+	                float radius, int n_hint, float zmin,
+	                const Steer::CtlState& entry_ctl
+	                    = Steer::CtlState());
+
+	// The ONLY route to PROVED_IRRELEVANT: a certified ceiling that
+	// cannot beat an incumbent witness from elsewhere. Returns false
+	// (and changes nothing) when the inequality does not hold.
+	inline bool MarkIrrelevant(QueryState* st, float L_star) {
+		if (!st || st->U > L_star || st->U_bound_id == 0)
+			return false;
+		st->status = QueryState::PROVED_IRRELEVANT;
+		st->irrel_Lstar = L_star;
+		st->irrel_bound_id = st->U_bound_id;
+		return true;
+	}
 
 } // namespace Entrance
 } // namespace Solver
