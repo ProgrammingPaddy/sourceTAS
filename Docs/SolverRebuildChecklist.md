@@ -15,17 +15,20 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-19 (session 12l): EntranceField is
-INTEGRATION-READY. ExitField is UNFROZEN.** The anytime contract
-now lives ABOVE the local optimizer: `Entrance::RefineStep` runs a
-whole immutable profile as one atomic action and merges
-monotonically (L only rises, U only falls). `efrefine` 6/6 green.
-Legacy `RefSolve` (`scheduler = 0`) is the PRODUCTION local
-refinement engine - not deprecated; scheduler v1 is an
-EXPERIMENTAL path, NOT a prerequisite (it measures 18/32 against
-legacy 29/32 on frozen AirRec L1 at equal compute in boundary
-mode). NEXT: ExitField `exitfit` - canonical ride representation
-BEFORE any ride optimizer. See `Docs/AirRecSpec.md` 23-25.
+**STATUS 2026-08-19 (session 13): STAGE B (ExitField) is OPEN and
+stages 0-2 are GREEN.** Design of record: `Docs/ExitFieldSpec.md`
+(the set-valued transition relation R_F(B), the seams, laws
+B-A..B-F). Built: the EntranceField continuation frontier
+(BoardTransition lanes, gate R7), the canonical ride executor
+(`Ride::FlyRideSchedule`, SolverRide.h) and `exitfit` 7/7 GREEN -
+control basis `(side, cosa, duck)` proven at the input channel
+(worst wish-direction error 5.25e-06 rad over 42 hidden native
+rides), S_B = (complete PlayerState, CtlState, face) proven by 126
+bitwise checkpoint resumes. Known holes: no CONTACT_TRANSFER /
+GROUND / END fixture yet (required before stage 6). NEXT: stage 3,
+the witness-backed continuation frontier. EntranceField remains
+INTEGRATION-READY (session 12l); legacy RefSolve remains the
+production local engine.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -360,6 +363,75 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-19 (session 13, EXITFIELD STAGES 0-2: the operator is defined,
+  the canonical executor exists, and the representation gate is GREEN
+  after three real first-run findings). New design of record:
+  `Docs/ExitFieldSpec.md` - ExitField is the SET-VALUED exact transition
+  relation `R_F(B) = {(dt, e, S+, U_R)}` to the first boundary event
+  (AIR_EXIT / CONTACT_TRANSFER / GROUND / END / HORIZON); scalar max
+  exit energy is a dashboard projection; HORIZON => UNRESOLVED, never an
+  exit; standing laws B-A..B-F filed (ExitDoomed advisory-only and
+  banned from the canonical executor; set-valued certified envelope
+  `U_E(B, M)`; witness = consumed prefix; reopenable compression, no
+  approximate dominance; naming quarantine - `Field::ExitMap` is an
+  advisory estimator, classified at the source; human/carve rides are
+  regression only).
+  STAGE 0 (Entrance continuation API): `RefResult` gained per-interval
+  witness lanes; `BoardTransition` (stable lane ids: winner / tangent /
+  rung r / interval i) + `QueryState::transitions` merged monotonically
+  per lane (a lane once exposed is never lost, its L only rises, replay
+  horizon derives from the witness's own length);
+  `ReplayBoardTransition` is the one sanctioned way to obtain S_B.
+  **Gate R7: 10 lanes, 6 heading intervals, all replay to their
+  recorded L at |dL| 0.00** - BestBoard is a projection, the witnesses
+  are the payload.
+  STAGE 1 (canonical executor): `Source/Solver/SolverRide.h` -
+  `Ride::FlyRideSchedule` over per-tick `(side, cosa, duck)` with
+  side=0 the coasting channel and optional analog magnitude; emission
+  routes through `Air::WishInputs`; `Fn::WishFromInput` exposed as a
+  forwarding mirror so the inverter (`Ride::InvertWishInput`) cannot
+  drift from the tick; `Ride::SchedLegal` validates the dwell law
+  against the CARRIED CtlState and refuses illegal schedules (refusal
+  is a legality verdict, not an event). No controller, no splines, no
+  ExitDoomed, no optimizer.
+  STAGE 2 (`exitfit`, **7/7 GREEN**): X1a inversion identity 176/176;
+  X1 control completeness on 42 hidden native rides across 8 strata,
+  4 faces, 21 carried-ctl variants, 7 engine-built hull-2 entries, 2
+  analog - wish-direction worst **5.25e-06 rad**, zero
+  dir/class/duck mismatches, events exact, trajectory envelope worst
+  0.72u of 2u; XH horizon-never-an-exit; X2a **126 interior checkpoints
+  serialize -> reconstruct -> replay BITWISE equal**; X2b carried-dwell
+  seam legality (corrupted-younger age refused at the right tick); X2c
+  ducking/duck_timer_ms load-bearing (3/12 diverge) while hull-2 rides
+  as standing per the DECLARED model (Hulls::unduck_* == stand_* since
+  2026-08-15 - the gate asserts consistency, divergence would mean
+  collision-model drift); X7 carve-ride native inputs invert+replay to
+  the same exit (t25 vs t26 seam bookkeeping, 533.2 vs 533.6 u/s).
+  THREE FIRST-RUN FINDINGS, all resolved by measurement: (1) an
+  AIR_EXIT witness must carry the one-tick separation-witness INPUT
+  (tick never booked; spec section 2 amended) or it cannot be
+  classified standalone; (2) bitwise reproduction of native rides is
+  impossible for any single-encoding basis (float ulp x clip
+  amplification, 0.72u measured), so X1's claim was sharpened to the
+  INPUT CHANNEL - direction to float precision, magnitude class, duck -
+  with a 2u trajectory envelope; (3) poking `hull_state` up is not a
+  legal transient (the engine normalizes it away, 0/12) - probes must
+  use ENGINE-CONSTRUCTED transients, which exposed that hull-2 is
+  collision-identical to standing by declared model.
+  COVERAGE HOLES RECORDED: no fixture yet ends CONTACT_TRANSFER /
+  GROUND / END (blind native generation on open ramps); a
+  transfer-bearing fixture is REQUIRED before the stage-6 composition
+  milestone. The keyboard input model (binary wish magnitude) is
+  adopted explicitly per spec section 4; the analog channel exists and
+  is measured but production does not use it.
+  Whole board from a clean rebuild: exitfit 7/7, efrefine 7/7 (R7 new),
+  airprops 24/24, airsuite 48/48 gap 242k, airrec fixture VERIFIED,
+  wishparity PASS, strafelaw float-ULP, carve M1.4, airsolve M1.3.
+  NEXT (stage 3): the witness-backed continuation frontier with
+  reopenable partition compression + the first CONTACT_TRANSFER
+  fixtures; then U_E(B, M) (stage 4), lazy Query/Refine (stage 5),
+  face-to-face composition (stage 6).
 
 - 2026-08-19 (session 12l, THE ANYTIME BOUNDARY MOVES UP A LEVEL -
   ENTRANCEFIELD IS INTEGRATION-READY): advisor ruling 2026-08-19d

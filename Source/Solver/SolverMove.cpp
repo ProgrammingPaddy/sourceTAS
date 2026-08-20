@@ -806,6 +806,10 @@ namespace Solver {
 
 	// FUNCPROBE mirror: exactly the same code the tick runs, callable alone.
 	namespace Fn {
+		void WishFromInput(float yaw, float fmove, float smove,
+		                   float* wx, float* wy) {
+			::Solver::WishFromInput(yaw, fmove, smove, wx, wy);
+		}
 		void CategorizePosition(PlayerState& s, const World& w,
 		                        const MoveParams& p) {
 			::Solver::CategorizePosition(s, w, p, nullptr);

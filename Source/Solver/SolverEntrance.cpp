@@ -1052,8 +1052,15 @@ namespace Entrance {
 					if (ThetaIntervalDist2(rel, ivt[i3][0],
 						ivt[i3][1]) <= 0.f) {
 						best.iv_hits[i3]++;
-						if (H > best.iv_L[i3])
+						if (H > best.iv_L[i3]) {
 							best.iv_L[i3] = H;
+							// The lane WITNESS travels with the value
+							// (BoardTransition frontier, ExitField 0).
+							best.iv_side[i3] = sd;
+							best.iv_cosa[i3] = cs;
+							best.iv_res[i3] = res_p;
+							best.iv_th[i3] = th;
+						}
 					}
 				// THE CREDITING GATE. Keyed on the in-radius `strike`
 				// bool plus the explicit tangent condition - never on
@@ -3291,10 +3298,81 @@ namespace Entrance {
 			st->horizon = rr.horizon;
 			st->L_res = rr.strike_rmin;
 		}
+		// ---- the CONTINUATION FRONTIER, merged monotonically PER
+		// LANE: winner, tangent, exactness rungs, heading intervals.
+		// A lane once exposed is never lost; its L only rises. This is
+		// the payload that composes with ExitField - the headline L
+		// above is only the heatmap projection.
+		auto merge_lane = [&](unsigned lane, float L,
+			const std::vector<signed char>& sd,
+			const std::vector<float>& cs, int hz2, float res,
+			float th) {
+			if (sd.empty() || L <= -1e29f)
+				return;
+			// The replay horizon is a property of the WITNESS, not of
+			// whichever lane happened to win the solve: schedule
+			// length + the same slack the search flew with.
+			const int hz = static_cast<int>(sd.size()) + 8;
+			(void)hz2;
+			for (BoardTransition& t : st->transitions)
+				if (t.lane == lane) {
+					if (L > t.L) {
+						t.L = L;
+						t.side = sd;
+						t.cosa = cs;
+						t.horizon = hz;
+						t.res = res;
+						t.th = th;
+					}
+					return;
+				}
+			BoardTransition t;
+			t.lane = lane;
+			t.L = L;
+			t.side = sd;
+			t.cosa = cs;
+			t.horizon = hz;
+			t.res = res;
+			t.th = th;
+			st->transitions.push_back(t);
+		};
+		if (rr.ok)
+			merge_lane(0x0001u, rr.H, rr.wside, rr.wcosa, rr.horizon,
+				rr.strike_rmin, atan2f(rr.flight.v1.Y,
+					rr.flight.v1.X));
+		if (rr.tan_ok)
+			merge_lane(0x0300u, rr.tan_H, rr.tan_wside, rr.tan_wcosa,
+				rr.tan_horizon, 0.f, atan2f(rr.tan_flight.v1.Y,
+					rr.tan_flight.v1.X));
+		for (int r2 = 0; r2 < 6; ++r2)
+			merge_lane(0x0100u + static_cast<unsigned>(r2),
+				rr.rung_E[r2], rr.rung_side[r2], rr.rung_cosa[r2],
+				rr.horizon > 0 ? rr.horizon : N + 8, rr.rung_res[r2],
+				0.f);
+		for (int i2 = 0; i2 < 6; ++i2)
+			merge_lane(0x0200u + static_cast<unsigned>(i2),
+				rr.iv_L[i2], rr.iv_side[i2], rr.iv_cosa[i2],
+				rr.horizon > 0 ? rr.horizon : N + 8, rr.iv_res[i2],
+				rr.iv_th[i2]);
 		// Status is NEVER downgraded by a failed search. Only
 		// MarkIrrelevant, with a certified ceiling and an incumbent,
 		// may leave UNRESOLVED.
 		return true;
+	}
+
+	Air::Result ReplayBoardTransition(const BoardTransition& tr,
+	                                  const PlayerState& entry,
+	                                  const World& w,
+	                                  const MoveParams& p,
+	                                  const Route::Graph& g,
+	                                  int face_idx, const Vec3& q) {
+		Air::Target vt;
+		vt.face = face_idx;
+		vt.dot_cap = 3000.f;
+		vt.aim = q;
+		vt.max_ticks = tr.horizon;
+		return Air::FlyWishSchedule(entry, w, p, vt, g, tr.side,
+			tr.cosa, tr.horizon);
 	}
 } // namespace Entrance
 } // namespace Solver

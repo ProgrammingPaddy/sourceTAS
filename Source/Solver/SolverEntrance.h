@@ -507,6 +507,15 @@ namespace Entrance {
 		int   iv_hits[6] = { 0, 0, 0, 0, 0, 0 };
 		int   iv_shots[6] = { 0, 0, 0, 0, 0, 0 };
 		float iv_ref = 0.f;
+		// PER-INTERVAL WITNESSES (stage 0 of ExitField, 2026-08-19):
+		// the best in-radius witness per heading interval. Same rule as
+		// the rung witnesses - a lane you cannot hand back is only
+		// observable, never usable - and these are the heading-diverse
+		// half of the BoardTransition frontier.
+		std::vector<signed char> iv_side[6];
+		std::vector<float> iv_cosa[6];
+		float iv_res[6] = { 1e30f, 1e30f, 1e30f, 1e30f, 1e30f, 1e30f };
+		float iv_th[6] = { 0, 0, 0, 0, 0, 0 };
 		// BOUNDARY MODE residuals (RefTune::bnd_theta): best tick-T
 		// outcome by the search metric rp + 250*rth, and its terminal
 		// horizontal speed.
@@ -631,6 +640,25 @@ namespace Entrance {
 
 	// Persistent per-query refinement state. Everything here is
 	// monotone by construction - see RefineStep.
+	// ONE REPLAYABLE BOARD CONTINUATION (ExitField stage 0, advisor
+	// 2026-08-19f). BestBoard is a projection; BoardTransition
+	// witnesses are the transition payload - a lower-energy board can
+	// win the route, so the composition API must not collapse to one
+	// max-energy witness. S_B is obtained by AUTHORITATIVE REPLAY of
+	// the witness (Air::FlyWishSchedule -> end_state); nothing cached
+	// here is state.
+	struct BoardTransition {
+		// Stable lane identity: 0x0001 winner, 0x0300 tangent,
+		// 0x0100+r exactness rung r, 0x0200+i heading interval i.
+		unsigned lane = 0;
+		float L = -1e30f;       // replayed post-board energy
+		float res = 1e30f;      // witness residual to q
+		float th = 0.f;         // terminal heading (diversity key)
+		std::vector<signed char> side;
+		std::vector<float> cosa;
+		int horizon = 0;
+	};
+
 	struct QueryState {
 		int   level = 0;        // profiles executed so far
 		int   evals = 0;        // cumulative engine flights
@@ -641,6 +669,11 @@ namespace Entrance {
 		std::vector<float> wcosa;
 		int   horizon = 0;
 		float L_res = 1e30f;    // the witness's residual to q
+		// ---- the CONTINUATION FRONTIER: distinct replayable board
+		// transitions, merged monotonically PER LANE (a lane once
+		// exposed is never lost; its L only rises). The headline L is
+		// the heatmap projection; THIS is what composes with ExitField.
+		std::vector<BoardTransition> transitions;
 		// ---- the certified upper bound
 		float U = 1e30f;
 		unsigned U_bound_id = 0;
@@ -712,6 +745,18 @@ namespace Entrance {
 	                float radius, int n_hint, float zmin,
 	                const Steer::CtlState& entry_ctl
 	                    = Steer::CtlState());
+
+	// AUTHORITATIVE REPLAY of one BoardTransition: flies the witness
+	// through the exact engine and returns the full flight (end_state
+	// = S_B at the canonical post-board-tick boundary; pos/dot/tick =
+	// event metadata). hit && dot < 0 && struck_brush < 0 or the
+	// witness is VOID. This is the only sanctioned way to obtain S_B.
+	Air::Result ReplayBoardTransition(const BoardTransition& tr,
+	                                  const PlayerState& entry,
+	                                  const World& w,
+	                                  const MoveParams& p,
+	                                  const Route::Graph& g,
+	                                  int face_idx, const Vec3& q);
 
 	// The ONLY route to PROVED_IRRELEVANT: a certified ceiling that
 	// cannot beat an incumbent witness from elsewhere. Returns false

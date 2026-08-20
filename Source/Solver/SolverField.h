@@ -633,6 +633,11 @@ namespace Field {
 		return -1.f;
 	}
 
+	// STANDING LAW B-E (ExitField, 2026-08-19, Docs/ExitFieldSpec.md):
+	// ExitSample/ExitMap below are an ANALYTIC ADVISORY ESTIMATOR (law-
+	// booked ride time, closed-form exit speed). They order work; they
+	// are NOT the ExitField transition relation R_F(B), whose truth is
+	// only ever an exact Ride::FlyRideSchedule witness.
 	struct ExitSample {
 		Vec3  pt;                // departure point (on the face)
 		Vec3  dir;               // in-plane unit exit direction

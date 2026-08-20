@@ -179,6 +179,12 @@ namespace Solver {
 	// expose single functions so each can be diffed against the engine's own
 	// body in isolation (see Docs/FuncProbe.md and solver/func_pins.cfg).
 	namespace Fn {
+		// Move directions from the view yaw (z zeroed): the one wish
+		// construction the tick uses. Exposed so ride/flight input
+		// INVERTERS route through the authoritative formula instead of
+		// re-deriving it (ExitField exitfit).
+		void WishFromInput(float yaw, float fmove, float smove,
+		                   float* wx, float* wy);
 		void CategorizePosition(PlayerState& s, const World& w,
 		                        const MoveParams& p);
 		// Returns true when the jump fired (engine returns bool).

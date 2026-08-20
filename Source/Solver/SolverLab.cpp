@@ -32,6 +32,7 @@
 #include "SolverPlan.h"
 #include "SolverField.h"
 #include "SolverEntrance.h"
+#include "SolverRide.h"
 #include "SolverParams.h"
 #include "SolverSearchLog.h"
 #include "SolverSmooth.h"
@@ -7928,6 +7929,851 @@ namespace {
 	// path - the two pure helpers are shared with production precisely
 	// so a test can never drift from it. One authoritative threshold set
 	// drives both the printed verdict and the exit code.
+	// ================= exitfit: RIDE REPRESENTATION COMPLETENESS
+	// (ExitField stage 2; design of record Docs/ExitFieldSpec.md 8).
+	// Validates the pair (S_B, U_R) as sufficient to reproduce the
+	// exact transition relation R_F(B). Two hypotheses, kept separate:
+	// X1 control completeness (hidden NATIVE inputs, never generated in
+	// the canonical basis, must invert and replay exactly) and X2
+	// operator-state completeness (aimed at the SEAM - serialization,
+	// carried dwell legality, duck/hull sensitivity - not at MoveTick
+	// purity, which is trivial). No optimizer, no controller, no
+	// ExitDoomed, no human data in generation (X7 quarantined).
+
+	namespace {
+
+	// One native input tick (what a player's client actually sends).
+	struct NativeTick {
+		float yaw = 0.f;
+		float fmove = 0.f;
+		float smove = 0.f;
+		int   btn = 0;
+	};
+
+	// Deterministic native ride-input generator. Patterns are composed
+	// of SEGMENTS over raw keys and view yaw - held key combos, yaw
+	// ramps, coasts, duck press windows - so the canonical basis is
+	// never the generating language (that would make X1 a tautology).
+	void RideNative(int stratum, unsigned seed, float h0, int M,
+	                std::vector<NativeTick>* out) {
+		out->clear();
+		unsigned rng = seed * 2654435761u + 0x9e3779b9u;
+		auto fr = [&]() {
+			rng = rng * 1664525u + 1013904223u;
+			return static_cast<float>((rng >> 8) & 0xFFFF) / 65535.f;
+		};
+		const float d2r = 0.0174532925f;
+		float yaw = (h0 + (fr() - 0.5f)) * 57.2957795f;
+		int duck_a = -1, duck_b = -1;
+		if (stratum == 4) {              // mid-ride duck pulse
+			duck_a = 10 + static_cast<int>(fr() * 10.f);
+			duck_b = duck_a + 8 + static_cast<int>(fr() * 8.f);
+		}
+		if (stratum == 5)                // duck-off exit: press and hold
+			duck_a = 14 + static_cast<int>(fr() * 12.f);
+		int k = 0;
+		while (k < M) {
+			int len = 8 + static_cast<int>(fr() * 12.f);
+			if (len > M - k)
+				len = M - k;
+			float fm = 0.f, sm = 0.f, rate = 0.f;
+			switch (stratum) {
+			case 0:                      // held strafe key, fixed yaw
+				sm = fr() < 0.5f ? -450.f : 450.f;
+				break;
+			case 1:                      // yaw-ramp carve, held key
+				sm = fr() < 0.5f ? -450.f : 450.f;
+				rate = (0.5f + fr() * 2.5f) * (fr() < 0.5f ? 1.f : -1.f);
+				break;
+			case 2:                      // W-forward push + slow ramp
+				fm = 450.f;
+				rate = (fr() - 0.5f) * 1.2f;
+				break;
+			case 3:                      // coast interludes between keys
+				if (k % 2 == 0) {
+					sm = fr() < 0.5f ? -450.f : 450.f;
+				}
+				break;
+			case 4:                      // duck pulse over a held carve
+			case 5:                      // duck-off exit
+				sm = fr() < 0.5f ? -450.f : 450.f;
+				rate = (fr() - 0.5f) * 2.f;
+				break;
+			case 6:                      // key chord (W+A / W+D)
+				fm = 450.f;
+				sm = fr() < 0.5f ? -450.f : 450.f;
+				rate = (fr() - 0.5f) * 1.5f;
+				break;
+			case 7:                      // ANALOG stratum: sub-maxspeed
+				sm = fr() < 0.5f ? -137.5f : 137.5f;
+				rate = (fr() - 0.5f) * 1.5f;
+				break;
+			}
+			for (int j = 0; j < len; ++j, ++k) {
+				NativeTick nt;
+				nt.yaw = yaw;
+				nt.fmove = fm;
+				nt.smove = sm;
+				nt.btn = (duck_a >= 0 && k >= duck_a
+					&& (duck_b < 0 || k < duck_b)) ? IN_DUCK : 0;
+				out->push_back(nt);
+				yaw += rate;
+				(void)d2r;
+			}
+		}
+	}
+
+	// The native runner: executes raw inputs through the exact engine
+	// with THE SAME boundary classification as the canonical executor,
+	// and inverts every tick through the authoritative formulas as it
+	// goes. Returns the event (kind, tick) plus the per-boundary
+	// trajectory and the inverted canonical schedule (consumed prefix
+	// semantics identical to Ride::FlyRideSchedule).
+	struct NativeRun {
+		int  kind = Ride::kHorizon;
+		int  ticks = 0;
+		bool degenerate = false;   // near-zero speed tick seen
+		std::vector<PlayerState> traj;
+		std::vector<signed char> side;
+		std::vector<float> cosa;
+		std::vector<unsigned char> duck;
+		std::vector<float> mag;
+		bool any_analog = false;
+		PlayerState end_state;
+	};
+
+	void RunNative(const Ride::BoundaryState& B, const World& w,
+	               const MoveParams& p, const Route::Graph& g,
+	               const std::vector<NativeTick>& in, NativeRun* out) {
+		const Route::Face& fc = g.faces[static_cast<size_t>(B.face)];
+		PlayerState s = B.ps;
+		PlayerState prev = s;
+		int prev_side = static_cast<int>(B.ctl.side);
+		for (size_t k = 0; k < in.size(); ++k) {
+			prev = s;
+			const float s2d = Len2D(s.vel);
+			if (s2d < 1.f) {
+				out->degenerate = true;
+				return;
+			}
+			const float h = atan2f(s.vel.Y, s.vel.X);
+			// Invert BEFORE stepping (same phase as canonical emission).
+			Ride::CanonTick ct;
+			Ride::InvertWishInput(h, in[k].yaw, in[k].fmove,
+				in[k].smove, p, prev_side, &ct);
+			if (ct.side != 0)
+				prev_side = ct.side;
+			TickEvents ev;
+			MoveTick(s, w, p, 0.f, in[k].yaw, in[k].fmove, in[k].smove,
+				0.f, in[k].btn, &ev);
+			bool on_face = false;
+			int other = -1;
+			for (int c = 0; c < ev.ncontacts; ++c) {
+				if (ev.contact_brush[c] == fc.brush
+					&& ev.contact_plane[c] == fc.side)
+					on_face = true;
+				else if (other < 0)
+					other = c;
+			}
+			// The inverted tick joins the schedule only when the ride
+			// consumes it (AIR_EXIT's peek tick is Air's, not ours).
+			auto push_tick = [&]() {
+				out->side.push_back(
+					static_cast<signed char>(ct.side));
+				out->cosa.push_back(ct.cosa);
+				out->duck.push_back(in[k].btn & IN_DUCK ? 1 : 0);
+				out->mag.push_back(ct.mag);
+				if (ct.analog)
+					out->any_analog = true;
+				out->traj.push_back(s);
+			};
+			if (s.on_ground) {
+				push_tick();
+				out->kind = Ride::kGround;
+				out->ticks = static_cast<int>(k) + 1;
+				out->end_state = s;
+				return;
+			}
+			if (other >= 0) {
+				push_tick();
+				out->kind = Ride::kContactTransfer;
+				out->ticks = static_cast<int>(k) + 1;
+				out->end_state = s;
+				return;
+			}
+			if (!on_face) {
+				// The peek tick's INPUT joins the witness (the
+				// existence proof of a clean-air continuation); its
+				// tick is not booked and its state not recorded.
+				out->side.push_back(
+					static_cast<signed char>(ct.side));
+				out->cosa.push_back(ct.cosa);
+				out->duck.push_back(in[k].btn & IN_DUCK ? 1 : 0);
+				out->mag.push_back(ct.mag);
+				if (ct.analog)
+					out->any_analog = true;
+				out->kind = Ride::kAirExit;
+				out->ticks = static_cast<int>(k);
+				out->end_state = prev;
+				return;
+			}
+			push_tick();
+		}
+		out->kind = Ride::kHorizon;
+		out->ticks = static_cast<int>(in.size());
+		out->end_state = s;
+	}
+
+	// Board-state factory: a boundary state is only ever obtained by
+	// running the REAL engine into the face (never hand-assembled).
+	// entry_kind: 0 = standing, 1 = ducked, 2 = the post-air-unduck
+	// transient (constructed by actually unducking in flight and
+	// letting the engine set hull_state = 2 itself).
+	bool RideBoard(const World& w, const MoveParams& p,
+	               const Route::Graph& g, int face_idx, float s0,
+	               float vz0, float along, int entry_kind,
+	               const Steer::CtlState& ctl,
+	               Ride::BoundaryState* out) {
+		const Route::Face& fc = g.faces[static_cast<size_t>(face_idx)];
+		const float hn = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
+		if (hn < 1e-4f)
+			return false;
+		const float paz = atan2f(fc.n.Y, fc.n.X);
+		// Approach from off the face: mostly into the plane with an
+		// along-face component so rides can run in both directions.
+		const float inaz = Steer::WrapPi(paz + 3.14159265f
+			+ along);
+		PlayerState st;
+		st.pos = fc.centroid + Scale(fc.n, 40.f);
+		st.pos.Z += 20.f;
+		st.vel = Vec3(cosf(inaz) * s0, sinf(inaz) * s0, vz0);
+		st.ducked = entry_kind == 1;
+		st.hull_state = entry_kind == 1 ? 1 : 0;
+		if (entry_kind == 2) {
+			// Fly ducked, then release: the ENGINE produces the
+			// transient (never hand-set exotic states).
+			st.ducked = true;
+			st.hull_state = 1;
+			TickEvents ev0;
+			MoveTick(st, w, p, 0.f, inaz * 57.2957795f, 0.f, 0.f, 0.f,
+				IN_DUCK, &ev0);
+			if (ev0.ncontacts > 0 || st.on_ground)
+				return false;
+			TickEvents ev1;
+			MoveTick(st, w, p, 0.f, inaz * 57.2957795f, 0.f, 0.f, 0.f,
+				0, &ev1);
+			if (ev1.ncontacts > 0 || st.on_ground)
+				return false;
+			if (st.hull_state != 2)
+				return false;
+		}
+		const int hold = entry_kind == 1 ? IN_DUCK : 0;
+		for (int k = 0; k < 60; ++k) {
+			TickEvents ev;
+			MoveTick(st, w, p, 0.f, inaz * 57.2957795f, 0.f, 0.f, 0.f,
+				hold, &ev);
+			if (st.on_ground)
+				return false;
+			for (int c = 0; c < ev.ncontacts; ++c)
+				if (ev.contact_brush[c] == fc.brush
+					&& ev.contact_plane[c] == fc.side) {
+					out->ps = st;   // boundary AFTER the board tick
+					out->ctl = ctl;
+					out->face = face_idx;
+					return true;
+				}
+			if (ev.ncontacts > 0)
+				return false;   // struck something else first
+		}
+		return false;
+	}
+
+	} // namespace
+
+	int CmdExitFit(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("exitfit: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* detail) {
+			printf("exitfit: %-34s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", detail);
+			if (ok) pass++; else fail++;
+		};
+
+		// ---- X1a INVERSION IDENTITY: canonical -> authoritative
+		// emission -> authoritative wish -> inversion -> the same
+		// canonical tick. The property that makes X1's failures mean
+		// "basis incomplete" rather than "inverter buggy".
+		{
+			bool ok = true;
+			int n = 0, bad = 0;
+			float worst = 0.f;
+			for (int hi2 = 0; hi2 < 8; ++hi2)
+				for (int si = 0; si < 2; ++si)
+					for (int ci = 0; ci <= 10; ++ci) {
+						const float h = -3.14159265f
+							+ 6.2831853f * static_cast<float>(hi2)
+							/ 8.f;
+						const int sd = si == 0 ? 1 : -1;
+						const float ca = -1.f + 0.2f
+							* static_cast<float>(ci);
+						float yaw = 0.f, fm = 0.f, sm = 0.f;
+						Air::WishInputs(h, sd, ca, &yaw, &fm, &sm);
+						Ride::CanonTick ct;
+						Ride::InvertWishInput(h, yaw, fm, sm, p, 0,
+							&ct);
+						n++;
+						const float dc = fabsf(ct.cosa - ca);
+						if (dc > worst)
+							worst = dc;
+						// side is physically meaningless at ca = +-1
+						const bool degen = ca > 0.999f || ca < -0.999f;
+						if (dc > 1e-4f || (!degen && ct.side != sd)
+							|| ct.analog) {
+							ok = false;
+							bad++;
+						}
+					}
+			snprintf(buf, sizeof(buf), "%d canonical ticks round-trip "
+				"through WishInputs+WishFromInput; %d mismatches, "
+				"worst |dcosa| %.2e", n, bad, worst);
+			check("X1a inversion identity", ok, buf);
+		}
+
+		// ---- FIXTURES: native rides over every surfable face x
+		// stratum x entry variation. Discards are REPORTED, never
+		// silent.
+		struct Fix {
+			Ride::BoundaryState B;
+			NativeRun nat;
+			std::vector<NativeTick> raw;   // the hidden native inputs
+			int face = 0, stratum = 0, entry = 0;
+		};
+		std::vector<Fix> fixes;
+		int gen = 0, disc_board = 0, disc_short = 0, disc_degen = 0,
+			disc_illegal = 0, disc_h2 = 0;
+		const int kM = 160;
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		for (size_t fi2 = 0; fi2 < g.faces.size(); ++fi2) {
+			const Route::Face& fc = g.faces[fi2];
+			if (sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y) < 1e-4f)
+				continue;
+			for (int st2 = 0; st2 < 8; ++st2)
+				for (int en = 0; en < 3; ++en, ++gen) {
+					if (en != 0 && st2 > 3)
+						continue;   // entry variants on core strata
+					const float s0 = (gen % 2) ? 900.f : 450.f;
+					const float vz0 = (gen % 3 == 2) ? -350.f : -80.f;
+					const float along = ((gen % 4) - 1.5f) * 0.45f;
+					Steer::CtlState ctl;
+					if (gen % 3 == 1) {
+						ctl.side = 1;
+						ctl.age = 6;
+					} else if (gen % 3 == 2) {
+						ctl.side = -1;
+						ctl.age = 2;
+					}
+					Fix fx;
+					fx.face = static_cast<int>(fi2);
+					fx.stratum = st2;
+					fx.entry = en;
+					if (!RideBoard(w, p, g, fx.face, s0, vz0, along,
+						en, ctl, &fx.B)) {
+						if (en == 2) disc_h2++; else disc_board++;
+						continue;
+					}
+					const float h0 = atan2f(fx.B.ps.vel.Y,
+						fx.B.ps.vel.X);
+					RideNative(st2, static_cast<unsigned>(
+						gen * 104729 + 31), h0, kM, &fx.raw);
+					RunNative(fx.B, w, p, g, fx.raw, &fx.nat);
+					if (fx.nat.degenerate) {
+						disc_degen++;
+						continue;
+					}
+					if (fx.nat.kind == Ride::kAirExit
+						&& fx.nat.ticks < 6) {
+						disc_short++;
+						continue;   // barely a ride
+					}
+					// The canonical side sequence must be dwell-legal
+					// from the carried state, or the fixture is not a
+					// legal ride (generator emits raw keys, so this
+					// is a post-hoc filter - reported).
+					if (!Ride::SchedLegal(fx.B.ctl, fx.nat.side,
+						min_gap)) {
+						disc_illegal++;
+						continue;
+					}
+					fixes.push_back(fx);
+				}
+		}
+		{
+			int by_st[8] = { 0,0,0,0,0,0,0,0 };
+			int by_kind[5] = { 0,0,0,0,0 };
+			int faces_hit = 0, last_face = -1;
+			int with_ctl = 0, hull2 = 0;
+			for (const Fix& fx : fixes) {
+				by_st[fx.stratum]++;
+				by_kind[fx.nat.kind]++;
+				if (fx.face != last_face) {
+					faces_hit++;
+					last_face = fx.face;
+				}
+				if (fx.B.ctl.side != 0)
+					with_ctl++;
+				if (fx.entry == 2)
+					hull2++;
+			}
+			printf("exitfit: fixtures %d (gen %d | discard board %d "
+				"short %d degen %d illegal %d hull2-fail %d)\n",
+				static_cast<int>(fixes.size()), gen, disc_board,
+				disc_short, disc_degen, disc_illegal, disc_h2);
+			printf("exitfit:   strata hold/ramp/fwd/coast/duck/duckoff/"
+				"chord/analog %d/%d/%d/%d/%d/%d/%d/%d | events "
+				"exit/xfer/ground/end/hzn %d/%d/%d/%d/%d | faces %d | "
+				"carried-ctl %d | hull2 entries %d\n",
+				by_st[0], by_st[1], by_st[2], by_st[3], by_st[4],
+				by_st[5], by_st[6], by_st[7], by_kind[0], by_kind[1],
+				by_kind[2], by_kind[3], by_kind[4], faces_hit,
+				with_ctl, hull2);
+		}
+
+		// ---- X1 CONTROL COMPLETENESS. Bitwise reproduction of a native
+		// ride is IMPOSSIBLE for any single-encoding basis: two float
+		// input encodings of the same wish differ in the last ulp, and
+		// clips amplify that (measured: up to ~0.7u of positional drift
+		// over a full ride). The representation claim is therefore made
+		// at the INPUT CHANNEL: every tick's canonical emission must
+		// realize the SAME PHYSICAL WISH as the native input - direction
+		// to float precision, the same magnitude class (the engine only
+		// distinguishes |wishvel| below maxspeed), the same duck - and
+		// the replayed trajectory must track inside a small envelope
+		// with the same event kind, tick and legality.
+		{
+			bool ok = fixes.size() >= 20;
+			int replays = 0, bad_kind = 0, bad_tick = 0, bad_traj = 0;
+			int bad_wish = 0, bad_class = 0, bad_duck = 0;
+			float worst_pos = 0.f, worst_end = 0.f, worst_dir = 0.f;
+			int analog_fx = 0;
+			for (const Fix& fx : fixes) {
+				// (a) the input-channel equivalence, tick by tick
+				for (size_t k = 0; k < fx.nat.side.size(); ++k) {
+					const PlayerState& sb = k == 0 ? fx.B.ps
+						: fx.nat.traj[k - 1];
+					const float h = atan2f(sb.vel.Y, sb.vel.X);
+					float nx = 0.f, ny = 0.f;
+					Fn::WishFromInput(fx.raw[k].yaw, fx.raw[k].fmove,
+						fx.raw[k].smove, &nx, &ny);
+					const float nmag = sqrtf(nx * nx + ny * ny);
+					const bool nduck =
+						(fx.raw[k].btn & IN_DUCK) != 0;
+					if (nduck != (fx.nat.duck[k] != 0))
+						bad_duck++;
+					if (nmag < 1e-3f) {
+						if (fx.nat.side[k] != 0)
+							bad_wish++;
+						continue;
+					}
+					float yc = 0.f, fc2 = 0.f, sc2 = 0.f;
+					Air::WishInputs(h,
+						static_cast<int>(fx.nat.side[k]),
+						fx.nat.cosa[k], &yc, &fc2, &sc2);
+					if (fx.nat.any_analog) {
+						fc2 *= fx.nat.mag[k];
+						sc2 *= fx.nat.mag[k];
+					}
+					float cx = 0.f, cy = 0.f;
+					Fn::WishFromInput(yc, fc2, sc2, &cx, &cy);
+					const float cmag = sqrtf(cx * cx + cy * cy);
+					const float dd = fabsf(Steer::WrapPi(
+						atan2f(ny, nx) - atan2f(cy, cx)));
+					if (dd > worst_dir)
+						worst_dir = dd;
+					if (dd > 2e-5f)
+						bad_wish++;
+					if ((nmag >= p.maxspeed) != (cmag >= p.maxspeed)
+						|| (nmag < p.maxspeed
+							&& fabsf(nmag - cmag) > 0.05f))
+						bad_class++;
+				}
+				// (b) the replay envelope + exact event equivalence
+				std::vector<PlayerState> traj;
+				Ride::Result rr = Ride::FlyRideSchedule(fx.B, w, p, g,
+					fx.nat.side, fx.nat.cosa, fx.nat.duck,
+					fx.nat.any_analog ? &fx.nat.mag : nullptr, &traj);
+				if (fx.nat.any_analog)
+					analog_fx++;
+				replays++;
+				if (!rr.legal || rr.kind != fx.nat.kind) {
+					bad_kind++;
+					continue;
+				}
+				if (rr.ticks != fx.nat.ticks) {
+					bad_tick++;
+					continue;
+				}
+				float wp = 0.f;
+				const size_t nt = traj.size() < fx.nat.traj.size()
+					? traj.size() : fx.nat.traj.size();
+				for (size_t t2 = 0; t2 < nt; ++t2) {
+					const float dp = Len(traj[t2].pos
+						- fx.nat.traj[t2].pos);
+					if (dp > wp)
+						wp = dp;
+				}
+				const float de = Len(rr.end_state.pos
+					- fx.nat.end_state.pos);
+				if (wp > worst_pos)
+					worst_pos = wp;
+				if (de > worst_end)
+					worst_end = de;
+				if (wp > 2.f || de > 2.f)
+					bad_traj++;
+			}
+			ok = ok && bad_kind == 0 && bad_tick == 0 && bad_traj == 0
+				&& bad_wish == 0 && bad_class == 0 && bad_duck == 0;
+			snprintf(buf, sizeof(buf), "%d native rides (%d analog) | "
+				"wish-equiv: worst dir %.2e rad, mismatches dir/class/duck "
+				"%d/%d/%d | event kind/tick %d/%d | traj envelope worst "
+				"%.4fu S+ %.4fu (gate 2u), over %d", replays, analog_fx,
+				static_cast<double>(worst_dir),
+				bad_wish, bad_class, bad_duck, bad_kind, bad_tick,
+				worst_pos, worst_end, bad_traj);
+			check("X1 control completeness", ok, buf);
+		}
+
+		// ---- XH HORIZON SEMANTICS (standing law B-C): a schedule that
+		// ends while still riding returns HORIZON, contributes no
+		// transition, and is never an exit.
+		{
+			bool ok = false;
+			char det[120] = "no long ride available";
+			for (const Fix& fx : fixes) {
+				if (fx.nat.kind != Ride::kAirExit
+					|| fx.nat.ticks < 20)
+					continue;
+				const int cut = fx.nat.ticks / 2;
+				std::vector<signed char> sd(fx.nat.side.begin(),
+					fx.nat.side.begin() + cut);
+				std::vector<float> cs(fx.nat.cosa.begin(),
+					fx.nat.cosa.begin() + cut);
+				std::vector<unsigned char> dk(fx.nat.duck.begin(),
+					fx.nat.duck.begin() + cut);
+				Ride::Result rr = Ride::FlyRideSchedule(fx.B, w, p, g,
+					sd, cs, dk, nullptr);
+				ok = rr.kind == Ride::kHorizon && rr.ticks == cut
+					&& rr.legal;
+				snprintf(det, sizeof(det), "schedule cut %d -> %d "
+					"ticks returns HORIZON (kind %d), UNRESOLVED - "
+					"not an exit", fx.nat.ticks, cut, rr.kind);
+				break;
+			}
+			check("XH horizon is never an exit", ok, det);
+		}
+
+		// ---- X2a SERIALIZE/RESUME: checkpoint interior ticks,
+		// serialize the COMPLETE S_B to bytes, reconstruct fresh,
+		// replay the frozen suffix, demand the uninterrupted ride
+		// bitwise - trajectory, event, tick and continuation state.
+		// This is what actually crosses the operator boundary in the
+		// future global solver.
+		{
+			bool ok = true;
+			int n = 0, bad = 0;
+			for (const Fix& fx : fixes) {
+				std::vector<PlayerState> traj;
+				std::vector<Steer::CtlState> ctlt;
+				Ride::Result full = Ride::FlyRideSchedule(fx.B, w, p,
+					g, fx.nat.side, fx.nat.cosa, fx.nat.duck,
+					fx.nat.any_analog ? &fx.nat.mag : nullptr, &traj,
+					&ctlt);
+				if (!full.legal || full.ticks < 8)
+					continue;
+				for (int q2 = 1; q2 <= 3; ++q2) {
+					const int j = full.ticks * q2 / 4;
+					if (j < 1 || j > full.ticks - 1)
+						continue;
+					// serialize (the whole POD, bit-exact)
+					std::vector<unsigned char> bytes(
+						sizeof(PlayerState)
+						+ sizeof(Steer::CtlState) + sizeof(int));
+					memcpy(&bytes[0], &traj[static_cast<size_t>(
+						j - 1)], sizeof(PlayerState));
+					memcpy(&bytes[sizeof(PlayerState)],
+						&ctlt[static_cast<size_t>(j - 1)],
+						sizeof(Steer::CtlState));
+					memcpy(&bytes[sizeof(PlayerState)
+						+ sizeof(Steer::CtlState)], &fx.B.face,
+						sizeof(int));
+					Ride::BoundaryState R;
+					memcpy(&R.ps, &bytes[0], sizeof(PlayerState));
+					memcpy(&R.ctl, &bytes[sizeof(PlayerState)],
+						sizeof(Steer::CtlState));
+					memcpy(&R.face, &bytes[sizeof(PlayerState)
+						+ sizeof(Steer::CtlState)], sizeof(int));
+					std::vector<signed char> sd(
+						fx.nat.side.begin() + j, fx.nat.side.end());
+					std::vector<float> cs(
+						fx.nat.cosa.begin() + j, fx.nat.cosa.end());
+					std::vector<unsigned char> dk(
+						fx.nat.duck.begin() + j, fx.nat.duck.end());
+					std::vector<float> mg;
+					const std::vector<float>* mgp = nullptr;
+					if (fx.nat.any_analog) {
+						mg.assign(fx.nat.mag.begin() + j,
+							fx.nat.mag.end());
+						mgp = &mg;
+					}
+					std::vector<PlayerState> straj;
+					Ride::Result sub = Ride::FlyRideSchedule(R, w, p,
+						g, sd, cs, dk, mgp, &straj);
+					n++;
+					bool same = sub.legal
+						&& sub.kind == full.kind
+						&& sub.ticks == full.ticks - j
+						&& memcmp(&sub.end_state, &full.end_state,
+							sizeof(PlayerState)) == 0;
+					for (size_t t2 = 0; same && t2 < straj.size();
+						++t2)
+						if (memcmp(&straj[t2],
+							&traj[static_cast<size_t>(j) + t2],
+							sizeof(PlayerState)) != 0)
+							same = false;
+					if (!same) {
+						bad++;
+						ok = false;
+					}
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d interior checkpoints "
+				"serialize -> reconstruct -> replay BITWISE equal "
+				"(traj, event, tick, S+); %d diverged", n, bad);
+			check("X2a serialized resume equivalence", ok && n >= 30,
+				buf);
+		}
+
+		// ---- X2b SEAM LEGALITY: the carried CtlState decides which
+		// suffixes are ADMISSIBLE. A reversal legal under the true
+		// carried dwell must be accepted; the same schedule under a
+		// corrupted-younger dwell must be REFUSED at that tick. This is
+		// the state the Air seam bug lived in - it changes legality,
+		// never physics.
+		{
+			Ride::BoundaryState B0;
+			bool have = false;
+			for (const Fix& fx : fixes)
+				if (fx.nat.kind == Ride::kAirExit
+					&& fx.nat.ticks >= 12) {
+					B0 = fx.B;
+					have = true;
+					break;
+				}
+			bool ok = false;
+			char det[160] = "no fixture";
+			if (have) {
+				B0.ctl.side = 1;
+				B0.ctl.age = 2;
+				std::vector<signed char> sd(12,
+					static_cast<signed char>(1));
+				for (int k = 4; k < 12; ++k)
+					sd[static_cast<size_t>(k)] =
+						static_cast<signed char>(-1);
+				std::vector<float> cs(12, 0.1f);
+				std::vector<unsigned char> dk(12, 0);
+				// carried age 2 + 4 ticks = 6 >= min_gap: legal
+				Ride::Result a = Ride::FlyRideSchedule(B0, w, p, g,
+					sd, cs, dk);
+				Ride::BoundaryState B1 = B0;
+				B1.ctl.age = 1;   // corrupted-younger: 1 + 4 = 5 < 6
+				Ride::Result b = Ride::FlyRideSchedule(B1, w, p, g,
+					sd, cs, dk);
+				ok = a.legal && !b.legal && b.illegal_tick == 4;
+				snprintf(det, sizeof(det), "reversal@4 with carried "
+					"age 2 ACCEPTED (legal=%d); corrupted age 1 "
+					"REFUSED at tick %d (legal=%d) - dwell crosses "
+					"the seam", a.legal ? 1 : 0, b.illegal_tick,
+					b.legal ? 1 : 0);
+			}
+			check("X2b carried-dwell seam legality", ok, det);
+		}
+
+		// ---- X2c DUCK/HULL SENSITIVITY: boundary states differing
+		// ONLY in duck/hull fields must produce diverging rides on at
+		// least one fixture - proof the fields are load-bearing and
+		// that this matrix would catch their omission from S_B. (Both
+		// values are legal at these kinematics; this is a sensitivity
+		// probe, not a banked witness.)
+		{
+			int div_hull = 0, div_ducking = 0, n2 = 0, nh = 0;
+			int first_div = -1;
+			for (const Fix& fx : fixes) {
+				// The hull probe pairs an ENGINE-CONSTRUCTED transient
+				// (entry_kind 2: the factory actually unducked in
+				// flight and the engine set hull_state = 2 itself)
+				// against the same state normalized to the standing
+				// hull. Poking hull_state UP on a standing state is
+				// NOT a legal transient - it lacks the companion duck
+				// fields and the engine normalizes it away (measured,
+				// first exitfit run: 0/12 divergence that way).
+				const bool hull_fx = fx.entry == 2
+					&& fx.B.ps.hull_state == 2;
+				if ((fx.entry != 0 && !hull_fx) || fx.nat.ticks < 10)
+					continue;
+				if (n2 >= 12 && nh > 0)
+					break;
+				n2++;
+				std::vector<PlayerState> ta, tb, tc;
+				Ride::Result ra = Ride::FlyRideSchedule(fx.B, w, p, g,
+					fx.nat.side, fx.nat.cosa, fx.nat.duck, nullptr,
+					&ta);
+				if (hull_fx) {
+					nh++;
+					Ride::BoundaryState Bh = fx.B;
+					Bh.ps.hull_state = 0;   // normalize the transient
+					Ride::Result rb = Ride::FlyRideSchedule(Bh, w, p,
+						g, fx.nat.side, fx.nat.cosa, fx.nat.duck,
+						nullptr, &tb);
+					bool dv = rb.kind != ra.kind
+						|| rb.ticks != ra.ticks;
+					int at2 = dv ? 0 : -1;
+					const size_t n3 = tb.size() < ta.size()
+						? tb.size() : ta.size();
+					for (size_t t2 = 0; !dv && t2 < n3; ++t2)
+						if (Len(tb[t2].pos - ta[t2].pos) > 0.01f) {
+							dv = true;
+							at2 = static_cast<int>(t2);
+						}
+					if (dv) {
+						div_hull++;
+						if (first_div < 0)
+							first_div = at2;
+					}
+					continue;
+				}
+				Ride::BoundaryState Bd = fx.B;
+				Bd.ps.ducking = true;   // mid-transition timer state
+				Bd.ps.duck_timer_ms = 800.f;
+				Ride::Result rc = Ride::FlyRideSchedule(Bd, w, p, g,
+					fx.nat.side, fx.nat.cosa, fx.nat.duck, nullptr,
+					&tc);
+				auto diverges = [&](const std::vector<PlayerState>& x,
+					const Ride::Result& rx, int* at) {
+					if (rx.kind != ra.kind || rx.ticks != ra.ticks) {
+						*at = 0;
+						return true;
+					}
+					const size_t n3 = x.size() < ta.size()
+						? x.size() : ta.size();
+					for (size_t t2 = 0; t2 < n3; ++t2)
+						if (Len(x[t2].pos - ta[t2].pos) > 0.01f) {
+							*at = static_cast<int>(t2);
+							return true;
+						}
+					return false;
+				};
+				int at = -1;
+				if (diverges(tc, rc, &at))
+					div_ducking++;
+			}
+			// The hull expectation asserts CONSISTENCY WITH THE
+			// DECLARED MODEL, not an assumed sensitivity: Hulls::
+			// unduck_* == stand_* since 2026-08-15 (the 62.5 transient
+			// was removed as fit-noise), so the engine-built transient
+			// MUST ride identically to the normalized state - any
+			// divergence here means the collision model drifted. The
+			// ducking/timer fields are the load-bearing ones (the
+			// mid-ride transition applies the origin shift).
+			const bool ok = nh > 0 && div_hull == 0 && div_ducking > 0;
+			snprintf(buf, sizeof(buf), "%d probes (%d hull2) | engine "
+				"transient vs normalized hull diverges on %d (first "
+				"at tick %d, model expects 0) | ducking+timer diverges "
+				"on %d - "
+				"ducking/timer fields are load-bearing; hull2 rides as "
+				"standing per the declared model", n2, nh,
+				div_hull, first_div, div_ducking);
+			check("X2c duck/hull fields load-bearing", ok, buf);
+		}
+
+		// ---- X7 REFERENCE REGRESSION (quarantined): a carve-generated
+		// ride's realized NATIVE inputs invert and replay through the
+		// canonical executor to the same separation. Reference rides
+		// test the representation; they never define generation.
+		{
+			bool ok = false;
+			char det[200] = "no fixture board";
+			for (const Fix& fx : fixes) {
+				if (fx.entry != 0 || fx.stratum != 1)
+					continue;
+				Carve::Target ct;
+				ct.face = fx.face;
+				const float h0 = atan2f(fx.B.ps.vel.Y,
+					fx.B.ps.vel.X);
+				ct.exit_heading = Steer::WrapPi(h0 + 0.5f);
+				ct.max_ticks = 140;
+				std::vector<float> knots;
+				knots.push_back(h0);
+				knots.push_back(Steer::WrapPi(h0 + 0.25f));
+				knots.push_back(Steer::WrapPi(h0 + 0.5f));
+				Carve::Result cr = Carve::RideHeadingSpline(fx.B.ps,
+					w, p, ct, g, knots, nullptr, 140);
+				if (!cr.exited || cr.tick < 8
+					|| static_cast<int>(cr.yaw.size()) < cr.tick)
+					continue;
+				std::vector<NativeTick> nat;
+				for (int k = 0; k < cr.tick; ++k) {
+					NativeTick nt;
+					nt.yaw = cr.yaw[static_cast<size_t>(k)];
+					nt.fmove = cr.fmove[static_cast<size_t>(k)];
+					nt.smove = cr.smove[static_cast<size_t>(k)];
+					nt.btn = fx.B.ps.ducked ? IN_DUCK : 0;
+					nat.push_back(nt);
+				}
+				NativeRun nr;
+				RunNative(fx.B, w, p, g, nat, &nr);
+				if (nr.degenerate)
+					continue;
+				if (!Ride::SchedLegal(fx.B.ctl, nr.side, min_gap))
+					continue;
+				Ride::Result rr = Ride::FlyRideSchedule(fx.B, w, p, g,
+					nr.side, nr.cosa, nr.duck,
+					nr.any_analog ? &nr.mag : nullptr);
+				// carve books `tick` = first airborne tick = the
+				// executor's peek tick, so ticks should agree exactly
+				// (+-1 honesty margin for the seam bookkeeping).
+				const int dt2 = rr.ticks - (cr.tick);
+				ok = rr.legal && rr.kind == Ride::kAirExit
+					&& (dt2 >= -1 && dt2 <= 1);
+				snprintf(det, sizeof(det), "carve ride f%d exits "
+					"t%d; canonical invert+replay exits t%d "
+					"(kind %d) | speed2d carve %.1f vs exit_vel "
+					"%.1f", fx.face, cr.tick, rr.ticks, rr.kind,
+					cr.speed2d, Len2D(rr.exit_vel));
+				break;
+			}
+			check("X7 carve reference regression", ok, det);
+		}
+
+		printf("exitfit: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "RIDE REPRESENTATION GATE GREEN"
+				: "RIDE REPRESENTATION GATE RED");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= efrefine: THE OPERATOR-LEVEL ANYTIME GATE
 	// (advisor ruling 2026-08-19d). The anytime contract lives ABOVE
 	// the local optimizer: a whole fixed local solve is one atomic
@@ -8128,6 +8974,64 @@ namespace {
 			qu.level, qu.U / 1e3f, qu.U_bound_id, gate_lo ? 1 : 0,
 			gate_hi ? 1 : 0);
 		check("R6 failure never becomes impossibility", r6, buf);
+
+		// ---- R7 CONTINUATION FRONTIER (ExitField stage 0). BestBoard
+		// is a projection; BoardTransition witnesses are the transition
+		// payload. The query must expose MULTIPLE distinct replayable
+		// lanes (a lower-energy board can win the route), merged
+		// monotonically: a lane once exposed is never lost and its L
+		// only rises. Every lane must hand back S_B by authoritative
+		// replay at exactly its recorded value.
+		{
+			// (a) monotone lane merge across the refinement ladder
+			bool mono2 = true;
+			for (size_t i2 = 2; i2 < snap.size(); ++i2)
+				for (const Entrance::BoardTransition& t0
+					: snap[i2 - 1].transitions) {
+					bool found = false;
+					for (const Entrance::BoardTransition& t1
+						: snap[i2].transitions)
+						if (t1.lane == t0.lane) {
+							found = true;
+							if (t1.L < t0.L - 1e-3f)
+								mono2 = false;
+						}
+					if (!found)
+						mono2 = false;   // a lane was LOST
+				}
+			// (b) diversity: several lanes, including heading intervals
+			int n_lane = static_cast<int>(qs.transitions.size());
+			int n_iv = 0;
+			for (const Entrance::BoardTransition& t : qs.transitions)
+				if ((t.lane & 0xff00u) == 0x0200u)
+					n_iv++;
+			// (c) every lane replays to exactly its recorded value
+			int bad_replay = 0;
+			float worstL = 0.f;
+			for (const Entrance::BoardTransition& t : qs.transitions) {
+				Air::Result ar = Entrance::ReplayBoardTransition(t, st, w,
+					p, g, fi, q);
+				if (!ar.hit || ar.dot >= 0.f || ar.struck_brush >= 0) {
+					bad_replay++;
+					continue;
+				}
+				const float Hr = Dot(ar.end_state.vel, ar.end_state.vel)
+					+ 2.f * p.gravity * st.gravity_scale
+					* (ar.pos.Z - fc.zmin);
+				const float dl = fabsf(Hr - t.L);
+				if (dl > worstL)
+					worstL = dl;
+				if (dl > 1.f)
+					bad_replay++;
+			}
+			const bool r7 = mono2 && n_lane >= 3 && n_iv >= 2
+				&& bad_replay == 0;
+			snprintf(buf, sizeof(buf), "%d lanes (%d heading intervals) | "
+				"monotone per lane, none lost = %d | all replay to their "
+				"recorded L (worst |dL| %.2f), %d failures", n_lane, n_iv,
+				mono2 ? 1 : 0, worstL, bad_replay);
+			check("R7 continuation frontier", r7, buf);
+		}
 
 		// ---- The profile ladder itself, for the record.
 		for (int i = 0; i < nprof; ++i)
@@ -12499,6 +13403,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "exitfit" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdExitFit(argv[2], o);
 	}
 	if (cmd == "efrefine" && argc >= 3) {
 		ReplayOpts o;
