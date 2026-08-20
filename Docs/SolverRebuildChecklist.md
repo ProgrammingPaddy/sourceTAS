@@ -15,15 +15,17 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-19 (session 15): ExitField STAGE 4 COMPLETE -
-U_E(B, M) is CERTIFIED** (bound id 45580001, exitenv 8/8, domain
-D_static-surf). The wish law was DERIVED in the ride domain (measured
-tight: 899.00 of 900); duck origin costs one net shift; the HORIZON LAW
-is standing (M is query domain - refinement never changes it). Stage-3
-corrections in: spatial partition regions, versioned provenance,
-F6-earliest-boundary + F9 event precedence (exitfrontier 9/9). NEXT:
-stage 5 lazy Query/Refine for fixed (B, M), then stage 6 - the first
-composed transfer. See `Docs/ExitFieldSpec.md` session 15.
+**STATUS 2026-08-20 (session 16): STAGE B COMPLETE THROUGH STAGE 6 -
+THE FIRST REUSABLE FULL-MAP EDGE EXISTS.** Bound 45580001 is CERTIFIED
+(proofs repaired: the clean wish chain, a derived 512/tick FP slack,
+the analytical clip premise). Stage 5: `ExitField::ExitQuery` with
+partition-independent W_known, complete domain keys, honest statuses,
+provenance refusal (exitlazy 8/8). Stage 6: composed
+B_i -> ExitField -> Air -> EntranceField -> B_j legs and a direct
+CONTACT_TRANSFER leg, bitwise against continuous engine replay, exact
+tick accounting, dwell carried across both seams, diversity kept,
+edges rebuilt cold (faceleg 6/6). NEXT: the global graph/best-first
+layer over these edges. See `Docs/ExitFieldSpec.md` session 16.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -358,6 +360,52 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-20 (session 16, PROOFS REPAIRED + STAGES 5-6: THE FIRST
+  REUSABLE FULL-MAP EDGE EXISTS): advisor 2026-08-19j. PROOF REPAIRS
+  then promotion: (1) the wish derivation's invalid intermediate
+  (dE <= c^2 - p^2, wrong for p < -c) replaced by the clean chain
+  p <= c - a => dE <= c^2 - (a-c)^2 <= 900, braking included; (2) the
+  FP slack is DERIVED (conservative op inventory under certified
+  magnitude clamps: |E| < 2^27, ulp 8; inventory < 332, certified 512
+  per tick with headroom - E1's observed 0.5 stays as evidence, never
+  justification; E8's mutation detection survives the looser slack);
+  (3) the clip premise is analytical (beta(beta-2)(v.n)^2, beta = 1
+  exactly in the helper). exitenv 8/8 -> **bound 45580001 CERTIFIED**.
+  STAGE 5 (exitlazy 8/8): `ExitField::ExitQuery` with the complete
+  fixed domain key (exact B bytes + ctl + face + M + WorldIdent +
+  ProvenanceHash); W_known PARTITION-INDEPENDENT and append-only with
+  `Rebin` a pure derived view (measured: knowledge byte-identical while
+  materialization churns 21 -> 18); honest statuses with NO
+  RESOLVED/COMPLETE; provenance mismatch REFUSES; (B, 40) vs (B, 80)
+  are different domains (keys split, U_E may grow with M, M immutable
+  through refinement); deterministic profile history.
+  STAGE 6 (faceleg 6/6): 2 AIR legs B_i -> ExitField -> Air ->
+  EntranceField -> B_j and a direct CONTACT_TRANSFER leg, ALL verified
+  against one continuous exact-engine replay: composed B_j BITWISE
+  equal, dt_leg = dt_exit + dt_air with no +-1 (measured convention:
+  Air::Result::tick counts through the strike tick), every ride tick
+  except separation touches face i and exactly one board contact on
+  the final tick, the dwell law survives both seams (independent
+  whole-leg walk), two distinct exits to one face with distinct B_j
+  both kept, every edge rebuilds cold, no tape on the path.
+  COMPOSITION LESSONS (found by the continuous-replay gate failing
+  honestly): a 700 u/s into-face board is a faceplant (exits ~200 u/s,
+  nothing composes); down-slope rides exit low/diving and fall below
+  every board window - the composable exit class is FAST, FLAT, HIGH
+  (the human's 94-tick transfer flew ~1000u nearly level; lateral high
+  boards produce it); the entrance flight horizon must come from
+  GEOMETRY (fixed n_hint 60 found zero strikes ever; real transfers
+  need 100-160 ticks) - the competitive-horizon argument arriving
+  early. These preview the GLOBAL layer's job (B_i/aim/horizon
+  selection is route planning). Clean-rebuild board: faceleg 6/6,
+  exitlazy 8/8, exitenv 8/8, exitfrontier 9/9, exitfit 10/10, efrefine
+  7/7, airprops 24/24, airsuite 48/48, airrec VERIFIED, wishparity,
+  carve M1.4, airsolve M1.3. THE PROJECT STATE: both operators exist
+  as certified, witnessed, composable pieces and a face-to-face edge
+  has been constructed, verified bitwise and rebuilt cold. NEXT: the
+  global graph/best-first layer over these edges. Full detail:
+  `Docs/ExitFieldSpec.md` session 16.
 
 - 2026-08-19 (session 15, THREE CORRECTIONS + U_E(B, M) CERTIFIED):
   advisor 2026-08-19i. CORRECTIONS: (1) partition keys carry SPATIAL

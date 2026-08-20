@@ -624,3 +624,96 @@ shrinks, `U` only tightens. Then stage 6, the composition:
 accounting, control-state carry, packet concatenation, replay of the
 composed witness through the uninterrupted engine - and separately
 `B_i -> CONTACT_TRANSFER -> B_j` with no fake Air segment.
+
+### Session 16 (2026-08-20) — proofs repaired, 45580001 CERTIFIED,
+### stages 5 and 6 built: THE FIRST REUSABLE FULL-MAP EDGE EXISTS
+
+**Proof repairs (advisor 2026-08-19j), then promotion:**
+
+1. **The wish-work derivation is fixed.** The invalid intermediate
+   `dE <= c^2 - p^2` (wrong for p < -c, where convex f(a) = 2ap + a^2
+   beats a negative c^2 - p^2 at a = 0) is replaced by the clean chain:
+   a <= c - p gives p <= c - a, so
+   dE = 2ap + a^2 <= 2a(c-a) + a^2 = c^2 - (a-c)^2 <= c^2 <= 900,
+   with addspeed <= 0 giving a = 0, dE = 0. Braking included.
+2. **The FP slack is DERIVED, not measured.** Conservative forward
+   error inventory under the certified engine magnitude clamps
+   (per-component |v| <= maxvelocity 3500, BSP |z| <= 16384, |E| < 2^27
+   where one ulp is 8): gravity 2 ops, wish ~12, clips <= 4 bumps ~240,
+   integrate ~7, E-evaluation twice ~72 - inventory < 332, certified at
+   512/tick with headroom. E1's observed 0.5/tick stays as evidence of
+   conservatism, never justification. E8's hull-mutation still turns
+   RED at eps = 512, so detection survives the looser slack.
+3. **The clip premise is analytical**: v' = v - beta (v.n) n gives
+   |v'|^2 - |v|^2 = beta(beta-2)(v.n)^2, non-expansive for
+   0 <= beta <= 2; the authoritative helper uses overbounce beta = 1
+   exactly; creases are repeated beta = 1 projections; allsolid zeroes.
+   E3's probes falsify drift; the premise is the proof.
+
+exitenv 8/8 under the repaired proofs: **bound id 45580001 is
+CERTIFIED** (domain D_static-surf).
+
+**Stage 5 (exitlazy 8/8):** `ExitField::ExitQuery` - the fixed physical
+domain `(exact B bytes, ctl, face, M, WorldIdent, ProvenanceHash)` as
+the query key; **W_known partition-independent** (authoritative
+append-only transitions + hashes; `Rebin` is a pure derived view);
+honest statuses (kQUnexplored / kQUnresolved / kQRefined - deliberately
+no RESOLVED: scalar U_E is one certified projection, not completeness);
+stable profile ids; provenance-mismatch REFUSAL. Measured: W_known
+7 -> 16 -> 31 append-only with zero replay failures; materialization
+churns (21 -> 18 actives) while knowledge stays byte-identical; double
+rebin byte-identical; U_E constant across profiles; repeat profile
+finds 0 and invalidates nothing; mismatched provenance refused;
+(B, 40) vs (B, 80) split keys with U_E(B,80) > U_E(B,40) and M
+immutable; two fresh queries with the same profile sequence are
+identical in every observable.
+
+**Stage 6 (faceleg 6/6): the composition.**
+
+    B_i -> ExitField -> Air -> EntranceField -> B_j     2 AIR legs
+    B_i -> CONTACT_TRANSFER -> B_j                      direct leg
+
+- **C1/C2/C4:** composed B_j == one continuous exact-engine run,
+  BITWISE; dt_leg = dt_exit + dt_air with no +-1 anywhere (measured
+  convention: `Air::Result::tick` already counts through the strike
+  tick, so dt_air = ar.tick); every ride tick except the separation
+  tick touches face i, exactly one face-j contact and it is the final
+  booked tick.
+- **C3:** the dwell law survives both seams - B_j's carried (side, age)
+  equals an independent whole-leg walk (ride inversion + air schedule).
+- **C5:** the direct transfer leg composes bitwise with dt_leg =
+  dt_exit and NO Air segment.
+- **C6:** two distinct exit witnesses from one B_i reach the same face
+  with bitwise-distinct B_j, both kept (12 transfer witnesses
+  available on the synthetic valley) - no max-energy collapse.
+- **C8:** every edge rebuilds cold from (B_i, ride packets, air
+  schedule, face_j) alone. **C7:** no tape anywhere on the path.
+
+**What composition needed, measured not assumed** (all three were
+found by the continuous-replay gate failing honestly first):
+
+- A 700 u/s into-face board is a FACEPLANT (65% speed loss, exits
+  dt<=4 at ~200 u/s - nothing to compose). Plausible boards ride.
+- Down-slope rides exit LOW and DIVING (vz ~ -0.8 speed): they fall
+  below every board window. The composable exit class is FAST, FLAT
+  and HIGH (the human's 94-tick transfer flew ~1000u nearly level);
+  lateral high boards produce it.
+- The entrance flight horizon comes from the GEOMETRY
+  (distance/speed), not a fixed n_hint: 60 capped the search at ~100
+  ticks and found zero strikes ever; the real transfers need 100-160.
+
+These fixture lessons are recorded because they preview the GLOBAL
+layer's job: choosing B_i, aim points and horizons is route planning,
+and the fixed-horizon lesson is exactly the competitive-time-horizon
+argument (T* - g(S)) arriving early.
+
+Board from a clean rebuild: faceleg 6/6, exitlazy 8/8, exitenv 8/8,
+exitfrontier 9/9, exitfit 10/10, efrefine 7/7, airprops 24/24,
+airsuite 48/48, airrec VERIFIED, wishparity, carve M1.4, airsolve
+M1.3.
+
+**The project state: EntranceField and ExitField both exist as
+certified, witnessed, composable operators, and a face-to-face edge
+has been constructed, verified bitwise against the uninterrupted
+engine, and rebuilt cold. The next layer is the global graph/best-first
+search over these edges.**

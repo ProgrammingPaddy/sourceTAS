@@ -488,19 +488,28 @@ namespace ExitField {
 	//    z' = z + (vz - G/2) dt, so d(vz^2) = -2 G vz + G^2 and
 	//    d(2 g gs z) = 2 (G/dt)(vz - G/2) dt = 2 G vz - G^2. Sum = 0,
 	//    to float rounding (measured by E1; the per-tick eps below).
-	//  * WISH WORK (AirAccelerate): dE = 2 a proj + a^2 with
-	//    proj = v.wishdir and a <= addspeed = min(wishspd, cap) - proj
-	//    <= cap - proj. On that branch dE <= (cap - proj)(cap + proj)
-	//    = cap^2 - proj^2 <= cap^2. On the accelspeed-limited branch
-	//    a < cap - proj gives strictly less (f(a) = a(2 proj + a) is
-	//    increasing past a = -proj and f <= 0 below it). So
-	//    dE_wish <= cap^2 = 900 PER TICK - the Air law's number,
-	//    DERIVED in the ride domain (any wishspeed, any surface
-	//    friction, any speed), not copied.
-	//  * CLIPS (TryPlayerMove): ClipVelocity with overbounce 1 removes
-	//    the normal component: |v'|^2 = |v|^2 - d^2 <= |v|^2. Crease
-	//    resolution is repeated projection; allsolid ZEROES velocity.
-	//    Contact motion never adds energy (gate E3).
+	//  * WISH WORK (AirAccelerate): dE = 2 a p + a^2 with
+	//    p = v.wishdir and, when addspeed > 0, the applied
+	//    0 <= a <= addspeed = c - p where c = min(wishspd, cap) <= cap.
+	//    (PROOF REPAIRED 2026-08-19j: the earlier intermediate step
+	//    "dE <= c^2 - p^2" is INVALID for p < -c, where the convex
+	//    f(a) = 2ap + a^2 can beat a negative c^2 - p^2 at a = 0.)
+	//    The valid chain: a <= c - p gives p <= c - a, so
+	//        dE = 2 a p + a^2 <= 2 a (c - a) + a^2
+	//           = 2 a c - a^2 = c^2 - (a - c)^2 <= c^2 <= cap^2.
+	//    When addspeed <= 0, a = 0 and dE = 0. So dE_wish <= cap^2
+	//    = 900 PER TICK for EVERY legal wish - any wishspeed, any
+	//    surface friction, any speed, braking included - the Air
+	//    law's number DERIVED in the ride domain, not copied.
+	//  * CLIPS (TryPlayerMove) - THE ANALYTICAL PREMISE (2026-08-19j):
+	//    the general normal update v' = v - beta (v.n) n with unit n
+	//    gives |v'|^2 - |v|^2 = beta (beta - 2) (v.n)^2, non-expansive
+	//    for 0 <= beta <= 2. The authoritative ride-domain helper
+	//    (Fn::ClipVelocity / EngineClipVelocity) uses overbounce
+	//    beta = 1 exactly, so each clip contributes -(v.n)^2 <= 0;
+	//    crease resolution is repeated beta = 1 projections and the
+	//    allsolid path ZEROES velocity. E3's 2000 exact-helper probes
+	//    falsify implementation drift; this premise is the proof.
 	//  * DUCK ORIGIN: an in-air duck shifts the origin +duck_air_shift
 	//    and an unduck -duck_air_shift WITHOUT physical work - raw-z
 	//    potential jumps by +-2 g gs * 8.5 (~13.6k) per transition.
@@ -522,12 +531,26 @@ namespace ExitField {
 	// the proof.
 
 	constexpr unsigned kUEnergyBoundId = 0x45580001u;
-	// Float-drift slack per tick: E is O(1e6..1e7) in map coordinates,
-	// so one ulp is 0.25-1.0; the leapfrog conservation is exact in
-	// real arithmetic and E1 measures the realized drift at one ulp
-	// per tick (0.5 at |E| ~ 6.4M). 2.0 covers |E| up to ~16M with
-	// headroom; the certified domain note carries that cap.
-	constexpr float kUEnergyEpsTick = 2.0f;
+	// FLOATING-POINT SLACK, DERIVED NOT MEASURED (proof repair
+	// 2026-08-19j: "we haven't seen a violation" != "there cannot be
+	// one" - the B5 lesson applied to numerics). Conservative forward
+	// error inventory over one tick, under the certified engine
+	// magnitude clamps (each velocity component <= maxvelocity = 3500,
+	// so |v|^2 <= 3*3500^2 = 36.75M; BSP coordinates |z| <= 16384, so
+	// with gs <= 2 the potential term <= 52.4M and |E| < 2^27, where
+	// one float ulp is 8). Each float op errs <= 0.5 ulp of its
+	// result; a velocity-component error dv costs <= 2*3500*dv in E, a
+	// z error dz costs <= 2*g*gs*dz <= 3200*dz:
+	//   gravity halves      2 ops on vz     -> E-effect <  2
+	//   wish accel          ~6 ops/comp x2  -> E-effect < 11
+	//   clips, <= 4 bumps   ~10 ops/bump    -> E-effect < 240
+	//   position integrate  2 ops on z      -> E-effect <  7
+	//   E evaluation twice  ~9 ops at ulp 8 -> E-effect < 72
+	// Inventory total < 332; certified with headroom at 512. Loose is
+	// irrelevant against 900 legal wish work per tick; E1's observed
+	// ~0.5/tick stays as evidence the certified slack is conservative,
+	// never as its justification.
+	constexpr float kUEnergyEpsTick = 512.0f;
 
 	inline float EBoundary(const PlayerState& s, const MoveParams& p) {
 		return Dot(s.vel, s.vel)
@@ -541,6 +564,228 @@ namespace ExitField {
 			* p.duck_air_shift;
 		return EBoundary(B.ps, p) + cap2 * static_cast<float>(M)
 			+ hull + kUEnergyEpsTick * static_cast<float>(M);
+	}
+
+	// ================= STAGE 5: THE LAZY QUERY (advisor 2026-08-19j)
+	// =================
+	//
+	// The physical query domain is FIXED: (exact B, ridden face, M,
+	// world identity, movement/model versions). Refinement profiles
+	// change proposal effort, partition resolution and active caps -
+	// NEVER B, M, movement laws, event classification, control
+	// legality or the world. Horizon extension is a separate
+	// domain-expansion operation on a DIFFERENT key.
+	//
+	// W_known IS PARTITION-INDEPENDENT: the authoritative set of exact
+	// witnessed transitions lives outside the partition layout, so
+	// changing resolution is repartition(W_known) and CANNOT forget a
+	// witness. W_materialized (the active representatives in the view)
+	// is a derived resolution artifact and may recompress freely:
+	//     W_known only grows;  W_materialized may churn.
+	// The types make the distinction so no future monotonicity
+	// assertion is written over the active-vector size by mistake.
+	//
+	// STATUSES ARE HONEST: possession of scalar U_E is ONE certified
+	// projection of the outer envelope, not a characterization of
+	// R_F(B, M) - so there is deliberately no RESOLVED/COMPLETE value.
+	// Failure to discover exits remains UNRESOLVED unless a concrete
+	// certified predicate proves irrelevance at the global layer.
+	enum QueryStatus {
+		kQUnexplored = 0,   // no profile has run
+		kQUnresolved = 1,   // searched; the domain is not characterized
+		kQRefined = 2,      // witnesses exist; still not complete
+	};
+
+	// Stable immutable profile identities (the EntranceField
+	// discipline): a profile is an effort/resolution setting.
+	constexpr unsigned kQProfileId[4] = {
+		0x51460100u, 0x51460101u, 0x51460102u, 0x51460103u };
+
+	// World identity for the domain key: brush count + per-brush
+	// geometry bytes. Two queries merge knowledge only if they are the
+	// same physical problem (the witness-bank semantic-key lesson).
+	inline unsigned long long WorldIdent(const World& w) {
+		unsigned long long h = 1469598103934665603ULL;
+		auto mix = [&](const void* ptr, size_t n) {
+			const unsigned char* b =
+				static_cast<const unsigned char*>(ptr);
+			for (size_t i = 0; i < n; ++i) {
+				h ^= b[i];
+				h *= 1099511628211ULL;
+			}
+		};
+		const unsigned nb = static_cast<unsigned>(w.brushes.size());
+		mix(&nb, sizeof(nb));
+		for (const WorldBrush& b2 : w.brushes) {
+			mix(&b2.nsides, sizeof(b2.nsides));
+			mix(&b2.bmin, sizeof(b2.bmin));
+			mix(&b2.bmax, sizeof(b2.bmax));
+		}
+		return h;
+	}
+
+	struct ExitQuery {
+		// ---- THE FIXED PHYSICAL DOMAIN (immutable after Init)
+		Ride::BoundaryState B;
+		int M = 0;
+		unsigned long long domain_key = 0;
+		unsigned long long prov = 0;      // ProvenanceHash at Init
+		float UE = 0.f;                   // certified U_E(B, M)
+		// ---- AUTHORITATIVE KNOWLEDGE (partition-independent;
+		// monotone: only ever appended)
+		std::vector<Ride::ExitTransition> known;
+		std::vector<unsigned long long> known_hash;
+		int  horizon_runs = 0;            // UNRESOLVED evidence
+		// ---- DERIVED VIEW (materialization; may recompress)
+		std::vector<Partition> view;
+		int  view_level = 0;
+		// ---- audit
+		int  status = kQUnexplored;
+		std::vector<unsigned> trail;
+	};
+
+	inline unsigned long long QueryDomainKey(
+		const Ride::BoundaryState& B, int M, const World& w,
+		const MoveParams& p) {
+		unsigned long long h = 1469598103934665603ULL;
+		auto mix = [&](const void* ptr, size_t n) {
+			const unsigned char* b2 =
+				static_cast<const unsigned char*>(ptr);
+			for (size_t i = 0; i < n; ++i) {
+				h ^= b2[i];
+				h *= 1099511628211ULL;
+			}
+		};
+		mix(&B.ps, sizeof(PlayerState));
+		mix(&B.ctl, sizeof(Steer::CtlState));
+		mix(&B.face, sizeof(int));
+		mix(&M, sizeof(int));
+		const unsigned long long wid = WorldIdent(w);
+		mix(&wid, sizeof(wid));
+		const unsigned long long pv = ProvenanceHash(p);
+		mix(&pv, sizeof(pv));
+		return h;
+	}
+
+	// Deterministic rebin of the AUTHORITATIVE set into a fresh view
+	// at the given resolution level. Placement is a pure function of
+	// (known order, level), so the same knowledge rebins byte-
+	// identically; a member not active is in deferred_hash - KNOWN,
+	// never lost.
+	inline void Rebin(ExitQuery* Q, const Route::Graph& g, int level) {
+		Q->view.clear();
+		Q->view_level = level;
+		const int cap = ActiveCap(level);
+		for (size_t i = 0; i < Q->known.size(); ++i) {
+			const Ride::ExitTransition& t = Q->known[i];
+			const unsigned key = PartKey(t, g, Q->B.face);
+			Partition* P = nullptr;
+			for (Partition& q2 : Q->view)
+				if (q2.key == key) {
+					P = &q2;
+					break;
+				}
+			if (!P) {
+				Q->view.push_back(Partition());
+				P = &Q->view.back();
+				P->key = key;
+				P->kind = t.kind;
+				P->continuation_unsupported =
+					t.kind == Ride::kGround;
+			}
+			bool placed = false;
+			for (int slot = 0; slot < cap && !placed; ++slot) {
+				if (slot >= static_cast<int>(P->active.size())) {
+					P->active.push_back(t);
+					placed = true;
+					break;
+				}
+				if (SlotScore(t, slot) > SlotScore(
+					P->active[static_cast<size_t>(slot)], slot)) {
+					P->deferred_hash.push_back(WitnessHash(
+						P->active[static_cast<size_t>(
+							slot)].witness));
+					P->status = kCompressed;
+					P->active[static_cast<size_t>(slot)] = t;
+					placed = true;
+				}
+			}
+			if (placed) {
+				if (P->status == kUnexplored)
+					P->status = kActive;
+			} else {
+				P->deferred_hash.push_back(Q->known_hash[i]);
+				P->omitted_by_cap = true;
+				P->status = kCompressed;
+			}
+		}
+	}
+
+	inline void QueryInit(ExitQuery* Q, const Ride::BoundaryState& B,
+	                      int M, const World& w, const MoveParams& p) {
+		Q->B = B;
+		Q->M = M;
+		Q->UE = UEnergy(B, p, M);
+		Q->prov = ProvenanceHash(p);
+		Q->domain_key = QueryDomainKey(B, M, w, p);
+		Q->status = kQUnexplored;
+	}
+
+	// ONE refinement step: run the given profile on the FIXED domain
+	// (schedules clamped to M - any transition with dt <= M found by a
+	// legal schedule is in R(B, M)), append genuinely new transitions
+	// to the authoritative set, rebin the view. REFUSES to run under
+	// mismatched provenance: deferred indices from another
+	// proposal/model version are never silently regenerated under new
+	// semantics - that is an explicit migration.
+	inline bool QueryRefine(ExitQuery* Q, const World& w,
+	                        const MoveParams& p, const Route::Graph& g,
+	                        int profile) {
+		if (ProvenanceHash(p) != Q->prov)
+			return false;
+		if (profile < 0) profile = 0;
+		if (profile > 3) profile = 3;
+		const int n = ProposalCount(profile);
+		for (int i = 0; i < n; ++i) {
+			Proposal pr;
+			MakeProposal(i, &pr);
+			if (static_cast<int>(pr.side.size()) > Q->M) {
+				pr.side.resize(static_cast<size_t>(Q->M));
+				pr.cosa.resize(static_cast<size_t>(Q->M));
+				pr.duck.resize(static_cast<size_t>(Q->M));
+			}
+			Ride::CanonSchedule(pr.side, &pr.cosa, nullptr);
+			std::vector<Ride::MoveInput> pk;
+			Ride::Result rr = Ride::FlyRideSchedule(Q->B, w, p, g,
+				pr.side, pr.cosa, pr.duck, nullptr, nullptr,
+				nullptr, &pk);
+			if (!rr.legal)
+				continue;
+			if (rr.kind == Ride::kHorizon) {
+				Q->horizon_runs++;
+				continue;
+			}
+			Ride::ExitTransition tr;
+			if (!Ride::MakeTransition(rr, g, pk, &tr))
+				continue;
+			if (tr.dt > Q->M)
+				continue;   // outside the fixed domain
+			const unsigned long long h = WitnessHash(tr.witness);
+			bool have = false;
+			for (unsigned long long s : Q->known_hash)
+				if (s == h) {
+					have = true;
+					break;
+				}
+			if (!have) {
+				Q->known.push_back(tr);
+				Q->known_hash.push_back(h);
+			}
+		}
+		Rebin(Q, g, profile);
+		Q->status = Q->known.empty() ? kQUnresolved : kQRefined;
+		Q->trail.push_back(kQProfileId[static_cast<size_t>(profile)]);
+		return true;
 	}
 
 } // namespace ExitField

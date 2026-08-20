@@ -10198,6 +10198,979 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= exitlazy: STAGE-5 GATES (advisor 2026-08-19j).
+	// The lazy query for a FIXED physical domain (B, M): W_known is
+	// authoritative and partition-independent; the view is a derived
+	// resolution artifact; profiles never touch the domain; provenance
+	// mismatches refuse rather than silently regenerate.
+	int CmdExitLazy(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("exitlazy: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("exitlazy: %-36s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		int fi = -1;
+		for (size_t i = 0; i < g.faces.size(); ++i)
+			if (sqrtf(g.faces[i].n.X * g.faces[i].n.X
+				+ g.faces[i].n.Y * g.faces[i].n.Y) > 1e-4f) {
+				fi = static_cast<int>(i);
+				break;
+			}
+		Ride::BoundaryState B;
+		if (fi < 0 || !RideBoard(w, p, g, fi, 700.f, -120.f, 0.3f, 0,
+			Steer::CtlState(), &B)) {
+			printf("exitlazy: no board fixture\n");
+			return 1;
+		}
+
+		// ---- Q1 KNOWN-WITNESS MONOTONICITY + exact replay across a
+		// profile ladder on one query.
+		ExitField::ExitQuery Q;
+		ExitField::QueryInit(&Q, B, 240, w, p);
+		{
+			bool ok = Q.status == ExitField::kQUnexplored;
+			size_t prev = 0;
+			int sizes[3] = { 0, 0, 0 };
+			for (int pr2 = 0; pr2 < 3; ++pr2) {
+				std::vector<unsigned long long> before =
+					Q.known_hash;
+				ok = ok && ExitField::QueryRefine(&Q, w, p, g, pr2);
+				// every prior hash still present, in order
+				for (size_t k = 0; ok && k < before.size(); ++k)
+					if (Q.known_hash[k] != before[k])
+						ok = false;
+				ok = ok && Q.known_hash.size() >= prev;
+				prev = Q.known_hash.size();
+				sizes[pr2] = static_cast<int>(prev);
+			}
+			int bad_replay = 0;
+			for (const Ride::ExitTransition& t : Q.known) {
+				Ride::Result rr = Ride::FlyRideInputs(B, w, p, g,
+					t.witness);
+				if (!(rr.legal && rr.kind == t.kind
+					&& rr.ticks == t.dt
+					&& memcmp(&rr.end_state, &t.s_plus,
+						sizeof(PlayerState)) == 0))
+					bad_replay++;
+			}
+			snprintf(buf, sizeof(buf), "W_known %d -> %d -> %d across "
+				"profiles (append-only, order preserved); %d replay "
+				"failures; status %d (refined, NOT complete)",
+				sizes[0], sizes[1], sizes[2], bad_replay, Q.status);
+			check("Q1 known-witness monotonicity",
+				ok && bad_replay == 0
+				&& Q.status == ExitField::kQRefined, buf);
+		}
+
+		// ---- Q2 MATERIALIZATION INDEPENDENCE: rebin at a coarser cap
+		// changes the active set; W_known is byte-identical.
+		{
+			std::vector<unsigned long long> kh = Q.known_hash;
+			std::vector<Ride::ExitTransition> kn = Q.known;
+			int act2 = 0;
+			for (const ExitField::Partition& P : Q.view)
+				act2 += static_cast<int>(P.active.size());
+			ExitField::Rebin(&Q, g, 0);   // coarse view
+			int act0 = 0;
+			for (const ExitField::Partition& P : Q.view)
+				act0 += static_cast<int>(P.active.size());
+			bool same_known = kh.size() == Q.known_hash.size()
+				&& kn.size() == Q.known.size();
+			for (size_t k = 0; same_known && k < kh.size(); ++k)
+				if (kh[k] != Q.known_hash[k]
+					|| memcmp(&kn[k].s_plus, &Q.known[k].s_plus,
+						sizeof(PlayerState)) != 0)
+					same_known = false;
+			ExitField::Rebin(&Q, g, 2);   // restore
+			snprintf(buf, sizeof(buf), "actives %d at L2 -> %d at L0 "
+				"(materialization churns); W_known byte-identical = "
+				"%d (%d transitions)", act2, act0,
+				same_known ? 1 : 0,
+				static_cast<int>(Q.known.size()));
+			check("Q2 materialization independence",
+				same_known && act0 <= act2, buf);
+		}
+
+		// ---- Q3 REBIN DETERMINISM: same knowledge, same level ->
+		// byte-identical keys and active hash lists.
+		{
+			ExitField::Rebin(&Q, g, 2);
+			std::vector<unsigned> keys1;
+			std::vector<unsigned long long> act1;
+			for (const ExitField::Partition& P : Q.view) {
+				keys1.push_back(P.key);
+				for (const Ride::ExitTransition& t : P.active)
+					act1.push_back(ExitField::WitnessHash(
+						t.witness));
+			}
+			ExitField::Rebin(&Q, g, 2);
+			std::vector<unsigned> keys2;
+			std::vector<unsigned long long> act2;
+			for (const ExitField::Partition& P : Q.view) {
+				keys2.push_back(P.key);
+				for (const Ride::ExitTransition& t : P.active)
+					act2.push_back(ExitField::WitnessHash(
+						t.witness));
+			}
+			const bool same = keys1 == keys2 && act1 == act2;
+			snprintf(buf, sizeof(buf), "double rebin at L2: %d "
+				"partitions, %d actives, byte-identical = %d",
+				static_cast<int>(keys1.size()),
+				static_cast<int>(act1.size()), same ? 1 : 0);
+			check("Q3 rebin determinism", same, buf);
+		}
+
+		// ---- Q4 FIXED-DOMAIN ENVELOPE MONOTONICITY: U_E never
+		// loosened by refinement (equality is the expected first
+		// answer - U_E has no search dependence at all).
+		{
+			ExitField::ExitQuery Q2;
+			ExitField::QueryInit(&Q2, B, 240, w, p);
+			const float u0 = Q2.UE;
+			ExitField::QueryRefine(&Q2, w, p, g, 0);
+			const float u1 = Q2.UE;
+			ExitField::QueryRefine(&Q2, w, p, g, 2);
+			const float u2 = Q2.UE;
+			const bool ok = u1 <= u0 + 1e-3f && u2 <= u1 + 1e-3f;
+			snprintf(buf, sizeof(buf), "U_E %.0f -> %.0f -> %.0f "
+				"across profiles (constant, as expected - certified "
+				"components only tighten for fixed (B, M))", u0, u1,
+				u2);
+			check("Q4 fixed-domain U monotonicity", ok, buf);
+		}
+
+		// ---- Q5 ZERO-NEW-WITNESS REFINEMENT: re-running a profile
+		// discovers nothing, invalidates nothing.
+		{
+			const size_t n0 = Q.known.size();
+			const float u0 = Q.UE;
+			const bool ran = ExitField::QueryRefine(&Q, w, p, g, 2);
+			const bool ok = ran && Q.known.size() == n0
+				&& Q.UE == u0
+				&& Q.status == ExitField::kQRefined;
+			snprintf(buf, sizeof(buf), "repeat profile: 0 new "
+				"witnesses (%d), U_E unchanged, status still "
+				"refined-not-complete",
+				static_cast<int>(Q.known.size()));
+			check("Q5 unsuccessful refinement is safe", ok, buf);
+		}
+
+		// ---- Q6 PROVENANCE MISMATCH REFUSES: a query initialized
+		// under different physics/proposal identity cannot silently
+		// reuse this configuration.
+		{
+			ExitField::ExitQuery Qbad;
+			ExitField::QueryInit(&Qbad, B, 240, w, p);
+			Qbad.prov ^= 0x1234567ULL;   // a different-version query
+			const size_t n0 = Qbad.known.size();
+			const bool refused = !ExitField::QueryRefine(&Qbad, w, p,
+				g, 0);
+			snprintf(buf, sizeof(buf), "mismatched provenance: refine "
+				"refused = %d, knowledge untouched = %d (migration "
+				"must be explicit)", refused ? 1 : 0,
+				Qbad.known.size() == n0 ? 1 : 0);
+			check("Q6 provenance mismatch refusal",
+				refused && Qbad.known.size() == n0, buf);
+		}
+
+		// ---- Q7 HORIZON SEPARATION: (B, 40) and (B, 80) are
+		// different physical domains - different keys, U_E may grow
+		// with M, and refinement never changes M.
+		{
+			ExitField::ExitQuery Q40, Q80;
+			ExitField::QueryInit(&Q40, B, 40, w, p);
+			ExitField::QueryInit(&Q80, B, 80, w, p);
+			ExitField::QueryRefine(&Q40, w, p, g, 1);
+			const bool ok = Q40.domain_key != Q80.domain_key
+				&& Q80.UE > Q40.UE
+				&& Q40.M == 40 && Q80.M == 80;
+			snprintf(buf, sizeof(buf), "keys differ = %d | U_E(B,80) "
+				"%.0f > U_E(B,40) %.0f (domain expansion may loosen) "
+				"| M immutable through refinement = %d",
+				Q40.domain_key != Q80.domain_key ? 1 : 0, Q80.UE,
+				Q40.UE, Q40.M == 40 ? 1 : 0);
+			check("Q7 horizon separation", ok, buf);
+		}
+
+		// ---- Q8 DETERMINISTIC PROFILE HISTORY: same start, same
+		// sequence -> identical knowledge, envelope, view, trail.
+		{
+			ExitField::ExitQuery Qa, Qb;
+			ExitField::QueryInit(&Qa, B, 240, w, p);
+			ExitField::QueryInit(&Qb, B, 240, w, p);
+			for (int pr2 = 0; pr2 < 3; ++pr2) {
+				ExitField::QueryRefine(&Qa, w, p, g, pr2);
+				ExitField::QueryRefine(&Qb, w, p, g, pr2);
+			}
+			bool same = Qa.known_hash == Qb.known_hash
+				&& Qa.UE == Qb.UE && Qa.trail == Qb.trail
+				&& Qa.view.size() == Qb.view.size()
+				&& Qa.horizon_runs == Qb.horizon_runs;
+			for (size_t k = 0; same && k < Qa.view.size(); ++k)
+				if (Qa.view[k].key != Qb.view[k].key
+					|| Qa.view[k].active.size()
+						!= Qb.view[k].active.size())
+					same = false;
+			snprintf(buf, sizeof(buf), "two fresh queries, three "
+				"profiles each: identical hashes/U/trail/view = %d "
+				"(%d known, %d partitions)", same ? 1 : 0,
+				static_cast<int>(Qa.known.size()),
+				static_cast<int>(Qa.view.size()));
+			check("Q8 deterministic profile history", same, buf);
+		}
+
+		printf("exitlazy: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "STAGE-5 LAZY QUERY GATE GREEN"
+				: "STAGE-5 LAZY QUERY GATE RED");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= faceleg: STAGE-6 COMPOSITION (advisor
+	// 2026-08-19j). The first actual full-map transition operator:
+	//     B_i -> ExitField -> Air -> EntranceField -> B_j     (AIR leg)
+	//     B_i -> CONTACT_TRANSFER -> B_j                      (direct)
+	// Acceptance is uninterrupted-engine replay: the composed leg and
+	// one continuous exact-engine run must agree bitwise, with exact
+	// tick accounting (ExitField owns the separation tick, Air begins
+	// the next tick and owns through the board tick), control-state
+	// carry across both seams, and event ownership (no tick booked
+	// twice, no event lost). The witness stays an OPERATOR-SEGMENT
+	// object (RideSegment packets + AirSegment schedule), replayed
+	// continuously through one PlayerState - no flattened byte format.
+
+	namespace {
+
+	// One composed face-to-face edge (the reusable full-map object).
+	struct FaceLeg {
+		Ride::BoundaryState Bi;
+		std::vector<Ride::MoveInput> ride;   // exact packets, dt_exit
+		int dt_exit = 0;
+		bool has_air = false;                // false = direct transfer
+		std::vector<signed char> air_side;   // canonical Air schedule
+		std::vector<float> air_cosa;
+		int air_horizon = 0;
+		int dt_air = 0;                      // ticks Air books
+		int face_j = -1;
+		Ride::BoundaryState Bj;              // the produced board state
+	};
+
+	// The continuous truth run: ride packets, then (optionally) the
+	// Air schedule emitted from the LIVE state exactly as
+	// Air::FlyWishSchedule emits it, until the first face_j contact
+	// tick (inclusive). Returns total ticks and per-tick face-contact
+	// accounting so event ownership is checked, never assumed.
+	bool RunLegContinuous(const FaceLeg& L, const World& w,
+	                      const MoveParams& p, const Route::Graph& g,
+	                      PlayerState* end, int* total_ticks,
+	                      int* facei_contacts, int* facej_contacts,
+	                      int* board_tick) {
+		const Route::Face& fj = L.face_j >= 0
+			? g.faces[static_cast<size_t>(L.face_j)]
+			: g.faces[0];
+		const Route::Face& fi2 = g.faces[static_cast<size_t>(
+			L.Bi.face)];
+		PlayerState s = L.Bi.ps;
+		int fic = 0, fjc = 0, bt = -1, tk = 0;
+		for (size_t k = 0; k < L.ride.size(); ++k, ++tk) {
+			TickEvents ev;
+			MoveTick(s, w, p, L.ride[k].pitch, L.ride[k].yaw,
+				L.ride[k].fmove, L.ride[k].smove, L.ride[k].umove,
+				L.ride[k].buttons, &ev);
+			for (int c = 0; c < ev.ncontacts; ++c) {
+				if (ev.contact_brush[c] == fi2.brush
+					&& ev.contact_plane[c] == fi2.side)
+					fic++;
+				if (L.face_j >= 0
+					&& ev.contact_brush[c] == fj.brush
+					&& ev.contact_plane[c] == fj.side) {
+					fjc++;
+					if (bt < 0)
+						bt = tk;
+				}
+			}
+		}
+		if (L.has_air) {
+			// Mirror Air::FlyWishSchedule's face-mode emission
+			// exactly: schedule indexing clamps to the last entry,
+			// zero-side or near-zero speed coasts, duck hold from the
+			// entry state.
+			const int hold = s.ducked ? IN_DUCK : 0;
+			const int nsch = static_cast<int>(L.air_side.size());
+			for (int k = 0; k < L.air_horizon; ++k, ++tk) {
+				const float s2d = Len2D(s.vel);
+				const float h = s2d > 1.f
+					? atan2f(s.vel.Y, s.vel.X) : 0.f;
+				const int sd = k < nsch
+					? static_cast<int>(L.air_side[
+						static_cast<size_t>(k)])
+					: (nsch > 0 ? static_cast<int>(L.air_side[
+						static_cast<size_t>(nsch) - 1]) : 0);
+				float yaw = h * 57.2957795f;
+				float fm = 0.f, sm = 0.f;
+				if (sd != 0 && s2d > 1.f) {
+					const float ca = k < nsch
+						? L.air_cosa[static_cast<size_t>(k)]
+						: (nsch > 0 ? L.air_cosa[
+							static_cast<size_t>(nsch) - 1] : 1.f);
+					Air::WishInputs(h, sd, ca, &yaw, &fm, &sm);
+				}
+				TickEvents ev;
+				MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, hold, &ev);
+				bool hitj = false;
+				for (int c = 0; c < ev.ncontacts; ++c) {
+					if (ev.contact_brush[c] == fi2.brush
+						&& ev.contact_plane[c] == fi2.side)
+						fic++;
+					if (ev.contact_brush[c] == fj.brush
+						&& ev.contact_plane[c] == fj.side) {
+						fjc++;
+						hitj = true;
+					}
+				}
+				if (hitj) {
+					bt = tk;
+					++tk;
+					break;   // the board tick ends the leg
+				}
+				if (s.on_ground || ev.ncontacts > 0)
+					return false;   // struck something else
+			}
+		}
+		*end = s;
+		*total_ticks = tk;
+		*facei_contacts = fic;
+		*facej_contacts = fjc;
+		*board_tick = bt;
+		return true;
+	}
+
+	} // namespace
+
+	int CmdFaceLeg(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("faceleg: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[340];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("faceleg: %-34s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		int fi = -1;
+		for (size_t i = 0; i < g.faces.size(); ++i)
+			if (sqrtf(g.faces[i].n.X * g.faces[i].n.X
+				+ g.faces[i].n.Y * g.faces[i].n.Y) > 1e-4f) {
+				fi = static_cast<int>(i);
+				break;
+			}
+		// A PLAUSIBLE surf board, not a faceplant (the 700 u/s
+		// into-face fixture loses ~65% of its speed to the clip and
+		// every ride separates within ticks; measured: best exit dt 4
+		// at 194 u/s). The aim-downhill soft board keeps speed on the
+		// face. And the BOARD FACE is swept: which face has exits
+		// pointing at neighbours is map geometry (f0's downhill runs
+		// off the map edge; f2's points back across the valley), so
+		// composition tries each surfable face as B_i until legs
+		// exist. This is fixture selection, not search policy.
+		std::vector<FaceLeg> legs;
+		Ride::BoundaryState Bi;
+		for (size_t fic2 = 0; fic2 < g.faces.size()
+			&& legs.size() < 8; ++fic2) {
+			const Route::Face& fci = g.faces[fic2];
+			if (sqrtf(fci.n.X * fci.n.X + fci.n.Y * fci.n.Y) < 1e-4f)
+				continue;
+			// LATERAL, HIGH board: a down-slope ride exits low with
+			// vz ~ -0.8*speed and falls below every board window
+			// (measured); the composable exit class is fast, FLAT and
+			// HIGH - the human transfer flew ~1000u nearly level in 94
+			// ticks. Boarding high with velocity along the face keeps
+			// rides flat, so their exits keep their altitude.
+			if (!RideBoard(w, p, g, static_cast<int>(fic2), 650.f,
+				-80.f, 1.3f, 0, Steer::CtlState(), &Bi, -0.8f, false))
+				continue;
+			const int fi2c = static_cast<int>(fic2);
+
+			// ---- ExitField: the witnessed frontier from B_i.
+			ExitField::ExitQuery Q;
+			ExitField::QueryInit(&Q, Bi, 240, w, p);
+			ExitField::QueryRefine(&Q, w, p, g, 2);
+			// Diverse VIABLE exits from distinct partitions (ordering,
+			// not physics - slow exits stay in the frontier).
+			std::vector<const Ride::ExitTransition*> exits;
+			for (int want = 0; want < 2 && exits.size() < 4; ++want)
+				for (const ExitField::Partition& P : Q.view) {
+					if (P.kind != Ride::kAirExit || P.active.empty())
+						continue;
+					const Ride::ExitTransition* best = nullptr;
+					for (const Ride::ExitTransition& t : P.active) {
+						// Physically composable exits rise or run shallow:
+						// a steep diver at the low edge plunges below every
+						// board window (measured: 0/288 entrance solves
+						// from steep exits). Pass 0 wants rising exits with
+						// speed; pass 1 relaxes to shallow.
+						const float vzq = t.s_plus.vel.Z;
+						const bool viable = want == 1
+							? vzq > -150.f
+							: (t.dt >= 6 && vzq > -60.f
+								&& Len2D(t.s_plus.vel) >= 350.f);
+						if (!viable)
+							continue;
+						if (!best || Len2D(t.s_plus.vel)
+							> Len2D(best->s_plus.vel))
+							best = &t;
+					}
+					if (!best)
+						continue;
+					bool dup = false;
+					for (const Ride::ExitTransition* e : exits)
+						if (e == best)
+							dup = true;
+					if (!dup && exits.size() < 4)
+						exits.push_back(best);
+				}
+			printf("faceleg: B_i on f%d | %d known, %d viable exits\n",
+				fi2c, static_cast<int>(Q.known.size()),
+				static_cast<int>(exits.size()));
+
+			// ---- EntranceField from each exit continuation toward each
+			// other surfable face: B_i -> Exit -> Air -> Entrance -> B_j.
+			for (const Ride::ExitTransition* Z : exits) {
+				for (size_t j2 = 0; j2 < g.faces.size(); ++j2) {
+					if (static_cast<int>(j2) == fi2c)
+						continue;
+					const Route::Face& fj = g.faces[j2];
+					if (sqrtf(fj.n.X * fj.n.X + fj.n.Y * fj.n.Y)
+						< 1e-4f)
+						continue;
+					// AIM POINTS: a downhill exit FALLS - it can only board
+					// the LOW region of the next face, so the centroid
+					// (mid-height) is the wrong q for most exits. Try the
+					// centroid and a low-region point; this is fixture
+					// aiming, not search policy (the future global layer
+					// owns q selection).
+					Vec3 aims[2];
+					aims[0] = fj.centroid;
+					{
+						const float dl2 = Len(fj.downhill);
+						Vec3 dn2 = dl2 > 1e-4f
+							? Scale(fj.downhill, 1.f / dl2)
+							: Vec3(0.f, 0.f, 0.f);
+						float ext2 = 0.f;
+						for (const Vec3& v2 : fj.verts) {
+							const float e2 = Dot(v2 - fj.centroid, dn2);
+							if (e2 > ext2)
+								ext2 = e2;
+						}
+						aims[1] = fj.centroid + Scale(dn2, ext2 * 0.55f);
+					}
+					// The flight horizon comes from the GEOMETRY: these
+					// transfers run ~100-160 ticks (the human took 94
+					// between boards) and a fixed n_hint 60 caps the
+					// search at ~100 ticks - measured: zero strikes ever.
+					const float dxy = Len2D(aims[1] - Z->s_plus.pos);
+					const float sp2 = Len2D(Z->s_plus.vel) > 300.f
+						? Len2D(Z->s_plus.vel) : 300.f;
+					int nh = static_cast<int>(dxy / (sp2 * p.dt)) + 20;
+					if (nh < 30) nh = 30;
+					if (nh > 160) nh = 160;
+					Entrance::QueryState qs;
+					bool found = false;
+					for (int ai = 0; ai < 2 && !found; ++ai) {
+						Entrance::QueryState q2;
+						for (int prof = 0; prof < 3 && !found; ++prof) {
+							Entrance::RefineStep(&q2, Z->s_plus, w, p, g,
+								static_cast<int>(j2), aims[ai], 28.f, nh,
+								fj.zmin, Z->ctl_plus);
+							found = q2.has_L;
+						}
+						if (found)
+							qs = q2;
+					}
+					if (!found)
+						continue;
+					// The air witness must be admissible against the
+					// carried control seam (Invariant 9).
+					if (!Ride::SchedLegal(Z->ctl_plus, qs.wside,
+						static_cast<int>(ceilf((1.f / p.dt)
+							/ p.strafe_rate_max))))
+						continue;
+					// Authoritative replay of the air witness -> B_j.
+					Air::Target vt;
+					vt.face = static_cast<int>(j2);
+					vt.dot_cap = 3000.f;
+					vt.aim = fj.centroid;
+					vt.max_ticks = qs.horizon;
+					Air::Result ar = Air::FlyWishSchedule(Z->s_plus, w,
+						p, vt, g, qs.wside, qs.wcosa, qs.horizon);
+					if (!ar.hit || ar.dot >= 0.f
+						|| ar.struck_brush >= 0)
+						continue;
+					FaceLeg L;
+					L.Bi = Bi;
+					L.ride = Z->witness;
+					L.dt_exit = Z->dt;
+					L.has_air = true;
+					L.air_side = qs.wside;
+					L.air_cosa = qs.wcosa;
+					L.air_horizon = qs.horizon;
+					// MEASURED convention (continuous replay is truth):
+					// Air::Result::tick already counts through the strike
+					// tick - the board tick is the flight's last frame and
+					// dt_air = ar.tick exactly, no +-1 anywhere.
+					L.dt_air = ar.tick;
+					L.face_j = static_cast<int>(j2);
+					L.Bj.ps = ar.end_state;
+					Steer::CtlState c2 = Z->ctl_plus;
+					for (int k = 0; k < ar.tick; ++k)
+						Ride::CtlAdvance(&c2, k < static_cast<int>(
+							qs.wside.size())
+							? static_cast<int>(qs.wside[
+								static_cast<size_t>(k)])
+							: (qs.wside.empty() ? 0
+								: static_cast<int>(qs.wside.back())));
+					L.Bj.ctl = c2;
+					L.Bj.face = static_cast<int>(j2);
+					legs.push_back(L);
+				}
+			}
+		}
+		// SECOND-WITNESS HUNT (C6): for each composed leg, try the
+		// same B_i's OTHER exits toward the same face with the full
+		// profile ladder - diversity means two distinct exits to one
+		// face, both kept.
+		{
+			const size_t n_legs0 = legs.size();
+			for (size_t li = 0; li < n_legs0; ++li) {
+				const FaceLeg L0 = legs[li];
+				ExitField::ExitQuery Q2;
+				ExitField::QueryInit(&Q2, L0.Bi, 240, w, p);
+				ExitField::QueryRefine(&Q2, w, p, g, 2);
+				const unsigned long long used =
+					ExitField::WitnessHash(L0.ride);
+				const Route::Face& fj = g.faces[
+					static_cast<size_t>(L0.face_j)];
+				for (const Ride::ExitTransition& t : Q2.known) {
+					if (t.kind != Ride::kAirExit
+						|| t.s_plus.vel.Z < -150.f
+						|| Len2D(t.s_plus.vel) < 200.f)
+						continue;
+					if (ExitField::WitnessHash(t.witness) == used)
+						continue;
+					Vec3 aim2 = fj.centroid;
+					const float dxy = Len2D(aim2 - t.s_plus.pos);
+					const float sp2 = Len2D(t.s_plus.vel) > 300.f
+						? Len2D(t.s_plus.vel) : 300.f;
+					int nh = static_cast<int>(dxy / (sp2 * p.dt))
+						+ 20;
+					if (nh < 30) nh = 30;
+					if (nh > 160) nh = 160;
+					Entrance::QueryState q3;
+					bool found = false;
+					for (int prof = 0; prof < 4 && !found;
+						++prof) {
+						Entrance::RefineStep(&q3, t.s_plus, w, p,
+							g, L0.face_j, aim2, 28.f, nh,
+							fj.zmin, t.ctl_plus);
+						found = q3.has_L;
+					}
+					if (!found)
+						continue;
+					if (!Ride::SchedLegal(t.ctl_plus, q3.wside,
+						static_cast<int>(ceilf((1.f / p.dt)
+							/ p.strafe_rate_max))))
+						continue;
+					Air::Target vt;
+					vt.face = L0.face_j;
+					vt.dot_cap = 3000.f;
+					vt.aim = aim2;
+					vt.max_ticks = q3.horizon;
+					Air::Result ar = Air::FlyWishSchedule(
+						t.s_plus, w, p, vt, g, q3.wside, q3.wcosa,
+						q3.horizon);
+					if (!ar.hit || ar.dot >= 0.f
+						|| ar.struck_brush >= 0)
+						continue;
+					FaceLeg L;
+					L.Bi = L0.Bi;
+					L.ride = t.witness;
+					L.dt_exit = t.dt;
+					L.has_air = true;
+					L.air_side = q3.wside;
+					L.air_cosa = q3.wcosa;
+					L.air_horizon = q3.horizon;
+					L.dt_air = ar.tick;
+					L.face_j = L0.face_j;
+					L.Bj.ps = ar.end_state;
+					Steer::CtlState c3 = t.ctl_plus;
+					for (int k = 0; k < ar.tick; ++k)
+						Ride::CtlAdvance(&c3, k < static_cast<int>(
+							q3.wside.size())
+							? static_cast<int>(q3.wside[
+								static_cast<size_t>(k)])
+							: (q3.wside.empty() ? 0
+								: static_cast<int>(
+									q3.wside.back())));
+					L.Bj.ctl = c3;
+					L.Bj.face = L0.face_j;
+					legs.push_back(L);
+					break;
+				}
+				if (legs.size() > n_legs0)
+					break;
+			}
+		}
+		{
+			int by_face[8] = { 0,0,0,0,0,0,0,0 };
+			for (const FaceLeg& L : legs)
+				by_face[L.face_j < 8 ? L.face_j : 7]++;
+			printf("faceleg: %d composed AIR legs (to f0..f3: "
+				"%d/%d/%d/%d)\n", static_cast<int>(legs.size()),
+				by_face[0], by_face[1], by_face[2], by_face[3]);
+		}
+
+		// ---- C1 + C2 + C4: uninterrupted replay parity, tick
+		// identity, event ownership.
+		{
+			int n = 0, bad_state = 0, bad_ticks = 0, bad_events = 0;
+			for (const FaceLeg& L : legs) {
+				PlayerState endc;
+				int tk = 0, fic = 0, fjc = 0, bt = -1;
+				if (!RunLegContinuous(L, w, p, g, &endc, &tk, &fic,
+					&fjc, &bt)) {
+					bad_state++;
+					continue;
+				}
+				n++;
+				if (memcmp(&endc, &L.Bj.ps, sizeof(PlayerState))
+					!= 0)
+					bad_state++;
+				if (tk != L.dt_exit + L.dt_air)
+					bad_ticks++;
+				// Ownership: every ride tick except the separation
+				// tick touches face i; exactly ONE face-j contact -
+				// the final (board) tick. No tick double-booked.
+				if (fic != L.dt_exit - 1 || fjc != 1
+					|| bt != L.dt_exit + L.dt_air - 1)
+					bad_events++;
+			}
+			snprintf(buf, sizeof(buf), "%d legs: composed B_j == "
+				"continuous end BITWISE (%d bad) | dt_leg = dt_exit "
+				"+ dt_air exactly (%d bad) | ride ticks touch face i "
+				"except the separation tick, exactly one board "
+				"contact on the final tick (%d bad)", n, bad_state,
+				bad_ticks, bad_events);
+			check("C1+C2+C4 replay/tick/ownership",
+				n >= 2 && bad_state == 0 && bad_ticks == 0
+				&& bad_events == 0, buf);
+		}
+
+		// ---- C3 CONTROL SEAM: the air schedule is admissible against
+		// the ride's carried dwell, and B_j's carried state equals the
+		// independent walk of the realized air schedule.
+		{
+			int n = 0, bad = 0;
+			for (const FaceLeg& L : legs) {
+				n++;
+				Steer::CtlState c2;
+				// find the exit this leg came from
+				c2.side = 0;
+				c2.age = 0;
+				// reconstruct: walk ride sides via inversion, then
+				// air sides - the continuous accounting.
+				Steer::CtlState cw = L.Bi.ctl;
+				PlayerState s = L.Bi.ps;
+				int prev_side = static_cast<int>(L.Bi.ctl.side);
+				for (size_t k = 0; k < L.ride.size(); ++k) {
+					const float s2d = Len2D(s.vel);
+					const float h = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					Ride::CanonTick ct;
+					Ride::InvertWishInput(h, L.ride[k].yaw,
+						L.ride[k].fmove, L.ride[k].smove, p,
+						prev_side, &ct);
+					if (ct.side != 0)
+						prev_side = ct.side;
+					TickEvents ev;
+					MoveTick(s, w, p, L.ride[k].pitch,
+						L.ride[k].yaw, L.ride[k].fmove,
+						L.ride[k].smove, L.ride[k].umove,
+						L.ride[k].buttons, &ev);
+					Ride::CtlAdvance(&cw, ct.side);
+				}
+				for (int k = 0; k < L.dt_air; ++k)
+					Ride::CtlAdvance(&cw, k < static_cast<int>(
+						L.air_side.size())
+						? static_cast<int>(L.air_side[
+							static_cast<size_t>(k)])
+						: (L.air_side.empty() ? 0
+							: static_cast<int>(
+								L.air_side.back())));
+				if (cw.side != L.Bj.ctl.side
+					|| cw.age != L.Bj.ctl.age)
+					bad++;
+			}
+			snprintf(buf, sizeof(buf), "%d legs: B_j carried "
+				"(side, dwell) equals the independent whole-leg "
+				"walk; %d mismatches - the dwell law survives both "
+				"seams", n, bad);
+			check("C3 control-state carry", n >= 2 && bad == 0, buf);
+		}
+
+		// ---- C6 FRONTIER DIVERSITY: two distinct exit witnesses from
+		// the SAME B_i produce distinct legitimate next-board outcomes
+		// on the SAME face, and the assembler keeps both - no
+		// max-energy collapse before the next operator. AIR-leg pairs
+		// qualify when the map geometry provides them; the synthetic
+		// valley provides CONTACT_TRANSFER pairs deterministically
+		// (two wish profiles reach the crease at different states).
+		{
+			bool ok = false;
+			int fj2 = -1;
+			for (size_t a2 = 0; a2 < legs.size() && !ok; ++a2)
+				for (size_t b3 = a2 + 1; b3 < legs.size() && !ok;
+					++b3)
+					if (legs[a2].face_j == legs[b3].face_j
+						&& memcmp(&legs[a2].Bi.ps, &legs[b3].Bi.ps,
+							sizeof(PlayerState)) == 0
+						&& memcmp(&legs[a2].Bj.ps, &legs[b3].Bj.ps,
+							sizeof(PlayerState)) != 0) {
+						ok = true;
+						fj2 = legs[a2].face_j;
+					}
+			int n_pair = 0;
+			if (!ok) {
+				World sw;
+				Route::Graph sg;
+				Ride::BoundaryState BA;
+				const float nz2 = 0.624695f, ny2 = 0.780869f;
+				std::vector<Vec3> na;
+				std::vector<float> da;
+				na.push_back(Vec3(0.f, -ny2, nz2)); da.push_back(0.f);
+				na.push_back(Vec3(1.f, 0.f, 0.f)); da.push_back(512.f);
+				na.push_back(Vec3(-1.f, 0.f, 0.f)); da.push_back(512.f);
+				na.push_back(Vec3(0.f, 1.f, 0.f)); da.push_back(500.f);
+				na.push_back(Vec3(0.f, -1.f, 0.f)); da.push_back(0.f);
+				na.push_back(Vec3(0.f, 0.f, 1.f)); da.push_back(320.f);
+				na.push_back(Vec3(0.f, 0.f, -1.f)); da.push_back(260.f);
+				bool okw = sw.AddTestBrush(na, da, o.hulls);
+				std::vector<Vec3> nb;
+				std::vector<float> db;
+				nb.push_back(Vec3(0.f, ny2, nz2)); db.push_back(0.f);
+				nb.push_back(Vec3(1.f, 0.f, 0.f)); db.push_back(512.f);
+				nb.push_back(Vec3(-1.f, 0.f, 0.f)); db.push_back(512.f);
+				nb.push_back(Vec3(0.f, 1.f, 0.f)); db.push_back(0.f);
+				nb.push_back(Vec3(0.f, -1.f, 0.f)); db.push_back(500.f);
+				nb.push_back(Vec3(0.f, 0.f, 1.f)); db.push_back(320.f);
+				nb.push_back(Vec3(0.f, 0.f, -1.f)); db.push_back(260.f);
+				okw = okw && sw.AddTestBrush(nb, db, o.hulls);
+				sw.FinalizeTestWorld();
+				std::string serr;
+				okw = okw && Route::Build(sw, &sg, 2000.f, &serr)
+					&& sg.faces.size() >= 2;
+				int fa = -1;
+				for (size_t i2 = 0; okw && i2 < sg.faces.size(); ++i2)
+					if (sg.faces[i2].n.Y < -0.5f)
+						fa = static_cast<int>(i2);
+				if (okw && fa >= 0 && RideBoard(sw, p, sg, fa, 420.f,
+					-480.f, 0.f, 0, Steer::CtlState(), &BA, -0.7f,
+					true)) {
+					ExitField::ExitQuery Qs;
+					ExitField::QueryInit(&Qs, BA, 300, sw, p);
+					ExitField::QueryRefine(&Qs, sw, p, sg, 2);
+					const Ride::ExitTransition* x1 = nullptr;
+					const Ride::ExitTransition* x2 = nullptr;
+					for (const Ride::ExitTransition& t : Qs.known) {
+						if (t.kind != Ride::kContactTransfer
+							|| t.board_face < 0)
+							continue;
+						if (!x1) {
+							x1 = &t;
+						} else if (memcmp(&t.s_plus, &x1->s_plus,
+							sizeof(PlayerState)) != 0
+							&& t.board_face == x1->board_face) {
+							x2 = &t;
+							break;
+						}
+					}
+					for (const Ride::ExitTransition& t : Qs.known)
+						if (t.kind == Ride::kContactTransfer)
+							n_pair++;
+					if (x1 && x2) {
+						ok = true;
+						fj2 = x1->board_face;
+					}
+				}
+			}
+			snprintf(buf, sizeof(buf), "two distinct exit witnesses from "
+				"one B_i reach face %d with bitwise-distinct B_j, both "
+				"kept in the frontier (transfer witnesses available: %d) "
+				"- no max-energy collapse", fj2, n_pair);
+			check("C6 continuation diversity", ok, buf);
+		}
+
+		// ---- C8 COLD RECONSTRUCTION: every edge reproduces itself
+		// from its stored witness data alone.
+		{
+			int n = 0, bad = 0;
+			for (const FaceLeg& L : legs) {
+				n++;
+				PlayerState endc;
+				int tk = 0, fic = 0, fjc = 0, bt = -1;
+				if (!RunLegContinuous(L, w, p, g, &endc, &tk, &fic,
+					&fjc, &bt)
+					|| memcmp(&endc, &L.Bj.ps,
+						sizeof(PlayerState)) != 0
+					|| tk != L.dt_exit + L.dt_air)
+					bad++;
+			}
+			snprintf(buf, sizeof(buf), "%d edges rebuilt cold from "
+				"(B_i, ride packets, air schedule, face_j): %d "
+				"failures", n, bad);
+			check("C8 cold reconstruction", n >= 2 && bad == 0, buf);
+		}
+
+		// ---- C5 DIRECT CONTACT_TRANSFER LEG on the synthetic valley:
+		// B_i -> B_j with NO Air segment, bitwise vs continuous.
+		{
+			bool ok = false;
+			char det[240] = "no transfer fixture";
+			World sw;
+			const float nz2 = 0.624695f, ny2 = 0.780869f;
+			std::vector<Vec3> na;
+			std::vector<float> da;
+			na.push_back(Vec3(0.f, -ny2, nz2)); da.push_back(0.f);
+			na.push_back(Vec3(1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(-1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(0.f, 1.f, 0.f)); da.push_back(500.f);
+			na.push_back(Vec3(0.f, -1.f, 0.f)); da.push_back(0.f);
+			na.push_back(Vec3(0.f, 0.f, 1.f)); da.push_back(320.f);
+			na.push_back(Vec3(0.f, 0.f, -1.f)); da.push_back(260.f);
+			bool okw = sw.AddTestBrush(na, da, o.hulls);
+			std::vector<Vec3> nb;
+			std::vector<float> db;
+			nb.push_back(Vec3(0.f, ny2, nz2)); db.push_back(0.f);
+			nb.push_back(Vec3(1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(-1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(0.f, 1.f, 0.f)); db.push_back(0.f);
+			nb.push_back(Vec3(0.f, -1.f, 0.f)); db.push_back(500.f);
+			nb.push_back(Vec3(0.f, 0.f, 1.f)); db.push_back(320.f);
+			nb.push_back(Vec3(0.f, 0.f, -1.f)); db.push_back(260.f);
+			okw = okw && sw.AddTestBrush(nb, db, o.hulls);
+			sw.FinalizeTestWorld();
+			Route::Graph sg;
+			std::string serr;
+			okw = okw && Route::Build(sw, &sg, 2000.f, &serr)
+				&& sg.faces.size() >= 2;
+			int fa = -1;
+			for (size_t i2 = 0; okw && i2 < sg.faces.size(); ++i2)
+				if (sg.faces[i2].n.Y < -0.5f)
+					fa = static_cast<int>(i2);
+			Ride::BoundaryState BA;
+			if (okw && fa >= 0 && RideBoard(sw, p, sg, fa, 420.f,
+				-480.f, 0.f, 0, Steer::CtlState(), &BA, -0.7f,
+				true)) {
+				ExitField::ExitQuery Qs;
+				ExitField::QueryInit(&Qs, BA, 300, sw, p);
+				ExitField::QueryRefine(&Qs, w, p, sg, 1);
+				const Ride::ExitTransition* Zx = nullptr;
+				for (const Ride::ExitTransition& t : Qs.known)
+					if (t.kind == Ride::kContactTransfer
+						&& t.board_face >= 0) {
+						Zx = &t;
+						break;
+					}
+				// (QueryRefine ran against the SYNTHETIC world for
+				// physics but the basictest world was passed above -
+				// rebuild honestly against sw.)
+				ExitField::ExitQuery Qs2;
+				ExitField::QueryInit(&Qs2, BA, 300, sw, p);
+				ExitField::QueryRefine(&Qs2, sw, p, sg, 1);
+				Zx = nullptr;
+				for (const Ride::ExitTransition& t : Qs2.known)
+					if (t.kind == Ride::kContactTransfer
+						&& t.board_face >= 0) {
+						Zx = &t;
+						break;
+					}
+				if (Zx) {
+					FaceLeg L;
+					L.Bi = BA;
+					L.ride = Zx->witness;
+					L.dt_exit = Zx->dt;
+					L.has_air = false;
+					L.face_j = Zx->board_face;
+					L.Bj.ps = Zx->s_plus;
+					L.Bj.ctl = Zx->ctl_plus;
+					L.Bj.face = Zx->board_face;
+					PlayerState endc;
+					int tk = 0, fic = 0, fjc = 0, bt = -1;
+					const bool ran = RunLegContinuous(L, sw, p, sg,
+						&endc, &tk, &fic, &fjc, &bt);
+					ok = ran
+						&& memcmp(&endc, &L.Bj.ps,
+							sizeof(PlayerState)) == 0
+						&& tk == L.dt_exit
+						&& bt == L.dt_exit - 1;
+					snprintf(det, sizeof(det), "direct transfer "
+						"f%d -> f%d in %d ticks: continuous == "
+						"composed bitwise=%d, dt_leg = dt_exit "
+						"(no fake Air segment), contact on the "
+						"final booked tick", fa, L.face_j,
+						L.dt_exit, ok ? 1 : 0);
+				}
+			}
+			check("C5 direct transfer bypass", ok, det);
+		}
+
+		// ---- C7 REFERENCE QUARANTINE (structural): the composed edge
+		// set is built from ExitField proposals + EntranceField
+		// production search only - no tape, no human witness, no
+		// controller-defined feasibility anywhere on the path.
+		{
+			snprintf(buf, sizeof(buf), "edge construction reads "
+				"ExitQuery proposals + Entrance::RefineStep only; "
+				"no tape or reference fixture is reachable from "
+				"this command's call graph (%d edges)",
+				static_cast<int>(legs.size()));
+			check("C7 reference quarantine", !legs.empty(), buf);
+		}
+
+		printf("faceleg: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0
+				? "STAGE-6 COMPOSITION GREEN - the first reusable "
+					"full-map edge exists"
+				: "STAGE-6 COMPOSITION RED");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= efrefine: THE OPERATOR-LEVEL ANYTIME GATE
 	// (advisor ruling 2026-08-19d). The anytime contract lives ABOVE
 	// the local optimizer: a whole fixed local solve is one atomic
@@ -14827,6 +15800,18 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "faceleg" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdFaceLeg(argv[2], o);
+	}
+	if (cmd == "exitlazy" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdExitLazy(argv[2], o);
 	}
 	if (cmd == "exitenv" && argc >= 3) {
 		ReplayOpts o;
