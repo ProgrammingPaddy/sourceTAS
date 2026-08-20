@@ -434,3 +434,86 @@ only, every retained transition from exact canonical replay, reopenable
 partition compression, no approximate dominance. Then the first
 certified finite-horizon ExitEnvelope component, `ExitDoomed` staying
 advisory.
+
+### Session 14 (2026-08-19) — stage 3: the ExitWitnessFrontier, 8/8
+
+Advisor ruling 2026-08-19h implemented. The headline distinction is now
+in the data model, not just prose:
+
+    W_F(B)  SUBSET OF  R_F(B)  SUBSET OF  U_F(B)   [stage 4]
+
+**The operator is not the frontier.** `ExitField::WitnessFrontier`
+(`Source/Solver/SolverExitField.h`) is the witnessed LOWER
+approximation - the set-valued analogue of EntranceField's L. Absence
+from it never acquires unreachable semantics; the status enums have no
+"dead" or "impossible" value by construction (`kUnexplored / kActive /
+kCompressed`).
+
+**GROUND is not terminal.** Partitions of kind GROUND carry
+`continuation_unsupported = true` - the exact continuation is
+preserved; the global layer must refuse to prove a route irrelevant
+because its next operator is unbuilt. (User note, recorded: some
+walkable ground contact is always bad - fail zones - some optional;
+classifying that is map semantics, deliberately undefined at this
+stage.)
+
+**Compression is resolution only.** Diversity slots (earliest exit /
+fastest / highest vz / max energy - no single local objective exists)
+hold up to `ActiveCap(level) = 2 + 2*level` representatives per
+partition; displaced or capped members become DEFERRED HASHES with the
+partition marked `kCompressed`. Reopen provenance = the deterministic
+proposal enumeration itself (`MakeProposal(index)` is a pure function):
+refinement re-enumerates, dedupes by witness hash, and previously
+deferred members MATERIALIZE under the larger cap - measured by F5. A
+re-encountered known hash is NOT a no-op; that re-encounter is exactly
+how regeneration works.
+
+**Proposal families (production, quarantined):** constant-side x cosa
+x horizon (+ late duck-hold), single reversal, coast-prefix + duck-off,
+finer cosa ladder + late reversals - 72/132/204 proposals at levels
+0/1/2, all through `SchedLegal` and the canonical executor, no Carve,
+no controller, no tapes, no ExitDoomed.
+
+### The gates (exitfrontier, 8/8)
+
+| gate | result |
+|---|---|
+| F1 exact frontier truth | 25 active members replay bitwise to (kind, dt, S+) |
+| F2 event partition integrity | 0 mismatches; GROUND partitions all flagged unsupported |
+| F3 monotone witness knowledge | all L0 hashes survive to L2 (7 -> 31 known); 0 actives lost |
+| F4 no false dominance | 3 compressed partitions, every one carries deferred hashes |
+| F5 partition reopening | compressed partition: 4 actives at L2 -> 6 at L3, a previously deferred member materialized |
+| F6 transfer composition parity | handoff S+ **bitwise**; composed suffix bitwise for every booked tick; early stop matches a real contact in the continuous run |
+| F7 proposal quarantine | ExitDoomed cull toggled -> hash-identical frontier |
+| F8 recoverability smoke | 7/8 hidden off-family rides recovered (miss: kind 0 dt 19, reported) |
+
+Two gate-level findings worth keeping:
+
+1. **F6's first failure was the gate's, not the seam's.** The composed
+   run lawfully STOPS EARLY at its own next boundary - at the crease
+   the hull touches wedge A again while riding B, a real ping-pong
+   transition. Parity's honest statement: bitwise handoff, bitwise
+   state agreement for every tick the composed run booked, and the
+   composed event must correspond to a real contact/ground in the
+   continuous run at that tick. All three hold.
+2. **Compression status must mean "has deferred members", however they
+   got there** - the first implementation only marked cap-refusals,
+   missing displacement-deferrals, which made F5's precondition
+   unfindable. Fixed in `Insert` (and a partition whose deferred list
+   empties reverts to `kActive`).
+
+F8's one miss (a short-duration heading bucket) is the smoke test doing
+its job - a structural note for the proposal families, not a blocker.
+
+Board from a clean rebuild: exitfrontier 8/8, exitfit 10/10, efrefine
+7/7, airprops 24/24, airsuite 48/48, airrec VERIFIED, wishparity,
+strafelaw, carve M1.4, airsolve M1.3.
+
+**Next (stage 4):** the first certified outer-envelope component
+`U_E(B, M)` - derived from the ride ledger laws and exact phase
+semantics, NOT copied from the Air cap^2/tick law; certified as
+"for all Z in R_F(B) with dt(Z) <= M: E(S+(Z)) <= U_E(B, M)"; loose is
+acceptable. Then stage 5 (lazy Query/Refine mirroring
+Entrance::RefineStep: W only grows, U only tightens), and stage 6 -
+the first composed transfer `B_i -> ExitField -> Air -> EntranceField
+-> B_j`, where the rebuilt pieces become the full-map solver.

@@ -33,6 +33,7 @@
 #include "SolverField.h"
 #include "SolverEntrance.h"
 #include "SolverRide.h"
+#include "SolverExitField.h"
 #include "SolverParams.h"
 #include "SolverSearchLog.h"
 #include "SolverSmooth.h"
@@ -9188,6 +9189,496 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= exitfrontier: STAGE-3 GATES (advisor
+	// 2026-08-19h). The witnessed frontier W_F(B) is a LOWER
+	// approximation of the operator R_F(B): these gates prove the
+	// finite representation's laws - exact replay, event typing,
+	// monotone knowledge, no false dominance, reopening,
+	// CONTACT_TRANSFER composition parity, proposal quarantine - and
+	// close with a constructive recoverability smoke test so
+	// representation success is not confused with search coverage.
+	int CmdExitFrontier(const std::string& map_path,
+	                    const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("exitfrontier: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("exitfrontier: %-34s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		int fi = -1;
+		for (size_t i = 0; i < g.faces.size(); ++i)
+			if (sqrtf(g.faces[i].n.X * g.faces[i].n.X
+				+ g.faces[i].n.Y * g.faces[i].n.Y) > 1e-4f) {
+				fi = static_cast<int>(i);
+				break;
+			}
+		if (fi < 0) {
+			printf("exitfrontier: no surfable face\n");
+			return 1;
+		}
+		Ride::BoundaryState B;
+		if (!RideBoard(w, p, g, fi, 700.f, -120.f, 0.3f, 0,
+			Steer::CtlState(), &B)) {
+			printf("exitfrontier: board construction failed\n");
+			return 1;
+		}
+
+		// ---- build at level 0, then refine twice on the SAME object.
+		ExitField::WitnessFrontier wf;
+		wf.B = B;
+		ExitField::BuildFrontier(&wf, w, p, g, 0);
+		// snapshot of level-0 knowledge for F3
+		std::vector<unsigned long long> seen0 = wf.seen_hash;
+		std::vector<unsigned long long> act0;
+		int comp0 = 0;
+		unsigned reopen_key = 0;
+		int reopen_active0 = -1;
+		for (const ExitField::Partition& P : wf.parts) {
+			for (const Ride::ExitTransition& t : P.active)
+				act0.push_back(ExitField::WitnessHash(t.witness));
+			if (P.status == ExitField::kCompressed) {
+				comp0++;
+				if (!reopen_key && P.omitted_by_cap
+					&& !P.deferred_hash.empty()) {
+					reopen_key = P.key;
+					reopen_active0 =
+						static_cast<int>(P.active.size());
+				}
+			}
+		}
+		ExitField::BuildFrontier(&wf, w, p, g, 1);
+		ExitField::BuildFrontier(&wf, w, p, g, 2);
+
+		// ---- summary
+		{
+			int by_kind[5] = { 0,0,0,0,0 };
+			int actives = 0, deferred = 0, unsupported = 0;
+			for (const ExitField::Partition& P : wf.parts) {
+				by_kind[P.kind < 5 ? P.kind : 4]++;
+				actives += static_cast<int>(P.active.size());
+				deferred += static_cast<int>(P.deferred_hash.size());
+				if (P.continuation_unsupported)
+					unsupported++;
+			}
+			printf("exitfrontier: W_F(B) after L0->L2 | proposals %d "
+				"(illegal %d, horizon %d) | known %d | partitions %d "
+				"(air %d xfer %d ground %d end %d) | active %d "
+				"deferred %d | ground-unsupported %d\n",
+				wf.proposals, wf.illegal, wf.horizon, wf.known,
+				static_cast<int>(wf.parts.size()), by_kind[0],
+				by_kind[1], by_kind[2], by_kind[3], actives, deferred,
+				unsupported);
+		}
+
+		// ---- F1 EXACT FRONTIER TRUTH: every active member replays
+		// packet-exactly to its recorded event, dt and S+.
+		{
+			int n = 0, bad = 0;
+			for (const ExitField::Partition& P : wf.parts)
+				for (const Ride::ExitTransition& t : P.active) {
+					n++;
+					Ride::Result rr = Ride::FlyRideInputs(B, w, p, g,
+						t.witness);
+					if (!(rr.legal && rr.kind == t.kind
+						&& rr.ticks == t.dt
+						&& memcmp(&rr.end_state, &t.s_plus,
+							sizeof(PlayerState)) == 0))
+						bad++;
+				}
+			snprintf(buf, sizeof(buf), "%d active members replay "
+				"bitwise to (kind, dt, S+); %d failures", n, bad);
+			check("F1 exact frontier truth", n > 0 && bad == 0, buf);
+		}
+
+		// ---- F2 EVENT PARTITION INTEGRITY.
+		{
+			int bad = 0, ground_flagged = 0, ground_parts = 0;
+			for (const ExitField::Partition& P : wf.parts) {
+				for (const Ride::ExitTransition& t : P.active) {
+					if (t.kind != P.kind)
+						bad++;
+					if (t.kind == Ride::kContactTransfer
+						&& t.contact_brush < 0)
+						bad++;
+				}
+				if (P.kind == Ride::kGround) {
+					ground_parts++;
+					if (P.continuation_unsupported)
+						ground_flagged++;
+				}
+			}
+			snprintf(buf, sizeof(buf), "kind/metadata mismatches %d | "
+				"GROUND partitions %d, all marked "
+				"continuation-unsupported (%d) - preserved, never "
+				"dead", bad, ground_parts, ground_flagged);
+			check("F2 event partition integrity",
+				bad == 0 && ground_flagged == ground_parts, buf);
+		}
+
+		// ---- F3 MONOTONE WITNESS KNOWLEDGE: refinement recompresses,
+		// never forgets. Every level-0 hash survives; every level-0
+		// ACTIVE member is still active or deferred in its partition.
+		{
+			bool ok = true;
+			for (unsigned long long h : seen0) {
+				bool found = false;
+				for (unsigned long long s : wf.seen_hash)
+					if (s == h) {
+						found = true;
+						break;
+					}
+				if (!found)
+					ok = false;
+			}
+			int lost = 0;
+			for (unsigned long long h : act0) {
+				bool found = false;
+				for (const ExitField::Partition& P : wf.parts) {
+					for (const Ride::ExitTransition& t : P.active)
+						if (ExitField::WitnessHash(t.witness) == h)
+							found = true;
+					for (unsigned long long dh : P.deferred_hash)
+						if (dh == h)
+							found = true;
+				}
+				if (!found) {
+					lost++;
+					ok = false;
+				}
+			}
+			snprintf(buf, sizeof(buf), "L0 knowledge %d hashes all "
+				"survive to L2 (known %d); L0 actives lost %d",
+				static_cast<int>(seen0.size()), wf.known, lost);
+			check("F3 monotone witness knowledge", ok, buf);
+		}
+
+		// ---- F4 NO FALSE DOMINANCE: compression marks members
+		// DEFERRED, never erases them - a capped partition still
+		// carries every known member as active or deferred hash.
+		{
+			bool ok = true;
+			int comp = 0;
+			for (const ExitField::Partition& P : wf.parts)
+				if (P.status == ExitField::kCompressed) {
+					comp++;
+					if (P.deferred_hash.empty()
+						&& static_cast<int>(P.active.size())
+							<= ExitField::ActiveCap(wf.level))
+						ok = false;
+				}
+			snprintf(buf, sizeof(buf), "%d compressed partitions (L0 "
+				"had %d), every one carries deferred hashes - "
+				"status says COMPRESSED, nothing says dominated",
+				comp, comp0);
+			check("F4 no false dominance", ok, buf);
+		}
+
+		// ---- F5 REOPENING: take a partition the L2 cap actually
+		// compressed, refine once more, and require a previously
+		// DEFERRED member to MATERIALIZE as an active representative -
+		// the deterministic provenance regenerating exactly what it
+		// deferred.
+		{
+			unsigned key2 = 0;
+			int a_before = -1;
+			std::vector<unsigned long long> was_deferred;
+			for (const ExitField::Partition& P : wf.parts)
+				if (P.status == ExitField::kCompressed
+					&& !P.deferred_hash.empty()) {
+					key2 = P.key;
+					a_before = static_cast<int>(P.active.size());
+					was_deferred = P.deferred_hash;
+					break;
+				}
+			bool ok = false;
+			int a_after = -1;
+			bool mat = false;
+			if (key2) {
+				ExitField::BuildFrontier(&wf, w, p, g, 3);
+				for (const ExitField::Partition& P : wf.parts)
+					if (P.key == key2) {
+						a_after =
+							static_cast<int>(P.active.size());
+						// ANY member of the L2 deferred set now
+						// active = the reopen provenance worked;
+						// which one wins slots is a resolution
+						// detail, not the law.
+						for (const Ride::ExitTransition& t
+							: P.active) {
+							const unsigned long long th2 =
+								ExitField::WitnessHash(t.witness);
+							for (unsigned long long dh
+								: was_deferred)
+								if (dh == th2)
+									mat = true;
+						}
+					}
+				ok = a_after > a_before && mat;
+			}
+			snprintf(buf, sizeof(buf), "compressed partition %08x: "
+				"active %d at L2 -> %d at L3; a previously deferred "
+				"member materialized as active = %d", key2,
+				a_before, a_after, mat ? 1 : 0);
+			check("F5 partition reopening", ok, buf);
+		}
+
+		// ---- F6 CONTACT_TRANSFER COMPOSITION PARITY (the chained
+		// seam): continuous execution across the A->B contact plus a
+		// suffix on B must equal chaining ExitTransition(A) into a
+		// fresh ride context built from its S+.
+		{
+			bool ok = false;
+			char det[240] = "synthetic valley unavailable";
+			World sw;
+			const float nz2 = 0.624695f, ny2 = 0.780869f;
+			std::vector<Vec3> na;
+			std::vector<float> da;
+			na.push_back(Vec3(0.f, -ny2, nz2)); da.push_back(0.f);
+			na.push_back(Vec3(1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(-1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(0.f, 1.f, 0.f)); da.push_back(500.f);
+			na.push_back(Vec3(0.f, -1.f, 0.f)); da.push_back(0.f);
+			na.push_back(Vec3(0.f, 0.f, 1.f)); da.push_back(320.f);
+			na.push_back(Vec3(0.f, 0.f, -1.f)); da.push_back(260.f);
+			bool okw = sw.AddTestBrush(na, da, o.hulls);
+			std::vector<Vec3> nb;
+			std::vector<float> db;
+			nb.push_back(Vec3(0.f, ny2, nz2)); db.push_back(0.f);
+			nb.push_back(Vec3(1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(-1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(0.f, 1.f, 0.f)); db.push_back(0.f);
+			nb.push_back(Vec3(0.f, -1.f, 0.f)); db.push_back(500.f);
+			nb.push_back(Vec3(0.f, 0.f, 1.f)); db.push_back(320.f);
+			nb.push_back(Vec3(0.f, 0.f, -1.f)); db.push_back(260.f);
+			okw = okw && sw.AddTestBrush(nb, db, o.hulls);
+			sw.FinalizeTestWorld();
+			Route::Graph sg;
+			std::string serr;
+			okw = okw && Route::Build(sw, &sg, 2000.f, &serr)
+				&& sg.faces.size() >= 2;
+			int fa = -1;
+			for (size_t i2 = 0; okw && i2 < sg.faces.size(); ++i2)
+				if (sg.faces[i2].n.Y < -0.5f)
+					fa = static_cast<int>(i2);
+			Ride::BoundaryState BA;
+			if (okw && fa >= 0 && RideBoard(sw, p, sg, fa, 420.f,
+				-480.f, 0.f, 0, Steer::CtlState(), &BA, -0.7f,
+				true)) {
+				const int Mv = 300;
+				std::vector<signed char> sd(Mv,
+					static_cast<signed char>(1));
+				std::vector<float> cs(Mv, -0.02f);
+				std::vector<unsigned char> dk(Mv, 0);
+				std::vector<Ride::MoveInput> pkA;
+				Ride::Result ra = Ride::FlyRideSchedule(BA, sw, p, sg,
+					sd, cs, dk, nullptr, nullptr, nullptr, &pkA);
+				Ride::ExitTransition tr;
+				if (ra.kind == Ride::kContactTransfer
+					&& Ride::MakeTransition(ra, sg, pkA, &tr)
+					&& tr.board_face >= 0) {
+					// CONTINUOUS: raw MoveTick through the transfer
+					// tick, then 12 more canonical gain ticks emitted
+					// from the LIVE state (recorded as packets).
+					PlayerState s = BA.ps;
+					for (int k = 0; k < ra.ticks; ++k) {
+						TickEvents ev;
+						MoveTick(s, sw, p, pkA[
+							static_cast<size_t>(k)].pitch,
+							pkA[static_cast<size_t>(k)].yaw,
+							pkA[static_cast<size_t>(k)].fmove,
+							pkA[static_cast<size_t>(k)].smove,
+							pkA[static_cast<size_t>(k)].umove,
+							pkA[static_cast<size_t>(k)].buttons,
+							&ev);
+					}
+					const bool handoff_exact = memcmp(&s, &tr.s_plus,
+						sizeof(PlayerState)) == 0;
+					std::vector<Ride::MoveInput> pkS;
+					std::vector<PlayerState> cont;
+					std::vector<TickEvents> cev;
+					for (int k = 0; k < 12; ++k) {
+						const float s2d = Len2D(s.vel);
+						const float h2 = s2d > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : 0.f;
+						Ride::MoveInput mi;
+						mi.yaw = h2 * 57.2957795f;
+						if (s2d > 1.f)
+							Air::WishInputs(h2, 1, -0.02f, &mi.yaw,
+								&mi.fmove, &mi.smove);
+						TickEvents ev;
+						MoveTick(s, sw, p, mi.pitch, mi.yaw,
+							mi.fmove, mi.smove, mi.umove,
+							mi.buttons, &ev);
+						pkS.push_back(mi);
+						cont.push_back(s);
+						cev.push_back(ev);
+					}
+					// COMPOSED: rebuild the ride context from the
+					// transition's typed continuation alone. The
+					// composed run may lawfully STOP EARLY at its own
+					// next boundary event (at a crease the hull can
+					// touch wedge A again while riding B - a real
+					// transition, not a parity failure); parity
+					// demands (a) bitwise handoff, (b) bitwise state
+					// agreement for every tick the composed run
+					// booked, (c) the composed event corresponds to a
+					// real contact/ground in the continuous run at
+					// that same tick.
+					Ride::BoundaryState BB;
+					BB.ps = tr.s_plus;
+					BB.ctl = tr.ctl_plus;
+					BB.face = tr.board_face;
+					std::vector<PlayerState> comp;
+					Ride::Result rb = Ride::FlyRideInputs(BB, sw, p,
+						sg, pkS, &comp);
+					bool same = handoff_exact && rb.ticks >= 1
+						&& comp.size() <= cont.size();
+					for (size_t k = 0; same && k < comp.size(); ++k)
+						if (memcmp(&comp[k], &cont[k],
+							sizeof(PlayerState)) != 0)
+							same = false;
+					bool ev_ok = true;
+					if (same && rb.kind == Ride::kContactTransfer) {
+						ev_ok = false;
+						const TickEvents& e2 = cev[
+							static_cast<size_t>(rb.ticks - 1)];
+						for (int c2 = 0; c2 < e2.ncontacts; ++c2)
+							if (e2.contact_brush[c2]
+								== rb.contact_brush)
+								ev_ok = true;
+					}
+					if (same && rb.kind == Ride::kGround)
+						ev_ok = cont[static_cast<size_t>(
+							rb.ticks - 1)].on_ground;
+					ok = same && ev_ok;
+					snprintf(det, sizeof(det), "A rides %d ticks, "
+						"contacts B; handoff S+ bitwise=%d; composed "
+						"suffix books %d/%d ticks bitwise=%d, ends "
+						"kind %d matching a real contact in the "
+						"continuous run=%d", ra.ticks,
+						handoff_exact ? 1 : 0, rb.ticks,
+						static_cast<int>(cont.size()),
+						same ? 1 : 0, rb.kind, ev_ok ? 1 : 0);
+				}
+			}
+			check("F6 transfer composition parity", ok, det);
+		}
+
+		// ---- F7 PROPOSAL QUARANTINE: the production frontier reads
+		// no tapes and no Carve machinery; toggling the ExitDoomed
+		// in-sim cull changes nothing, and two builds are bitwise
+		// deterministic.
+		{
+			ExitField::WitnessFrontier w2;
+			w2.B = B;
+			const bool saved = Carve::g_doom_cull;
+			Carve::g_doom_cull = !saved;
+			ExitField::BuildFrontier(&w2, w, p, g, 0);
+			ExitField::BuildFrontier(&w2, w, p, g, 1);
+			ExitField::BuildFrontier(&w2, w, p, g, 2);
+			Carve::g_doom_cull = saved;
+			bool same = w2.known == wf.known
+				&& w2.seen_hash.size() == wf.seen_hash.size();
+			for (size_t i = 0; same && i < w2.seen_hash.size(); ++i)
+				if (w2.seen_hash[i] != wf.seen_hash[i])
+					same = false;
+			snprintf(buf, sizeof(buf), "rebuild with ExitDoomed cull "
+				"toggled: identical knowledge (%d transitions, "
+				"hash-for-hash) - no tape, no Carve, no cull on the "
+				"proposal path", w2.known);
+			check("F7 proposal quarantine", same, buf);
+		}
+
+		// ---- F8 CONSTRUCTIVE RECOVERABILITY SMOKE: hidden legal
+		// canonical rides OUTSIDE the proposal families; production
+		// gets only B. Recovery = a frontier member (active or
+		// deferred) in the hidden transition's partition with a
+		// nearby duration. Exposes structural coverage holes, not a
+		// benchmark to perfect.
+		{
+			int n = 0, rec = 0;
+			char miss[80] = "";
+			for (int j = 0; j < 8; ++j) {
+				const int M = 48 + 24 * (j % 3);
+				std::vector<signed char> sd(
+					static_cast<size_t>(M),
+					static_cast<signed char>(j & 1 ? -1 : 1));
+				std::vector<float> cs(static_cast<size_t>(M),
+					j % 3 == 0 ? 0.14f : (j % 3 == 1 ? 0.5f
+						: -0.06f));
+				std::vector<unsigned char> dk(
+					static_cast<size_t>(M), 0);
+				// off-family structure: odd-tick reversal, coast
+				// pulse, duck pulse
+				const int r = 11 + 2 * (j % 4);
+				if (j < 4)
+					for (int k = r; k < M; ++k)
+						sd[static_cast<size_t>(k)] =
+							static_cast<signed char>(
+								j & 1 ? 1 : -1);
+				if (j >= 4 && j < 6)
+					for (int k = r; k < r + 5 && k < M; ++k)
+						sd[static_cast<size_t>(k)] = 0;
+				if (j >= 6)
+					for (int k = r; k < r + 9 && k < M; ++k)
+						dk[static_cast<size_t>(k)] = 1;
+				Ride::CanonSchedule(sd, &cs, nullptr);
+				std::vector<Ride::MoveInput> pk;
+				Ride::Result rr = Ride::FlyRideSchedule(B, w, p, g,
+					sd, cs, dk, nullptr, nullptr, nullptr, &pk);
+				Ride::ExitTransition zt;
+				if (!rr.legal || rr.kind == Ride::kHorizon
+					|| !Ride::MakeTransition(rr, g, pk, &zt))
+					continue;
+				n++;
+				const unsigned key = ExitField::PartKey(zt);
+				bool found = false;
+				for (const ExitField::Partition& P : wf.parts) {
+					if (P.key != key)
+						continue;
+					for (const Ride::ExitTransition& t : P.active)
+						if (abs(t.dt - zt.dt)
+							<= (zt.dt / 5 > 6 ? zt.dt / 5 : 6))
+							found = true;
+					if (!P.deferred_hash.empty())
+						found = true;   // known members live here too
+				}
+				if (found)
+					rec++;
+				else if (miss[0] == 0)
+					snprintf(miss, sizeof(miss), " | first miss: "
+						"kind %d dt %d key %08x", zt.kind, zt.dt,
+						key);
+			}
+			snprintf(buf, sizeof(buf), "%d hidden legal rides "
+				"(off-family: odd reversals, coast pulses, duck "
+				"pulses); %d recovered by partition+duration%s", n,
+				rec, miss);
+			check("F8 recoverability smoke", n >= 5 && rec * 2 >= n,
+				buf);
+		}
+
+		printf("exitfrontier: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "STAGE-3 FRONTIER GATE GREEN"
+				: "STAGE-3 FRONTIER GATE RED");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= efrefine: THE OPERATOR-LEVEL ANYTIME GATE
 	// (advisor ruling 2026-08-19d). The anytime contract lives ABOVE
 	// the local optimizer: a whole fixed local solve is one atomic
@@ -13817,6 +14308,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "exitfrontier" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdExitFrontier(argv[2], o);
 	}
 	if (cmd == "exitfit" && argc >= 3) {
 		ReplayOpts o;

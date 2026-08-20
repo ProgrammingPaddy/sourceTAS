@@ -15,16 +15,17 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-19 (session 13b): ExitField stages 0-2 COMPLETE,
-stage 3 safe to begin.** The AIR_EXIT seam is closed under composition
-(the ride books the separation tick); witnesses are exact MoveInput
-packets replayed bitwise by `Ride::FlyRideInputs`; coast-through-dwell
-gated; CONTACT_TRANSFER / GROUND / END / HORIZON all exercised
-deterministically (transfer via the synthetic two-wedge valley -
-World::AddTestBrush, harness-only); `Ride::ExitTransition` +
-`MakeTransition` are the typed stage-3 records. exitfit 10/10; whole
-board green. NEXT: stage 3, the witness-backed event-partitioned
-continuation frontier. See `Docs/ExitFieldSpec.md` sessions 13 + 13b.
+**STATUS 2026-08-19 (session 14): ExitField STAGE 3 COMPLETE.** The
+witnessed frontier W_F(B) exists (`SolverExitField.h`): event-typed
+partitions, diversity slots, deferred-hash compression with
+deterministic reopen provenance, GROUND preserved as
+continuation-unsupported, proposals quarantined. `exitfrontier` 8/8 -
+including BITWISE transfer composition parity on the synthetic valley
+and a 7/8 recoverability smoke. NEXT: stage 4, the first certified
+outer-envelope component U_E(B, M) derived from RIDE physics; then
+stage 5 lazy Query/Refine; then stage 6, the first composed transfer
+B_i -> ExitField -> Air -> EntranceField -> B_j. See
+`Docs/ExitFieldSpec.md` session 14.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -359,6 +360,54 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-19 (session 14, STAGE 3: THE EXIT WITNESS FRONTIER - 8/8):
+  advisor ruling 2026-08-19h implemented. The distinction is in the
+  DATA MODEL: `ExitField::WitnessFrontier` (SolverExitField.h) is the
+  witnessed LOWER approximation W_F(B) of the operator R_F(B) - the
+  set-valued analogue of EntranceField's L; the status enums
+  (kUnexplored/kActive/kCompressed) have no "dead" or "impossible"
+  value BY CONSTRUCTION, and absence from the frontier never means
+  unreachable. GROUND partitions carry continuation_unsupported = true
+  (exact continuation preserved; the global layer may not prove a route
+  irrelevant because its next operator is unbuilt; fail-zone vs
+  optional ground contact is map semantics, deliberately undefined
+  now). COMPRESSION IS RESOLUTION ONLY: diversity slots (earliest /
+  fastest / highest-vz / max-energy; no single local objective) cap at
+  2+2*level per partition; displaced or capped members become DEFERRED
+  HASHES; reopen provenance is the deterministic proposal enumeration
+  itself (MakeProposal(index) is pure) - refinement re-enumerates,
+  dedupes by witness hash, and deferred members MATERIALIZE under the
+  larger cap. Proposal families (72/132/204 at L0/1/2): constant-side x
+  cosa x horizon + duck-hold, single reversal, coast-prefix + duck-off,
+  finer cosa + late reversals - all through SchedLegal + the canonical
+  executor; no Carve, no controller, no tapes, no ExitDoomed.
+  GATES (exitfrontier, 8/8): F1 25 active members replay BITWISE to
+  (kind, dt, S+); F2 event typing + GROUND flags; F3 monotone knowledge
+  (7 -> 31 known, nothing lost); F4 3 compressed partitions all
+  carrying deferred hashes - status says COMPRESSED, nothing says
+  dominated; F5 reopening (4 -> 6 actives, a previously deferred member
+  materialized); F6 TRANSFER COMPOSITION PARITY on the synthetic valley
+  - handoff S+ BITWISE, composed suffix bitwise for every booked tick,
+  and the composed run's lawful EARLY STOP (crease ping-pong: the hull
+  touches wedge A again while riding B - a real transition) matches a
+  real contact in the continuous run; F7 quarantine (ExitDoomed cull
+  toggled -> hash-identical frontier); F8 recoverability smoke 7/8
+  hidden off-family rides recovered (the miss - a short-duration
+  heading bucket - is the smoke test exposing a family hole, reported).
+  Gate-level findings: F6's first failure was the GATE's semantics, not
+  the seam's (early stop is lawful); compression status must mean "has
+  deferred members" however they got there (displacement-deferrals were
+  unmarked - fixed, with reversion to kActive when the deferred list
+  empties). Clean-rebuild board: exitfrontier 8/8, exitfit 10/10,
+  efrefine 7/7, airprops 24/24, airsuite 48/48, airrec VERIFIED,
+  wishparity, strafelaw, carve M1.4, airsolve M1.3. NEXT (stage 4): the
+  first certified outer-envelope component U_E(B, M) from the RIDE
+  ledger laws (not copied from the Air law), certified as "for all Z
+  with dt <= M: E(S+) <= U_E"; loose acceptable. Then stage 5 (lazy
+  Query/Refine: W grows, U tightens) and stage 6 - the first composed
+  transfer B_i -> ExitField -> Air -> EntranceField -> B_j. Full
+  detail: `Docs/ExitFieldSpec.md` session 14.
 
 - 2026-08-19 (session 13b, THE FIVE PRE-STAGE-3 CORRECTIONS - exitfit
   10/10): advisor directive 2026-08-19g implemented in full. (1) THE

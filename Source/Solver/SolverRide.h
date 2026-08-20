@@ -405,7 +405,17 @@ namespace Ride {
 	//                        route face resolved from (brush, plane),
 	//                        or -1 when the contact is not a graph face
 	//                        (still a valid explicit contact event)
-	//   kGround           -> terminal until a Ground operator exists
+	//   kGround           -> CONTINUATION UNIMPLEMENTED, never "dead":
+	//                        walkable-ground movement is a real part of
+	//                        map trajectories (the face-coverage work
+	//                        measured walkable-top GROUND contacts on
+	//                        ridden moments). The exact continuation is
+	//                        preserved; the global layer must refuse to
+	//                        prove a route irrelevant merely because
+	//                        this operator is not built yet. Whether a
+	//                        specific ground contact is a fail zone is
+	//                        map semantics, deliberately not defined
+	//                        here.
 	//   kEnd              -> the finish, terminal success
 	//   kHorizon          -> NO transition (MakeTransition refuses)
 	// The witness is the exact executable packet sequence - replaying
