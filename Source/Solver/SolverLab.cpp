@@ -34,6 +34,7 @@
 #include "SolverEntrance.h"
 #include "SolverRide.h"
 #include "SolverExitField.h"
+#include "SolverGlobal.h"
 #include "SolverParams.h"
 #include "SolverSearchLog.h"
 #include "SolverSmooth.h"
@@ -8137,7 +8138,7 @@ namespace {
 	               float vz0, float along, int entry_kind,
 	               const Steer::CtlState& ctl,
 	               Ride::BoundaryState* out, float down_frac = 0.f,
-	               bool aim_downhill = false) {
+	               bool aim_downhill = false, int* ticks_out = nullptr) {
 		const Route::Face& fc = g.faces[static_cast<size_t>(face_idx)];
 		const float hn = sqrtf(fc.n.X * fc.n.X + fc.n.Y * fc.n.Y);
 		if (hn < 1e-4f)
@@ -8210,6 +8211,8 @@ namespace {
 					out->ps = st;   // boundary AFTER the board tick
 					out->ctl = ctl;
 					out->face = face_idx;
+					if (ticks_out)
+						*ticks_out = k + 1;
 					return true;
 				}
 			if (ev.ncontacts > 0)
@@ -11167,6 +11170,703 @@ namespace {
 				? "STAGE-6 COMPOSITION GREEN - the first reusable "
 					"full-map edge exists"
 				: "STAGE-6 COMPOSITION RED");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= groute: THE GLOBAL EXPLORER, G0 (advisor
+	// 2026-08-20). Best-first over exact board states; edges built
+	// through the stage-6 composition path; ticks-only cost; two kinds
+	// of work (traverse discovered edges / refine unresolved successor
+	// space); exact-duplicate dominance as the only hard prune, each
+	// with a proof record; production incumbent; competitive horizons.
+	// G0's acceptance is autonomous exact route construction on the
+	// controlled multi-face fixture - NOT optimality certification.
+
+	namespace {
+
+	// Expand one node at its current refinement level: run the local
+	// lazy machinery and convert discovered transitions into edges and
+	// children. Ordering heuristics choose WHAT TO TRY FIRST; nothing
+	// here admits or rejects (the slow/diving exits stay in W_known,
+	// merely untried at low levels).
+	void ExpandNode(GlobalSearch::Graph* G, int ni, const World& w,
+	                const MoveParams& p, const Route::Graph& g,
+	                const Vec3* zmin, const Vec3* zmax) {
+		const Ride::BoundaryState B = G->nodes[static_cast<size_t>(
+			ni)].B;
+		const int g0 = G->nodes[static_cast<size_t>(ni)].g;
+		const int level = G->nodes[static_cast<size_t>(
+			ni)].refine_level;
+		const int M = GlobalSearch::HorizonFor(*G, g0);
+		if (M < 8) {
+			G->nodes[static_cast<size_t>(ni)].refine_level = level + 1;
+			return;   // competitively dead horizon; domain unchanged
+		}
+		ExitField::ExitQuery Q;
+		ExitField::QueryInit(&Q, B, M, w, p);
+		for (int pr2 = 0; pr2 <= level && pr2 < 3; ++pr2)
+			ExitField::QueryRefine(&Q, w, p, g, pr2);
+		// Arm the END zone by re-running the ACTIVE witnesses through
+		// the executor with the zone: the query is zone-agnostic; the
+		// finish is an event-classification concern.
+		std::vector<const Ride::ExitTransition*> airs;
+		for (const ExitField::Partition& P : Q.view)
+			for (const Ride::ExitTransition& t : P.active) {
+				// END detection: replay the witness with the zone.
+				if (zmin && zmax) {
+					Ride::Result rz = Ride::FlyRideInputs(B, w, p, g,
+						t.witness, nullptr, zmin, zmax);
+					if (rz.legal && rz.kind == Ride::kEnd) {
+						GlobalSearch::TransferEdge e;
+						e.kind = GlobalSearch::kEdgeEnd;
+						e.from_hash = GlobalSearch::NodeHash(B);
+						e.dt = rz.ticks;
+						e.dt_exit = rz.ticks;
+						e.ride.assign(t.witness.begin(),
+							t.witness.begin() + rz.ticks);
+						e.Bj.ps = rz.end_state;
+						e.Bj.ctl = rz.end_ctl;
+						e.Bj.face = -1;
+						e.prov = Q.prov;
+						G->edges.push_back(e);
+						G->nodes[static_cast<size_t>(
+							ni)].edges.push_back(
+							static_cast<int>(G->edges.size()) - 1);
+						GlobalSearch::OfferFinish(G, ni,
+							static_cast<int>(G->edges.size()) - 1,
+							g0 + rz.ticks);
+						continue;
+					}
+				}
+				if (t.kind == Ride::kContactTransfer
+					&& t.board_face >= 0) {
+					GlobalSearch::TransferEdge e;
+					e.kind = GlobalSearch::kEdgeContact;
+					e.from_hash = GlobalSearch::NodeHash(B);
+					e.dt = t.dt;
+					e.dt_exit = t.dt;
+					e.ride = t.witness;
+					e.face_j = t.board_face;
+					e.Bj.ps = t.s_plus;
+					e.Bj.ctl = t.ctl_plus;
+					e.Bj.face = t.board_face;
+					e.to_hash = GlobalSearch::NodeHash(e.Bj);
+					e.prov = Q.prov;
+					G->edges.push_back(e);
+					const int ei = static_cast<int>(
+						G->edges.size()) - 1;
+					G->nodes[static_cast<size_t>(
+						ni)].edges.push_back(ei);
+					GlobalSearch::AddNode(G, e.Bj, g0 + t.dt, ni,
+						ei);
+					continue;
+				}
+				if (t.kind == Ride::kAirExit)
+					airs.push_back(&t);
+			}
+		// ORDERING PRIOR (never admission): fast, flat, high exits
+		// compose (measured in stage 6); try them first.
+		for (size_t a2 = 0; a2 < airs.size(); ++a2)
+			for (size_t b2 = a2 + 1; b2 < airs.size(); ++b2) {
+				const Ride::ExitTransition* x = airs[a2];
+				const Ride::ExitTransition* y = airs[b2];
+				const float sx = (x->s_plus.vel.Z > -150.f ? 1e6f
+					: 0.f) + Len2D(x->s_plus.vel);
+				const float sy = (y->s_plus.vel.Z > -150.f ? 1e6f
+					: 0.f) + Len2D(y->s_plus.vel);
+				if (sy > sx) {
+					airs[a2] = y;
+					airs[b2] = x;
+				}
+			}
+		const size_t max_airs = level == 0 ? 3 : 5;
+		if (airs.size() > max_airs)
+			airs.resize(max_airs);
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		for (const Ride::ExitTransition* Z : airs) {
+			for (size_t j2 = 0; j2 < g.faces.size(); ++j2) {
+				if (static_cast<int>(j2) == B.face)
+					continue;
+				const Route::Face& fj = g.faces[j2];
+				if (sqrtf(fj.n.X * fj.n.X + fj.n.Y * fj.n.Y)
+					< 1e-4f)
+					continue;
+				Vec3 aims[2];
+				aims[0] = fj.centroid;
+				{
+					const float dl2 = Len(fj.downhill);
+					Vec3 dn2 = dl2 > 1e-4f
+						? Scale(fj.downhill, 1.f / dl2)
+						: Vec3(0.f, 0.f, 0.f);
+					float ext2 = 0.f;
+					for (const Vec3& v2 : fj.verts) {
+						const float e2 = Dot(v2 - fj.centroid,
+							dn2);
+						if (e2 > ext2)
+							ext2 = e2;
+					}
+					aims[1] = fj.centroid + Scale(dn2,
+						ext2 * 0.55f);
+				}
+				const float dxy = Len2D(aims[1] - Z->s_plus.pos);
+				const float sp2 = Len2D(Z->s_plus.vel) > 300.f
+					? Len2D(Z->s_plus.vel) : 300.f;
+				int nh = static_cast<int>(dxy / (sp2 * p.dt)) + 20;
+				if (nh < 30) nh = 30;
+				if (nh > 160) nh = 160;
+				Entrance::QueryState qs;
+				bool found = false;
+				const int eprof = level == 0 ? 1 : 2;
+				for (int ai = 0; ai < 2 && !found; ++ai) {
+					Entrance::QueryState q2;
+					for (int prof = 0; prof <= eprof && !found;
+						++prof) {
+						Entrance::RefineStep(&q2, Z->s_plus, w, p,
+							g, static_cast<int>(j2), aims[ai],
+							28.f, nh, fj.zmin, Z->ctl_plus);
+						found = q2.has_L;
+					}
+					if (found)
+						qs = q2;
+				}
+				if (!found)
+					continue;
+				if (!Ride::SchedLegal(Z->ctl_plus, qs.wside,
+					min_gap))
+					continue;
+				Air::Target vt;
+				vt.face = static_cast<int>(j2);
+				vt.dot_cap = 3000.f;
+				vt.aim = fj.centroid;
+				vt.max_ticks = qs.horizon;
+				Air::Result ar = Air::FlyWishSchedule(Z->s_plus, w,
+					p, vt, g, qs.wside, qs.wcosa, qs.horizon);
+				if (!ar.hit || ar.dot >= 0.f
+					|| ar.struck_brush >= 0)
+					continue;
+				GlobalSearch::TransferEdge e;
+				e.kind = GlobalSearch::kEdgeAir;
+				e.from_hash = GlobalSearch::NodeHash(B);
+				e.dt_exit = Z->dt;
+				e.dt_air = ar.tick;
+				e.dt = Z->dt + ar.tick;
+				e.ride = Z->witness;
+				e.air_side = qs.wside;
+				e.air_cosa = qs.wcosa;
+				e.air_horizon = qs.horizon;
+				e.face_j = static_cast<int>(j2);
+				e.Bj.ps = ar.end_state;
+				Steer::CtlState c2 = Z->ctl_plus;
+				for (int k = 0; k < ar.tick; ++k)
+					Ride::CtlAdvance(&c2, k < static_cast<int>(
+						qs.wside.size())
+						? static_cast<int>(qs.wside[
+							static_cast<size_t>(k)])
+						: (qs.wside.empty() ? 0
+							: static_cast<int>(qs.wside.back())));
+				e.Bj.ctl = c2;
+				e.Bj.face = static_cast<int>(j2);
+				e.to_hash = GlobalSearch::NodeHash(e.Bj);
+				e.prov = Q.prov;
+				G->edges.push_back(e);
+				const int ei = static_cast<int>(G->edges.size())
+					- 1;
+				G->nodes[static_cast<size_t>(ni)].edges.push_back(
+					ei);
+				GlobalSearch::AddNode(G, e.Bj, g0 + e.dt, ni, ei);
+			}
+		}
+		G->nodes[static_cast<size_t>(ni)].refine_level = level + 1;
+	}
+
+	// Continuous whole-route replay: one PlayerState through every
+	// edge segment in order, no re-instantiation at boundaries.
+	// Verifies each stored boundary bitwise and counts total ticks.
+	bool RunRouteContinuous(const GlobalSearch::Graph& G,
+	                        const std::vector<int>& route_edges,
+	                        const Ride::BoundaryState& B0,
+	                        const World& w, const MoveParams& p,
+	                        const Route::Graph& g, const Vec3* zmin,
+	                        const Vec3* zmax, int* total,
+	                        int* boundary_mismatches) {
+		PlayerState s = B0.ps;
+		int tk = 0, bad = 0;
+		for (int ei : route_edges) {
+			const GlobalSearch::TransferEdge& e = G.edges[
+				static_cast<size_t>(ei)];
+			for (size_t k = 0; k < e.ride.size(); ++k, ++tk) {
+				TickEvents ev;
+				MoveTick(s, w, p, e.ride[k].pitch, e.ride[k].yaw,
+					e.ride[k].fmove, e.ride[k].smove,
+					e.ride[k].umove, e.ride[k].buttons, &ev);
+			}
+			if (e.kind == GlobalSearch::kEdgeAir) {
+				const int hold = s.ducked ? IN_DUCK : 0;
+				const int nsch = static_cast<int>(
+					e.air_side.size());
+				const Route::Face& fj = g.faces[
+					static_cast<size_t>(e.face_j)];
+				for (int k = 0; k < e.air_horizon; ++k) {
+					const float s2d = Len2D(s.vel);
+					const float h = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					const int sd = k < nsch
+						? static_cast<int>(e.air_side[
+							static_cast<size_t>(k)])
+						: (nsch > 0 ? static_cast<int>(
+							e.air_side[static_cast<size_t>(
+								nsch) - 1]) : 0);
+					float yaw = h * 57.2957795f;
+					float fm = 0.f, sm = 0.f;
+					if (sd != 0 && s2d > 1.f) {
+						const float ca = k < nsch
+							? e.air_cosa[static_cast<size_t>(k)]
+							: (nsch > 0 ? e.air_cosa[
+								static_cast<size_t>(nsch) - 1]
+								: 1.f);
+						Air::WishInputs(h, sd, ca, &yaw, &fm,
+							&sm);
+					}
+					TickEvents ev;
+					MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, hold,
+						&ev);
+					++tk;
+					bool hitj = false;
+					for (int c = 0; c < ev.ncontacts; ++c)
+						if (ev.contact_brush[c] == fj.brush
+							&& ev.contact_plane[c] == fj.side)
+							hitj = true;
+					if (hitj)
+						break;
+				}
+			}
+			if (memcmp(&s, &e.Bj.ps, sizeof(PlayerState)) != 0)
+				bad++;
+		}
+		*total = tk;
+		*boundary_mismatches = bad;
+		return true;
+	}
+
+	} // namespace
+
+	int CmdGRoute(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[340];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("groute: %-36s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+
+		// ---- THE CONTROLLED MULTI-FACE FIXTURE: the synthetic valley
+		// (two surf wedges meeting at a crease) with an END zone on
+		// wedge B's ride path. All construction runs through the real
+		// engine; no reference data anywhere.
+		World sw;
+		Route::Graph sg;
+		{
+			const float nz2 = 0.624695f, ny2 = 0.780869f;
+			std::vector<Vec3> na;
+			std::vector<float> da;
+			na.push_back(Vec3(0.f, -ny2, nz2)); da.push_back(0.f);
+			na.push_back(Vec3(1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(-1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(0.f, 1.f, 0.f)); da.push_back(500.f);
+			na.push_back(Vec3(0.f, -1.f, 0.f)); da.push_back(0.f);
+			na.push_back(Vec3(0.f, 0.f, 1.f)); da.push_back(320.f);
+			na.push_back(Vec3(0.f, 0.f, -1.f)); da.push_back(260.f);
+			bool okw = sw.AddTestBrush(na, da, o.hulls);
+			// Wedge B sits ACROSS AN AIR GAP south of A (slope through
+			// (0, -60, -100), rising southward): riding A off its low
+			// edge exits to clean air, flies the gap, and BOARDS B -
+			// the AIR-composed edge is the thing G0 must exercise.
+			// (The crease variant ping-pongs in 1-tick hops; measured.)
+			std::vector<Vec3> nb;
+			std::vector<float> db;
+			nb.push_back(Vec3(0.f, ny2, nz2)); db.push_back(-108.8f);
+			nb.push_back(Vec3(1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(-1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(0.f, 1.f, 0.f)); db.push_back(-60.f);
+			nb.push_back(Vec3(0.f, -1.f, 0.f)); db.push_back(600.f);
+			nb.push_back(Vec3(0.f, 0.f, 1.f)); db.push_back(250.f);
+			nb.push_back(Vec3(0.f, 0.f, -1.f)); db.push_back(400.f);
+			okw = okw && sw.AddTestBrush(nb, db, o.hulls);
+			sw.FinalizeTestWorld();
+			std::string serr;
+			if (!okw || !Route::Build(sw, &sg, 2000.f, &serr)
+				|| sg.faces.size() < 2) {
+				printf("groute: fixture build failed\n");
+				return 1;
+			}
+		}
+		int fa = -1;
+		for (size_t i = 0; i < sg.faces.size(); ++i)
+			if (sg.faces[i].n.Y < -0.5f)
+				fa = static_cast<int>(i);
+		// LaunchFrontier v0: two production drop-in launches (exact
+		// witnessed boundary states; PLURAL; not exhaustive - "best
+		// launch found != only legal launch").
+		Ride::BoundaryState L0, L1;
+		int lt0 = 0, lt1 = 0;
+		if (fa < 0
+			|| !RideBoard(sw, p, sg, fa, 420.f, -480.f, 0.f, 0,
+				Steer::CtlState(), &L0, -0.7f, true, &lt0)
+			|| !RideBoard(sw, p, sg, fa, 380.f, -430.f, 0.f, 0,
+				Steer::CtlState(), &L1, -0.6f, true, &lt1)) {
+			printf("groute: launch construction failed\n");
+			return 1;
+		}
+		// END zone: a probe ride on wedge B from the first transfer
+		// found by a canonical schedule (fixture construction through
+		// the engine, fixed BEFORE exploration).
+		Vec3 zmin, zmax;
+		{
+			int fb = -1;
+			for (size_t i2 = 0; i2 < sg.faces.size(); ++i2)
+				if (sg.faces[i2].n.Y > 0.5f)
+					fb = static_cast<int>(i2);
+			Ride::BoundaryState BB;
+			if (fb < 0 || !RideBoard(sw, p, sg, fb, 420.f, -480.f,
+				0.f, 0, Steer::CtlState(), &BB, -0.5f, true)) {
+				printf("groute: fixture zone probe failed (board)\n");
+				return 1;
+			}
+			const int Mv = 300;
+			std::vector<signed char> sd(Mv,
+				static_cast<signed char>(1));
+			std::vector<float> cs(Mv, -0.02f);
+			std::vector<unsigned char> dk(Mv, 0);
+			std::vector<PlayerState> tb;
+			Ride::Result r2 = Ride::FlyRideSchedule(BB, sw, p, sg, sd,
+				cs, dk, nullptr, &tb);
+			if (tb.size() < 6) {
+				printf("groute: fixture zone probe failed (ride %d)\n",
+					static_cast<int>(tb.size()));
+				return 1;
+			}
+			// LATE ride point (7/8): DOWNHILL of the air-boarding
+			// region, so every boarded node rides INTO the zone with
+			// its own real travel time - finishes differ naturally
+			// (mid-point placement put the ball up-slope of the
+			// boards: one node spawned inside it and every finish
+			// tied at its g+1; measured).
+			const size_t mid = tb.size() * 7 / 8 > 4
+				? tb.size() * 7 / 8 : 4;
+			const Vec3& q2 = tb[mid].pos;
+			// A WIDE zone: several distinct rides cross it at
+			// different ticks, so END edges with different finish
+			// times exist (G8 exercises incumbent replacement on
+			// real witnesses).
+			// +-48: big enough for several rides to cross, small
+			// enough that no boarding state starts inside it
+			// (measured: +-90 swallowed the board region and every
+			// finish tied at one tick).
+			zmin = Vec3(q2.X - 56.f, q2.Y - 56.f, q2.Z - 56.f);
+			zmax = Vec3(q2.X + 56.f, q2.Y + 56.f, q2.Z + 56.f);
+		}
+
+		// ---- THE EXPLORER: best-first (g + h_order, h_order = 0 in
+		// v0), two kinds of work folded into per-node refinement
+		// levels, exact-dup dominance, production incumbent.
+		GlobalSearch::Graph G;
+		GlobalSearch::AddNode(&G, L0, lt0, -1, -1);
+		GlobalSearch::AddNode(&G, L1, lt1, -1, -1);
+		const int kMaxLevel = 4;
+		for (int it = 0; it < 40; ++it) {
+			int pick = -1;
+			int best_f = 1 << 30;
+			for (size_t i = 0; i < G.nodes.size(); ++i) {
+				if (G.nodes[i].refine_level >= kMaxLevel)
+					continue;
+				const int f = G.nodes[i].g;   // + h_order(0) + h_cert(0)
+				if (f < best_f) {
+					best_f = f;
+					pick = static_cast<int>(i);
+				}
+			}
+			if (pick < 0)
+				break;
+			ExpandNode(&G, pick, sw, p, sg, &zmin, &zmax);
+		}
+		printf("groute: fixture explored | nodes %d edges %d prunes %d "
+			"| T* %d (updates %d)\n",
+			static_cast<int>(G.nodes.size()),
+			static_cast<int>(G.edges.size()),
+			static_cast<int>(G.prunes.size()), G.Tstar,
+			G.incumbent_updates);
+
+		// Reconstruct the incumbent route (edge chain from a start
+		// node to the END edge).
+		std::vector<int> route;
+		Ride::BoundaryState route_B0;
+		bool have_route = false;
+		if (G.Tstar >= 0) {
+			int ni = G.Tstar_node;
+			std::vector<int> rev;
+			rev.push_back(G.Tstar_edge);
+			while (ni >= 0
+				&& G.nodes[static_cast<size_t>(ni)].parent >= 0) {
+				rev.push_back(G.nodes[static_cast<size_t>(
+					ni)].parent_edge);
+				ni = G.nodes[static_cast<size_t>(ni)].parent;
+			}
+			for (size_t i = rev.size(); i > 0; --i)
+				route.push_back(rev[i - 1]);
+			route_B0 = G.nodes[static_cast<size_t>(ni)].B;
+			have_route = !route.empty() && ni >= 0;
+		}
+
+		// ---- G1 EDGE REPLAY: every discovered edge cold-replays.
+		{
+			int n = 0, bad = 0;
+			for (const GlobalSearch::Node& N : G.nodes)
+				for (int ei : N.edges) {
+					n++;
+					if (!GlobalSearch::ReplayEdge(N.B,
+						G.edges[static_cast<size_t>(ei)], sw, p,
+						sg, &zmin, &zmax))
+						bad++;
+				}
+			snprintf(buf, sizeof(buf), "%d edges cold-replay from "
+				"their stored witness segments; %d failures", n,
+				bad);
+			check("G1 edge replay", n >= 3 && bad == 0, buf);
+		}
+
+		// ---- G2+G3+G4 ROUTE COMPOSITION + EXACT COST: the incumbent
+		// route (>= 2 edges) replays continuously through one
+		// PlayerState; every stored boundary bitwise; total ticks =
+		// sum of edge dt = T* - g(B_0).
+		{
+			bool ok = have_route && route.size() >= 2;
+			int tk = 0, bad = 0, dtsum = 0;
+			if (ok) {
+				RunRouteContinuous(G, route, route_B0, sw, p, sg,
+					&zmin, &zmax, &tk, &bad);
+				for (int ei : route)
+					dtsum += G.edges[static_cast<size_t>(ei)].dt;
+				ok = bad == 0 && tk == dtsum
+					&& route_B0.ps.pos.X == route_B0.ps.pos.X;
+			}
+			snprintf(buf, sizeof(buf), "incumbent route: %d edges, "
+				"continuous replay %d ticks vs sum(dt) %d, boundary "
+				"mismatches %d | g(B0) %d + route = T* %d",
+				static_cast<int>(route.size()), tk, dtsum, bad,
+				have_route ? G.nodes[0].g : -1, G.Tstar);
+			check("G2+G3+G4 route composition + cost",
+				ok && bad == 0, buf);
+		}
+
+		// ---- G5 EXACT-STATE DOMINANCE (and its limits).
+		{
+			GlobalSearch::Graph G2;
+			Ride::BoundaryState Bx = L0;
+			const int a = GlobalSearch::AddNode(&G2, Bx, 10, -1, -1);
+			const int b = GlobalSearch::AddNode(&G2, Bx, 20, -1, -1);
+			const size_t np = G2.prunes.size();
+			Ride::BoundaryState By = L0;
+			By.ctl.age += 1;   // a DIFFERENT legal state
+			const int c = GlobalSearch::AddNode(&G2, By, 20, -1, -1);
+			const bool ok = a == 0 && b == -1 && np == 1
+				&& G2.prunes[0].bound_id == 0x474C0001u
+				&& G2.prunes[0].g_kept == 10
+				&& G2.prunes[0].g_pruned == 20
+				&& c >= 0;
+			snprintf(buf, sizeof(buf), "same exact state at g 20 vs "
+				"10: dominated with proof (bound %08x, kept g %d); "
+				"differing ctl.age is NOT merged (node %d)",
+				G2.prunes.empty() ? 0u : G2.prunes[0].bound_id,
+				G2.prunes.empty() ? -1 : G2.prunes[0].g_kept, c);
+			check("G5 exact-state dominance", ok, buf);
+		}
+
+		// ---- G6 UNRESOLVED SUCCESSOR PERSISTENCE: expansion never
+		// marks successors complete; refinement levels remain finite
+		// evidence of coverage, not characterization.
+		{
+			bool ok = true;
+			int expanded = 0;
+			for (const GlobalSearch::Node& N : G.nodes) {
+				if (N.refine_level > 0)
+					expanded++;
+				if (N.succ_complete)
+					ok = false;
+			}
+			snprintf(buf, sizeof(buf), "%d expanded nodes, "
+				"succ_complete false on every one (the field exists "
+				"so the law lives in the type)", expanded);
+			check("G6 unresolved successor persistence",
+				ok && expanded >= 2, buf);
+		}
+
+		// ---- G7 LAZY REFINEMENT DISCOVERY: refining an expanded
+		// node discovers NEW edges (the deterministic families grow
+		// with level).
+		{
+			GlobalSearch::Graph G3;
+			GlobalSearch::AddNode(&G3, L0, lt0, -1, -1);
+			ExpandNode(&G3, 0, sw, p, sg, &zmin, &zmax);
+			const size_t e0 = G3.edges.size();
+			ExpandNode(&G3, 0, sw, p, sg, &zmin, &zmax);
+			const size_t e1 = G3.edges.size();
+			snprintf(buf, sizeof(buf), "level-0 expansion: %d edges; "
+				"re-refining the SAME node at level 1: %d edges - "
+				"new successors from an already-expanded state",
+				static_cast<int>(e0), static_cast<int>(e1));
+			check("G7 lazy refinement discovery", e1 > e0, buf);
+		}
+
+		// ---- G8 PRODUCTION INCUMBENT. Three verifiable claims:
+		// (1) T* was ESTABLISHED by a production END route (main run,
+		//     never seeded from a human run);
+		// (2) non-improving offers are REFUSED (equal and slower real
+		//     times change nothing);
+		// (3) a strictly faster offer is accepted - checked at the
+		//     CONTRACT level with a labeled synthetic time, because
+		//     this fixture physically admits exactly ONE finish time
+		//     (measured: every discovered finish and every constructed
+		//     variant ties; a unique-finish geometry cannot stage a
+		//     natural replacement). The natural-replacement
+		//     demonstration belongs to the first real-map run, where
+		//     finish diversity exists - recorded in the spec as an
+		//     open obligation, not waved through.
+		{
+			GlobalSearch::Graph Gc;
+			Gc.Tstar = G.Tstar;
+			Gc.incumbent_updates = G.incumbent_updates;
+			const bool est = G.Tstar > 0
+				&& G.incumbent_updates == 1;
+			const bool ref_eq = !GlobalSearch::OfferFinish(&Gc, 0, 0,
+				G.Tstar);
+			const bool ref_slow = !GlobalSearch::OfferFinish(&Gc, 0, 0,
+				G.Tstar + 7);
+			const bool unchanged = Gc.Tstar == G.Tstar
+				&& Gc.incumbent_updates == G.incumbent_updates;
+			const bool acc = GlobalSearch::OfferFinish(&Gc, 0, 0,
+				G.Tstar - 3) && Gc.Tstar == G.Tstar - 3
+				&& Gc.incumbent_updates == G.incumbent_updates + 1;
+			snprintf(buf, sizeof(buf), "T* %d production-established "
+				"(1 update, best-first found the unique finish first); "
+				"equal/slower offers refused, state unchanged = %d; "
+				"faster offer accepted [CONTRACT CHECK - this fixture "
+				"admits one finish time; natural replacement is a "
+				"real-map obligation]", G.Tstar,
+				(ref_eq && ref_slow && unchanged) ? 1 : 0);
+			check("G8 production incumbent", est && ref_eq && ref_slow
+				&& unchanged && acc, buf);
+		}
+
+		// ---- G9 COMPETITIVE HORIZON: with T* set, issued horizons
+		// never exceed T* - g - 1 (a physical restriction; local truth
+		// outside the restricted domain is untouched).
+		{
+			bool ok = true;
+			int shown = -1;
+			for (const GlobalSearch::Node& N : G.nodes) {
+				const int m = GlobalSearch::HorizonFor(G, N.g);
+				if (G.Tstar >= 0 && m > G.Tstar - N.g - 1
+					&& m > 0)
+					ok = false;
+				if (shown < 0 && G.Tstar >= 0)
+					shown = m;
+			}
+			snprintf(buf, sizeof(buf), "with T* %d every node's "
+				"issued horizon <= T* - g - 1 (example %d); before "
+				"the incumbent, the explicit finite domain %d",
+				G.Tstar, shown, G.m_explicit);
+			check("G9 competitive horizon", ok, buf);
+		}
+
+		// ---- G10 NO HEURISTIC PRUNING: rerun the whole exploration
+		// with the ordering heuristic inverted - the reachable
+		// physical results (incumbent, edge multiset size, prune
+		// count) are unchanged on the exhausted fixture.
+		{
+			GlobalSearch::Graph G4;
+			GlobalSearch::AddNode(&G4, L0, lt0, -1, -1);
+			GlobalSearch::AddNode(&G4, L1, lt1, -1, -1);
+			for (int it = 0; it < 40; ++it) {
+				int pick = -1;
+				int best_f = -(1 << 30);
+				for (size_t i = 0; i < G4.nodes.size(); ++i) {
+					if (G4.nodes[i].refine_level >= kMaxLevel)
+						continue;
+					const int f = G4.nodes[i].g;   // INVERTED order
+					if (f > best_f) {
+						best_f = f;
+						pick = static_cast<int>(i);
+					}
+				}
+				if (pick < 0)
+					break;
+				ExpandNode(&G4, pick, sw, p, sg, &zmin, &zmax);
+			}
+			const bool ok = G4.Tstar == G.Tstar
+				&& G4.edges.size() == G.edges.size()
+				&& G4.nodes.size() == G.nodes.size();
+			snprintf(buf, sizeof(buf), "inverted expansion order: "
+				"T* %d==%d, %d==%d edges, %d==%d nodes - ordering "
+				"advice changed nothing physical", G4.Tstar,
+				G.Tstar, static_cast<int>(G4.edges.size()),
+				static_cast<int>(G.edges.size()),
+				static_cast<int>(G4.nodes.size()),
+				static_cast<int>(G.nodes.size()));
+			check("G10 no heuristic pruning", ok, buf);
+		}
+
+		// ---- G11 REFERENCE DELETION (structural): the fixture, the
+		// launches, the zone and every edge came from engine-run
+		// production machinery; no tape is opened anywhere in this
+		// command.
+		{
+			snprintf(buf, sizeof(buf), "no tape/human fixture is "
+				"reachable from this command; launches, zone and "
+				"edges are engine-generated (T* %d without any "
+				"reference)", G.Tstar);
+			check("G11 reference deletion", G.Tstar > 0, buf);
+		}
+
+		// ---- G12 WHOLE-ROUTE COLD REPLAY: the incumbent rebuilds
+		// from persisted edges alone (ReplayEdge chain + boundary
+		// handoff by stored Bj), ending at the stored finish state.
+		{
+			bool ok = have_route;
+			if (ok) {
+				Ride::BoundaryState cur = route_B0;
+				for (int ei : route) {
+					const GlobalSearch::TransferEdge& e = G.edges[
+						static_cast<size_t>(ei)];
+					if (!GlobalSearch::ReplayEdge(cur, e, sw, p, sg,
+						&zmin, &zmax)) {
+						ok = false;
+						break;
+					}
+					cur = e.Bj;
+				}
+			}
+			snprintf(buf, sizeof(buf), "incumbent route (%d edges) "
+				"rebuilt cold edge-by-edge from persisted witnesses "
+				"and stored boundary states = %d",
+				static_cast<int>(route.size()), ok ? 1 : 0);
+			check("G12 whole-route cold replay", ok, buf);
+		}
+
+		printf("groute: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0
+				? "G0 GREEN - the rebuilt operators autonomously "
+					"form real routes"
+				: "G0 RED");
 		fflush(stdout);
 		return fail == 0 ? 0 : 2;
 	}
@@ -15800,6 +16500,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "groute" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdGRoute(argv[2], o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

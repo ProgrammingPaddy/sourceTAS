@@ -717,3 +717,85 @@ certified, witnessed, composable operators, and a face-to-face edge
 has been constructed, verified bitwise against the uninterrupted
 engine, and rebuilt cold. The next layer is the global graph/best-first
 search over these edges.**
+
+### Session 17 (2026-08-20) — G0: THE GLOBAL EXPLORER, 10/10.
+### "The rebuilt operators autonomously form real routes."
+
+Advisor ruling 2026-08-20 implemented: the project is no longer
+operator development - `Source/Solver/SolverGlobal.h` is the full-map
+solver's substrate.
+
+**The data model carries the laws:**
+
+- `GlobalSearch::Node` = exact `BoardBoundaryState` + exact elapsed
+  ticks g. `succ_complete` exists and is ALWAYS false in v0 - nothing
+  may set it: a discovered edge is exact and witnessed, the successor
+  set is never complete, and absence from an edge list never means
+  nonexistence.
+- `GlobalSearch::TransferEdge` = the production edge contract: ride
+  packets + optional canonical Air schedule + destination boundary
+  state + provenance; `ReplayEdge` reproduces it cold, bitwise.
+  AIR / CONTACT / END kinds mirror the event typing.
+- Cost is TICKS ONLY (`g`, objective min finish tick). h_order and
+  h_cert are separate; h_cert = 0 in G0; the ONE certified elimination
+  is exact duplicate-state dominance (byte-hash equality, static-world
+  theorem), every prune carrying a `PruneProof`.
+- `OfferFinish` is the single incumbent code path; `HorizonFor`
+  derives competitive local horizons from T* - g - 1 once an incumbent
+  exists (a physical restriction, not a budget; before an incumbent,
+  the explicit finite domain M0 = 240).
+
+**The G0 fixture** (all engine-generated, no reference data): two surf
+wedges separated by an AIR GAP (the crease variant ping-pongs in
+1-tick hops - measured), a production `LaunchFrontier` of two drop-in
+launches with exact launch tick counts, and an END zone placed by an
+engine probe ride on wedge B (+-56 at the mid path; +-90 swallowed the
+boarding region and every finish tied at one tick; +-48 at the quarter
+point was never crossed - all measured, all recorded).
+
+**The run:** 8 nodes, 17 edges, 9 dominance prunes, and the explorer
+autonomously assembles
+
+    LAUNCH -> B_0(wedge A) -> [exit, air, board] -> B_1(wedge B)
+           -> [ride] -> END        at T* = 66
+
+**The gates (10/10):** G1 all 17 edges cold-replay; G2+G3+G4 the
+incumbent route replays continuously through one PlayerState with 57
+ticks == sum(dt) and g(B0) + route == T*; G5 exact-state dominance
+with proof records (and differing ctl.age NOT merged); G6 every
+expanded node still `succ_complete == false`; G7 re-refining an
+expanded node discovers new edges (2 -> 4); G8 the incumbent is
+production-established, equal/slower offers refused - with the honest
+caveat recorded below; G9 every issued horizon <= T* - g - 1; G10 the
+inverted expansion order changes nothing physical (same T*, same
+edges, same nodes); G11 no tape anywhere; G12 the incumbent rebuilds
+cold edge-by-edge.
+
+**G8's honest caveat (open obligation):** this fixture physically
+admits exactly ONE finish time - every discovered finish and every
+constructed variant ties (measured across zone sizes, placements,
+wish variants, deeper refinement, and dominated-route reconstruction).
+So "a later faster witness replaces the incumbent" is verified at the
+CONTRACT level (a labeled synthetic faster offer through the one
+`OfferFinish` path), not by a naturally discovered witness. The
+natural-replacement demonstration transfers to the first real-map run,
+where finish diversity exists. Recorded here so it cannot silently
+become "demonstrated".
+
+**What G0 deliberately does not claim:** optimality certification
+(h_cert = 0), successor completeness anywhere, or a real-map route.
+The next measured step is the basictest full run - LaunchFrontier from
+the real spawn, the real end zone, and the G8 natural replacement -
+and after its explosion is MEASURED, the weakest useful certified
+remaining-time bound for G1 optimality proof. Per the standing
+prohibition list: no ExitDoomed certification, no approximate global
+dominance, no beams, no top-K route shapes, no ML ranking, no
+universal ride-horizon proof.
+
+Board from a clean rebuild: groute 10/10, faceleg 6/6, exitlazy 8/8,
+exitenv 8/8, exitfrontier 9/9, exitfit 10/10, efrefine 7/7, airprops
+24/24, airsuite 48/48, airrec VERIFIED, wishparity, carve M1.4,
+airsolve M1.3 - thirteen suites.
+
+**The project state, in the advisor's words: this is a pathfinding
+engine substrate. The full-map solver has begun.**

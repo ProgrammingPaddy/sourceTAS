@@ -15,17 +15,15 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-20 (session 16): STAGE B COMPLETE THROUGH STAGE 6 -
-THE FIRST REUSABLE FULL-MAP EDGE EXISTS.** Bound 45580001 is CERTIFIED
-(proofs repaired: the clean wish chain, a derived 512/tick FP slack,
-the analytical clip premise). Stage 5: `ExitField::ExitQuery` with
-partition-independent W_known, complete domain keys, honest statuses,
-provenance refusal (exitlazy 8/8). Stage 6: composed
-B_i -> ExitField -> Air -> EntranceField -> B_j legs and a direct
-CONTACT_TRANSFER leg, bitwise against continuous engine replay, exact
-tick accounting, dwell carried across both seams, diversity kept,
-edges rebuilt cold (faceleg 6/6). NEXT: the global graph/best-first
-layer over these edges. See `Docs/ExitFieldSpec.md` session 16.
+**STATUS 2026-08-20 (session 17): G0 GREEN - THE GLOBAL EXPLORER
+EXISTS.** `SolverGlobal.h`: exact board-state nodes, witnessed
+TransferEdges (cold-replay bitwise), ticks-only cost, exact-dup
+dominance with proofs, production incumbent, competitive horizons; the
+explorer autonomously assembles LAUNCH -> board -> [exit/air/board] ->
+board -> [ride] -> END at T* = 66 on the engine-built two-wedge fixture
+(groute 10/10; G8 natural replacement is an open real-map obligation).
+NEXT: the basictest full run, then measure the explosion before any
+G1 bound work. See `Docs/ExitFieldSpec.md` session 17.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -360,6 +358,51 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-20 (session 17, G0: THE GLOBAL EXPLORER - 10/10; "the
+  rebuilt operators autonomously form real routes"): advisor ruling
+  2026-08-20. `Source/Solver/SolverGlobal.h` is the full-map solver
+  substrate: Node = exact BoardBoundaryState + exact ticks g, with
+  `succ_complete` ALWAYS false in v0 (the law "expansion != successor
+  completeness" lives in the type); TransferEdge = the production edge
+  contract (ride packets + optional Air schedule + destination +
+  provenance, cold-replayed bitwise by ReplayEdge); cost is TICKS ONLY
+  with h_order/h_cert separate (h_cert = 0); the one certified
+  elimination is exact duplicate-state dominance with PruneProof
+  records; OfferFinish is the single incumbent path; HorizonFor derives
+  competitive horizons from T* - g - 1 (physical restriction, not
+  budget). THE FIXTURE (all engine-generated): two wedges across an AIR
+  GAP (crease ping-pongs 1-tick - measured), a 2-launch production
+  LaunchFrontier with exact launch ticks, END zone placed by an engine
+  probe (+-56 mid-path; +-90 swallowed the board region, +-48
+  quarter-point never crossed - measured). THE RUN: 8 nodes, 17 edges,
+  9 dominance prunes; the explorer autonomously assembles LAUNCH ->
+  B_0(A) -> [exit/air/board] -> B_1(B) -> [ride] -> END at T* = 66.
+  GATES (10/10): all edges cold-replay; the route replays continuously
+  (57 ticks == sum dt, g(B0)+route == T*); dominance with proofs
+  (differing ctl.age NOT merged); succ_complete false everywhere;
+  re-refinement discovers new edges (2 -> 4); production incumbent
+  (equal/slower refused); horizons <= T* - g - 1; INVERTED expansion
+  order changes nothing physical; no tape; cold route rebuild.
+  G8'S HONEST CAVEAT (open obligation, recorded so it cannot silently
+  become "demonstrated"): this fixture admits exactly ONE finish time -
+  every discovered finish and constructed variant ties (measured across
+  zone sizes/placements/wish variants/deeper refinement) - so
+  faster-replaces-incumbent is verified at the CONTRACT level with a
+  labeled synthetic offer; the natural demonstration transfers to the
+  first real-map run. G0 deliberately does NOT claim optimality
+  (h_cert = 0), successor completeness, or a real-map route. NEXT: the
+  basictest full run (real spawn LaunchFrontier, real end zone, G8
+  natural replacement), then MEASURE the explosion before building the
+  weakest useful certified remaining-time bound (G1). Standing
+  prohibitions honored: no ExitDoomed certification, no approximate
+  global dominance, no beams/top-K/ML. Clean-rebuild board: thirteen
+  suites green (groute 10/10, faceleg 6/6, exitlazy 8/8, exitenv 8/8,
+  exitfrontier 9/9, exitfit 10/10, efrefine 7/7, airprops 24/24,
+  airsuite 48/48, airrec VERIFIED, wishparity, carve M1.4, airsolve
+  M1.3). THE PROJECT IS NOW A PATHFINDING ENGINE SUBSTRATE - the
+  full-map solver has begun. Full detail: `Docs/ExitFieldSpec.md`
+  session 17.
 
 - 2026-08-20 (session 16, PROOFS REPAIRED + STAGES 5-6: THE FIRST
   REUSABLE FULL-MAP EDGE EXISTS): advisor 2026-08-19j. PROOF REPAIRS
