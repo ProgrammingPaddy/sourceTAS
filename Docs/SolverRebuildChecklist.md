@@ -15,15 +15,26 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-20 (session 17): G0 GREEN - THE GLOBAL EXPLORER
-EXISTS.** `SolverGlobal.h`: exact board-state nodes, witnessed
-TransferEdges (cold-replay bitwise), ticks-only cost, exact-dup
-dominance with proofs, production incumbent, competitive horizons; the
-explorer autonomously assembles LAUNCH -> board -> [exit/air/board] ->
-board -> [ride] -> END at T* = 66 on the engine-built two-wedge fixture
-(groute 10/10; G8 natural replacement is an open real-map obligation).
-NEXT: the basictest full run, then measure the explosion before any
-G1 bound work. See `Docs/ExitFieldSpec.md` session 17.
+**STATUS 2026-08-20b (session 18): G1M DELIVERED, G0R NOT REACHED -
+THE REAL-MAP MEASUREMENT.** The `gmap` command ran the explorer cold
+on surf_basictest eight times; the march works autonomously three
+faces deep (f0 -> f1 -> f2, 1940 exact states, 1944 edges all
+cold-replaying bitwise, 0 topology violations, no tape anywhere), and
+every starvation was measured and answered with ordering/coverage
+policy (ballistic + spread aims, geometry-only horizons, exit
+diversity buckets, entrance-query persistence, within-face position-
+bucket deepening). THE MEASUREMENT: entrance refinement = 98-99.5% of
+all wall-clock (43.4M evals/hour); same-face hop proliferation
+dominates state-space (exact-dup dominance nearly never fires: 13
+prunes / 1940 states); and the G0R blocker is SPEED COMPOUNDING -
+cheap short-hop transfers are found first, slow arrivals ride slow,
+and 300-500 u/s f2 arrivals physically cannot bridge to f3's window
+(needs ~600+ u/s at height). groute is 11/11 (G13 horizon-boundary
+gate new); DomainAudit stable domain identities + GlobalRouteWitness
++ END-via-air landed in `SolverGlobal.h`. NEXT: advisor ruling on the
+speed-compounding dynamic (service/ordering or launch), and entrance
+spend is THE perf target - nothing else is measurable. See
+`Docs/ExitFieldSpec.md` session 18.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -358,6 +369,64 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-20b (session 18, G1M DELIVERED / G0R NOT REACHED - the
+  first real-map global runs): advisor ruling 2026-08-20b ("treat
+  this first run primarily as an instrumented global-search
+  experiment... do not only report the final route"). PRE-RUN
+  ADDITIONS: G13 horizon-boundary gate (groute 11/11 - the
+  "< incumbent" convention verified against the real executor at
+  T*-1/T*/T*+1: M = dt_e admits the END booking at exactly tick M, no
+  off-by-one; ties/slower excluded and refused); DomainAudit stable
+  unresolved-domain identities (FNV over node/kind/face/variant,
+  statuses unexplored/unresolved/witnessed - no "impossible" -
+  outcome reason codes, attempts update never re-identify);
+  topology falsification counters (0 violations ever; the
+  distance-gated Route prediction measured UNSAFE - thousands of
+  realized self-transfers it would have missed); GlobalRouteWitness
+  (Launch + TransferEdges + END) with continuous one-PlayerState
+  replay; LaunchWitness + ReplayLaunch; END-VIA-AIR (FlyZoneSchedule,
+  kEdgeEnd with dt_air, extended ReplayEdge; sound Minkowski-
+  intersection END box for brush 10, stated standing-only underside
+  gap). THE gmap COMMAND: cold instrumented explorer on basictest -
+  real spawn anchor, 24-direction production launch fan, all-faces
+  conservative topology, persistent exit (qcache) AND entrance
+  (ecache) lazy queries, deterministic two-lane service. EIGHT RUNS,
+  EIGHT MEASUREMENTS (each fix ordering/coverage only, physics and
+  operators untouched): (1) launch starved - the acceptance ball is a
+  REGION query; BallisticAim (coast-arc plane crossing) unlocked 6
+  exact f0 roots; (2) min-g service floods same-face hops; (3) TWO
+  self-inflicted regressions caught by the ledger - speed-scaled
+  horizons cut fast nodes to M 105 where the f0->f1 witness needs
+  ~160+ (fix: geometry-only nh at 300 u/s reference), and pure
+  breadth never ladders to the finding profiles; (4) f0->f1 restored
+  (6 edges, fine, M 192) but the flat/high exit prior is
+  ANTI-correlated with f2's south-diving feeders (fix: exit diversity
+  buckets + long-axis spread aims + defer-far); (5/6) --diag-exits
+  showed the deepest f1 node boards at the far WEST end - min-g
+  laddering only ever deepens a face's earliest boards (fix:
+  within-face position-bucket deepen rotation, 2:1 deepen:breadth);
+  (7) THE MARCH WORKS - f0(346) -> f1(452) -> f2(324) autonomously,
+  the east-f1 board's f2 domain carried 62 edges at coarse/medium;
+  (8, 3600s) 336 expansions, 1940 states (f2 865), 1944 edges ALL
+  cold-replaying bitwise, f3 still zero: SPEED COMPOUNDS ACROSS HOPS
+  - cheap short-hop transfers are found first, 300-500 u/s f2
+  arrivals fall ~350u across the 300u gap and physically cannot reach
+  f3's window (~600+ u/s at height needed); the deficit chains back
+  to the 250 u/s run-off launch. G1M HEADLINES: entrance refinement =
+  98-99.5% of ALL wall-clock everywhere (43.4M evals/hour; exit/
+  probes/bookkeeping < 0.2s each) - nothing else is a measurable perf
+  target; same-face hop proliferation dominates state-space and
+  exact-dup dominance nearly never fires on real geometry (13 prunes
+  / 1940 states); competitive horizons never engaged (no incumbent) -
+  the T* feedback loop is unexercised. G0R recorded NOT REACHED,
+  plainly; the blocker is a route-quality ordering dynamic for the
+  advisor to rule on, not aims/horizons/resolution/topology (each of
+  those was found and fixed above). Clean-rebuild board: groute
+  11/11, faceleg 6/6, exitlazy 8/8, exitenv 8/8, exitfrontier 9/9,
+  exitfit 10/10, efrefine 7/7, airprops 24/24, airsuite 48/48, airrec
+  VERIFIED, wishparity, carve M1.4, airsolve M1.3. Full run log:
+  `Docs/ExitFieldSpec.md` session 18.
 
 - 2026-08-20 (session 17, G0: THE GLOBAL EXPLORER - 10/10; "the
   rebuilt operators autonomously form real routes"): advisor ruling

@@ -97,6 +97,86 @@ namespace GlobalSearch {
 		return h;
 	}
 
+	// SESSION 18 (advisor 2026-08-20b): STABLE UNRESOLVED-DOMAIN
+	// IDENTITY. `succ_complete == false` says only "more may exist";
+	// eventual proof accounting needs to know WHICH search domains were
+	// attempted, at what resolution, and why each produced nothing -
+	// every unresolved domain must one day be refined or proven unable
+	// to beat the incumbent. One record per domain per node; repeat
+	// attempts UPDATE the record (level / M / outcome evolve), the
+	// identity never changes. `kDomWitnessed` means "this domain has
+	// produced at least one exact edge" - never completeness. There is
+	// deliberately no "impossible" status.
+	enum DomainKind {
+		kDomExit = 0,       // the node's ExitQuery at a profile level
+		kDomEntrance = 1,   // exit witness -> Air -> board on face_j
+		kDomEnd = 2,        // exit witness -> zone probe (END-via-air)
+		kDomLaunch = 3,     // a launch direction (root construction)
+	};
+	enum DomainStatus {
+		kDomUnexplored = 0,
+		kDomUnresolved = 1, // attempted; no edge; NEVER "unreachable"
+		kDomWitnessed = 2,  // >= 1 exact edge produced
+	};
+	// Reason code of the LAST attempt (diagnosis, not judgment).
+	enum DomainOutcome {
+		kOutNone = 0,
+		kOutEdge = 1,           // produced an exact edge
+		kOutNoExitWitness = 2,  // the ExitQuery has no active witness yet
+		kOutNoStrike = 3,       // Entrance found no board (UNRESOLVED)
+		kOutSchedIllegal = 4,   // control seam refused the handoff
+		kOutReplayReject = 5,   // authoritative replay voided the witness
+		kOutHorizonDead = 6,    // competitive horizon left no room
+		kOutZoneMiss = 7,       // probe contacted geometry short of zone
+		kOutNotAirborne = 8,    // launch run never left the ground
+	};
+	struct DomainAudit {
+		unsigned long long id = 0;  // stable FNV over the identity
+		int kind = 0;               // DomainKind
+		int face_j = -1;            // entrance target face (-1 = n/a)
+		int variant = 0;            // aim / schedule / direction index
+		int level = -1;             // deepest local profile attempted
+		int M = 0;                  // horizon at the last attempt
+		int status = kDomUnexplored;
+		int outcome = kOutNone;
+		int attempts = 0;
+		int edges_found = 0;        // cumulative exact edges
+	};
+	inline unsigned long long DomainId(unsigned long long owner_hash,
+	                                   int kind, int face_j,
+	                                   int variant) {
+		unsigned long long h = 1469598103934665603ULL;
+		auto mix = [&](unsigned long long v) {
+			for (int i = 0; i < 8; ++i) {
+				h ^= (v >> (i * 8)) & 0xFF;
+				h *= 1099511628211ULL;
+			}
+		};
+		mix(owner_hash);
+		mix(static_cast<unsigned long long>(kind));
+		mix(static_cast<unsigned long long>(
+			static_cast<long long>(face_j)));
+		mix(static_cast<unsigned long long>(
+			static_cast<long long>(variant)));
+		return h;
+	}
+	inline DomainAudit* TouchDomain(std::vector<DomainAudit>* a,
+	                                unsigned long long owner_hash,
+	                                int kind, int face_j, int variant) {
+		const unsigned long long id = DomainId(owner_hash, kind,
+			face_j, variant);
+		for (size_t i = 0; i < a->size(); ++i)
+			if ((*a)[i].id == id)
+				return &(*a)[i];
+		DomainAudit d;
+		d.id = id;
+		d.kind = kind;
+		d.face_j = face_j;
+		d.variant = variant;
+		a->push_back(d);
+		return &a->back();
+	}
+
 	struct Node {
 		Ride::BoundaryState B;
 		unsigned long long hash = 0;
@@ -109,6 +189,10 @@ namespace GlobalSearch {
 		// the law "expansion != successor completeness" lives in the
 		// type, not in a comment.
 		bool succ_complete = false;
+		// The domain ledger (session 18): what has been tried here,
+		// at what resolution, with what outcome. The granular form of
+		// "successors are not complete".
+		std::vector<DomainAudit> audit;
 	};
 
 	// Certified eliminations only, each carrying its proof.
@@ -121,6 +205,15 @@ namespace GlobalSearch {
 		int  incumbent = -1;        // T* at prune time (-1 = none)
 	};
 
+	// One accepted incumbent, in discovery order (session 18: the
+	// full history is a first-class measurement - T_1 > T_2 > ... >
+	// T*, and whether the positive feedback loop actually happens).
+	struct FinishEvent {
+		int Tf = -1;
+		int node = -1;
+		int edge = -1;
+	};
+
 	struct Graph {
 		std::vector<Node> nodes;
 		std::vector<TransferEdge> edges;
@@ -130,6 +223,13 @@ namespace GlobalSearch {
 		int  Tstar_edge = -1;
 		int  incumbent_updates = 0; // G8 observability
 		int  m_explicit = 240;      // pre-incumbent horizon domain
+		std::vector<FinishEvent> history;  // accepted incumbents
+		int  finish_offers = 0;     // every OfferFinish call
+		// Topology falsification (session 18): a realized edge whose
+		// face_j was NOT in the conservative candidate set is a
+		// topology correctness FAILURE, not a bonus edge. Nonzero here
+		// means the topology is unsafe.
+		int  topo_violations = 0;
 	};
 
 	// Offer a production finish to the incumbent: the first
@@ -137,11 +237,17 @@ namespace GlobalSearch {
 	// else changes nothing. The ONE code path every END edge goes
 	// through (ExpandNode and any future assembler both call here).
 	inline bool OfferFinish(Graph* G, int node, int edge, int Tf) {
+		G->finish_offers++;
 		if (G->Tstar < 0 || Tf < G->Tstar) {
 			G->Tstar = Tf;
 			G->Tstar_node = node;
 			G->Tstar_edge = edge;
 			G->incumbent_updates++;
+			FinishEvent fe;
+			fe.Tf = Tf;
+			fe.node = node;
+			fe.edge = edge;
+			G->history.push_back(fe);
 			return true;
 		}
 		return false;
@@ -205,9 +311,128 @@ namespace GlobalSearch {
 		return static_cast<int>(G->nodes.size()) - 1;
 	}
 
+	// THE CANONICAL AIR LEG (session 18: promoted from the fixture
+	// harness so launch and route replay share ONE realization): fly
+	// the (side, cosa) schedule from *s toward face_j, deterministic
+	// per-tick input derivation (coast = no input; WishInputs realizes
+	// the wish exactly), stopping at the first contact with face_j
+	// (the strike tick is booked, matching Air::Result::tick). Returns
+	// booked ticks, or -1 if the horizon runs out without a strike.
+	inline int FlyAirLeg(PlayerState* s, const World& w,
+	                     const MoveParams& p, const Route::Graph& g,
+	                     int face_j,
+	                     const std::vector<signed char>& side,
+	                     const std::vector<float>& cosa, int horizon) {
+		const int hold = s->ducked ? IN_DUCK : 0;
+		const int n = static_cast<int>(side.size());
+		const Route::Face& fj = g.faces[static_cast<size_t>(face_j)];
+		for (int k = 0; k < horizon; ++k) {
+			const float s2d = Len2D(s->vel);
+			const float h = s2d > 1.f ? atan2f(s->vel.Y, s->vel.X)
+				: 0.f;
+			const int sd = k < n
+				? static_cast<int>(side[static_cast<size_t>(k)])
+				: (n > 0 ? static_cast<int>(
+					side[static_cast<size_t>(n) - 1]) : 0);
+			float yaw = h * 57.2957795f;
+			float fm = 0.f, sm = 0.f;
+			if (sd != 0 && s2d > 1.f) {
+				const float ca = k < n
+					? cosa[static_cast<size_t>(k)]
+					: (n > 0 ? cosa[static_cast<size_t>(n) - 1]
+						: 1.f);
+				Air::WishInputs(h, sd, ca, &yaw, &fm, &sm);
+			}
+			TickEvents ev;
+			MoveTick(*s, w, p, 0.f, yaw, fm, sm, 0.f, hold, &ev);
+			for (int c = 0; c < ev.ncontacts; ++c)
+				if (ev.contact_brush[c] == fj.brush
+					&& ev.contact_plane[c] == fj.side)
+					return k + 1;
+		}
+		return -1;
+	}
+
+	// END-VIA-AIR (session 18): the finish approach that leaves the
+	// last face and touches the END set in FREE FLIGHT. Air targets
+	// faces; the END set is a position box, so it needs its own
+	// deterministic zone-probe flight. Same input realization as
+	// FlyAirLeg; the zone is tested FIRST each tick (ClassifyTick's
+	// END > GROUND > CONTACT precedence applied to a zone-only
+	// flight); any brush contact or landing stops the probe as a
+	// non-finish. A contact with the end brush OUTSIDE the sound zone
+	// box is the caller's zone-model-miss counter, never a claimed
+	// finish.
+	struct ZoneProbeResult {
+		bool reached = false;
+		int  tick = 0;            // booked ticks at the stop
+		PlayerState end_state;
+		bool contact = false;
+		int  contact_brush = -1;
+		bool grounded = false;
+	};
+	inline ZoneProbeResult FlyZoneSchedule(const PlayerState& s0,
+	                                       const World& w,
+	                                       const MoveParams& p,
+	                                       const std::vector<signed char>& side,
+	                                       const std::vector<float>& cosa,
+	                                       int horizon, const Vec3& zmin,
+	                                       const Vec3& zmax) {
+		ZoneProbeResult r;
+		PlayerState s = s0;
+		const int hold = s.ducked ? IN_DUCK : 0;
+		const int n = static_cast<int>(side.size());
+		for (int k = 0; k < horizon; ++k) {
+			const float s2d = Len2D(s.vel);
+			const float h = s2d > 1.f ? atan2f(s.vel.Y, s.vel.X)
+				: 0.f;
+			const int sd = k < n
+				? static_cast<int>(side[static_cast<size_t>(k)])
+				: (n > 0 ? static_cast<int>(
+					side[static_cast<size_t>(n) - 1]) : 0);
+			float yaw = h * 57.2957795f;
+			float fm = 0.f, sm = 0.f;
+			if (sd != 0 && s2d > 1.f) {
+				const float ca = k < n
+					? cosa[static_cast<size_t>(k)]
+					: (n > 0 ? cosa[static_cast<size_t>(n) - 1]
+						: 1.f);
+				Air::WishInputs(h, sd, ca, &yaw, &fm, &sm);
+			}
+			TickEvents ev;
+			MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, hold, &ev);
+			if (s.pos.X >= zmin.X && s.pos.X <= zmax.X
+				&& s.pos.Y >= zmin.Y && s.pos.Y <= zmax.Y
+				&& s.pos.Z >= zmin.Z && s.pos.Z <= zmax.Z) {
+				r.reached = true;
+				r.tick = k + 1;
+				r.end_state = s;
+				return r;
+			}
+			if (ev.ncontacts > 0 || s.on_ground) {
+				r.contact = ev.ncontacts > 0;
+				r.contact_brush = ev.ncontacts > 0
+					? ev.contact_brush[0]
+					: (s.on_ground ? s.ground_brush : -1);
+				r.grounded = s.on_ground;
+				r.tick = k + 1;
+				r.end_state = s;
+				return r;
+			}
+		}
+		r.tick = horizon;
+		r.end_state = s0;
+		if (horizon > 0)
+			r.end_state = s;
+		return r;
+	}
+
 	// COLD EDGE REPLAY: reproduce the edge from its stored witness
 	// segments alone, verifying against the stored destination
-	// bitwise. The zone box arms END edges.
+	// bitwise. The zone box arms END edges. An END edge with
+	// dt_air > 0 is END-VIA-AIR: the ride segment must exit clean and
+	// the stored zone-probe schedule must reach the zone at exactly
+	// dt_air with the stored finish state.
 	inline bool ReplayEdge(const Ride::BoundaryState& Bfrom,
 	                       const TransferEdge& e, const World& w,
 	                       const MoveParams& p, const Route::Graph& g,
@@ -216,10 +441,20 @@ namespace GlobalSearch {
 			nullptr, zone_min, zone_max);
 		if (!rr.legal || rr.ticks != e.dt_exit)
 			return false;
-		if (e.kind == kEdgeEnd)
-			return rr.kind == Ride::kEnd
-				&& memcmp(&rr.end_state, &e.Bj.ps,
+		if (e.kind == kEdgeEnd) {
+			if (e.dt_air <= 0)
+				return rr.kind == Ride::kEnd
+					&& memcmp(&rr.end_state, &e.Bj.ps,
+						sizeof(PlayerState)) == 0;
+			if (rr.kind != Ride::kAirExit || !zone_min || !zone_max)
+				return false;
+			ZoneProbeResult zr = FlyZoneSchedule(rr.end_state, w, p,
+				e.air_side, e.air_cosa, e.air_horizon, *zone_min,
+				*zone_max);
+			return zr.reached && zr.tick == e.dt_air
+				&& memcmp(&zr.end_state, &e.Bj.ps,
 					sizeof(PlayerState)) == 0;
+		}
 		if (e.kind == kEdgeContact)
 			return rr.kind == Ride::kContactTransfer
 				&& memcmp(&rr.end_state, &e.Bj.ps,
@@ -237,6 +472,133 @@ namespace GlobalSearch {
 			&& ar.tick == e.dt_air
 			&& memcmp(&ar.end_state, &e.Bj.ps,
 				sizeof(PlayerState)) == 0;
+	}
+
+	// THE LAUNCH (session 18): from the anchored spawn state to the
+	// first exact board. Ground segment = exact MoveInput packets (the
+	// run to the edge); air segment = the (side, cosa) witness whose
+	// per-tick inputs FlyAirLeg re-derives deterministically. g0 is
+	// the route clock: EVERY tick from the anchored spawn state,
+	// including the board tick. Production machinery only - a launch
+	// is never seeded from a tape.
+	struct LaunchWitness {
+		std::vector<Ride::MoveInput> ground;
+		std::vector<signed char> air_side;
+		std::vector<float> air_cosa;
+		int  air_horizon = 0;
+		int  face = -1;             // first boarded face
+		int  dt_air = 0;            // flight ticks incl. the board tick
+		Ride::BoundaryState B0;     // the boarded boundary state
+		int  g0 = 0;                // ground.size() + dt_air
+		int  variant = -1;          // launch-direction index (audit)
+	};
+
+	// Cold launch replay: anchor -> ground packets -> airborne -> air
+	// leg -> bitwise B0 at exactly g0 ticks.
+	inline bool ReplayLaunch(const LaunchWitness& lw,
+	                         const PlayerState& anchor, const World& w,
+	                         const MoveParams& p,
+	                         const Route::Graph& g) {
+		if (lw.face < 0
+			|| lw.face >= static_cast<int>(g.faces.size()))
+			return false;
+		PlayerState s = anchor;
+		for (size_t k = 0; k < lw.ground.size(); ++k) {
+			TickEvents ev;
+			MoveTick(s, w, p, lw.ground[k].pitch, lw.ground[k].yaw,
+				lw.ground[k].fmove, lw.ground[k].smove,
+				lw.ground[k].umove, lw.ground[k].buttons, &ev);
+		}
+		if (s.on_ground)
+			return false;
+		const int dt = FlyAirLeg(&s, w, p, g, lw.face, lw.air_side,
+			lw.air_cosa, lw.air_horizon);
+		return dt == lw.dt_air
+			&& static_cast<int>(lw.ground.size()) + dt == lw.g0
+			&& memcmp(&s, &lw.B0.ps, sizeof(PlayerState)) == 0;
+	}
+
+	// THE HIERARCHICAL ROUTE WITNESS (advisor 2026-08-20b): the
+	// constructive proof object of an incumbent -
+	//     LaunchWitness + TransferEdge[] + the END event.
+	// Replay walks the pieces IN SEQUENCE through ONE PlayerState with
+	// no regeneration and no re-instantiation at boundaries; the
+	// finish tick must equal the graph's claim exactly. This artifact
+	// proves "a legal finish in T* ticks exists"; the certified bound
+	// ledger will one day prove "nothing finishes sooner".
+	struct RouteWitness {
+		LaunchWitness launch;
+		std::vector<TransferEdge> edges;   // self-contained copies
+		int Tf = -1;                       // claimed finish tick
+	};
+
+	// Continuous whole-route replay through ONE PlayerState. Verifies
+	// every stored boundary bitwise; *ticks_out counts every booked
+	// tick from the anchor. Success requires *ticks_out == rw.Tf and
+	// zero boundary mismatches.
+	inline bool ReplayRouteWitness(const RouteWitness& rw,
+	                               const PlayerState& anchor,
+	                               const World& w, const MoveParams& p,
+	                               const Route::Graph& g,
+	                               const Vec3& zmin, const Vec3& zmax,
+	                               int* ticks_out, int* mismatches) {
+		PlayerState s = anchor;
+		int tk = 0, bad = 0;
+		for (size_t k = 0; k < rw.launch.ground.size(); ++k, ++tk) {
+			TickEvents ev;
+			MoveTick(s, w, p, rw.launch.ground[k].pitch,
+				rw.launch.ground[k].yaw, rw.launch.ground[k].fmove,
+				rw.launch.ground[k].smove, rw.launch.ground[k].umove,
+				rw.launch.ground[k].buttons, &ev);
+		}
+		if (s.on_ground) {
+			if (ticks_out) *ticks_out = tk;
+			if (mismatches) *mismatches = 1;
+			return false;
+		}
+		const int ldt = FlyAirLeg(&s, w, p, g, rw.launch.face,
+			rw.launch.air_side, rw.launch.air_cosa,
+			rw.launch.air_horizon);
+		if (ldt < 0) {
+			if (ticks_out) *ticks_out = tk;
+			if (mismatches) *mismatches = 1;
+			return false;
+		}
+		tk += ldt;
+		if (memcmp(&s, &rw.launch.B0.ps, sizeof(PlayerState)) != 0)
+			bad++;
+		for (const TransferEdge& e : rw.edges) {
+			for (size_t k = 0; k < e.ride.size(); ++k, ++tk) {
+				TickEvents ev;
+				MoveTick(s, w, p, e.ride[k].pitch, e.ride[k].yaw,
+					e.ride[k].fmove, e.ride[k].smove,
+					e.ride[k].umove, e.ride[k].buttons, &ev);
+			}
+			if (e.kind == kEdgeAir) {
+				const int adt = FlyAirLeg(&s, w, p, g, e.face_j,
+					e.air_side, e.air_cosa, e.air_horizon);
+				if (adt < 0) {
+					bad++;
+					break;
+				}
+				tk += adt;
+			} else if (e.kind == kEdgeEnd && e.dt_air > 0) {
+				ZoneProbeResult zr = FlyZoneSchedule(s, w, p,
+					e.air_side, e.air_cosa, e.air_horizon, zmin,
+					zmax);
+				if (!zr.reached) {
+					bad++;
+					break;
+				}
+				s = zr.end_state;
+				tk += zr.tick;
+			}
+			if (memcmp(&s, &e.Bj.ps, sizeof(PlayerState)) != 0)
+				bad++;
+		}
+		if (ticks_out) *ticks_out = tk;
+		if (mismatches) *mismatches = bad;
+		return bad == 0 && tk == rw.Tf;
 	}
 
 } // namespace GlobalSearch

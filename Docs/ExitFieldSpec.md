@@ -799,3 +799,154 @@ airsolve M1.3 - thirteen suites.
 
 **The project state, in the advisor's words: this is a pathfinding
 engine substrate. The full-map solver has begun.**
+
+---
+
+### Session 18 (2026-08-20) — G0R attempted, G1M DELIVERED:
+### the first real-map global runs, and what they measured
+
+Advisor ruling 2026-08-20b: run the explorer cold on surf_basictest
+as an INSTRUMENTED EXPERIMENT — "do not only report the final route;
+the search-shape measurements are what decide G1." Eight runs were
+made; each measured a specific starvation, each got a specific
+ordering/coverage fix (never an admission rule, never operator
+research), and the run log below is the deliverable.
+
+**Pre-run additions (all landed; groute is now 11/11):**
+
+1. **G13 HORIZON BOUNDARY** (groute): with the fixture's real finish
+   ride (dt_e ticks), T* is set so that finish would land at T*-1 /
+   T* / T*+1. Measured: M = dt_e ADMITS it (END books at exactly tick
+   dt_e == M — no off-by-one truncation; OfferFinish accepts);
+   M = dt_e - 1 excludes the tie and the offer is refused; slower
+   likewise. The "< incumbent" convention cannot cut a
+   one-tick-faster route.
+2. **STABLE UNRESOLVED-DOMAIN IDENTITY** (`GlobalSearch::DomainAudit`)
+   — per-node records with FNV identity over (node hash, kind, face,
+   variant); kinds exit/entrance/end/launch; statuses unexplored /
+   unresolved / witnessed (deliberately NO "impossible"); outcome
+   reason codes; attempts update a record, identity never changes.
+   This ledger made every diagnosis below a one-glance read.
+3. **TOPOLOGY FALSIFICATION**: v0 candidates = ALL faces;
+   `Graph::topo_violations` armed on every realized edge (0 across
+   all runs). The DIAGNOSTIC counter measuring the distance-gated
+   Route prediction registered THOUSANDS of realized transfers the
+   gate would have missed (it has no self-edges, and same-face
+   re-entry is real and load-bearing) — the gated topology is hereby
+   measured UNSAFE as an admission rule.
+4. **GlobalRouteWitness** (Launch + TransferEdge[] + END) with
+   continuous `ReplayRouteWitness` through ONE PlayerState;
+   `LaunchWitness` = exact ground packets + air schedule;
+   `ReplayLaunch` cold.
+5. **END-VIA-AIR**: `FlyZoneSchedule` (the zone is a position box,
+   not a face; zone tested first per tick, mirroring the END > GROUND
+   > CONTACT precedence); `kEdgeEnd` with dt_air > 0; `ReplayEdge`
+   extended. The sound END set for brush 10 = the Minkowski
+   intersection box (XY +16, Z [bmin-54, bmax]): every claimed finish
+   is a hull touch in EITHER hull state. Stated completeness gap:
+   standing-only underside touches with feet in [bmin-72, bmin-54).
+6. Incumbent history (`Graph::history`), finish-offer counter, and
+   the full G1M instrument set (per-phase timers, branching/depth/
+   horizon distributions, queue high-water, per-face populations).
+
+**The map, production-measured:** 4 surf faces — south-facing f0/f1,
+north-facing f2 (an orientation flip), west-facing f3 (a second) —
+END platform brush 10 across a ~320u air gap east of f3. Spawn on
+brush 6. f0 is the ONLY ballistically reachable first face.
+
+**The run log (every fix is ordering/coverage policy; physics and
+operators untouched):**
+
+- **Run 1 — the launch aim.** 24-direction fan -> 9 airborne -> ZERO
+  boards from 172,800 entrance evals. The acceptance ball is a REGION
+  query; centroid/low-region aims sat 130-190u from where ballistic
+  arcs meet the faces. FIX: `BallisticAim` — the pure-coast arc's
+  plane crossing as the first aim (geometry from the current state,
+  never route knowledge). After: 6 exact roots on f0.
+- **Run 2 — the service flood.** min-g service flooded f0's cheap
+  self-re-entry hops (133 states / 10 expansions; one node grew 37
+  f0->f0 edges) and starved every later face. Entrance = 94% of
+  wall-clock. FIX: face-round-robin breadth + coarse-only level-0
+  entrance (`lvl0_coarse`).
+- **Run 3 — two self-inflicted regressions, caught by the ledger.**
+  Pure breadth kept every node at coarse (nobody laddered to the
+  profiles that find f1) and the nh formula divided by CURRENT exit
+  speed, cutting fast nodes to M 105 where the known f0->f1 witness
+  needs ~160+. FIXES: geometry-only horizons at a 300 u/s reference
+  speed (a horizon is a physical domain, not a per-state discount);
+  interleaved work lanes; entrance-query persistence (`ecache` — the
+  entrance mirror of the exit qcache; RefineStep was already
+  incremental, the harness had been discarding its state).
+- **Run 4 — f0->f1 RESTORED** (6 edges at fine profile, M 192), but
+  the cascade stalled: f2 faces NORTH and sits SOUTH of f1, so its
+  feeders are f1's south-DIVING exits — exactly the class the
+  fast/flat/high ordering prior deprioritizes. One score cannot rank
+  feeders for every transfer orientation. FIXES: exit DIVERSITY
+  (tried exits round-robin (vz class x heading quadrant) buckets);
+  long-axis SPREAD AIMS; DEFER_FAR (no coast crossing => coarse only
+  until the node deepens — a deferral, never a ban).
+- **Run 5/6 — the board-position lesson.** f1 grew to 504 nodes (one
+  entrance domain alone carried 81 edges) but f2 stayed zero; the
+  --diag-exits inventory showed the deepest f1 node boards at
+  x = -551 (f1's far WEST end) and every south-diving exit passes
+  200-380u west of f2 with arcs falling under its polygon. The
+  feeder class = EAST-half f1 boards — present in the graph, never
+  deepened, because min-g laddering always picks a face's earliest
+  (= west) arrivals. FIX: within-face deepen diversity — position
+  buckets along the face's long axis, rotated per visit; 2:1
+  deepen:breadth interleave.
+- **Run 7 — THE MARCH WORKS.** f0(346) -> f1(452) -> f2(324 nodes)
+  autonomously in one cold run; the east-f1 board's f2 domain carried
+  62 edges at coarse/medium (M 80) — once the right board laddered,
+  the transfer was easy. f3: zero.
+- **Run 8 (3600s) — the honest wall.** 336 expansions, 1940 states
+  (f2 = 865), 1944 edges, every one cold-replaying bitwise, 0 topo
+  violations — and f3 still zero. The measured reason: **SPEED
+  COMPOUNDS ACROSS HOPS.** The f2 arrivals (300-500 u/s, fed by the
+  cheap short-hop transfers found first) physically cannot bridge
+  the ~300u gap to f3's window: a measured 319 u/s exit falls ~350u
+  in the crossing time; the bridge needs roughly 600+ u/s at exit
+  height. The deficit chains back through every hop to the 250 u/s
+  run-off launch. This is not an aim, horizon, resolution, or
+  topology problem — those were each found and fixed above. It is a
+  route-quality dynamic: the explorer reaches faces through the
+  cheapest transfers, and cheap arrivals are slow arrivals.
+
+**G1M — the measurement the advisor asked for:**
+
+- COMPUTE: EntranceField refinement is 98-99.5% of ALL wall-clock in
+  every configuration (run 8: 43.4M flight evals / 3628s of 3646s).
+  Exit queries, zone probes, launch, and global bookkeeping are
+  rounding errors (< 0.2s each per run). Any G1/perf work that does
+  not attack entrance spend is attacking noise.
+- STATE-SPACE: same-face hop proliferation dominates (~90% of nodes
+  are ride-hop variants; queue high-water 1883). Exact-duplicate
+  dominance almost never fires on real geometry (13 prunes / 1940
+  states) — every hop differs in bytes. The advisor's predicted
+  "many exact state variants on same face -> state handling policy"
+  is the measured reality.
+- BRANCHING: median 3, mean 3.8-7.0, max 53 new edges per expansion.
+  Depth reached 9. Horizons: every expansion ran at the explicit
+  M0 = 240; competitive horizons NEVER engaged (no incumbent) — the
+  entire T*-feedback loop is unexercised on the real map.
+- The failure-mode ladder the advisor listed (launch coverage /
+  topology / entrance coverage / exit coverage / horizon selection /
+  branching / refinement / compute) was descended one measured rung
+  at a time; the run log above is that descent, and the bottom rung
+  is ROUTE-QUALITY ORDERING (speed compounding), not any of the
+  layers above it.
+
+**G0R: NOT REACHED.** Recorded plainly. The march mechanism is
+validated three faces deep with bitwise replays throughout; the
+finish needs fast chains, which needs the service/ordering layer (or
+the launch) to value speed the way the objective ultimately will —
+an advisor ruling, not a unilateral hack.
+
+**Open instrumentation added for the next run:** per-face arrival
+speed distributions (median/max), and --diag-exits now dumps each
+face's fastest deepest node.
+
+**What was deliberately NOT done:** no operator changes, no admission
+rules, no ExitDoomed, no approximate dominance, no beams/top-K, no
+human data anywhere (G11 structural: gmap never opens a tape), and no
+chasing G0R past the measurement mandate.

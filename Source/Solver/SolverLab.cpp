@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -282,6 +283,8 @@ namespace {
 		int  fuzz_dump = 0;         // fuzzdiff: dump the first N mismatches
 		bool fuzz_dump_reach = false;   // ...restricted to reachable states
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
+		bool diag_exits = false;    // gmap: dump per-face deepest node's
+		                            // exit inventory + coast crossings
 		// smooth (line-space CMA) options
 		int pop = 0;                // population (0 = auto)
 		int cp_ticks = 16;          // spline control-point spacing
@@ -402,6 +405,7 @@ namespace {
 			}
 			else if (a == "--no-edge-bevels") o.edge_bevels = false;
 			else if (a == "--legacy-corner") o.corner_true = false;
+			else if (a == "--diag-exits") o.diag_exits = true;
 			else if (a == "--pop") ok = next_i(&o.pop);
 			else if (a == "--cp-ticks") ok = next_i(&o.cp_ticks);
 			else if (a == "--wloss") ok = next_f(&o.wloss);
@@ -11185,6 +11189,134 @@ namespace {
 
 	namespace {
 
+	// Instrumentation for the real-map run (G1M): where the work and
+	// the state-space actually go. Pure counters - never admission.
+	struct GmapInstr {
+		long long expansions = 0;
+		long long exit_refines = 0;      // ExitField::QueryRefine calls
+		long long entrance_calls = 0;    // Entrance::RefineStep calls
+		long long entrance_evals = 0;    // engine flights inside them
+		long long zone_probes = 0;       // END-via-air probe flights
+		long long lane_edges = 0;        // edges from non-winner lanes
+		long long dup_edges_skipped = 0; // physically-duplicate edges
+		int  horizon_constrained = 0;    // expansions with M < M0
+		int  horizon_dead = 0;           // expansions no-oped, M < 8
+		int  dtfiltered = 0;             // witnesses beyond the
+		                                 // competitive horizon
+		long long end_brush_near_miss = 0; // end-brush touch OUTSIDE
+		                                   // the sound zone box (a
+		                                   // zone-model gap, counted
+		                                   // never claimed)
+		int  gated_topo_miss = 0;        // realized edge absent from
+		                                 // the distance-gated Route
+		                                 // prediction (diagnostic; the
+		                                 // v0 candidate set is ALL
+		                                 // faces, so this measures the
+		                                 // gate we might one day use)
+		double t_exit_ms = 0.0, t_entr_ms = 0.0, t_probe_ms = 0.0;
+		std::vector<int> horizons_pre, horizons_post; // issued M
+		std::vector<int> exp_new_edges;  // per-expansion branching
+	};
+
+	// Expansion parameters. The DEFAULTS are the G0 fixture behavior
+	// bit-for-bit; the real-map harness passes its own. Everything
+	// here is coverage/ordering policy - nothing admits or rejects a
+	// physical result.
+	struct GXParams {
+		int  max_airs_l0 = 3;      // exits tried at level 0
+		int  max_airs_lk = 5;      // exits tried at level >= 1
+		int  nh_cap = 160;         // entrance flight horizon cap
+		bool same_face = false;    // allow re-entry onto the exited face
+		bool end_probe = false;    // END-via-air zone probes
+		bool use_lanes = false;    // per-lane entrance transitions
+		int  eprof_cap = 2;        // entrance profile ceiling
+		int  xprof_cap = 2;        // exit profile ceiling
+		bool audit = false;        // write DomainAudit records
+		bool dedup_edges = false;  // skip physically-duplicate edges
+		bool ballistic_aim = false; // add the coast-arc aim (tried
+		                            // first; measured necessary on the
+		                            // real map)
+		bool lvl0_coarse = false;  // level-0 entrance = coarse profile
+		                           // only (measured: the full ladder at
+		                           // level 0 is 94% of wall-clock)
+		float ref_speed_nh = 0.f;  // > 0: geometry-only entrance
+		                           // horizons at this reference speed
+		                           // (0 = fixture's speed-scaled form)
+		bool exit_diversity = false; // pick tried exits round-robin
+		                             // across (vz class x heading)
+		                             // buckets instead of one score -
+		                             // measured: the flat/high prior
+		                             // is anti-correlated with the
+		                             // south-diving exits that feed
+		                             // north-facing ramps
+		bool spread_aims = false;  // + long-axis aim spread (lvl >= 1)
+		bool defer_far = false;    // no ballistic crossing => coarse
+		                           // only until node level >= 2 (cost
+		                           // deferral, never a ban; the ledger
+		                           // records the lower level)
+		int  end_brush_widx = -1;  // World brush index of the END brush
+		// Persistent per-node lazy exit queries (real map): W_known is
+		// append-only under the FIXED domain (B, M0); the competitive
+		// restriction to M < M0 is applied at USE time by filtering
+		// event ticks <= M - lawful because events are
+		// prefix-determined, so R(B, M) = { Z in R(B, M0) :
+		// dt(Z) <= M } exactly.
+		std::vector<std::unique_ptr<ExitField::ExitQuery>>* qcache
+			= nullptr;
+		// Persistent entrance queries per (node, exit witness, face,
+		// aim) - the entrance mirror of qcache. MEASURED NECESSITY:
+		// without it every re-expansion re-runs the whole profile
+		// ladder per domain and the entrance is 97% of wall-clock
+		// (9.75M evals / 84 expansions). RefineStep is already
+		// incremental; this just stops discarding its state.
+		std::vector<std::map<unsigned long long,
+			Entrance::QueryState> >* ecache = nullptr;
+		GmapInstr* instr = nullptr;
+	};
+
+	// The natural drop-in aim (session 18, measured necessary): where
+	// the pure-coast arc from the entry state crosses the face plane.
+	// The first real-map run starved with 172,800 entrance evals and
+	// ZERO boards because centroid/low-region aims sat 130-190u from
+	// where ballistic arcs actually meet the faces - the acceptance
+	// ball is a REGION query and the caller must ask about the right
+	// region. This is geometry from the current state, never route
+	// knowledge. Returns false when the coast arc misses the face's
+	// neighborhood within the horizon.
+	bool BallisticAim(const Vec3& p0, const Vec3& v0,
+	                  const Route::Face& fc, const MoveParams& p,
+	                  int max_ticks, Vec3* out) {
+		Vec3 pos = p0, vel = v0;
+		float prev_d = Dot(fc.n, pos) - fc.d;
+		Vec3 bmin = fc.verts.empty() ? fc.centroid : fc.verts[0];
+		Vec3 bmax = bmin;
+		for (const Vec3& v : fc.verts) {
+			bmin.X = v.X < bmin.X ? v.X : bmin.X;
+			bmin.Y = v.Y < bmin.Y ? v.Y : bmin.Y;
+			bmin.Z = v.Z < bmin.Z ? v.Z : bmin.Z;
+			bmax.X = v.X > bmax.X ? v.X : bmax.X;
+			bmax.Y = v.Y > bmax.Y ? v.Y : bmax.Y;
+			bmax.Z = v.Z > bmax.Z ? v.Z : bmax.Z;
+		}
+		for (int k = 0; k < max_ticks; ++k) {
+			vel.Z -= p.gravity * p.dt;
+			pos = pos + Scale(vel, p.dt);
+			const float d2 = Dot(fc.n, pos) - fc.d;
+			if (prev_d > 0.f && d2 <= 0.f) {
+				const Vec3 q = pos - Scale(fc.n, d2);
+				const float pad = 64.f;
+				if (q.X < bmin.X - pad || q.X > bmax.X + pad
+					|| q.Y < bmin.Y - pad || q.Y > bmax.Y + pad
+					|| q.Z < bmin.Z - pad || q.Z > bmax.Z + pad)
+					return false;
+				*out = q;
+				return true;
+			}
+			prev_d = d2;
+		}
+		return false;
+	}
+
 	// Expand one node at its current refinement level: run the local
 	// lazy machinery and convert discovered transitions into edges and
 	// children. Ordering heuristics choose WHAT TO TRY FIRST; nothing
@@ -11192,24 +11324,143 @@ namespace {
 	// merely untried at low levels).
 	void ExpandNode(GlobalSearch::Graph* G, int ni, const World& w,
 	                const MoveParams& p, const Route::Graph& g,
-	                const Vec3* zmin, const Vec3* zmax) {
+	                const Vec3* zmin, const Vec3* zmax,
+	                const GXParams& gx = GXParams()) {
 		const Ride::BoundaryState B = G->nodes[static_cast<size_t>(
 			ni)].B;
+		const unsigned long long owner_hash = G->nodes[
+			static_cast<size_t>(ni)].hash;
 		const int g0 = G->nodes[static_cast<size_t>(ni)].g;
 		const int level = G->nodes[static_cast<size_t>(
 			ni)].refine_level;
 		const int M = GlobalSearch::HorizonFor(*G, g0);
+		const size_t edges_before = G->edges.size();
+		if (gx.instr) {
+			gx.instr->expansions++;
+			if (G->Tstar >= 0 && M < G->m_explicit)
+				gx.instr->horizon_constrained++;
+			if (G->Tstar < 0)
+				gx.instr->horizons_pre.push_back(M);
+			else
+				gx.instr->horizons_post.push_back(M);
+		}
+		auto touch = [&](int kind, int face_j, int variant)
+			-> GlobalSearch::DomainAudit* {
+			if (!gx.audit)
+				return nullptr;
+			return GlobalSearch::TouchDomain(&G->nodes[
+				static_cast<size_t>(ni)].audit, owner_hash, kind,
+				face_j, variant);
+		};
 		if (M < 8) {
+			if (gx.instr)
+				gx.instr->horizon_dead++;
+			if (GlobalSearch::DomainAudit* da = touch(
+				GlobalSearch::kDomExit, -1, -1)) {
+				da->attempts++;
+				da->level = level;
+				da->M = M;
+				da->status = GlobalSearch::kDomUnresolved;
+				da->outcome = GlobalSearch::kOutHorizonDead;
+			}
 			G->nodes[static_cast<size_t>(ni)].refine_level = level + 1;
 			return;   // competitively dead horizon; domain unchanged
 		}
-		ExitField::ExitQuery Q;
-		ExitField::QueryInit(&Q, B, M, w, p);
-		for (int pr2 = 0; pr2 <= level && pr2 < 3; ++pr2)
-			ExitField::QueryRefine(&Q, w, p, g, pr2);
+		// ---- the exit side: persistent lazy query at the explicit
+		// domain (map) or a fresh per-call query at the competitive
+		// horizon (fixture; identical results - the fresh query's
+		// domain IS the filter).
+		ExitField::ExitQuery Qlocal;
+		ExitField::ExitQuery* Qp = &Qlocal;
+		{
+			const auto tx0 = std::chrono::steady_clock::now();
+			if (gx.qcache) {
+				std::unique_ptr<ExitField::ExitQuery>& slot =
+					(*gx.qcache)[static_cast<size_t>(ni)];
+				if (!slot) {
+					slot.reset(new ExitField::ExitQuery());
+					ExitField::QueryInit(slot.get(), B,
+						G->m_explicit, w, p);
+				}
+				Qp = slot.get();
+				const int pr2 = level <= gx.xprof_cap ? level
+					: gx.xprof_cap;
+				const size_t kb = Qp->known.size();
+				ExitField::QueryRefine(Qp, w, p, g, pr2);
+				if (gx.instr)
+					gx.instr->exit_refines++;
+				if (GlobalSearch::DomainAudit* da = touch(
+					GlobalSearch::kDomExit, -1, pr2)) {
+					da->attempts++;
+					da->level = pr2;
+					da->M = M;
+					const int grew = static_cast<int>(
+						Qp->known.size() - kb);
+					da->edges_found += grew;
+					da->outcome = grew > 0 ? GlobalSearch::kOutEdge
+						: GlobalSearch::kOutNoExitWitness;
+					da->status = Qp->known.empty()
+						? GlobalSearch::kDomUnresolved
+						: GlobalSearch::kDomWitnessed;
+				}
+			} else {
+				ExitField::QueryInit(&Qlocal, B, M, w, p);
+				for (int pr2 = 0; pr2 <= level && pr2 <= gx.xprof_cap;
+					++pr2)
+					ExitField::QueryRefine(&Qlocal, w, p, g, pr2);
+			}
+			if (gx.instr)
+				gx.instr->t_exit_ms +=
+					std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() - tx0)
+						.count();
+		}
+		ExitField::ExitQuery& Q = *Qp;
+		// Physically-duplicate edge suppression (map mode: the
+		// persistent view re-presents old witnesses every expansion).
+		auto is_dup_edge = [&](const GlobalSearch::TransferEdge& e)
+			-> bool {
+			if (!gx.dedup_edges)
+				return false;
+			for (int ei : G->nodes[static_cast<size_t>(ni)].edges) {
+				const GlobalSearch::TransferEdge& o = G->edges[
+					static_cast<size_t>(ei)];
+				if (o.kind != e.kind || o.face_j != e.face_j
+					|| o.dt != e.dt || o.dt_exit != e.dt_exit
+					|| o.dt_air != e.dt_air
+					|| o.to_hash != e.to_hash
+					|| o.ride.size() != e.ride.size()
+					|| o.air_side.size() != e.air_side.size())
+					continue;
+				if (!o.ride.empty() && memcmp(o.ride.data(),
+					e.ride.data(), o.ride.size()
+						* sizeof(Ride::MoveInput)) != 0)
+					continue;
+				if (e.kind == GlobalSearch::kEdgeEnd
+					&& memcmp(&o.Bj.ps, &e.Bj.ps,
+						sizeof(PlayerState)) != 0)
+					continue;
+				if (gx.instr)
+					gx.instr->dup_edges_skipped++;
+				return true;
+			}
+			return false;
+		};
+		// Diagnostic: would the distance-gated Route prediction have
+		// listed this realized successor? (v0 admits ALL faces; this
+		// measures the gate we might one day trust.)
+		auto gated_predicts = [&](int fi, int fj) -> bool {
+			for (const Route::Edge& re : g.edges)
+				if (re.from == fi && re.to == fj)
+					return true;
+			return false;
+		};
 		// Arm the END zone by re-running the ACTIVE witnesses through
 		// the executor with the zone: the query is zone-agnostic; the
-		// finish is an event-classification concern.
+		// finish is an event-classification concern. The zone replay
+		// runs BEFORE the competitive filter because it can truncate
+		// the ride EARLIER than the stored event - the filter applies
+		// to the ACTUAL event tick.
 		std::vector<const Ride::ExitTransition*> airs;
 		for (const ExitField::Partition& P : Q.view)
 			for (const Ride::ExitTransition& t : P.active) {
@@ -11217,7 +11468,8 @@ namespace {
 				if (zmin && zmax) {
 					Ride::Result rz = Ride::FlyRideInputs(B, w, p, g,
 						t.witness, nullptr, zmin, zmax);
-					if (rz.legal && rz.kind == Ride::kEnd) {
+					if (rz.legal && rz.kind == Ride::kEnd
+						&& rz.ticks <= M) {
 						GlobalSearch::TransferEdge e;
 						e.kind = GlobalSearch::kEdgeEnd;
 						e.from_hash = GlobalSearch::NodeHash(B);
@@ -11229,15 +11481,39 @@ namespace {
 						e.Bj.ctl = rz.end_ctl;
 						e.Bj.face = -1;
 						e.prov = Q.prov;
-						G->edges.push_back(e);
-						G->nodes[static_cast<size_t>(
-							ni)].edges.push_back(
-							static_cast<int>(G->edges.size()) - 1);
-						GlobalSearch::OfferFinish(G, ni,
-							static_cast<int>(G->edges.size()) - 1,
-							g0 + rz.ticks);
+						if (GlobalSearch::DomainAudit* da = touch(
+							GlobalSearch::kDomEnd, -1, -1)) {
+							da->attempts++;
+							da->level = level;
+							da->M = M;
+						}
+						if (!is_dup_edge(e)) {
+							G->edges.push_back(e);
+							G->nodes[static_cast<size_t>(
+								ni)].edges.push_back(
+								static_cast<int>(G->edges.size())
+									- 1);
+							GlobalSearch::OfferFinish(G, ni,
+								static_cast<int>(G->edges.size())
+									- 1,
+								g0 + rz.ticks);
+							if (GlobalSearch::DomainAudit* da =
+								touch(GlobalSearch::kDomEnd, -1,
+									-1)) {
+								da->status =
+									GlobalSearch::kDomWitnessed;
+								da->outcome =
+									GlobalSearch::kOutEdge;
+								da->edges_found++;
+							}
+						}
 						continue;
 					}
+				}
+				if (t.dt > M) {
+					if (gx.instr)
+						gx.instr->dtfiltered++;
+					continue;
 				}
 				if (t.kind == Ride::kContactTransfer
 					&& t.board_face >= 0) {
@@ -11253,13 +11529,25 @@ namespace {
 					e.Bj.face = t.board_face;
 					e.to_hash = GlobalSearch::NodeHash(e.Bj);
 					e.prov = Q.prov;
-					G->edges.push_back(e);
-					const int ei = static_cast<int>(
-						G->edges.size()) - 1;
-					G->nodes[static_cast<size_t>(
-						ni)].edges.push_back(ei);
-					GlobalSearch::AddNode(G, e.Bj, g0 + t.dt, ni,
-						ei);
+					// Topology falsification: a realized successor
+					// outside the conservative candidate set is a
+					// correctness FAILURE. v0 candidates = every
+					// route face.
+					if (t.board_face >= static_cast<int>(
+						g.faces.size()))
+						G->topo_violations++;
+					if (gx.instr && !gated_predicts(B.face,
+						t.board_face))
+						gx.instr->gated_topo_miss++;
+					if (!is_dup_edge(e)) {
+						G->edges.push_back(e);
+						const int ei = static_cast<int>(
+							G->edges.size()) - 1;
+						G->nodes[static_cast<size_t>(
+							ni)].edges.push_back(ei);
+						GlobalSearch::AddNode(G, e.Bj, g0 + t.dt,
+							ni, ei);
+					}
 					continue;
 				}
 				if (t.kind == Ride::kAirExit)
@@ -11280,21 +11568,67 @@ namespace {
 					airs[b2] = x;
 				}
 			}
-		const size_t max_airs = level == 0 ? 3 : 5;
-		if (airs.size() > max_airs)
+		// END-VIA-AIR probes run over EVERY air exit (cheap flights;
+		// coverage where it costs nothing), before the entrance cap.
+		const std::vector<const Ride::ExitTransition*> airs_all = airs;
+		const size_t max_airs = level == 0
+			? static_cast<size_t>(gx.max_airs_l0)
+			: static_cast<size_t>(gx.max_airs_lk);
+		if (gx.exit_diversity && airs.size() > max_airs) {
+			// DIVERSE selection (session 18, measured): one score
+			// ranks; buckets cover. The flat/high prior alone starved
+			// the south-diving exits whose coast arcs feed the
+			// north-facing ramp - the feeder class differs per
+			// transfer, so the tried set round-robins (vz class x
+			// heading quadrant) buckets, prior-ordered within each.
+			std::vector<std::vector<const Ride::ExitTransition*> >
+				bk(8);
+			for (const Ride::ExitTransition* z : airs) {
+				const float hx = z->s_plus.vel.X;
+				const float hy = z->s_plus.vel.Y;
+				const int q = (fabsf(hx) >= fabsf(hy))
+					? (hx >= 0.f ? 0 : 1) : (hy >= 0.f ? 2 : 3);
+				bk[static_cast<size_t>(
+					(z->s_plus.vel.Z > -150.f ? 0 : 4) + q)]
+					.push_back(z);
+			}
+			std::vector<const Ride::ExitTransition*> sel;
+			for (size_t r = 0; sel.size() < max_airs; ++r) {
+				bool any = false;
+				for (const std::vector<
+					const Ride::ExitTransition*>& b : bk)
+					if (r < b.size()) {
+						any = true;
+						if (sel.size() < max_airs)
+							sel.push_back(b[r]);
+					}
+				if (!any)
+					break;
+			}
+			airs = sel;
+		} else if (airs.size() > max_airs)
 			airs.resize(max_airs);
 		const int min_gap = static_cast<int>(
 			ceilf((1.f / p.dt) / p.strafe_rate_max));
 		for (const Ride::ExitTransition* Z : airs) {
 			for (size_t j2 = 0; j2 < g.faces.size(); ++j2) {
-				if (static_cast<int>(j2) == B.face)
+				if (!gx.same_face && static_cast<int>(j2) == B.face)
 					continue;
 				const Route::Face& fj = g.faces[j2];
 				if (sqrtf(fj.n.X * fj.n.X + fj.n.Y * fj.n.Y)
 					< 1e-4f)
 					continue;
-				Vec3 aims[2];
-				aims[0] = fj.centroid;
+				std::vector<Vec3> aims;
+				bool has_cross = false;
+				if (gx.ballistic_aim) {
+					Vec3 bq;
+					if (BallisticAim(Z->s_plus.pos, Z->s_plus.vel,
+						fj, p, gx.nh_cap, &bq)) {
+						aims.push_back(bq);
+						has_cross = true;
+					}
+				}
+				aims.push_back(fj.centroid);
 				{
 					const float dl2 = Len(fj.downhill);
 					Vec3 dn2 = dl2 > 1e-4f
@@ -11307,77 +11641,333 @@ namespace {
 						if (e2 > ext2)
 							ext2 = e2;
 					}
-					aims[1] = fj.centroid + Scale(dn2,
-						ext2 * 0.55f);
+					aims.push_back(fj.centroid + Scale(dn2,
+						ext2 * 0.55f));
 				}
-				const float dxy = Len2D(aims[1] - Z->s_plus.pos);
-				const float sp2 = Len2D(Z->s_plus.vel) > 300.f
-					? Len2D(Z->s_plus.vel) : 300.f;
-				int nh = static_cast<int>(dxy / (sp2 * p.dt)) + 20;
+				if (gx.spread_aims && level >= 1
+					&& !fj.verts.empty()) {
+					// Long-axis spread (measured: the acceptance
+					// ball is a region query; a face's natural board
+					// region can sit at either end of a long ramp).
+					Vec3 vb0 = fj.verts[0], vb1 = fj.verts[0];
+					for (const Vec3& v2 : fj.verts) {
+						vb0.X = v2.X < vb0.X ? v2.X : vb0.X;
+						vb0.Y = v2.Y < vb0.Y ? v2.Y : vb0.Y;
+						vb1.X = v2.X > vb1.X ? v2.X : vb1.X;
+						vb1.Y = v2.Y > vb1.Y ? v2.Y : vb1.Y;
+					}
+					const float exx = (vb1.X - vb0.X) * 0.5f;
+					const float exy = (vb1.Y - vb0.Y) * 0.5f;
+					const Vec3 dir = exx >= exy
+						? Vec3(1.f, 0.f, 0.f) : Vec3(0.f, 1.f, 0.f);
+					const float ext3 = (exx >= exy ? exx : exy)
+						* 0.9f;
+					for (int sgn = -1; sgn <= 1; sgn += 2) {
+						Vec3 q3 = fj.centroid + Scale(dir,
+							ext3 * static_cast<float>(sgn));
+						q3 = q3 - Scale(fj.n,
+							Dot(fj.n, q3) - fj.d);
+						aims.push_back(q3);
+					}
+				}
+				float dxy = Len2D(aims.back() - Z->s_plus.pos);
+				if (gx.spread_aims)
+					for (const Vec3& a3 : aims) {
+						const float d3 = Len2D(a3 - Z->s_plus.pos);
+						if (d3 > dxy)
+							dxy = d3;
+					}
+				// GEOMETRY-ONLY horizon (session 18, measured): tying
+				// nh to the instantaneous exit speed CUT the arcing
+				// transfers - a 465 u/s exit got M 105 where the
+				// f0->f1 witness needs ~160+ (turning and rising cost
+				// ticks the straight-line division never grants). A
+				// fixed reference speed keeps the domain physical and
+				// uniform.
+				const float sp2 = gx.ref_speed_nh > 0.f
+					? gx.ref_speed_nh
+					: (Len2D(Z->s_plus.vel) > 300.f
+						? Len2D(Z->s_plus.vel) : 300.f);
+				int nh = static_cast<int>(dxy / (sp2 * p.dt))
+					+ (gx.ref_speed_nh > 0.f ? 30 : 20);
 				if (nh < 30) nh = 30;
-				if (nh > 160) nh = 160;
-				Entrance::QueryState qs;
-				bool found = false;
-				const int eprof = level == 0 ? 1 : 2;
-				for (int ai = 0; ai < 2 && !found; ++ai) {
-					Entrance::QueryState q2;
-					for (int prof = 0; prof <= eprof && !found;
-						++prof) {
-						Entrance::RefineStep(&q2, Z->s_plus, w, p,
-							g, static_cast<int>(j2), aims[ai],
-							28.f, nh, fj.zmin, Z->ctl_plus);
-						found = q2.has_L;
+				if (nh > gx.nh_cap) nh = gx.nh_cap;
+				const auto te0 = std::chrono::steady_clock::now();
+				Entrance::QueryState qs_local;
+				const Entrance::QueryState* qsp = nullptr;
+				const int eprof_want = gx.lvl0_coarse ? level
+					: 1 + level;
+				int eprof = eprof_want <= gx.eprof_cap
+					? eprof_want : gx.eprof_cap;
+				// COST DEFERRAL, never a ban: a face with no coast
+				// crossing from this exit gets only the coarse
+				// profile until the node deepens - the ledger records
+				// the lower ladder level; nothing becomes
+				// "unreachable".
+				if (gx.defer_far && !has_cross && level < 2)
+					eprof = 0;
+				const unsigned long long zh = gx.ecache
+					? ExitField::WitnessHash(Z->witness) : 0;
+				for (int ai = 0;
+					ai < static_cast<int>(aims.size()) && !qsp;
+					++ai) {
+					Entrance::QueryState* q2;
+					if (gx.ecache) {
+						unsigned long long key = zh;
+						key = key * 1099511628211ULL
+							^ static_cast<unsigned long long>(
+								j2 * 2 + 1);
+						key = key * 1099511628211ULL
+							^ static_cast<unsigned long long>(
+								ai + 1);
+						q2 = &(*gx.ecache)[static_cast<size_t>(
+							ni)][key];
+					} else {
+						qs_local = Entrance::QueryState();
+						q2 = &qs_local;
+					}
+					const int ev0 = q2->evals;
+					bool found = q2->has_L;
+					while (!found && q2->level <= eprof) {
+						if (!Entrance::RefineStep(q2, Z->s_plus, w,
+							p, g, static_cast<int>(j2),
+							aims[static_cast<size_t>(ai)],
+							28.f, nh, fj.zmin, Z->ctl_plus))
+							break;
+						found = q2->has_L;
+						if (gx.instr)
+							gx.instr->entrance_calls++;
+					}
+					if (gx.instr)
+						gx.instr->entrance_evals +=
+							q2->evals - ev0;
+					if (GlobalSearch::DomainAudit* da = touch(
+						GlobalSearch::kDomEntrance,
+						static_cast<int>(j2), ai)) {
+						da->attempts++;
+						da->level = q2->level;
+						da->M = nh;
+						if (!found
+							&& da->status
+								!= GlobalSearch::kDomWitnessed) {
+							da->status =
+								GlobalSearch::kDomUnresolved;
+							da->outcome =
+								GlobalSearch::kOutNoStrike;
+						}
 					}
 					if (found)
-						qs = q2;
+						qsp = q2;
 				}
-				if (!found)
+				if (gx.instr)
+					gx.instr->t_entr_ms +=
+						std::chrono::duration<double, std::milli>(
+							std::chrono::steady_clock::now() - te0)
+							.count();
+				if (!qsp)
 					continue;
-				if (!Ride::SchedLegal(Z->ctl_plus, qs.wside,
-					min_gap))
-					continue;
-				Air::Target vt;
-				vt.face = static_cast<int>(j2);
-				vt.dot_cap = 3000.f;
-				vt.aim = fj.centroid;
-				vt.max_ticks = qs.horizon;
-				Air::Result ar = Air::FlyWishSchedule(Z->s_plus, w,
-					p, vt, g, qs.wside, qs.wcosa, qs.horizon);
-				if (!ar.hit || ar.dot >= 0.f
-					|| ar.struck_brush >= 0)
-					continue;
-				GlobalSearch::TransferEdge e;
-				e.kind = GlobalSearch::kEdgeAir;
-				e.from_hash = GlobalSearch::NodeHash(B);
-				e.dt_exit = Z->dt;
-				e.dt_air = ar.tick;
-				e.dt = Z->dt + ar.tick;
-				e.ride = Z->witness;
-				e.air_side = qs.wside;
-				e.air_cosa = qs.wcosa;
-				e.air_horizon = qs.horizon;
-				e.face_j = static_cast<int>(j2);
-				e.Bj.ps = ar.end_state;
-				Steer::CtlState c2 = Z->ctl_plus;
-				for (int k = 0; k < ar.tick; ++k)
-					Ride::CtlAdvance(&c2, k < static_cast<int>(
-						qs.wside.size())
-						? static_cast<int>(qs.wside[
-							static_cast<size_t>(k)])
-						: (qs.wside.empty() ? 0
-							: static_cast<int>(qs.wside.back())));
-				e.Bj.ctl = c2;
-				e.Bj.face = static_cast<int>(j2);
-				e.to_hash = GlobalSearch::NodeHash(e.Bj);
-				e.prov = Q.prov;
-				G->edges.push_back(e);
-				const int ei = static_cast<int>(G->edges.size())
-					- 1;
-				G->nodes[static_cast<size_t>(ni)].edges.push_back(
-					ei);
-				GlobalSearch::AddNode(G, e.Bj, g0 + e.dt, ni, ei);
+				const Entrance::QueryState& qs = *qsp;
+				// The witness set: the headline winner alone
+				// (fixture), or every distinct continuation lane the
+				// entrance frontier holds (map, level >= 1) - the
+				// advisor's "distinct BoardTransition witnesses".
+				Entrance::BoardTransition winner_tr;
+				std::vector<const Entrance::BoardTransition*> trs;
+				if (gx.use_lanes && level >= 1
+					&& !qs.transitions.empty()) {
+					for (const Entrance::BoardTransition& tr :
+						qs.transitions)
+						if (!tr.side.empty())
+							trs.push_back(&tr);
+				}
+				if (trs.empty()) {
+					winner_tr.side = qs.wside;
+					winner_tr.cosa = qs.wcosa;
+					winner_tr.horizon = qs.horizon;
+					trs.push_back(&winner_tr);
+				}
+				bool first_tr = true;
+				for (const Entrance::BoardTransition* tr : trs) {
+					const bool is_winner = first_tr;
+					first_tr = false;
+					if (!Ride::SchedLegal(Z->ctl_plus, tr->side,
+						min_gap)) {
+						if (GlobalSearch::DomainAudit* da = touch(
+							GlobalSearch::kDomEntrance,
+							static_cast<int>(j2), 0)) {
+							da->outcome =
+								GlobalSearch::kOutSchedIllegal;
+						}
+						continue;
+					}
+					Air::Target vt;
+					vt.face = static_cast<int>(j2);
+					vt.dot_cap = 3000.f;
+					vt.aim = fj.centroid;
+					vt.max_ticks = tr->horizon;
+					Air::Result ar = Air::FlyWishSchedule(
+						Z->s_plus, w, p, vt, g, tr->side, tr->cosa,
+						tr->horizon);
+					if (!ar.hit || ar.dot >= 0.f
+						|| ar.struck_brush >= 0) {
+						if (GlobalSearch::DomainAudit* da = touch(
+							GlobalSearch::kDomEntrance,
+							static_cast<int>(j2), 0)) {
+							da->outcome =
+								GlobalSearch::kOutReplayReject;
+						}
+						continue;
+					}
+					GlobalSearch::TransferEdge e;
+					e.kind = GlobalSearch::kEdgeAir;
+					e.from_hash = GlobalSearch::NodeHash(B);
+					e.dt_exit = Z->dt;
+					e.dt_air = ar.tick;
+					e.dt = Z->dt + ar.tick;
+					e.ride = Z->witness;
+					e.air_side = tr->side;
+					e.air_cosa = tr->cosa;
+					e.air_horizon = tr->horizon;
+					e.face_j = static_cast<int>(j2);
+					e.Bj.ps = ar.end_state;
+					Steer::CtlState c2 = Z->ctl_plus;
+					for (int k = 0; k < ar.tick; ++k)
+						Ride::CtlAdvance(&c2, k < static_cast<int>(
+							tr->side.size())
+							? static_cast<int>(tr->side[
+								static_cast<size_t>(k)])
+							: (tr->side.empty() ? 0
+								: static_cast<int>(
+									tr->side.back())));
+					e.Bj.ctl = c2;
+					e.Bj.face = static_cast<int>(j2);
+					e.to_hash = GlobalSearch::NodeHash(e.Bj);
+					e.prov = Q.prov;
+					if (gx.instr && !gated_predicts(B.face,
+						static_cast<int>(j2)))
+						gx.instr->gated_topo_miss++;
+					if (is_dup_edge(e))
+						continue;
+					G->edges.push_back(e);
+					const int ei = static_cast<int>(G->edges.size())
+						- 1;
+					G->nodes[static_cast<size_t>(
+						ni)].edges.push_back(ei);
+					GlobalSearch::AddNode(G, e.Bj, g0 + e.dt, ni,
+						ei);
+					if (gx.instr && !is_winner)
+						gx.instr->lane_edges++;
+					if (GlobalSearch::DomainAudit* da = touch(
+						GlobalSearch::kDomEntrance,
+						static_cast<int>(j2), 0)) {
+						da->status = GlobalSearch::kDomWitnessed;
+						da->outcome = GlobalSearch::kOutEdge;
+						da->edges_found++;
+					}
+				}
 			}
 		}
+		// ---- END-VIA-AIR: deterministic zone probes from every air
+		// exit. The finish set is a position box, not a face, so it
+		// gets its own flight family (coast first; strafing holds at
+		// deeper levels - coverage policy, never admission).
+		if (gx.end_probe && zmin && zmax) {
+			const auto tp0 = std::chrono::steady_clock::now();
+			struct PS2 { signed char side; float cosa; };
+			std::vector<PS2> scheds;
+			scheds.push_back(PS2{ 0, 1.f });
+			if (level >= 1) {
+				scheds.push_back(PS2{ 1, 0.999f });
+				scheds.push_back(PS2{ -1, 0.999f });
+			}
+			if (level >= 2) {
+				scheds.push_back(PS2{ 1, 0.97f });
+				scheds.push_back(PS2{ -1, 0.97f });
+			}
+			const Vec3 zc = Scale(*zmin + *zmax, 0.5f);
+			for (const Ride::ExitTransition* Z : airs_all) {
+				for (size_t si = 0; si < scheds.size(); ++si) {
+					const float dxy = Len2D(zc - Z->s_plus.pos);
+					const float sp = Len2D(Z->s_plus.vel) > 300.f
+						? Len2D(Z->s_plus.vel) : 300.f;
+					int nh = static_cast<int>(dxy / (sp * p.dt))
+						+ 40;
+					if (nh < 30) nh = 30;
+					if (nh > 300) nh = 300;
+					std::vector<signed char> sd(
+						static_cast<size_t>(nh), scheds[si].side);
+					std::vector<float> cs(static_cast<size_t>(nh),
+						scheds[si].cosa);
+					GlobalSearch::ZoneProbeResult zr =
+						GlobalSearch::FlyZoneSchedule(Z->s_plus, w,
+							p, sd, cs, nh, *zmin, *zmax);
+					if (gx.instr)
+						gx.instr->zone_probes++;
+					GlobalSearch::DomainAudit* da = touch(
+						GlobalSearch::kDomEnd, -1,
+						static_cast<int>(si));
+					if (da) {
+						da->attempts++;
+						da->level = level;
+						da->M = nh;
+					}
+					if (zr.reached) {
+						GlobalSearch::TransferEdge e;
+						e.kind = GlobalSearch::kEdgeEnd;
+						e.from_hash = GlobalSearch::NodeHash(B);
+						e.dt_exit = Z->dt;
+						e.dt_air = zr.tick;
+						e.dt = Z->dt + zr.tick;
+						e.ride = Z->witness;
+						e.air_side = sd;
+						e.air_cosa = cs;
+						e.air_horizon = nh;
+						e.Bj.ps = zr.end_state;
+						e.Bj.ctl = Z->ctl_plus;
+						e.Bj.face = -1;
+						e.prov = Q.prov;
+						if (!is_dup_edge(e)) {
+							G->edges.push_back(e);
+							const int ei = static_cast<int>(
+								G->edges.size()) - 1;
+							G->nodes[static_cast<size_t>(
+								ni)].edges.push_back(ei);
+							GlobalSearch::OfferFinish(G, ni, ei,
+								g0 + e.dt);
+							if (da) {
+								da->status =
+									GlobalSearch::kDomWitnessed;
+								da->outcome =
+									GlobalSearch::kOutEdge;
+								da->edges_found++;
+							}
+						}
+					} else if (!zr.reached) {
+						if (da
+							&& da->status
+								!= GlobalSearch::kDomWitnessed) {
+							da->status =
+								GlobalSearch::kDomUnresolved;
+							da->outcome =
+								GlobalSearch::kOutZoneMiss;
+						}
+						if (gx.instr && zr.contact
+							&& gx.end_brush_widx >= 0
+							&& zr.contact_brush
+								== gx.end_brush_widx)
+							gx.instr->end_brush_near_miss++;
+					}
+				}
+			}
+			if (gx.instr)
+				gx.instr->t_probe_ms +=
+					std::chrono::duration<double, std::milli>(
+						std::chrono::steady_clock::now() - tp0)
+						.count();
+		}
+		if (gx.instr)
+			gx.instr->exp_new_edges.push_back(static_cast<int>(
+				G->edges.size() - edges_before));
 		G->nodes[static_cast<size_t>(ni)].refine_level = level + 1;
 	}
 
@@ -11862,6 +12452,76 @@ namespace {
 			check("G12 whole-route cold replay", ok, buf);
 		}
 
+		// ---- G13 HORIZON BOUNDARY (advisor 2026-08-20b): the
+		// "< incumbent" tick convention cannot cut a route finishing
+		// one tick sooner. Using the incumbent's REAL finish ride
+		// (node at g_e, END witness of exactly dt_e ticks), set T* so
+		// that this finish would land at T*-1, T*, T*+1 and verify
+		// the issued horizon respectively ADMITS it (the executor
+		// books END at tick dt_e == M with no off-by-one truncation,
+		// and OfferFinish accepts), EXCLUDES the tie (the M = dt_e - 1
+		// ride horizons out short of the zone; an offer anyway is
+		// refused), and EXCLUDES the slower one. A convention mismatch
+		// here would invisibly cut one-tick-optimal branches on every
+		// future map.
+		{
+			bool ok = have_route && G.Tstar_edge >= 0;
+			int MA = -1, MB = -1, MC = -1, dte = -1;
+			bool admA = false, accA = false, exclB = false,
+				refB = false, exclC = false, refC = false;
+			if (ok) {
+				const GlobalSearch::TransferEdge& ee = G.edges[
+					static_cast<size_t>(G.Tstar_edge)];
+				const GlobalSearch::Node& ne = G.nodes[
+					static_cast<size_t>(G.Tstar_node)];
+				const int ge = ne.g;
+				dte = ee.dt;
+				auto ride_to = [&](int mm) -> Ride::Result {
+					const int n2 = mm < dte ? mm : dte;
+					std::vector<Ride::MoveInput> wv(
+						ee.ride.begin(), ee.ride.begin()
+							+ (n2 > 0 ? n2 : 0));
+					return Ride::FlyRideInputs(ne.B, sw, p, sg, wv,
+						nullptr, &zmin, &zmax);
+				};
+				// finish at T*-1: admitted and accepted.
+				GlobalSearch::Graph GA;
+				GA.Tstar = ge + dte + 1;
+				MA = GlobalSearch::HorizonFor(GA, ge);
+				Ride::Result rA = ride_to(MA);
+				admA = MA == dte && rA.legal
+					&& rA.kind == Ride::kEnd && rA.ticks == dte;
+				accA = GlobalSearch::OfferFinish(&GA, 0, 0,
+					ge + dte) && GA.Tstar == ge + dte;
+				// finish at exactly T*: horizon excludes the tie.
+				GlobalSearch::Graph GB;
+				GB.Tstar = ge + dte;
+				MB = GlobalSearch::HorizonFor(GB, ge);
+				Ride::Result rB = ride_to(MB);
+				exclB = MB == dte - 1
+					&& !(rB.legal && rB.kind == Ride::kEnd);
+				refB = !GlobalSearch::OfferFinish(&GB, 0, 0,
+					ge + dte);
+				// finish at T*+1: still excluded, still refused.
+				GlobalSearch::Graph GC;
+				GC.Tstar = ge + dte - 1;
+				MC = GlobalSearch::HorizonFor(GC, ge);
+				Ride::Result rC = ride_to(MC);
+				exclC = MC == dte - 2
+					&& !(rC.legal && rC.kind == Ride::kEnd);
+				refC = !GlobalSearch::OfferFinish(&GC, 0, 0,
+					ge + dte);
+				ok = admA && accA && exclB && refB && exclC && refC;
+			}
+			snprintf(buf, sizeof(buf), "real finish ride dt %d: at "
+				"T*-1 the horizon M=%d ADMITS it (END books at tick "
+				"%d, offer accepted %d); at T* M=%d excludes the tie "
+				"(refused %d); at T*+1 M=%d excludes (refused %d)",
+				dte, MA, dte, accA ? 1 : 0, MB, refB ? 1 : 0, MC,
+				refC ? 1 : 0);
+			check("G13 horizon boundary", ok, buf);
+		}
+
 		printf("groute: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0
 				? "G0 GREEN - the rebuilt operators autonomously "
@@ -11869,6 +12529,879 @@ namespace {
 				: "G0 RED");
 		fflush(stdout);
 		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= gmap: THE FIRST REAL-MAP GLOBAL RUN (advisor
+	// 2026-08-20b). G0R = production cold finds a real multi-face
+	// finish and the hierarchical witness (Launch + TransferEdges)
+	// replays continuously through the exact engine at the claimed
+	// tick. G1M = the instrumented measurement of where global search
+	// actually spends its state-space and compute - THE product of
+	// this command even when no route is found. h_cert = 0 throughout;
+	// no human data is reachable from this command.
+	int CmdGMap(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		if (o.end_brush < 0) {
+			printf("gmap: --end-brush required (the END set)\n");
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err) || g.faces.empty()) {
+			printf("gmap: route build failed: %s\n", err.c_str());
+			return 1;
+		}
+		std::string zerr;
+		const bool anchored = Route::AnchorZones(w, &g, w.spawn_origin,
+			false, o.end_brush, 2000.f, &zerr);
+		const int end_widx = w.IndexOfBrushId(o.end_brush);
+		if (end_widx < 0) {
+			printf("gmap: end brush id %d not found\n", o.end_brush);
+			return 1;
+		}
+		// THE END SET: origin-box such that origin-in-box implies the
+		// hull TOUCHES the end brush in EITHER hull state (Minkowski
+		// intersection: XY +16 both hulls; Z in [bmin-54, bmax], the
+		// 54u duck hull). SOUND - no claimed finish that is not a real
+		// touch. Known completeness gap, stated: a STANDING-only
+		// underside touch with feet in [bmin-72, bmin-54) is not
+		// detected in v0.
+		const WorldBrush& eb = w.brushes[static_cast<size_t>(end_widx)];
+		const Vec3 zmin(eb.bmin.X - 16.f, eb.bmin.Y - 16.f,
+			eb.bmin.Z - 54.f);
+		const Vec3 zmax(eb.bmax.X + 16.f, eb.bmax.Y + 16.f,
+			eb.bmax.Z);
+		printf("gmap: %d faces, %d gated transfer candidates | end "
+			"brush %d (world idx %d) zone (%.0f,%.0f,%.0f)..(%.0f,"
+			"%.0f,%.0f)\n",
+			static_cast<int>(g.faces.size()),
+			static_cast<int>(g.edges.size()), o.end_brush, end_widx,
+			zmin.X, zmin.Y, zmin.Z, zmax.X, zmax.Y, zmax.Z);
+		if (!anchored)
+			printf("gmap: WARN zone anchoring: %s\n", zerr.c_str());
+		// The anchored spawn state (map entities lump; ground
+		// established by the standard 2u down-probe).
+		PlayerState anchor;
+		anchor.pos = w.spawn_origin;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(anchor.pos,
+				anchor.pos - Vec3(0.f, 0.f, 2.f), false, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= p.walkable_z) {
+				anchor.pos.Z -= 2.f * gf;
+				anchor.on_ground = true;
+				anchor.ground_brush = tr.brush;
+			}
+		}
+		printf("gmap: spawn (%.2f, %.2f, %.2f) on brush %d, "
+			"on_ground %d\n", anchor.pos.X, anchor.pos.Y,
+			anchor.pos.Z, anchor.ground_brush,
+			anchor.on_ground ? 1 : 0);
+		const auto T0 = std::chrono::steady_clock::now();
+		auto secs = [&]() {
+			return std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - T0).count();
+		};
+
+		// ---- LAUNCH FRONTIER (production, minimal, PLURAL): a full
+		// yaw fan of forward runs from the anchored spawn to the first
+		// airborne boundary, then the certified Entrance machinery to
+		// every route face. Failed directions stay recorded and
+		// UNRESOLVED - never unreachable. No spawn-yaw seeding, no
+		// route knowledge: the fan covers all directions and the
+		// physics decides.
+		GlobalSearch::Graph G;
+		GmapInstr instr;
+		std::map<int, GlobalSearch::LaunchWitness> root_lw;
+		struct LaunchDir {
+			float yaw = 0.f;
+			int ticks = 0;
+			int status = 0;   // 0 never airborne, 1 airborne, 2 boarded
+			int boards = 0;
+		};
+		std::vector<LaunchDir> ldirs;
+		long long launch_evals = 0;
+		const int fan = 24;
+		const int krun_cap = 300;
+		for (int d = 0; d < fan; ++d) {
+			const float yawd = -180.f + d * (360.f / fan);
+			PlayerState s = anchor;
+			std::vector<Ride::MoveInput> gp;
+			bool airborne = false;
+			for (int k = 0; k < krun_cap; ++k) {
+				TickEvents ev;
+				MoveTick(s, w, p, 0.f, yawd, 450.f, 0.f, 0.f, 0,
+					&ev);
+				Ride::MoveInput mi;
+				mi.yaw = yawd;
+				mi.fmove = 450.f;
+				gp.push_back(mi);
+				if (!s.on_ground) {
+					airborne = true;
+					break;
+				}
+				if (k > 60 && Len2D(s.vel) < 20.f)
+					break;   // ran into a wall; direction rests
+			}
+			LaunchDir ld;
+			ld.yaw = yawd;
+			ld.ticks = static_cast<int>(gp.size());
+			ld.status = airborne ? 1 : 0;
+			if (!airborne) {
+				ldirs.push_back(ld);
+				continue;
+			}
+			for (size_t j = 0; j < g.faces.size(); ++j) {
+				const Route::Face& fj = g.faces[j];
+				if (sqrtf(fj.n.X * fj.n.X + fj.n.Y * fj.n.Y)
+					< 1e-4f)
+					continue;
+				std::vector<Vec3> aims;
+				{
+					Vec3 bq;
+					if (BallisticAim(s.pos, s.vel, fj, p, 400, &bq))
+						aims.push_back(bq);
+				}
+				aims.push_back(fj.centroid);
+				{
+					const float dl2 = Len(fj.downhill);
+					Vec3 dn2 = dl2 > 1e-4f
+						? Scale(fj.downhill, 1.f / dl2)
+						: Vec3(0.f, 0.f, 0.f);
+					float ext2 = 0.f;
+					for (const Vec3& v2 : fj.verts) {
+						const float e2 = Dot(v2 - fj.centroid,
+							dn2);
+						if (e2 > ext2)
+							ext2 = e2;
+					}
+					aims.push_back(fj.centroid + Scale(dn2,
+						ext2 * 0.55f));
+				}
+				const float dxy = Len2D(aims.back() - s.pos);
+				const float sp2 = Len2D(s.vel) > 200.f
+					? Len2D(s.vel) : 200.f;
+				int nh = static_cast<int>(dxy / (sp2 * p.dt)) + 20;
+				if (nh < 30) nh = 30;
+				if (nh > 400) nh = 400;
+				Entrance::QueryState qs;
+				bool found = false;
+				for (int ai = 0;
+					ai < static_cast<int>(aims.size()) && !found;
+					++ai) {
+					Entrance::QueryState q2;
+					for (int prof = 0; prof <= 1 && !found; ++prof) {
+						Entrance::RefineStep(&q2, s, w, p, g,
+							static_cast<int>(j),
+							aims[static_cast<size_t>(ai)], 28.f,
+							nh, fj.zmin, Steer::CtlState());
+						found = q2.has_L;
+					}
+					launch_evals += q2.evals;
+					if (found)
+						qs = q2;
+				}
+				if (!found)
+					continue;
+				Entrance::BoardTransition winner_tr;
+				std::vector<const Entrance::BoardTransition*> trs;
+				for (const Entrance::BoardTransition& tr :
+					qs.transitions)
+					if (!tr.side.empty())
+						trs.push_back(&tr);
+				if (trs.empty()) {
+					winner_tr.side = qs.wside;
+					winner_tr.cosa = qs.wcosa;
+					winner_tr.horizon = qs.horizon;
+					trs.push_back(&winner_tr);
+				}
+				for (const Entrance::BoardTransition* tr : trs) {
+					Air::Target vt;
+					vt.face = static_cast<int>(j);
+					vt.dot_cap = 3000.f;
+					vt.aim = fj.centroid;
+					vt.max_ticks = tr->horizon;
+					Air::Result ar = Air::FlyWishSchedule(s, w, p,
+						vt, g, tr->side, tr->cosa, tr->horizon);
+					if (!ar.hit || ar.dot >= 0.f
+						|| ar.struck_brush >= 0)
+						continue;
+					Ride::BoundaryState B0;
+					B0.ps = ar.end_state;
+					Steer::CtlState c2;
+					for (int k = 0; k < ar.tick; ++k)
+						Ride::CtlAdvance(&c2, k < static_cast<int>(
+							tr->side.size())
+							? static_cast<int>(tr->side[
+								static_cast<size_t>(k)])
+							: (tr->side.empty() ? 0
+								: static_cast<int>(
+									tr->side.back())));
+					B0.ctl = c2;
+					B0.face = static_cast<int>(j);
+					const int lg0 = static_cast<int>(gp.size())
+						+ ar.tick;
+					const int nidx = GlobalSearch::AddNode(&G, B0,
+						lg0, -1, -1);
+					if (nidx >= 0) {
+						GlobalSearch::LaunchWitness lw;
+						lw.ground = gp;
+						lw.air_side = tr->side;
+						lw.air_cosa = tr->cosa;
+						lw.air_horizon = tr->horizon;
+						lw.face = static_cast<int>(j);
+						lw.dt_air = ar.tick;
+						lw.B0 = B0;
+						lw.g0 = lg0;
+						lw.variant = d;
+						std::map<int,
+							GlobalSearch::LaunchWitness>::iterator
+							it = root_lw.find(nidx);
+						if (it == root_lw.end()
+							|| it->second.g0 > lg0)
+							root_lw[nidx] = lw;
+						ld.boards++;
+					}
+				}
+			}
+			if (ld.boards > 0)
+				ld.status = 2;
+			ldirs.push_back(ld);
+		}
+		const double t_launch = secs();
+		{
+			int nair = 0, nboard = 0;
+			for (const LaunchDir& ld : ldirs) {
+				if (ld.status >= 1) nair++;
+				if (ld.status == 2) nboard++;
+			}
+			printf("gmap: LAUNCH %d directions -> %d airborne -> %d "
+				"boarding directions -> %d distinct root states "
+				"(%lld entrance evals, %.1fs)\n", fan, nair, nboard,
+				static_cast<int>(G.nodes.size()), launch_evals,
+				t_launch);
+			for (const LaunchDir& ld : ldirs)
+				if (ld.status == 2)
+					printf("gmap:   yaw %+7.1f: ground %3d ticks, "
+						"%d roots\n", ld.yaw, ld.ticks, ld.boards);
+			int shown = 0;
+			for (std::map<int,
+				GlobalSearch::LaunchWitness>::const_iterator it =
+				root_lw.begin(); it != root_lw.end() && shown < 10;
+				++it, ++shown)
+				printf("gmap:   root n%d: face %d g0 %d speed2d "
+					"%.0f\n", it->first, it->second.face,
+					it->second.g0,
+					Len2D(G.nodes[static_cast<size_t>(
+						it->first)].B.ps.vel));
+		}
+		if (G.nodes.empty()) {
+			printf("gmap: LAUNCH FRONTIER EMPTY - the run is starved "
+				"at launch; G0R not reached. (This is a launch "
+				"coverage finding, not a search architecture "
+				"verdict.)\n");
+			return 0;
+		}
+
+		// ---- THE EXPLORER (simple deterministic service): pick the
+		// open node with min (g, refine_level, index); expand once at
+		// its current level. Two kinds of work fold into levels.
+		std::vector<std::unique_ptr<ExitField::ExitQuery>> qcache;
+		std::vector<std::map<unsigned long long,
+			Entrance::QueryState> > ecache;
+		GXParams gx;
+		gx.max_airs_l0 = 4;
+		gx.max_airs_lk = 8;
+		gx.nh_cap = 400;
+		gx.same_face = true;
+		gx.end_probe = true;
+		gx.use_lanes = true;
+		gx.eprof_cap = 2;
+		gx.xprof_cap = 3;
+		gx.audit = true;
+		gx.dedup_edges = true;
+		gx.ballistic_aim = true;
+		gx.lvl0_coarse = true;
+		gx.ref_speed_nh = 300.f;
+		gx.exit_diversity = true;
+		gx.spread_aims = true;
+		gx.defer_far = true;
+		gx.end_brush_widx = end_widx;
+		gx.qcache = &qcache;
+		gx.ecache = &ecache;
+		gx.instr = &instr;
+		const int kMaxLevel = 4;
+		const long long max_iters = o.rollouts > 0 ? o.rollouts : 500;
+		const double wall_s = o.budget_s;
+		int qhw = 0;
+		long long iters = 0;
+		const char* stop_reason = "iteration cap";
+		std::vector<std::pair<int, double> > inc_times;
+		size_t seen_hist = 0;
+		// SERVICE ORDER (deterministic; ordering advice only, physics
+		// untouched): round-robin FACES first - the measured min-g
+		// service flooded the first face's cheap re-entry hops and
+		// starved every later face. (face expansion count, level, g,
+		// index) spreads work along the route while everything skipped
+		// stays open and recorded.
+		std::vector<int> face_visits(g.faces.size(), 0);
+		// Per-face long-axis frame for WITHIN-FACE deepen diversity
+		// (session 18, measured): min-g laddering alone only ever
+		// deepens a face's earliest boards - on f1 the west end -
+		// while the east-half boards that feed the next face rest
+		// shallow. Position buckets along the face's long horizontal
+		// axis rotate the deepen lane across the whole face. Map-free
+		// geometry; ordering only.
+		struct FaceAxis {
+			bool x_axis = true;
+			float lo = 0.f, hi = 1.f;
+		};
+		std::vector<FaceAxis> faxis(g.faces.size());
+		for (size_t fv = 0; fv < g.faces.size(); ++fv) {
+			const Route::Face& fc = g.faces[fv];
+			if (fc.verts.empty())
+				continue;
+			Vec3 vb0 = fc.verts[0], vb1 = fc.verts[0];
+			for (const Vec3& v2 : fc.verts) {
+				vb0.X = v2.X < vb0.X ? v2.X : vb0.X;
+				vb0.Y = v2.Y < vb0.Y ? v2.Y : vb0.Y;
+				vb1.X = v2.X > vb1.X ? v2.X : vb1.X;
+				vb1.Y = v2.Y > vb1.Y ? v2.Y : vb1.Y;
+			}
+			faxis[fv].x_axis = (vb1.X - vb0.X) >= (vb1.Y - vb0.Y);
+			faxis[fv].lo = faxis[fv].x_axis ? vb0.X : vb0.Y;
+			faxis[fv].hi = faxis[fv].x_axis ? vb1.X : vb1.Y;
+			if (faxis[fv].hi - faxis[fv].lo < 1.f)
+				faxis[fv].hi = faxis[fv].lo + 1.f;
+		}
+		for (long long it = 0; it < max_iters; ++it) {
+			if (secs() - t_launch > wall_s) {
+				stop_reason = "wall budget";
+				break;
+			}
+			if (qcache.size() < G.nodes.size())
+				qcache.resize(G.nodes.size());
+			if (ecache.size() < G.nodes.size())
+				ecache.resize(G.nodes.size());
+			// TWO WORK LANES, interleaved deterministically (ordering
+			// only): even iterations take BREADTH (round-robin faces,
+			// lowest level, lowest g - new state work); odd iterations
+			// DEEPEN the fastest open node (the fast/flat/high prior
+			// applied to states) so refinement ladders actually climb
+			// to the profiles that find the harder transfers. Measured
+			// necessity: pure breadth kept every node at the coarse
+			// level and the coarse entrance never finds the next face.
+			int pick = -1;
+			int open = 0;
+			for (const GlobalSearch::Node& N : G.nodes)
+				if (N.refine_level < kMaxLevel)
+					open++;
+			if (it % 3 == 0) {
+				// BREADTH lane (1 of 3): round-robin faces, lowest
+				// level, lowest g - new state work.
+				int bv = 1 << 30, bl = 1 << 30, bg = 1 << 30;
+				for (size_t i = 0; i < G.nodes.size(); ++i) {
+					if (G.nodes[i].refine_level >= kMaxLevel)
+						continue;
+					const int fc = G.nodes[i].B.face;
+					const int vv = fc >= 0 && fc < static_cast<int>(
+						face_visits.size()) ? face_visits[
+							static_cast<size_t>(fc)] : 0;
+					const int ll = G.nodes[i].refine_level;
+					const int gg = G.nodes[i].g;
+					if (vv < bv || (vv == bv && (ll < bl
+						|| (ll == bl && gg < bg)))) {
+						bv = vv;
+						bl = ll;
+						bg = gg;
+						pick = static_cast<int>(i);
+					}
+				}
+			} else {
+				// DEEPEN lane (2 of 3): rotate faces, then rotate
+				// POSITION BUCKETS along the face's long axis, then
+				// min g (highest level first among ties so a started
+				// ladder finishes). Measured: min-g alone only ever
+				// ladders a face's earliest (west) boards; the east
+				// boards that feed the next face rested shallow.
+				int bface = -1, bv = 1 << 30;
+				for (size_t i = 0; i < G.nodes.size(); ++i) {
+					if (G.nodes[i].refine_level >= kMaxLevel)
+						continue;
+					const int fc = G.nodes[i].B.face;
+					if (fc < 0 || fc >= static_cast<int>(
+						face_visits.size()))
+						continue;
+					const int vv = face_visits[static_cast<size_t>(
+						fc)];
+					if (vv < bv || (vv == bv && fc < bface)) {
+						bv = vv;
+						bface = fc;
+					}
+				}
+				if (bface >= 0) {
+					const FaceAxis& fa = faxis[static_cast<size_t>(
+						bface)];
+					const int nb = 4;
+					const int want = face_visits[static_cast<size_t>(
+						bface)] % nb;
+					// Within the bucket, ALTERNATE min-g and
+					// max-speed picks by visit parity (session 18,
+					// measured): the earliest arrivals are often the
+					// SLOW short-hop boards, and slow boards ride
+					// slow, exit slow, and cannot make the next
+					// jump - speed compounds across hops, so the
+					// fast chains must ladder too.
+					const bool by_speed = (face_visits[
+						static_cast<size_t>(bface)] / nb) % 2 == 1;
+					for (int off = 0; off < nb && pick < 0; ++off) {
+						const int b = (want + off) % nb;
+						int bg = 1 << 30, bl = -1;
+						float bs = -1.f;
+						for (size_t i = 0; i < G.nodes.size();
+							++i) {
+							if (G.nodes[i].refine_level >= kMaxLevel
+								|| G.nodes[i].B.face != bface)
+								continue;
+							const float tpos = fa.x_axis
+								? G.nodes[i].B.ps.pos.X
+								: G.nodes[i].B.ps.pos.Y;
+							int bkt = static_cast<int>(
+								(tpos - fa.lo) * nb
+								/ (fa.hi - fa.lo));
+							if (bkt < 0) bkt = 0;
+							if (bkt >= nb) bkt = nb - 1;
+							if (bkt != b)
+								continue;
+							const int gg = G.nodes[i].g;
+							const int ll =
+								G.nodes[i].refine_level;
+							if (by_speed) {
+								const float sp = Len2D(
+									G.nodes[i].B.ps.vel);
+								if (sp > bs || (sp == bs
+									&& gg < bg)) {
+									bs = sp;
+									bg = gg;
+									pick = static_cast<int>(i);
+								}
+							} else if (gg < bg
+								|| (gg == bg && ll > bl)) {
+								bg = gg;
+								bl = ll;
+								pick = static_cast<int>(i);
+							}
+						}
+					}
+				}
+			}
+			if (open > qhw)
+				qhw = open;
+			if (pick < 0) {
+				stop_reason = "frontier rested (every node at the "
+					"level cap)";
+				break;
+			}
+			const int pf = G.nodes[static_cast<size_t>(pick)].B.face;
+			if (pf >= 0 && pf < static_cast<int>(face_visits.size()))
+				face_visits[static_cast<size_t>(pf)]++;
+			ExpandNode(&G, pick, w, p, g, &zmin, &zmax, gx);
+			iters++;
+			while (seen_hist < G.history.size()) {
+				inc_times.push_back(std::make_pair(
+					G.history[seen_hist].Tf, secs()));
+				seen_hist++;
+			}
+			if (iters % 20 == 0 || it + 1 == max_iters)
+				printf("gmap: it %lld | nodes %d open %d edges %d "
+					"prunes %d | T* %d | %.0fs\n", iters,
+					static_cast<int>(G.nodes.size()), open,
+					static_cast<int>(G.edges.size()),
+					static_cast<int>(G.prunes.size()), G.Tstar,
+					secs());
+		}
+		const double t_total = secs();
+
+		// ---- G1M: the measurement dump.
+		printf("gmap: ---- G1M MEASUREMENT ----\n");
+		printf("gmap: stop: %s after %lld expansions, %.1fs "
+			"(launch %.1fs)\n", stop_reason, iters, t_total,
+			t_launch);
+		{
+			int ne_air = 0, ne_con = 0, ne_end = 0;
+			for (const GlobalSearch::TransferEdge& e : G.edges) {
+				if (e.kind == GlobalSearch::kEdgeAir) ne_air++;
+				else if (e.kind == GlobalSearch::kEdgeContact)
+					ne_con++;
+				else ne_end++;
+			}
+			printf("gmap: states %d unique | edges %d (air %d, "
+				"contact %d, end %d) | dominance prunes %d | queue "
+				"high-water %d\n",
+				static_cast<int>(G.nodes.size()),
+				static_cast<int>(G.edges.size()), ne_air, ne_con,
+				ne_end, static_cast<int>(G.prunes.size()), qhw);
+			printf("gmap: finish offers %d, incumbent updates %d | "
+				"topo violations %d | gated-topo misses %d "
+				"(diagnostic) | dup edges skipped %lld | lane edges "
+				"%lld\n", G.finish_offers, G.incumbent_updates,
+				G.topo_violations, instr.gated_topo_miss,
+				instr.dup_edges_skipped, instr.lane_edges);
+			printf("gmap: expansions %lld (horizon-dead %d, "
+				"horizon-constrained %d, dt-filtered %d) | exit "
+				"refines %lld | entrance calls %lld evals %lld | "
+				"zone probes %lld (end-brush near-miss %lld)\n",
+				instr.expansions, instr.horizon_dead,
+				instr.horizon_constrained, instr.dtfiltered,
+				instr.exit_refines, instr.entrance_calls,
+				instr.entrance_evals, instr.zone_probes,
+				instr.end_brush_near_miss);
+			const double t_other = (t_total - t_launch)
+				- (instr.t_exit_ms + instr.t_entr_ms
+					+ instr.t_probe_ms) / 1000.0;
+			printf("gmap: compute split: launch %.1fs | exit %.1fs | "
+				"entrance %.1fs | zone probes %.1fs | global "
+				"bookkeeping %.1fs\n", t_launch,
+				instr.t_exit_ms / 1000.0, instr.t_entr_ms / 1000.0,
+				instr.t_probe_ms / 1000.0,
+				t_other > 0 ? t_other : 0.0);
+		}
+		{
+			// branching: new edges per expansion
+			std::vector<int> b = instr.exp_new_edges;
+			std::sort(b.begin(), b.end());
+			int zero = 0;
+			for (int v : b)
+				if (v == 0) zero++;
+			double mean = 0;
+			for (int v : b) mean += v;
+			if (!b.empty()) mean /= b.size();
+			printf("gmap: branching (new edges/expansion): n %d, "
+				"zero %d, median %d, mean %.2f, max %d\n",
+				static_cast<int>(b.size()), zero,
+				b.empty() ? 0 : b[b.size() / 2], mean,
+				b.empty() ? 0 : b.back());
+			// depth distribution
+			std::map<int, int> depth_ct;
+			for (const GlobalSearch::Node& N : G.nodes) {
+				int dpt = 0, cur = N.parent;
+				while (cur >= 0) {
+					dpt++;
+					cur = G.nodes[static_cast<size_t>(cur)].parent;
+				}
+				depth_ct[dpt]++;
+			}
+			printf("gmap: depth distribution:");
+			for (std::map<int, int>::const_iterator it =
+				depth_ct.begin(); it != depth_ct.end(); ++it)
+				printf(" d%d:%d", it->first, it->second);
+			printf("\n");
+			auto hstat = [&](std::vector<int>& h, const char* nm) {
+				if (h.empty()) {
+					printf("gmap: horizons %s: none\n", nm);
+					return;
+				}
+				std::sort(h.begin(), h.end());
+				printf("gmap: horizons %s: n %d min %d median %d "
+					"max %d\n", nm, static_cast<int>(h.size()),
+					h.front(), h[h.size() / 2], h.back());
+			};
+			hstat(instr.horizons_pre, "pre-incumbent");
+			hstat(instr.horizons_post, "post-incumbent");
+		}
+		{
+			// unresolved-domain accounting (stable identities)
+			int dom_total = 0, dom_unres = 0, dom_wit = 0;
+			int by_kind[4][3];
+			memset(by_kind, 0, sizeof(by_kind));
+			for (const GlobalSearch::Node& N : G.nodes)
+				for (const GlobalSearch::DomainAudit& da : N.audit) {
+					dom_total++;
+					if (da.status == GlobalSearch::kDomUnresolved)
+						dom_unres++;
+					if (da.status == GlobalSearch::kDomWitnessed)
+						dom_wit++;
+					if (da.kind >= 0 && da.kind < 4
+						&& da.status >= 0 && da.status < 3)
+						by_kind[da.kind][da.status]++;
+				}
+			printf("gmap: domains %d records: witnessed %d, "
+				"unresolved %d | by kind (unexp/unres/wit): exit "
+				"%d/%d/%d entrance %d/%d/%d end %d/%d/%d\n",
+				dom_total, dom_wit, dom_unres,
+				by_kind[0][0], by_kind[0][1], by_kind[0][2],
+				by_kind[1][0], by_kind[1][1], by_kind[1][2],
+				by_kind[2][0], by_kind[2][1], by_kind[2][2]);
+			// Sample the ledger PER FACE (the deepest-refined nodes
+			// are the informative ones), plus per-face node counts.
+			{
+				std::vector<int> face_nodes(g.faces.size(), 0);
+				std::vector<float> face_vmax(g.faces.size(), 0.f);
+				std::vector<std::vector<float> > face_sp(
+					g.faces.size());
+				for (const GlobalSearch::Node& N : G.nodes)
+					if (N.B.face >= 0 && N.B.face
+						< static_cast<int>(face_nodes.size())) {
+						const size_t fv2 = static_cast<size_t>(
+							N.B.face);
+						face_nodes[fv2]++;
+						const float sp = Len2D(N.B.ps.vel);
+						face_sp[fv2].push_back(sp);
+						if (sp > face_vmax[fv2])
+							face_vmax[fv2] = sp;
+					}
+				printf("gmap: nodes per face:");
+				for (size_t fv = 0; fv < face_nodes.size(); ++fv)
+					printf(" f%d:%d", static_cast<int>(fv),
+						face_nodes[fv]);
+				printf("\n");
+				// Arrival-speed distribution per face (session 18:
+				// speed compounds across hops; whether fast arrivals
+				// even EXIST at a face decides whether laddering can
+				// bridge to the next one).
+				printf("gmap: arrival speed2d per face "
+					"(median/max):");
+				for (size_t fv = 0; fv < face_sp.size(); ++fv) {
+					std::sort(face_sp[fv].begin(),
+						face_sp[fv].end());
+					printf(" f%d:%.0f/%.0f", static_cast<int>(fv),
+						face_sp[fv].empty() ? 0.f
+							: face_sp[fv][face_sp[fv].size() / 2],
+						face_vmax[fv]);
+				}
+				printf("\n");
+			}
+			std::vector<int> dump_nodes;
+			for (size_t fv = 0; fv < g.faces.size(); ++fv) {
+				std::vector<std::pair<int, int> > cand;
+				for (size_t i = 0; i < G.nodes.size(); ++i)
+					if (G.nodes[i].B.face == static_cast<int>(fv)
+						&& !G.nodes[i].audit.empty())
+						cand.push_back(std::make_pair(
+							G.nodes[i].refine_level,
+							static_cast<int>(i)));
+				std::sort(cand.rbegin(), cand.rend());
+				for (size_t c = 0; c < cand.size() && c < 2; ++c)
+					dump_nodes.push_back(cand[c].second);
+			}
+			for (int di : dump_nodes) {
+				const GlobalSearch::Node& N = G.nodes[
+					static_cast<size_t>(di)];
+				printf("gmap: node %d (face %d, g %d, level %d, %d "
+					"edges):\n", di, N.B.face,
+					N.g, N.refine_level,
+					static_cast<int>(N.edges.size()));
+				for (const GlobalSearch::DomainAudit& da : N.audit)
+					printf("gmap:     %s f%d v%d lvl %d M %d %s "
+						"(out %d, tries %d, edges %d) id "
+						"%016llx\n",
+						da.kind == GlobalSearch::kDomExit ? "exit"
+						: da.kind == GlobalSearch::kDomEntrance
+							? "entr"
+						: da.kind == GlobalSearch::kDomEnd ? "end "
+						: "lnch", da.face_j, da.variant, da.level,
+						da.M,
+						da.status == GlobalSearch::kDomWitnessed
+							? "WITNESSED"
+							: da.status
+								== GlobalSearch::kDomUnresolved
+								? "unresolved" : "unexplored",
+						da.outcome, da.attempts, da.edges_found,
+						da.id);
+			}
+		}
+		{
+			printf("gmap: incumbent history:");
+			if (inc_times.empty())
+				printf(" (none)");
+			for (size_t i = 0; i < inc_times.size(); ++i)
+				printf(" T%d=%d@%.0fs", static_cast<int>(i) + 1,
+					inc_times[i].first, inc_times[i].second);
+			printf("\n");
+		}
+
+		// ---- exit inventory diagnosis (--diag-exits): for each
+		// face's deepest-refined node, the ACTIVE exit witnesses and
+		// whether each one's coast arc crosses each target face -
+		// answers "does W even contain the feeder class?" without
+		// touching the search.
+		if (o.diag_exits) {
+			for (size_t fv = 0; fv < g.faces.size(); ++fv) {
+				// deepest node; among ties, the FASTEST (the frontier
+				// state whose exits decide the next transfer).
+				int best = -1, bl2 = -1;
+				float bs2 = -1.f;
+				for (size_t i = 0; i < G.nodes.size(); ++i)
+					if (G.nodes[i].B.face == static_cast<int>(fv)
+						&& (G.nodes[i].refine_level > bl2
+							|| (G.nodes[i].refine_level == bl2
+								&& Len2D(G.nodes[i].B.ps.vel)
+									> bs2))) {
+						bl2 = G.nodes[i].refine_level;
+						bs2 = Len2D(G.nodes[i].B.ps.vel);
+						best = static_cast<int>(i);
+					}
+				if (best < 0
+					|| static_cast<size_t>(best) >= qcache.size()
+					|| !qcache[static_cast<size_t>(best)])
+					continue;
+				printf("gmap: DIAG exits of node %d (face %d, level "
+					"%d, g %d):\n", best, static_cast<int>(fv), bl2,
+					G.nodes[static_cast<size_t>(best)].g);
+				int shown2 = 0;
+				for (const ExitField::Partition& P :
+					qcache[static_cast<size_t>(best)]->view) {
+					for (const Ride::ExitTransition& t : P.active) {
+						if (t.kind != Ride::kAirExit)
+							continue;
+						if (shown2++ >= 24)
+							break;
+						char cr[16];
+						int nc = 0;
+						for (size_t j = 0;
+							j < g.faces.size() && nc < 15; ++j) {
+							Vec3 bq;
+							if (BallisticAim(t.s_plus.pos,
+								t.s_plus.vel, g.faces[j], p, 400,
+								&bq))
+								cr[nc++] = static_cast<char>('0'
+									+ static_cast<int>(j));
+						}
+						cr[nc] = 0;
+						printf("gmap:   dt %3d pos (%7.1f,%7.1f,"
+							"%6.1f) vel (%6.0f,%6.0f,%6.0f) "
+							"cross[%s]\n", t.dt, t.s_plus.pos.X,
+							t.s_plus.pos.Y, t.s_plus.pos.Z,
+							t.s_plus.vel.X, t.s_plus.vel.Y,
+							t.s_plus.vel.Z, cr);
+					}
+					if (shown2 >= 24)
+						break;
+				}
+			}
+		}
+
+		// ---- G0R: the route, its hierarchical witness, and the
+		// replays.
+		int rc = 0;
+		if (G.Tstar < 0) {
+			printf("gmap: G0R NOT REACHED - no production finish "
+				"within this run's budget/resolution. The "
+				"measurement above says where the search starved; "
+				"that finding is the deliverable.\n");
+		} else {
+			std::vector<int> route;
+			int ni = G.Tstar_node;
+			std::vector<int> rev;
+			rev.push_back(G.Tstar_edge);
+			while (ni >= 0
+				&& G.nodes[static_cast<size_t>(ni)].parent >= 0) {
+				rev.push_back(G.nodes[static_cast<size_t>(
+					ni)].parent_edge);
+				ni = G.nodes[static_cast<size_t>(ni)].parent;
+			}
+			for (size_t i = rev.size(); i > 0; --i)
+				route.push_back(rev[i - 1]);
+			const bool have_root = ni >= 0
+				&& root_lw.find(ni) != root_lw.end();
+			printf("gmap: G0R route: T* %d, %d edges from root n%d "
+				"(face %d, g0 %d)\n", G.Tstar,
+				static_cast<int>(route.size()), ni,
+				ni >= 0 ? G.nodes[static_cast<size_t>(ni)].B.face
+					: -1,
+				ni >= 0 ? G.nodes[static_cast<size_t>(ni)].g : -1);
+			for (int ei : route) {
+				const GlobalSearch::TransferEdge& e = G.edges[
+					static_cast<size_t>(ei)];
+				printf("gmap:   %s dt %d (exit %d + air %d) -> %s "
+					"%d\n",
+					e.kind == GlobalSearch::kEdgeAir ? "AIR "
+					: e.kind == GlobalSearch::kEdgeContact
+						? "CONT" : "END ",
+					e.dt, e.dt_exit, e.dt_air,
+					e.kind == GlobalSearch::kEdgeEnd ? "finish tick"
+						: "face",
+					e.kind == GlobalSearch::kEdgeEnd
+						? G.Tstar : e.face_j);
+			}
+			if (!have_root) {
+				printf("gmap: INCONSISTENT - route root has no "
+					"launch witness\n");
+				rc = 2;
+			} else {
+				GlobalSearch::RouteWitness rw;
+				rw.launch = root_lw[ni];
+				for (int ei : route)
+					rw.edges.push_back(G.edges[
+						static_cast<size_t>(ei)]);
+				rw.Tf = G.Tstar;
+				const bool lrep = GlobalSearch::ReplayLaunch(
+					rw.launch, anchor, w, p, g);
+				int rt = 0, rbad = 0;
+				const bool wrep = GlobalSearch::ReplayRouteWitness(
+					rw, anchor, w, p, g, zmin, zmax, &rt, &rbad);
+				bool cold = true;
+				{
+					Ride::BoundaryState cur = G.nodes[
+						static_cast<size_t>(ni)].B;
+					for (int ei : route) {
+						const GlobalSearch::TransferEdge& e =
+							G.edges[static_cast<size_t>(ei)];
+						if (!GlobalSearch::ReplayEdge(cur, e, w, p,
+							g, &zmin, &zmax)) {
+							cold = false;
+							break;
+						}
+						cur = e.Bj;
+					}
+				}
+				printf("gmap: launch replay %s | continuous witness "
+					"replay %s (%d ticks vs T* %d, %d boundary "
+					"mismatches) | cold edge chain %s\n",
+					lrep ? "OK" : "FAIL", wrep ? "OK" : "FAIL",
+					rt, G.Tstar, rbad, cold ? "OK" : "FAIL");
+				if (!(lrep && wrep && cold))
+					rc = 2;
+				else
+					printf("gmap: G0R GREEN - production cold "
+						"found a real multi-face finish and the "
+						"hierarchical witness replays continuously "
+						"at exactly T* = %d\n", G.Tstar);
+			}
+		}
+		// all-edge cold replay (graph integrity, route or not)
+		{
+			int n = 0, bad = 0;
+			for (const GlobalSearch::Node& N : G.nodes)
+				for (int ei : N.edges) {
+					n++;
+					if (!GlobalSearch::ReplayEdge(N.B, G.edges[
+						static_cast<size_t>(ei)], w, p, g, &zmin,
+						&zmax))
+						bad++;
+				}
+			printf("gmap: all-edge cold replay: %d edges, %d "
+				"failures\n", n, bad);
+			if (bad > 0)
+				rc = 2;
+		}
+		if (G.topo_violations > 0)
+			rc = 2;
+		printf("gmap: %s\n", rc == 0
+			? (G.Tstar >= 0 ? "RUN CONSISTENT, G0R GREEN"
+				: "RUN CONSISTENT, G0R NOT REACHED (measurement "
+					"delivered)")
+			: "RUN INCONSISTENT - investigate before trusting the "
+				"measurement");
+		fflush(stdout);
+		return rc;
 	}
 
 	// ================= efrefine: THE OPERATOR-LEVEL ANYTIME GATE
@@ -16506,6 +18039,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdGRoute(argv[2], o);
+	}
+	if (cmd == "gmap" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdGMap(argv[2], o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;
