@@ -15,6 +15,29 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-20c (session 19): G0Q DIRECTIONALLY CONFIRMED; THE
+84% K-DUPLICATION CEILING IS THE MEASURED PATH TO THE 5-MINUTE
+TARGET.** The resource-preservation service lane (advisor
+2026-08-20c: objective min-g + resource max-E(B) representatives per
+face/position bucket, least-served fair rotation, SERVICE ONLY - no
+blended scores, no thresholds, no pruning; legacy behind --svc18)
+ran a clean 3600s-vs-3600s causal A/B with the launch and all
+operators frozen. MEASURED: the same 250 u/s launch exposes
+materially stronger late-face states when they receive refinement -
+bridge-class f2 exits (606 u/s @ z 157, inside f3's window by the
+arithmetic) exist ONLY in the resource arm; f1 median board E +24% -
+but the lane pays in march speed and neither arm's hour completed
+the fast-f2 fine ladders against f3 (G0R still open, f3 never
+witnessed). THE BINDING CONSTRAINT IS THROUGHPUT: the entrance
+K-duplication measurement (queries grouped by exact (air start,
+face, horizon)) shows 84-85% of ALL entrance evals are repeat-share
+across BOTH policies - ~5,400-6,000 distinct physical problems
+solved 4.2-4.4x over. The ~6x batched-witness-field amortization is
+the advisor's post-G0R project, now measured justified, and the only
+path to the user's <= 5-min basictest budget. Open: the conditional
+generous launch-capability probe. See `Docs/ExitFieldSpec.md`
+session 19.
+
 **STATUS 2026-08-20b (session 18): G1M DELIVERED, G0R NOT REACHED -
 THE REAL-MAP MEASUREMENT.** The `gmap` command ran the explorer cold
 on surf_basictest eight times; the march works autonomously three
@@ -35,6 +58,16 @@ gate new); DomainAudit stable domain identities + GlobalRouteWitness
 speed-compounding dynamic (service/ordering or launch), and entrance
 spend is THE perf target - nothing else is measurable. See
 `Docs/ExitFieldSpec.md` session 18.
+
+**PERFORMANCE NORTH STAR (user, 2026-08-20): solve surf_basictest in
+<= 5 minutes wall (goal: sub-1-minute).** Context: basictest is 4
+ramps / under 10s of play; real maps are 30+ ramps and 60+ seconds of
+play. Session 18 measured entrance refinement at 98-99.5% of all
+wall-clock, so the target lives or dies on entrance throughput -
+the advisor-approved post-G0R project is the K-duplication
+measurement (instrumented session 19) -> shared/batched witness-field
+evaluation IF the measured overlap justifies it. Every service/perf
+decision should be checked against this budget.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -369,6 +402,40 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-20c (session 19, THE RESOURCE-PRESERVATION SERVICE LANE -
+  G0Q directionally confirmed; the 84% K-duplication ceiling): advisor
+  ruling 2026-08-20c ("route quality enters the SERVICE layer - as an
+  independent physical-resource lane, not a new objective or a
+  speed-biased admission score"). User performance north star
+  recorded: basictest <= 5 min wall (goal sub-1-min); real maps 30+
+  ramps / 60+ s. THE CHANGE (service only; objective stays ticks;
+  operators/launch/topology/horizons/aims frozen): within the
+  face/position-bucket deepen rotation, two lanes per bucket - the
+  OBJECTIVE representative (min g) and the RESOURCE representative
+  (max exact E(B) via the one certified ExitField::EBoundary) -
+  least-served lane next, deterministic tie to objective; the
+  conceptual advisory Pareto service frontier in (g, -E); no blending,
+  no thresholds, nothing pruned or dominated; legacy session-18
+  deepening preserved behind --svc18 as the A/B arm. NEW INSTRUMENTS:
+  per-face board-E median/max + g@maxE + per-bucket max-E; per-face
+  distinct exit capability (speed, z); lane attribution; first-witness
+  snapshots; and the K-DUPLICATION measurement (queries grouped by
+  exact (air start state, target face, horizon) across aim/region
+  queries). THE CAUSAL A/B (3600s vs 3600s, same binary): resource
+  arm - f2 exits max 606 u/s @ z 157 (bridge-class, inside f3's
+  window by the arithmetic) vs baseline 510 @ 125; f1 median board E
+  238k vs 192k (+24%); f2 max E 268k@g500 vs 254k@g355; cost - f2
+  first witnessed 1265s vs 690s (march speed traded for capability);
+  f3 NEVER witnessed in either arm; G0R open. THE DECISIVE NUMBER:
+  K-dup repeat share 84% vs 85% - POLICY-INVARIANT; both arms
+  re-solved ~5,400-6,000 distinct physical problems 4.2-4.4x over
+  (38.7M / 47.2M evals). The ~6x batched-witness-field amortization
+  is now measured justified as the post-G0R project and the only
+  path to the 5-minute budget; the advisor's conditional generous
+  launch-capability probe stays open as the second lever. Suites:
+  groute 11/11 and the full thirteen green from the session binary.
+  Full A/B tables: `Docs/ExitFieldSpec.md` session 19.
 
 - 2026-08-20b (session 18, G1M DELIVERED / G0R NOT REACHED - the
   first real-map global runs): advisor ruling 2026-08-20b ("treat

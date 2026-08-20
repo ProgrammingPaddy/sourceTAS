@@ -49,6 +49,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -285,6 +286,10 @@ namespace {
 		bool corner_true = true;    // false = legacy epsilon-padded hit test
 		bool diag_exits = false;    // gmap: dump per-face deepest node's
 		                            // exit inventory + coast crossings
+		bool svc18 = false;         // gmap: legacy session-18 deepen
+		                            // service (the A/B baseline for the
+		                            // session-19 resource-lane causal
+		                            // experiment)
 		// smooth (line-space CMA) options
 		int pop = 0;                // population (0 = auto)
 		int cp_ticks = 16;          // spline control-point spacing
@@ -406,6 +411,7 @@ namespace {
 			else if (a == "--no-edge-bevels") o.edge_bevels = false;
 			else if (a == "--legacy-corner") o.corner_true = false;
 			else if (a == "--diag-exits") o.diag_exits = true;
+			else if (a == "--svc18") o.svc18 = true;
 			else if (a == "--pop") ok = next_i(&o.pop);
 			else if (a == "--cp-ticks") ok = next_i(&o.cp_ticks);
 			else if (a == "--wloss") ok = next_f(&o.wloss);
@@ -11216,6 +11222,20 @@ namespace {
 		double t_exit_ms = 0.0, t_entr_ms = 0.0, t_probe_ms = 0.0;
 		std::vector<int> horizons_pre, horizons_post; // issued M
 		std::vector<int> exp_new_edges;  // per-expansion branching
+		// SESSION 19: entrance-duplication measurement (advisor
+		// 2026-08-20c; instrument NOW, batch only if measured). K
+		// groups queries sharing the same underlying physical problem
+		// - (exact air start state, target face, flight horizon) -
+		// across differing aim/region queries. Large per-K overlap =
+		// the shared/batched witness-field amortization opportunity.
+		std::map<unsigned long long, std::pair<int, long long> > kdup;
+		// SESSION 19: per-face exit capability - (speed2d, z) of every
+		// DISTINCT air-exit witness presented from that face's nodes
+		// (dedup by witness hash; answers "what can this face's
+		// frontier actually feed the next transfer").
+		std::map<int, std::set<unsigned long long> > exit_seen;
+		std::map<int, std::vector<std::pair<float, float> > >
+			exit_stats;
 	};
 
 	// Expansion parameters. The DEFAULTS are the G0 fixture behavior
@@ -11571,6 +11591,18 @@ namespace {
 		// END-VIA-AIR probes run over EVERY air exit (cheap flights;
 		// coverage where it costs nothing), before the entrance cap.
 		const std::vector<const Ride::ExitTransition*> airs_all = airs;
+		if (gx.instr) {
+			std::set<unsigned long long>& seen =
+				gx.instr->exit_seen[B.face];
+			for (const Ride::ExitTransition* z2 : airs_all) {
+				const unsigned long long wh2 =
+					ExitField::WitnessHash(z2->witness);
+				if (seen.insert(wh2).second)
+					gx.instr->exit_stats[B.face].push_back(
+						std::make_pair(Len2D(z2->s_plus.vel),
+							z2->s_plus.pos.Z));
+			}
+		}
 		const size_t max_airs = level == 0
 			? static_cast<size_t>(gx.max_airs_l0)
 			: static_cast<size_t>(gx.max_airs_lk);
@@ -11708,6 +11740,26 @@ namespace {
 					eprof = 0;
 				const unsigned long long zh = gx.ecache
 					? ExitField::WitnessHash(Z->witness) : 0;
+				// K-duplication key: the underlying physical problem
+				// (exact air start state, target face, horizon) that
+				// every aim/region query below shares.
+				unsigned long long kkey = 0;
+				if (gx.instr) {
+					kkey = 1469598103934665603ULL;
+					const unsigned char* kb =
+						reinterpret_cast<const unsigned char*>(
+							&Z->s_plus);
+					for (size_t kb2 = 0; kb2 < sizeof(PlayerState);
+						++kb2) {
+						kkey ^= kb[kb2];
+						kkey *= 1099511628211ULL;
+					}
+					kkey ^= static_cast<unsigned long long>(
+						j2 * 2 + 1);
+					kkey *= 1099511628211ULL;
+					kkey ^= static_cast<unsigned long long>(nh);
+					kkey *= 1099511628211ULL;
+				}
 				for (int ai = 0;
 					ai < static_cast<int>(aims.size()) && !qsp;
 					++ai) {
@@ -11738,9 +11790,14 @@ namespace {
 						if (gx.instr)
 							gx.instr->entrance_calls++;
 					}
-					if (gx.instr)
+					if (gx.instr) {
 						gx.instr->entrance_evals +=
 							q2->evals - ev0;
+						std::pair<int, long long>& kd =
+							gx.instr->kdup[kkey];
+						kd.first++;
+						kd.second += q2->evals - ev0;
+					}
 					if (GlobalSearch::DomainAudit* da = touch(
 						GlobalSearch::kDomEntrance,
 						static_cast<int>(j2), ai)) {
@@ -12881,6 +12938,28 @@ namespace {
 			if (faxis[fv].hi - faxis[fv].lo < 1.f)
 				faxis[fv].hi = faxis[fv].lo + 1.f;
 		}
+		// Session-19 service bookkeeping: per-(face, position-bucket)
+		// lane service counters [objective, resource], expansion
+		// attribution by lane, and per-face first-witness snapshots.
+		std::vector<int> lane_srv(g.faces.size() * 4 * 2, 0);
+		long long lane_exps[3] = { 0, 0, 0 };
+		long long lane_evals[3] = { 0, 0, 0 };
+		int lane_levels[3][4];
+		memset(lane_levels, 0, sizeof(lane_levels));
+		std::vector<int> prev_face_nodes(g.faces.size(), 0);
+		struct FirstWit {
+			long long it = -1;
+			double sec = 0;
+			long long evals = 0;
+		};
+		std::vector<FirstWit> first_wit(g.faces.size());
+		for (const GlobalSearch::Node& N : G.nodes)
+			if (N.B.face >= 0 && N.B.face < static_cast<int>(
+				prev_face_nodes.size())) {
+				prev_face_nodes[static_cast<size_t>(N.B.face)]++;
+				if (first_wit[static_cast<size_t>(N.B.face)].it < 0)
+					first_wit[static_cast<size_t>(N.B.face)].it = 0;
+			}
 		for (long long it = 0; it < max_iters; ++it) {
 			if (secs() - t_launch > wall_s) {
 				stop_reason = "wall budget";
@@ -12899,6 +12978,7 @@ namespace {
 			// necessity: pure breadth kept every node at the coarse
 			// level and the coarse entrance never finds the next face.
 			int pick = -1;
+			int cur_lane = 0;
 			int open = 0;
 			for (const GlobalSearch::Node& N : G.nodes)
 				if (N.refine_level < kMaxLevel)
@@ -12952,19 +13032,33 @@ namespace {
 					const int nb = 4;
 					const int want = face_visits[static_cast<size_t>(
 						bface)] % nb;
-					// Within the bucket, ALTERNATE min-g and
-					// max-speed picks by visit parity (session 18,
-					// measured): the earliest arrivals are often the
-					// SLOW short-hop boards, and slow boards ride
-					// slow, exit slow, and cannot make the next
-					// jump - speed compounds across hops, so the
-					// fast chains must ladder too.
-					const bool by_speed = (face_visits[
+					// TWO SERVICE LANES within the bucket (advisor
+					// 2026-08-20c): the OBJECTIVE representative
+					// (min g) and the RESOURCE representative (max
+					// exact board-boundary energy E(B) = |v|^2 +
+					// 2 g gs z - speed and height together, assuming
+					// nothing about which the next ramp needs). The
+					// LEAST-SERVED lane goes next; tie -> objective.
+					// SERVICE ONLY: no blended score, no threshold,
+					// no pruning - lower-energy states remain legal
+					// unresolved states with their breadth/position/
+					// diversity service intact. (--svc18 = the legacy
+					// session-18 speed-parity deepening, the A/B
+					// baseline for the causal experiment.)
+					const bool by_speed = o.svc18 && (face_visits[
 						static_cast<size_t>(bface)] / nb) % 2 == 1;
 					for (int off = 0; off < nb && pick < 0; ++off) {
 						const int b = (want + off) % nb;
+						bool use_e = false;
+						size_t li = 0;
+						if (!o.svc18) {
+							li = (static_cast<size_t>(bface)
+								* static_cast<size_t>(nb)
+								+ static_cast<size_t>(b)) * 2;
+							use_e = lane_srv[li + 1] < lane_srv[li];
+						}
 						int bg = 1 << 30, bl = -1;
-						float bs = -1.f;
+						float bs = -1e30f;
 						for (size_t i = 0; i < G.nodes.size();
 							++i) {
 							if (G.nodes[i].refine_level >= kMaxLevel
@@ -12992,12 +13086,27 @@ namespace {
 									bg = gg;
 									pick = static_cast<int>(i);
 								}
+							} else if (!o.svc18 && use_e) {
+								const float en =
+									ExitField::EBoundary(
+										G.nodes[i].B.ps, p);
+								if (en > bs || (en == bs
+									&& gg < bg)) {
+									bs = en;
+									bg = gg;
+									pick = static_cast<int>(i);
+								}
 							} else if (gg < bg
 								|| (gg == bg && ll > bl)) {
 								bg = gg;
 								bl = ll;
 								pick = static_cast<int>(i);
 							}
+						}
+						if (pick >= 0) {
+							if (!o.svc18)
+								lane_srv[li + (use_e ? 1 : 0)]++;
+							cur_lane = use_e ? 2 : 1;
 						}
 					}
 				}
@@ -13012,8 +13121,30 @@ namespace {
 			const int pf = G.nodes[static_cast<size_t>(pick)].B.face;
 			if (pf >= 0 && pf < static_cast<int>(face_visits.size()))
 				face_visits[static_cast<size_t>(pf)]++;
+			const int plevel = G.nodes[static_cast<size_t>(
+				pick)].refine_level;
+			const long long ev_before = instr.entrance_evals;
 			ExpandNode(&G, pick, w, p, g, &zmin, &zmax, gx);
 			iters++;
+			lane_exps[cur_lane]++;
+			lane_evals[cur_lane] += instr.entrance_evals - ev_before;
+			lane_levels[cur_lane][plevel < 4 ? plevel : 3]++;
+			// first-witness snapshots (face population 0 -> >0)
+			{
+				std::vector<int> now_fn(g.faces.size(), 0);
+				for (const GlobalSearch::Node& N : G.nodes)
+					if (N.B.face >= 0 && N.B.face
+						< static_cast<int>(now_fn.size()))
+						now_fn[static_cast<size_t>(N.B.face)]++;
+				for (size_t fv = 0; fv < now_fn.size(); ++fv)
+					if (prev_face_nodes[fv] == 0 && now_fn[fv] > 0) {
+						first_wit[fv].it = iters;
+						first_wit[fv].sec = secs();
+						first_wit[fv].evals =
+							instr.entrance_evals;
+					}
+				prev_face_nodes = now_fn;
+			}
 			while (seen_hist < G.history.size()) {
 				inc_times.push_back(std::make_pair(
 					G.history[seen_hist].Tf, secs()));
@@ -13177,6 +13308,141 @@ namespace {
 						face_vmax[fv]);
 				}
 				printf("\n");
+				// Board ENERGY per face (session 19, the G0Q
+				// metric): median/max exact E(B) and the g of the
+				// max-E label, plus max E per position bucket.
+				printf("gmap: board E per face (median/max, "
+					"g@maxE):");
+				for (size_t fv = 0; fv < g.faces.size(); ++fv) {
+					std::vector<float> es;
+					float emax = -1e30f;
+					int gmaxe = -1;
+					for (const GlobalSearch::Node& N : G.nodes)
+						if (N.B.face == static_cast<int>(fv)) {
+							const float en = ExitField::EBoundary(
+								N.B.ps, p);
+							es.push_back(en);
+							if (en > emax) {
+								emax = en;
+								gmaxe = N.g;
+							}
+						}
+					std::sort(es.begin(), es.end());
+					printf(" f%d:%.0fk/%.0fk@g%d",
+						static_cast<int>(fv),
+						es.empty() ? 0.f
+							: es[es.size() / 2] / 1000.f,
+						es.empty() ? 0.f : emax / 1000.f, gmaxe);
+				}
+				printf("\n");
+				for (size_t fv = 0; fv < g.faces.size(); ++fv) {
+					printf("gmap: f%d max-E by position bucket:",
+						static_cast<int>(fv));
+					for (int b2 = 0; b2 < 4; ++b2) {
+						float emax = -1e30f;
+						for (const GlobalSearch::Node& N : G.nodes) {
+							if (N.B.face != static_cast<int>(fv))
+								continue;
+							const float tpos = faxis[fv].x_axis
+								? N.B.ps.pos.X : N.B.ps.pos.Y;
+							int bkt = static_cast<int>(
+								(tpos - faxis[fv].lo) * 4
+								/ (faxis[fv].hi - faxis[fv].lo));
+							if (bkt < 0) bkt = 0;
+							if (bkt > 3) bkt = 3;
+							if (bkt != b2)
+								continue;
+							const float en = ExitField::EBoundary(
+								N.B.ps, p);
+							if (en > emax)
+								emax = en;
+						}
+						printf(" b%d:%s", b2, emax < -1e29f ? "-"
+							: "");
+						if (emax >= -1e29f)
+							printf("%.0fk", emax / 1000.f);
+					}
+					printf("\n");
+				}
+				// Exit capability per face: (speed2d, z) of every
+				// distinct presented air-exit witness.
+				for (std::map<int, std::vector<std::pair<float,
+					float> > >::iterator xit =
+					instr.exit_stats.begin();
+					xit != instr.exit_stats.end(); ++xit) {
+					std::vector<float> sp2, zz;
+					for (size_t k2 = 0; k2 < xit->second.size();
+						++k2) {
+						sp2.push_back(xit->second[k2].first);
+						zz.push_back(xit->second[k2].second);
+					}
+					std::sort(sp2.begin(), sp2.end());
+					std::sort(zz.begin(), zz.end());
+					printf("gmap: f%d exits (n %d): speed med/max "
+						"%.0f/%.0f | z med/max %.0f/%.0f\n",
+						xit->first,
+						static_cast<int>(sp2.size()),
+						sp2.empty() ? 0.f : sp2[sp2.size() / 2],
+						sp2.empty() ? 0.f : sp2.back(),
+						zz.empty() ? 0.f : zz[zz.size() / 2],
+						zz.empty() ? 0.f : zz.back());
+				}
+				// Service-lane attribution + first witnesses + the
+				// entrance K-duplication measurement.
+				printf("gmap: lane service (exps/evals): breadth "
+					"%lld/%lldk | objective %lld/%lldk | resource "
+					"%lld/%lldk\n", lane_exps[0],
+					lane_evals[0] / 1000, lane_exps[1],
+					lane_evals[1] / 1000, lane_exps[2],
+					lane_evals[2] / 1000);
+				printf("gmap: lane x node-level:");
+				for (int l2 = 0; l2 < 3; ++l2) {
+					printf(" %s[", l2 == 0 ? "br" : l2 == 1 ? "obj"
+						: "res");
+					for (int v2 = 0; v2 < 4; ++v2)
+						printf("%s%d", v2 ? "," : "",
+							lane_levels[l2][v2]);
+					printf("]");
+				}
+				printf("\n");
+				printf("gmap: first witness per face:");
+				for (size_t fv = 0; fv < first_wit.size(); ++fv) {
+					if (first_wit[fv].it < 0)
+						printf(" f%d:never", static_cast<int>(fv));
+					else
+						printf(" f%d:it%lld@%.0fs/%lldk-ev",
+							static_cast<int>(fv),
+							first_wit[fv].it, first_wit[fv].sec,
+							first_wit[fv].evals / 1000);
+				}
+				printf("\n");
+				{
+					long long nk = 0, nq = 0, ev_all = 0,
+						ev_rep = 0;
+					int qmax = 0;
+					for (std::map<unsigned long long,
+						std::pair<int, long long> >::iterator
+						ki = instr.kdup.begin();
+						ki != instr.kdup.end(); ++ki) {
+						nk++;
+						nq += ki->second.first;
+						ev_all += ki->second.second;
+						if (ki->second.first > qmax)
+							qmax = ki->second.first;
+						if (ki->second.first > 1)
+							ev_rep += ki->second.second
+								- ki->second.second
+									/ ki->second.first;
+					}
+					printf("gmap: entrance K-dup: distinct K %lld, "
+						"queries %lld (avg %.1f/K, max %d), evals "
+						"%lldk of which repeat-share ~%lldk "
+						"(%.0f%%) - the batched-witness-field "
+						"amortization ceiling\n", nk, nq,
+						nk ? static_cast<double>(nq) / nk : 0.0,
+						qmax, ev_all / 1000, ev_rep / 1000,
+						ev_all ? 100.0 * ev_rep / ev_all : 0.0);
+				}
 			}
 			std::vector<int> dump_nodes;
 			for (size_t fv = 0; fv < g.faces.size(); ++fv) {

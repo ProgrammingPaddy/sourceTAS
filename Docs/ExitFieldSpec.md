@@ -950,3 +950,110 @@ face's fastest deepest node.
 rules, no ExitDoomed, no approximate dominance, no beams/top-K, no
 human data anywhere (G11 structural: gmap never opens a tape), and no
 chasing G0R past the measurement mandate.
+
+---
+
+### Session 19 (2026-08-20) — the resource-preservation service lane:
+### G0Q measured, and the 84% K-duplication ceiling
+
+Advisor ruling 2026-08-20c implemented exactly: global refinement-
+service policy only; objective untouched (ticks); no blended scores,
+no speed thresholds, no pruning; LaunchFrontier and every operator
+frozen. User performance north star recorded: basictest <= 5 min wall
+(goal sub-1-min); real maps 30+ ramps.
+
+**The change (SERVICE ONLY):** within the existing face/position-
+bucket deepen rotation, TWO lanes per bucket - the OBJECTIVE
+representative (min g) and the RESOURCE representative (max exact
+board-boundary energy E(B) = |v|^2 + 2 g gs z, via the one certified
+`ExitField::EBoundary` formula). Least-served lane goes next,
+deterministic tie to objective. Conceptually the advisory Pareto
+service frontier in (g, -E). Lower-energy states keep their breadth/
+position/diversity service - nothing is dominated, suppressed, or
+"impossible". The legacy session-18 speed-parity deepening is
+preserved behind `--svc18` as the A/B baseline arm.
+
+**New instrumentation (measure now, build only if measured):**
+per-face board-E median/max with g@maxE and per-bucket max-E; per-face
+distinct exit capability (speed, z) by witness hash; service-lane
+attribution (expansions/evals/level histograms per lane); per-face
+first-witness snapshots (iteration/seconds/evals); and the advisor's
+K-DUPLICATION measurement - queries grouped by the underlying physical
+problem K = (exact air start state, target face, flight horizon)
+across differing aim/region queries.
+
+**Run 9 (resource lane, 3600s, launch frozen at the same 250 u/s
+run-off):**
+
+- Lane service: breadth 112 exps / 1.9M evals, objective 115 / 21.6M,
+  resource 109 / 15.2M; the resource lane's level histogram skews low
+  (40,31,19,19) - it keeps pulling FRESH high-E states into their
+  first ladders, exactly its job.
+- THE PARETO TAIL IS REAL AND SERVICED: g@maxE is late everywhere
+  (f0: 621k@g170, f1: 561k@g351, f2: 268k@g500) - later-but-richer
+  states now receive fine refinement; f2's max-E concentrates in the
+  east buckets (b2 249k, b3 268k), matching the geometry.
+- f2 EXIT CAPABILITY now reaches the bridge class: speed med/max
+  184/606 u/s, z med/max 27/157. At 606 u/s from z 157 the ~300u gap
+  costs ~100u of fall -> arrival inside f3's window. The capability
+  the bridge needs EXISTS at the tail of the distribution.
+- f3: STILL NEVER WITNESSED. The march is now compute-starved rather
+  than misdirected: f1 first witnessed at 118s/0.84M evals, f2 only
+  at 1265s/12.0M evals - two thirds of the hour went to reaching and
+  strengthening f2; the fast f2 states' fine ladders toward f3 ran
+  out of budget. 2173 states, 2177 edges, all cold-replay bitwise,
+  0 topo violations, no incumbent.
+- **THE K-DUPLICATION MEASUREMENT: 84% of all entrance evals are
+  repeat-share.** 38.7M evals across 22,695 aim/region queries hit
+  only 5,398 distinct physical problems (avg 4.2 queries/K, max 25).
+  The batched-witness-field amortization ceiling is ~6x - the
+  measured green light for the post-G0R entrance-throughput project,
+  and the difference between the current hour-scale runs and the
+  user's 5-minute budget.
+
+**Run 10 (--svc18 frozen baseline, 3600s, identical binary and
+instrumentation):** 369 expansions, 47.2M evals, 2150 states
+(f2: 987), f3 never. Baseline reached f2 FASTER (690s / 8.3M evals vs
+1265s / 12.0M) and made more f2 nodes - pure march speed - but its
+capability tail is WEAKER everywhere the bridge cares: f2 exits
+510 u/s max @ z 125 (vs 606 @ 157), f2 board E max 254k@g355 (vs
+268k@g500), f1 median board E 192k (vs 238k). Its lane report shows
+the structural difference plainly: objective 246 expansions / 45.1M
+evals, resource 0/0.
+
+**THE A/B (both arms 3600s, same binary, same frozen launch):**
+
+    metric                     svc18 baseline   resource lane
+    f2 exit speed max          510 u/s          606 u/s   (+19%)
+    f2 exit z max              125              157       (+26%)
+    f2 board E max (g@)        254k @ g355      268k @ g500
+    f1 board E median          192k             238k      (+24%)
+    f2 board E median          110k             118k      (+7%)
+    f2 first witnessed         690s / 8.3M ev   1265s / 12.0M ev
+    f2 nodes                   987              851
+    f3 witnessed               never            never
+    K-dup repeat share         85%              84%
+
+**G0Q verdict - DIRECTIONALLY CONFIRMED, NOT COMPLETE:** the same
+250 u/s launch does expose materially stronger late-face states when
+they receive refinement - the bridge-class f2 exits (600+ u/s at
+height, arriving inside f3's window by the ballistic arithmetic)
+exist ONLY in the resource arm, and the f1/f2 populations
+strengthened, not just the max. But the lane pays in march speed, and
+neither arm's hour was enough to run the fast f2 states' fine ladders
+against f3. f2 -> f3 remains unwitnessed; G0R remains open.
+
+**The binding constraint is now measured to be THROUGHPUT, not
+allocation:** the K-duplication repeat share is POLICY-INVARIANT
+(84% vs 85%) - both arms spent the hour re-solving ~5,400-6,000
+distinct physical problems 4.2-4.4x over. At the ~6x amortization
+ceiling, the resource arm's hour becomes ~10 minutes - which both
+fits the fast-f2 fine ladders that f3 needs and is the only measured
+path toward the user's <= 5-minute budget (sub-1-minute goal). The
+advisor's conditional launch-capability probe remains open as the
+second lever if post-batching f2 states still fall short.
+
+**Standing state:** groute 11/11 and the twelve other suites green
+from the session binary; gmap runs consistent (all edges cold-replay
+bitwise, 0 topo violations, no tape reachable); h_cert = 0; no
+incumbent yet, competitive horizons still unexercised.
