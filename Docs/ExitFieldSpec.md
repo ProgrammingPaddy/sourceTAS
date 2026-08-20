@@ -517,3 +517,110 @@ acceptable. Then stage 5 (lazy Query/Refine mirroring
 Entrance::RefineStep: W only grows, U only tightens), and stage 6 -
 the first composed transfer `B_i -> ExitField -> Air -> EntranceField
 -> B_j`, where the rebuilt pieces become the full-map solver.
+
+---
+
+## The horizon law (standing, advisor 2026-08-19i)
+
+**M is part of the physical query domain, not the refinement profile.**
+`R(B, 40) SUBSET OF R(B, 80)`: increasing M enlarges the feasible set,
+so `U_E(B, 80)` may legitimately exceed `U_E(B, 40)` - that is domain
+expansion, not a monotonicity failure. The set-valued anytime contract
+
+    W grows, U tightens
+
+is asserted ONLY for fixed `(B, M)`. Extending the horizon is an
+explicit `ExtendHorizon(M -> M')`, never a `coarse/medium/fine` side
+effect - otherwise Stage 5 acquires the exact "U unexpectedly loosened"
+ambiguity that took so long to eradicate on EntranceField. Gate E7 pins
+`U_E` monotone in M; global branch-and-bound naturally supplies the
+competitive horizon (a continuation needing `dt >= T* - g(S)` cannot
+improve the incumbent), so no universal maximum ride horizon is ever
+required.
+
+Also standing from the same ruling: `W_known` (hashes + provenance,
+never shrinks) is distinct from `W_materialized` (active
+representatives, may recompress); and F8's 7/8 stays as recorded
+evidence until Stage-5 profiles rerun it across resolution - proposal
+vocabulary work happens only if the miss survives strong refinement.
+
+### Session 15 (2026-08-19) — the three corrections + U_E(B, M) CERTIFIED
+
+**Corrections (advisor 2026-08-19i), all in before the bound spread:**
+
+1. **Spatial regions in partition keys.** `RegionBits` projects the
+   event position into a face-local frame (`FaceFrame`: in-plane u/v),
+   128u cells, 8 bits in the key. AIR_EXIT keys carry the exit region
+   on the RIDDEN face; CONTACT_TRANSFER keys carry the contact region
+   on the TARGET face. Two exits from opposite ends of a ramp now live
+   in different partitions the global solver can request separately.
+   The 128u cell is a coarse resolution setting; finer splitting is
+   refinement's job.
+2. **Versioned reopen provenance.** `kProposalVersion` +
+   `ProvenanceHash` (proposal version, engine/control/collision model
+   versions, cap/dwell/dt params, family sizes) stamped on every
+   frontier. A deferred hash is regenerable only under the same
+   provenance; anything else is a migration by replay. Same lesson the
+   witness bank learned.
+3. **F6 strengthened + F9 added.** F6 now requires the composed event
+   to be the SAME EARLIEST post-handoff boundary event as an
+   instrumented continuous run - same tick, same kind, same contacted
+   face, no earlier boundary skipped (measured: kind 1 t1 == kind 1
+   t1). F9 pins deterministic simultaneous-event precedence
+   END > GROUND > CONTACT_TRANSFER > AIR_EXIT with a genuine
+   same-tick fixture (transfer tick + a +-3u END zone entered ON that
+   tick: classifies END). exitfrontier is 9/9.
+
+**Stage 4 — the envelope, derived then certified (exitenv 8/8):**
+
+    for all Z in R_F(B), dt(Z) <= M:
+        E_boundary(S+(Z)) <= U_E(B, M)
+        = E(B) + cap^2 M + 2 g gs duck_air_shift + eps M
+
+- **Phase first:** E := |v|^2 + 2 g gs z at the exact s_plus boundary
+  (after FinishGravity). The half-tick leapfrog conserves E EXACTLY in
+  real arithmetic (d(vz^2) = -2Gvz + G^2 against d(2g'z) = +2Gvz - G^2)
+  - E1 measures realized drift at one float ulp per tick (0.5 at
+  |E| ~ 6.4M), eps = 2.0/tick.
+- **The wish law is DERIVED in the ride domain, not copied from Air:**
+  dE = 2a*proj + a^2 with a <= addspeed = min(wishspd, cap) - proj
+  gives dE <= cap^2 - proj^2 <= cap^2 = 900 for ANY legal wish, any
+  wishspeed, any surface friction, any speed. E2 measured the realized
+  one-tick maximum at **899.00 of 900** across 576 legal wish ticks -
+  the law is tight.
+- **Clips never add energy** (E3: 2000 random clips through the
+  authoritative helper, worst expansion 0.0000).
+- **Duck origin is one net shift, not per-tick slack:** transitions
+  alternate, so the prefix sum of +-8.5 shifts is at most one +8.5 -
+  the certified slack is a single 2 g gs duck_air_shift (~13.6k). E4
+  measured the duck-tick jump at +14,486 (shift + that tick's wish
+  work) with the envelope holding, worst margin 2191.
+- **E5:** 1,918 booked boundary states across all 204 family schedules
+  + 40 random-legal schedules: 0 violations. **E6:** every frontier
+  transition contained at its own dt. **E7:** the horizon law. **E8:**
+  removing the hull term turns the suite RED (1 violation) and the
+  measured 899.0 max proves a 50-point understatement of the wish law
+  would be detected - the suite is strong enough to notice broken
+  semantics (the B5-passed-while-broken lesson, closed by
+  construction).
+
+**Domain, scoped honestly (D_static-surf):** static geometry, constant
+gravity_scale, basevel == 0, no triggers, wish+duck inputs only, every
+booked tick starts airborne. Outside that domain the environment enters
+the operator state and a new bound version gets certified.
+
+`U_E(B, M)` enters the certified registry as bound id `45580001`.
+
+Board from a clean rebuild: exitenv 8/8, exitfrontier 9/9, exitfit
+10/10, efrefine 7/7, airprops 24/24, airsuite 48/48, airrec VERIFIED,
+wishparity, carve M1.4, airsolve M1.3.
+
+**Next (stage 5):** the lazy Query/Refine wrapper for fixed `(B, M)` -
+`ExitQueryState = (W, U, partitions, deferred provenance, status,
+profile trail)`, refinement profiles varying proposal effort /
+partition resolution / active caps, never B or M; `W_known` never
+shrinks, `U` only tightens. Then stage 6, the composition:
+`B_i -> ExitField -> Air -> EntranceField -> B_j` with exact tick
+accounting, control-state carry, packet concatenation, replay of the
+composed witness through the uninterrupted engine - and separately
+`B_i -> CONTACT_TRANSFER -> B_j` with no fake Air segment.

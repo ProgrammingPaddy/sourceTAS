@@ -9551,28 +9551,56 @@ namespace {
 						if (memcmp(&comp[k], &cont[k],
 							sizeof(PlayerState)) != 0)
 							same = false;
-					bool ev_ok = true;
-					if (same && rb.kind == Ride::kContactTransfer) {
-						ev_ok = false;
-						const TickEvents& e2 = cev[
-							static_cast<size_t>(rb.ticks - 1)];
-						for (int c2 = 0; c2 < e2.ncontacts; ++c2)
-							if (e2.contact_brush[c2]
-								== rb.contact_brush)
-								ev_ok = true;
+					// STRENGTHENED (advisor 2026-08-19i): the composed
+					// event must be the SAME EARLIEST post-handoff
+					// boundary event as the instrumented continuous
+					// run - no earlier boundary skipped, same tick,
+					// same kind, same contacted face where applicable.
+					// Walk the continuous suffix through the SAME
+					// classification the executor uses (vs face B).
+					int exp_tick = -1, exp_kind = -1, exp_brush = -1;
+					const Route::Face& fcB = sg.faces[
+						static_cast<size_t>(tr.board_face)];
+					for (size_t k = 0; k < cev.size()
+						&& exp_tick < 0; ++k) {
+						bool onB = false;
+						int oth = -1;
+						for (int c2 = 0; c2 < cev[k].ncontacts;
+							++c2) {
+							if (cev[k].contact_brush[c2]
+								== fcB.brush
+								&& cev[k].contact_plane[c2]
+									== fcB.side)
+								onB = true;
+							else if (oth < 0)
+								oth = c2;
+						}
+						if (cont[k].on_ground) {
+							exp_tick = static_cast<int>(k) + 1;
+							exp_kind = Ride::kGround;
+						} else if (oth >= 0) {
+							exp_tick = static_cast<int>(k) + 1;
+							exp_kind = Ride::kContactTransfer;
+							exp_brush = cev[k].contact_brush[oth];
+						} else if (!onB) {
+							exp_tick = static_cast<int>(k) + 1;
+							exp_kind = Ride::kAirExit;
+						}
 					}
-					if (same && rb.kind == Ride::kGround)
-						ev_ok = cont[static_cast<size_t>(
-							rb.ticks - 1)].on_ground;
+					bool ev_ok = exp_tick == rb.ticks
+						&& exp_kind == rb.kind
+						&& (rb.kind != Ride::kContactTransfer
+							|| exp_brush == rb.contact_brush);
 					ok = same && ev_ok;
 					snprintf(det, sizeof(det), "A rides %d ticks, "
 						"contacts B; handoff S+ bitwise=%d; composed "
-						"suffix books %d/%d ticks bitwise=%d, ends "
-						"kind %d matching a real contact in the "
-						"continuous run=%d", ra.ticks,
-						handoff_exact ? 1 : 0, rb.ticks,
-						static_cast<int>(cont.size()),
-						same ? 1 : 0, rb.kind, ev_ok ? 1 : 0);
+						"suffix books %d/%d ticks bitwise=%d; "
+						"composed event (kind %d t%d) == earliest "
+						"continuous boundary (kind %d t%d)=%d",
+						ra.ticks, handoff_exact ? 1 : 0, rb.ticks,
+						static_cast<int>(cont.size()), same ? 1 : 0,
+						rb.kind, rb.ticks, exp_kind, exp_tick,
+						ev_ok ? 1 : 0);
 				}
 			}
 			check("F6 transfer composition parity", ok, det);
@@ -9645,7 +9673,7 @@ namespace {
 					|| !Ride::MakeTransition(rr, g, pk, &zt))
 					continue;
 				n++;
-				const unsigned key = ExitField::PartKey(zt);
+				const unsigned key = ExitField::PartKey(zt, g, B.face);
 				bool found = false;
 				for (const ExitField::Partition& P : wf.parts) {
 					if (P.key != key)
@@ -9672,9 +9700,500 @@ namespace {
 				buf);
 		}
 
+		// ---- F9 SIMULTANEOUS-EVENT PRECEDENCE (advisor 2026-08-19i):
+		// when one tick carries several boundary events the winner must
+		// be DETERMINISTIC AND SEMANTIC, not whichever branch runs
+		// first. The documented order is END > GROUND >
+		// CONTACT_TRANSFER > AIR_EXIT: entering the finish during a
+		// tick means the run is DONE regardless of what else that tick
+		// touched, grounding outranks an incidental brush contact, and
+		// any contact outranks separation. Constructed here: the
+		// synthetic-valley transfer tick with an END zone straddling
+		// that same tick's position - the executor must say END.
+		{
+			bool ok = false;
+			char det[200] = "no transfer fixture";
+			World sw;
+			const float nz2 = 0.624695f, ny2 = 0.780869f;
+			std::vector<Vec3> na;
+			std::vector<float> da;
+			na.push_back(Vec3(0.f, -ny2, nz2)); da.push_back(0.f);
+			na.push_back(Vec3(1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(-1.f, 0.f, 0.f)); da.push_back(512.f);
+			na.push_back(Vec3(0.f, 1.f, 0.f)); da.push_back(500.f);
+			na.push_back(Vec3(0.f, -1.f, 0.f)); da.push_back(0.f);
+			na.push_back(Vec3(0.f, 0.f, 1.f)); da.push_back(320.f);
+			na.push_back(Vec3(0.f, 0.f, -1.f)); da.push_back(260.f);
+			bool okw = sw.AddTestBrush(na, da, o.hulls);
+			std::vector<Vec3> nb;
+			std::vector<float> db;
+			nb.push_back(Vec3(0.f, ny2, nz2)); db.push_back(0.f);
+			nb.push_back(Vec3(1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(-1.f, 0.f, 0.f)); db.push_back(512.f);
+			nb.push_back(Vec3(0.f, 1.f, 0.f)); db.push_back(0.f);
+			nb.push_back(Vec3(0.f, -1.f, 0.f)); db.push_back(500.f);
+			nb.push_back(Vec3(0.f, 0.f, 1.f)); db.push_back(320.f);
+			nb.push_back(Vec3(0.f, 0.f, -1.f)); db.push_back(260.f);
+			okw = okw && sw.AddTestBrush(nb, db, o.hulls);
+			sw.FinalizeTestWorld();
+			Route::Graph sg;
+			std::string serr;
+			okw = okw && Route::Build(sw, &sg, 2000.f, &serr)
+				&& sg.faces.size() >= 2;
+			int fa = -1;
+			for (size_t i2 = 0; okw && i2 < sg.faces.size(); ++i2)
+				if (sg.faces[i2].n.Y < -0.5f)
+					fa = static_cast<int>(i2);
+			Ride::BoundaryState BA;
+			if (okw && fa >= 0 && RideBoard(sw, p, sg, fa, 420.f,
+				-480.f, 0.f, 0, Steer::CtlState(), &BA, -0.7f,
+				true)) {
+				const int Mv = 300;
+				std::vector<signed char> sd(Mv,
+					static_cast<signed char>(1));
+				std::vector<float> cs(Mv, -0.02f);
+				std::vector<unsigned char> dk(Mv, 0);
+				std::vector<PlayerState> traj;
+				Ride::Result r1 = Ride::FlyRideSchedule(BA, sw, p, sg,
+					sd, cs, dk, nullptr, &traj);
+				if (r1.kind == Ride::kContactTransfer
+					&& r1.ticks >= 1) {
+					const Vec3& q2 = traj[static_cast<size_t>(
+						r1.ticks - 1)].pos;
+					// +-3u: tick spacing is ~7u, so the zone is
+					// entered ON the transfer tick, not before -
+					// genuine simultaneity.
+					const Vec3 zmin(q2.X - 3.f, q2.Y - 3.f,
+						q2.Z - 3.f);
+					const Vec3 zmax(q2.X + 3.f, q2.Y + 3.f,
+						q2.Z + 3.f);
+					Ride::Result r2 = Ride::FlyRideSchedule(BA, sw, p,
+						sg, sd, cs, dk, nullptr, nullptr, nullptr,
+						nullptr, &zmin, &zmax);
+					ok = r2.kind == Ride::kEnd
+						&& r2.ticks == r1.ticks;
+					snprintf(det, sizeof(det), "transfer tick t%d "
+						"with an END zone on the same tick "
+						"classifies END (kind %d t%d) - precedence "
+						"END > GROUND > TRANSFER > AIR is "
+						"deterministic", r1.ticks, r2.kind,
+						r2.ticks);
+				}
+			}
+			check("F9 simultaneous-event precedence", ok, det);
+		}
+
 		printf("exitfrontier: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "STAGE-3 FRONTIER GATE GREEN"
 				: "STAGE-3 FRONTIER GATE RED");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= exitenv: STAGE-4 ENVELOPE CERTIFICATION
+	// (advisor 2026-08-19i; derivation in SolverExitField.h). The
+	// constructive gates FALSIFY the bound - the derivation is the
+	// proof - and E8 deliberately breaks the semantics to verify the
+	// suite is strong enough to notice (the B5-passed-while-broken
+	// lesson).
+	int CmdExitEnv(const std::string& map_path, const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)) {
+			printf("exitenv: %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("exitenv: %-36s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		int fi = -1;
+		for (size_t i = 0; i < g.faces.size(); ++i)
+			if (sqrtf(g.faces[i].n.X * g.faces[i].n.X
+				+ g.faces[i].n.Y * g.faces[i].n.Y) > 1e-4f) {
+				fi = static_cast<int>(i);
+				break;
+			}
+		Ride::BoundaryState B;
+		if (fi < 0 || !RideBoard(w, p, g, fi, 700.f, -120.f, 0.3f, 0,
+			Steer::CtlState(), &B)) {
+			printf("exitenv: no board fixture\n");
+			return 1;
+		}
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		const float hull_slack = 2.f * p.gravity
+			* B.ps.gravity_scale * p.duck_air_shift;
+
+		// A clean-air state factory for single-tick probes: high above
+		// the map so nothing contacts (falsification probes, never
+		// witnesses).
+		auto air_state = [&](float sp, float hd, float vz) {
+			PlayerState s = B.ps;
+			s.pos.Z += 4000.f;
+			s.vel = Vec3(cosf(hd) * sp, sinf(hd) * sp, vz);
+			s.on_ground = false;
+			s.ducked = false;
+			s.ducking = false;
+			s.duck_timer_ms = 0.f;
+			s.hull_state = 0;
+			return s;
+		};
+
+		// ---- E1 EXACT PHASE + BALLISTIC CONSERVATION: pure coast
+		// flight conserves E at tick boundaries to float rounding; the
+		// measured drift calibrates kUEnergyEpsTick.
+		float worst_drift = 0.f;
+		{
+			for (int c = 0; c < 6; ++c) {
+				PlayerState s = air_state(c % 2 ? 900.f : 300.f,
+					0.7f * static_cast<float>(c),
+					c % 3 == 0 ? -400.f : 150.f);
+				float e0 = ExitField::EBoundary(s, p);
+				for (int k = 0; k < 60; ++k) {
+					TickEvents ev;
+					MoveTick(s, w, p, 0.f, 0.f, 0.f, 0.f, 0.f, 0,
+						&ev);
+					if (ev.ncontacts > 0 || s.on_ground)
+						break;
+					const float e1 = ExitField::EBoundary(s, p);
+					const float dr = fabsf(e1 - e0);
+					if (dr > worst_drift)
+						worst_drift = dr;
+					e0 = e1;
+				}
+			}
+			snprintf(buf, sizeof(buf), "360 coast ticks at the "
+				"declared boundary phase: worst |dE| %.4f (eps/tick "
+				"%.2f) - the leapfrog conserves E, phase confirmed",
+				worst_drift, ExitField::kUEnergyEpsTick);
+			check("E1 exact phase + conservation",
+				worst_drift < ExitField::kUEnergyEpsTick, buf);
+		}
+
+		// ---- E2 WISH-WORK CEILING: no legal single wish tick exceeds
+		// cap^2, across speeds, headings, vz, cosa, analog magnitudes
+		// and native key chords.
+		float wish_max = -1e9f;
+		{
+			int n = 0, viol = 0;
+			for (int si = 0; si < 4; ++si)
+				for (int hi2 = 0; hi2 < 4; ++hi2)
+					for (int vi = 0; vi < 3; ++vi)
+						for (int sd = -1; sd <= 1; sd += 2)
+							for (int ci = 0; ci < 6; ++ci) {
+								const float sp = si == 0 ? 50.f
+									: (si == 1 ? 250.f
+									: (si == 2 ? 600.f : 1200.f));
+								const float hd = 1.57f
+									* static_cast<float>(hi2);
+								const float vz = vi == 0 ? -300.f
+									: (vi == 1 ? 0.f : 300.f);
+								const float ca = ci == 0 ? -1.f
+									: (ci == 1 ? -0.5f
+									: (ci == 2 ? -0.02f
+									: (ci == 3 ? 0.3f
+									: (ci == 4 ? 0.85f : 1.f))));
+								PlayerState s = air_state(sp, hd,
+									vz);
+								const float e0 =
+									ExitField::EBoundary(s, p);
+								float yaw = 0.f, fm = 0.f,
+									sm = 0.f;
+								Air::WishInputs(hd, sd, ca, &yaw,
+									&fm, &sm);
+								if (n % 3 == 1) {
+									fm *= 0.3f;   // analog
+									sm *= 0.3f;
+								}
+								if (n % 5 == 2)
+									fm = 450.f;   // key chord
+								TickEvents ev;
+								MoveTick(s, w, p, 0.f, yaw, fm, sm,
+									0.f, 0, &ev);
+								const float de =
+									ExitField::EBoundary(s, p)
+									- e0;
+								if (de > wish_max)
+									wish_max = de;
+								if (de > cap2
+									+ ExitField::kUEnergyEpsTick)
+									viol++;
+								n++;
+							}
+			snprintf(buf, sizeof(buf), "%d legal wish ticks (grid + "
+				"analog + chords): max dE %.2f vs ceiling %.0f; %d "
+				"violations", n, wish_max, cap2, viol);
+			check("E2 wish-work ceiling", viol == 0 && wish_max > 0.f,
+				buf);
+		}
+
+		// ---- E3 CLIP OPTIMISM: the collision response never adds
+		// speed.
+		{
+			unsigned rng = 0x9e3779b9u;
+			auto fr = [&]() {
+				rng = rng * 1664525u + 1013904223u;
+				return static_cast<float>((rng >> 8) & 0xFFFF)
+					/ 65535.f * 2.f - 1.f;
+			};
+			int viol = 0;
+			float worst = 0.f;
+			for (int i = 0; i < 2000; ++i) {
+				Vec3 v(fr() * 1500.f, fr() * 1500.f, fr() * 800.f);
+				Vec3 n(fr(), fr(), fr());
+				const float nl = Len(n);
+				if (nl < 1e-3f)
+					continue;
+				n = Scale(n, 1.f / nl);
+				Vec3 out;
+				Fn::ClipVelocity(v, n, &out);
+				const float d = Dot(out, out) - Dot(v, v);
+				if (d > worst)
+					worst = d;
+				if (d > 0.01f)
+					viol++;
+			}
+			snprintf(buf, sizeof(buf), "2000 random clips through the "
+				"authoritative helper: worst |v'|^2-|v|^2 = %.4f; %d "
+				"expansions", worst, viol);
+			check("E3 clip optimism", viol == 0, buf);
+		}
+
+		// ---- E4 DUCK/HULL BOOKKEEPING: rides with duck transitions
+		// stay inside the envelope, and the duck-origin jump is
+		// visible (so the hull term is doing real work).
+		float duck_jump_seen = 0.f;
+		int e4_viol = 0;
+		{
+			float worst_margin = 1e30f;
+			int ticks_checked = 0;
+			for (int c = 0; c < 6; ++c) {
+				const int M = 120;
+				std::vector<signed char> sd(
+					static_cast<size_t>(M),
+					static_cast<signed char>(c & 1 ? -1 : 1));
+				std::vector<float> cs(static_cast<size_t>(M),
+					-0.02f);
+				std::vector<unsigned char> dk(
+					static_cast<size_t>(M), 0);
+				const int a = 8 + 6 * c;
+				const int b = a + 10 + 3 * c;
+				for (int k = a; k < b && k < M; ++k)
+					dk[static_cast<size_t>(k)] = 1;   // duck pulse
+				std::vector<PlayerState> traj;
+				Ride::Result rr = Ride::FlyRideSchedule(B, w, p, g,
+					sd, cs, dk, nullptr, &traj);
+				if (!rr.legal)
+					continue;
+				const float e0 = ExitField::EBoundary(B.ps, p);
+				float eprev = e0;
+				for (size_t k2 = 0; k2 < traj.size(); ++k2) {
+					const float en = ExitField::EBoundary(
+						traj[k2], p);
+					const float ub = e0 + cap2
+						* static_cast<float>(k2 + 1) + hull_slack
+						+ ExitField::kUEnergyEpsTick
+						* static_cast<float>(k2 + 1);
+					const float mg = ub - en;
+					if (mg < worst_margin)
+						worst_margin = mg;
+					if (mg < 0.f)
+						e4_viol++;
+					const float jump = en - eprev;
+					if (jump > duck_jump_seen)
+						duck_jump_seen = jump;
+					eprev = en;
+					ticks_checked++;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d boundary states across duck "
+				"pulses: %d violations, worst margin %.0f; largest "
+				"single-tick +dE %.0f (the duck-origin jump - the "
+				"hull term earns its place)", ticks_checked, e4_viol,
+				worst_margin, duck_jump_seen);
+			check("E4 duck/hull bookkeeping",
+				e4_viol == 0 && duck_jump_seen > 5000.f, buf);
+		}
+
+		// ---- E5 MULTISTEP CONSTRUCTIVE FALSIFICATION: every proposal
+		// family schedule, the hidden off-family rides, and random
+		// legal schedules - every booked boundary state obeys the
+		// envelope at its own tick count.
+		float e5_worst = 1e30f;
+		int e5_ticks = 0, e5_viol = 0;
+		{
+			auto run_check = [&](const std::vector<signed char>& sd,
+				const std::vector<float>& cs,
+				const std::vector<unsigned char>& dk) {
+				std::vector<PlayerState> traj;
+				Ride::Result rr = Ride::FlyRideSchedule(B, w, p, g,
+					sd, cs, dk, nullptr, &traj);
+				if (!rr.legal)
+					return;
+				const float e0 = ExitField::EBoundary(B.ps, p);
+				for (size_t k2 = 0; k2 < traj.size(); ++k2) {
+					const float en = ExitField::EBoundary(
+						traj[k2], p);
+					const float ub = e0 + cap2
+						* static_cast<float>(k2 + 1) + hull_slack
+						+ ExitField::kUEnergyEpsTick
+						* static_cast<float>(k2 + 1);
+					if (ub - en < e5_worst)
+						e5_worst = ub - en;
+					if (en > ub)
+						e5_viol++;
+					e5_ticks++;
+				}
+			};
+			for (int i = 0; i < ExitField::ProposalCount(2); ++i) {
+				ExitField::Proposal pr;
+				ExitField::MakeProposal(i, &pr);
+				run_check(pr.side, pr.cosa, pr.duck);
+			}
+			unsigned rng = 12345u;
+			auto fr = [&]() {
+				rng = rng * 1664525u + 1013904223u;
+				return static_cast<float>((rng >> 8) & 0xFFFF)
+					/ 65535.f;
+			};
+			for (int j = 0; j < 40; ++j) {
+				const int M = 30 + static_cast<int>(fr() * 200.f);
+				std::vector<signed char> sd(
+					static_cast<size_t>(M), 0);
+				std::vector<float> cs(static_cast<size_t>(M), 1.f);
+				std::vector<unsigned char> dk(
+					static_cast<size_t>(M), 0);
+				signed char cur = fr() < 0.5f
+					? static_cast<signed char>(-1)
+					: static_cast<signed char>(1);
+				int age = 1000;
+				for (int k = 0; k < M; ++k) {
+					if (fr() < 0.08f && age >= 6) {
+						cur = static_cast<signed char>(-cur);
+						age = 0;
+					}
+					sd[static_cast<size_t>(k)] = fr() < 0.15f
+						? static_cast<signed char>(0) : cur;
+					cs[static_cast<size_t>(k)] = -0.1f
+						+ fr() * 1.05f;
+					dk[static_cast<size_t>(k)] = fr() < 0.1f
+						? 1 : 0;
+					age++;
+				}
+				Ride::CanonSchedule(sd, &cs, nullptr);
+				run_check(sd, cs, dk);
+			}
+			snprintf(buf, sizeof(buf), "%d booked boundary states "
+				"(204 family + 40 random-legal schedules): %d "
+				"violations, tightest margin %.0f", e5_ticks,
+				e5_viol, e5_worst);
+			check("E5 multistep constructive", e5_viol == 0
+				&& e5_ticks > 1500, buf);
+		}
+
+		// ---- E6 WITNESSED FRONTIER CONTAINMENT.
+		{
+			ExitField::WitnessFrontier wf;
+			wf.B = B;
+			ExitField::BuildFrontier(&wf, w, p, g, 2);
+			int n = 0, viol = 0;
+			float worst = 1e30f;
+			for (const ExitField::Partition& P : wf.parts)
+				for (const Ride::ExitTransition& t : P.active) {
+					const float en = ExitField::EBoundary(t.s_plus,
+						p);
+					const float ub = ExitField::UEnergy(B, p,
+						t.dt);
+					if (ub - en < worst)
+						worst = ub - en;
+					if (en > ub)
+						viol++;
+					if (en > ExitField::UEnergy(B, p, 240))
+						viol++;
+					n++;
+				}
+			snprintf(buf, sizeof(buf), "%d frontier transitions: "
+				"E(S+) <= U_E(B, dt) and <= U_E(B, 240); %d "
+				"violations, tightest margin %.0f", n, viol, worst);
+			check("E6 frontier containment", n > 0 && viol == 0, buf);
+		}
+
+		// ---- E7 HORIZON LAW: M is domain, not refinement - the
+		// envelope grows monotonically with the horizon.
+		{
+			bool mono = true;
+			for (int M = 10; M < 240; M += 10)
+				if (ExitField::UEnergy(B, p, M)
+					> ExitField::UEnergy(B, p, M + 10))
+					mono = false;
+			snprintf(buf, sizeof(buf), "U_E(B, M) nondecreasing over "
+				"M = 10..240 (domain expansion may loosen U; "
+				"refinement at fixed (B, M) may only tighten)");
+			check("E7 horizon law", mono, buf);
+		}
+
+		// ---- E8 DELIBERATE SEMANTIC MUTATION: the suite must turn
+		// red when the bound is broken (a suite that passes while too
+		// weak proves nothing - B5's history). Mutation 1: drop the
+		// duck-origin hull term. Mutation 2: understate the one-tick
+		// wish law by 50.
+		{
+			int viol_hull = 0;
+			{
+				const int M = 120;
+				std::vector<signed char> sd(
+					static_cast<size_t>(M),
+					static_cast<signed char>(1));
+				std::vector<float> cs(static_cast<size_t>(M),
+					-0.02f);
+				std::vector<unsigned char> dk(
+					static_cast<size_t>(M), 0);
+				for (int k = 8; k < 24; ++k)
+					dk[static_cast<size_t>(k)] = 1;
+				std::vector<PlayerState> traj;
+				Ride::Result rr = Ride::FlyRideSchedule(B, w, p, g,
+					sd, cs, dk, nullptr, &traj);
+				const float e0 = ExitField::EBoundary(B.ps, p);
+				for (size_t k2 = 0; rr.legal && k2 < traj.size();
+					++k2) {
+					const float en = ExitField::EBoundary(
+						traj[k2], p);
+					const float ub_bad = e0 + cap2
+						* static_cast<float>(k2 + 1)
+						+ ExitField::kUEnergyEpsTick
+						* static_cast<float>(k2 + 1);   // NO hull
+					if (en > ub_bad)
+						viol_hull++;
+				}
+			}
+			// Mutation 2 uses E2's measured maximum directly: the law
+			// must be TIGHT enough that understating it is detectable.
+			const bool m2_detect = wish_max > cap2 - 50.f;
+			const bool ok = viol_hull > 0 && m2_detect;
+			snprintf(buf, sizeof(buf), "hull term removed -> %d "
+				"violations (RED as required); measured one-tick max "
+				"%.1f > mutated ceiling %.0f -> wish-law mutation "
+				"detectable = %d", viol_hull, wish_max, cap2 - 50.f,
+				m2_detect ? 1 : 0);
+			check("E8 broken-semantics detection", ok, buf);
+		}
+
+		printf("exitenv: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0
+				? "ENVELOPE CERTIFICATION GREEN - U_E(B, M) enters "
+					"the certified registry (bound id 45580001, "
+					"domain D_static-surf)"
+				: "ENVELOPE CERTIFICATION RED");
 		fflush(stdout);
 		return fail == 0 ? 0 : 2;
 	}
@@ -14308,6 +14827,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdAirRec(argv[2], o);
+	}
+	if (cmd == "exitenv" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdExitEnv(argv[2], o);
 	}
 	if (cmd == "exitfrontier" && argc >= 3) {
 		ReplayOpts o;

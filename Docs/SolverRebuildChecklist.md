@@ -15,17 +15,15 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
-**STATUS 2026-08-19 (session 14): ExitField STAGE 3 COMPLETE.** The
-witnessed frontier W_F(B) exists (`SolverExitField.h`): event-typed
-partitions, diversity slots, deferred-hash compression with
-deterministic reopen provenance, GROUND preserved as
-continuation-unsupported, proposals quarantined. `exitfrontier` 8/8 -
-including BITWISE transfer composition parity on the synthetic valley
-and a 7/8 recoverability smoke. NEXT: stage 4, the first certified
-outer-envelope component U_E(B, M) derived from RIDE physics; then
-stage 5 lazy Query/Refine; then stage 6, the first composed transfer
-B_i -> ExitField -> Air -> EntranceField -> B_j. See
-`Docs/ExitFieldSpec.md` session 14.
+**STATUS 2026-08-19 (session 15): ExitField STAGE 4 COMPLETE -
+U_E(B, M) is CERTIFIED** (bound id 45580001, exitenv 8/8, domain
+D_static-surf). The wish law was DERIVED in the ride domain (measured
+tight: 899.00 of 900); duck origin costs one net shift; the HORIZON LAW
+is standing (M is query domain - refinement never changes it). Stage-3
+corrections in: spatial partition regions, versioned provenance,
+F6-earliest-boundary + F9 event precedence (exitfrontier 9/9). NEXT:
+stage 5 lazy Query/Refine for fixed (B, M), then stage 6 - the first
+composed transfer. See `Docs/ExitFieldSpec.md` session 15.
 
 **RULING 2026-08-19: do NOT build Level B (defect-based multiple
 shooting). BUILD THE SCHEDULER.** The funded recovery curve showed
@@ -360,6 +358,51 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-19 (session 15, THREE CORRECTIONS + U_E(B, M) CERTIFIED):
+  advisor 2026-08-19i. CORRECTIONS: (1) partition keys carry SPATIAL
+  REGIONS in face-local frames (RegionBits, 128u cells; AIR keyed on
+  the ridden face's exit region, TRANSFER on the target face's contact
+  region) - two exits from opposite ramp ends are now separately
+  requestable subdomains; (2) reopen provenance is VERSIONED
+  (kProposalVersion + ProvenanceHash over proposal/engine/control/
+  collision identity and params) - a deferred hash is regenerable only
+  under the same provenance; (3) F6 strengthened to "the composed event
+  IS the earliest post-handoff boundary of an instrumented continuous
+  run" (same tick/kind/face, none skipped) and F9 pins deterministic
+  simultaneous-event precedence END > GROUND > TRANSFER > AIR with a
+  genuine same-tick fixture. exitfrontier 9/9. F8's 7/8 left alone per
+  directive.
+  STAGE 4 (exitenv 8/8): U_E(B, M) = E(B) + cap^2 M + 2 g gs
+  duck_air_shift + eps M is CERTIFIED (bound id 45580001, domain
+  D_static-surf: static geometry, constant gs, basevel 0, no triggers,
+  wish+duck inputs, booked ticks airborne). PHASE FIRST: E := |v|^2 +
+  2 g gs z at the exact s_plus boundary; the leapfrog conserves E
+  exactly in real arithmetic (E1: realized drift = one float ulp/tick,
+  eps 2.0). THE WISH LAW IS DERIVED IN THE RIDE DOMAIN, NOT COPIED:
+  dE = 2a proj + a^2 with a <= cap - proj gives dE <= cap^2 = 900 for
+  any legal wish at any wishspeed/friction/speed; E2 measured the
+  realized one-tick max at 899.00 of 900 over 576 wish ticks - tight.
+  Clips never add energy (E3 worst expansion 0.0000 over 2000). DUCK
+  ORIGIN IS ONE NET SHIFT, not per-tick slack: transitions alternate so
+  the prefix sum of +-8.5 shifts is at most one +8.5 (E4: duck-tick
+  jump +14,486 measured, envelope holds, margin 2191). E5: 1,918 booked
+  boundary states, 0 violations. E6: every frontier transition
+  contained at its own dt. E7: THE HORIZON LAW - M is part of the QUERY
+  DOMAIN, not the refinement profile; R(B,40) subset R(B,80), so U may
+  legitimately grow with M; "W grows, U tightens" holds only for fixed
+  (B, M); ExtendHorizon is explicit domain expansion, never a profile
+  side effect (now standing in ExitFieldSpec). E8: removing the hull
+  term turns the suite RED and the measured 899.0 proves a 50-point
+  wish-law understatement is detectable - the suite can notice broken
+  semantics by construction. Clean-rebuild board: exitenv 8/8,
+  exitfrontier 9/9, exitfit 10/10, efrefine 7/7, airprops 24/24,
+  airsuite 48/48, airrec VERIFIED, wishparity, carve M1.4, airsolve
+  M1.3. NEXT: stage 5 lazy Query/Refine for fixed (B, M) (W_known never
+  shrinks vs W_materialized may recompress), then stage 6 - the
+  composed transfer with exact tick accounting and packet
+  concatenation, plus B_i -> CONTACT_TRANSFER -> B_j with no fake Air
+  segment. Full detail: `Docs/ExitFieldSpec.md` session 15.
 
 - 2026-08-19 (session 14, STAGE 3: THE EXIT WITNESS FRONTIER - 8/8):
   advisor ruling 2026-08-19h implemented. The distinction is in the
