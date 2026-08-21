@@ -1259,3 +1259,124 @@ RefSolve as oracle/polisher, then return to G0R.
 Board: thirteen suites green from the session binary (groute 11/11;
 airrec fixture hash bit-identical across the MoveTick-counter
 change).
+
+---
+
+### Session 21 (2026-08-20) — the compression benchmark: the derived
+### lattice works at coarse h, explodes at fine h, and the oracle
+### names the next law
+
+Advisor ruling 2026-08-20e implemented: three resolutions separated
+(board observation ~2000/1e6 u^2 ~ 22u; internal state cells DERIVED
+from output resolution via dv ~ h/tau; local refinement deferred);
+world-first-contact sweeps (per-face fields are views); (T, lambda)
+destination cells with half-pitch edge bands; multi-representative
+state cells with optimistic envelopes and honest compressed counts;
+NO frontier cap - an abort ceiling that reports explosion as a
+finding; RefSolve as the adversarial oracle with the first-lost-state
+diagnostic. Paused throughout: G0R, batching, launch, service,
+simulator approximation.
+
+**The rebuilt `forwardfield`:** scheme A = session-20 arbitrary bins
+(200k cap, continuity); scheme B = derived lattice, 1 representative
+(max speed); scheme C = derived lattice, 4 representatives (max
+speed / min heading / max heading / first). All schemes deposit into
+the same (face, T, lambda) board; benchmark at h in
+{32,16,8,4,2} (A at {32,8,2}).
+
+**THE BENCHMARK (world-first-contact, one S0, the real f0->f1
+problem, window+cone score 72, horizon 103, faces prepped
+f0..f3 with windows to tick 68-76):**
+
+    sch |  h | moveticks | retained | board | f1cells | wall  | note
+      A | 32 |     38.4M |    6.16M |   550 |     521 | 31.8s |
+      A |  8 |     34.9M |    5.64M |   879 |     879 | 30.3s |
+      A |  2 |     32.8M |    5.30M |  1305 |    1305 | 31.1s |
+      B | 32 |      2.97M|     474k |   614 |     471 |  2.2s |
+      B | 16 |     22.3M |    3.55M |  1231 |     916 | 18.1s |
+      B |  8 |    198.4M |   31.7M  |  2425 |    1763 |211.8s |
+      B |  4 |         - |        - |     - |       - |     - | ABORT
+      B |  2 |         - |        - |     - |       - |     - | ABORT
+      C | 32 |      9.18M|    1.47M |   661 |     489 |  6.1s |
+      C | 16 |     64.9M |    10.4M |  1269 |     932 | 47.3s |
+      C |  8 |         - |        - |     - |       - |     - | ABORT
+      C |  4 |         - |        - |     - |       - |     - | ABORT
+      C |  2 |         - |        - |     - |       - |     - | ABORT
+
+**Finding 1 — THE DERIVED LATTICE WORKS AT THE INTENDED DENSITY.**
+B@32: 2.97M ticks / 474k retained / 614 cells / 2.2 s - versus
+scheme A@32's 38.4M / 6.16M / 550 / 31.8 s. Thirteen-fold
+compression AND more coverage, within sight of the advisor's target
+scale (tens-to-hundreds of thousands retained). C@32 buys ~8% more
+cells for 3x cost via the extra representatives. The sensitivity
+rule (position at h; velocity at h/tau) is doing exactly what it was
+derived to do at the ~22-32u observation density.
+
+**Finding 2 — THE LATTICE EXPLODES AT FINE h; THE THIRD RESOLUTION
+IS NOW MEASURED NECESSARY.** dv = h/tau makes the velocity lattice
+finer as h shrinks; the frontier crosses the 1.5M honest abort
+ceiling at h <= 8 (scheme C) / h <= 4 (scheme B); B@8 completed only
+by brute force (198M ticks, 212 s). The law this measures: fine
+OUTPUT resolution cannot be bought with uniformly fine INTERNAL
+resolution - h-refinement must be LOCAL to competitive regions (the
+third resolution), never global. The abort ceiling did its job:
+explosion is a reported finding, not a silent truncation.
+
+**Finding 3 — THE ORACLE NAMES THE NEXT LAW: ACTION SAMPLING AND
+STATE LATTICE MUST BE CO-DESIGNED.** The first-lost-state diagnostic
+fired at TICK 0 for every valuable missing witness, cone clean:
+RefSolve's continuous cosa diverges from all nine sampled actions
+within one tick by more than the lattice's dv. The 4-sample cosa set
+{0.9995, 0.98, 0.9, 0.75} cannot fill a lattice whose cells are
+h/tau ~ 5-8 u/s wide. Either the action set densifies with the
+lattice, or cell membership must absorb sub-cell control differences
+(rounding into cells rather than exact generation). This is the
+first concrete, measured design constraint on the compression rule -
+delivered by the oracle exactly as designed, on its first run.
+
+**Also measured:** the (T, lambda) parameterization works (the
+destination is 1D per arrival tick; edge cells at half pitch); the
+world-first-contact sweep populates multiple faces from one S0
+(f0 re-entries + the f1 target from the same frontier - though this
+S0's cone confines most output to f1); zero cone-flagged witnesses
+(the certified reach cone never wrongly pruned an oracle path).
+
+**The final run (oracle recovery + diagnostics at h=32):**
+
+    oracle recovery (oracle cells at that h / recovered / missed /
+    ref-wins>1k):
+      A@32: 279/191/88/93    B@32: 279/186/93/102   C@32: 279/189/90/93
+      A@8:  561/168/393/87   B@16: 399/261/138/114  C@16: 399/261/138/108
+      A@2: 1032/131/901/120  B@8:  561/352/209/122  (finer rows aborted)
+
+    HEAD-TO-HEAD f1 at h=32: fwd-only 300 | shared 189 | ref-only 90
+    | ref wins-by->1k 93.
+
+- PER-CELL EFFICIENCY CLOSED FROM 50x TO ~1.5x: B@32 spends 6.3k
+  MoveTicks per covered cell vs the oracle ladder's 4.1k - while
+  covering 1.7x more cells (471 vs 279) from ONE sweep and retaining
+  13x fewer states than the v0 bins. C@32: 18.8k MT/cell for +4%
+  cells - the 4-rep basis is not yet paying for itself.
+- REFSOLVE'S QUALITY EDGE PERSISTS at every resolution (~90-120
+  cells won by >1k E): the representative basis loses outcome
+  extremes even where cells match - the second co-design input.
+- FIRST-LOST, UNANIMOUS: 12/12 valuable misses lost at TICK 0 with
+  the parent cell PRESENT and the cone clean => the four-sample cosa
+  action set cannot produce the witness's velocity cell even at
+  h=32. THE CO-DESIGN LAW (the session's central finding): the
+  action sampling density and the state-lattice pitch are one design
+  variable, not two - either actions densify with dv = h/tau, or
+  cell membership must absorb sub-cell control differences.
+
+Board: thirteen suites green (no engine/operator changes this
+session; the audit instrument only).
+
+**Sequel note (same day): the program pivoted** - see the
+CAPABILITY LIBRARY program (user + advisor 2026-08-20f,
+`Docs/CapabilityLibrary.md`): bottom-up min-max capability functions
+with unit proofs; the global solver becomes a regression consumer;
+G0R is no longer the next milestone. The session-21 findings carry
+directly: the co-design law and the representative-basis question
+become CAPABILITY questions (the N-tick air turn/gain function
+subsumes "which cosa samples suffice"), answered once, reused
+everywhere.

@@ -13670,138 +13670,283 @@ namespace {
 		return rc;
 	}
 
-	// ================= forwardfield: THE SEARCH-ARCHITECTURE AUDIT
-	// (advisor 2026-08-20d, session 20). The correction under test:
-	// the exact simulator is CHEAP; the current search FORMULATION is
-	// expensive. Production turned "one forward reachable-state sweep
-	// that deposits a board field" into "thousands of per-acceptance-
-	// ball inverse RefSolve jobs". This command runs both on ONE real
-	// Entrance problem (the basictest f0 -> f1 transfer) and prints
-	// the head-to-head: exact tick transitions, states, cells covered,
-	// best energy per cell, and wall time - at board resolutions
-	// 32/16/8/4/2u. The simulator is NEVER approximated; search
-	// resolution is adaptive, simulator accuracy is not.
-	//
-	// The forward arm is deliberately primitive v0 (the research
-	// question is the state representation, not polish): per tick,
-	// actions = {hold/flip side x 4 cosa samples, coast}, flips gated
-	// by the dwell-6 law; states bin by (xy cell, heading sector,
-	// speed bucket, side, age) with up to 2 exact representatives per
-	// bin (max speed); z/vz are deterministic per tick (asserted).
-	// Every target-face contact deposits (Q, E_boundary, witness
-	// lineage) into the field - the heatmap is an OUTPUT of the sweep.
-	// RefSolve runs afterward as the production baseline AND the
-	// recoverability oracle (cells it wins reveal which state/control
-	// dimension the sweep under-resolves).
+	// ================= forwardfield: THE COMPRESSION BENCHMARK
+	// (advisor 2026-08-20e, session 21; supersedes the session-20 v0
+	// audit form). Three resolutions are SEPARATE and named:
+	//   1. BOARD OBSERVATION resolution - the output field: ~2000
+	//      interior samples per 1e6 u^2 of face (~22u pitch), scaled
+	//      by area; a denser 1D boundary layer (edge cells at half
+	//      pitch); an output REPRESENTATION, never targets.
+	//   2. INTERNAL REACHABLE-STATE resolution - the compression
+	//      problem: state cells DERIVED from the output resolution
+	//      via the sensitivity scales dv ~ h/tau, dtheta ~ h/(s*tau)
+	//      (a cartesian velocity lattice at h/tau realizes both),
+	//      at each exact (tick, side, dwell); several exact
+	//      representatives per cell + an optimistic envelope + an
+	//      honest compressed marker. NO global frontier cap - an
+	//      ABORT ceiling reports explosion honestly instead of
+	//      silently truncating coverage.
+	//   3. LOCAL REFINEMENT resolution - later; not this pass.
+	// The base primitive is WORLD-FIRST-CONTACT: one forward sweep
+	// from exact S0 populates every face it actually reaches;
+	// per-face fields are views over the shared frontier. The
+	// destination is parameterized (arrival tick T, along-slice
+	// lambda): z(T) is deterministic, so a tilted face at tick T is a
+	// 1D slice - the cancelled destination dimension, with slice
+	// endpoints as the exact edges. RefSolve runs afterward as the
+	// ADVERSARIAL ORACLE with the first-lost-state diagnostic: for
+	// every valuable witness the field misses, replay its exact
+	// trajectory and report the first tick at which the forward
+	// representation no longer contained its state cell.
 
 	namespace {
 
-	struct FFLin {              // compact lineage (witness = the walk)
+	struct FFLin {
 		int parent = -1;
 		signed char side = 0;
 		unsigned char cosa_idx = 0;
 	};
-	struct FFRep {              // one frontier representative
+	struct FFRep {
 		PlayerState ps;
-		signed char side = 0;   // carried strafe side
-		signed char age = 7;    // dwell ticks (capped)
+		signed char side = 0;
+		signed char age = 7;
 		int lin = -1;
 	};
-	struct FFCell {
+	struct FFCellOut {
 		float bestE = -1e30f;
 		int strikes = 0;
-		int lin = -1;           // lineage of the best strike
+		int lin = -1;
 		int tick = 0;
 	};
+	// Internal state cell: up to 4 exact representatives (max speed /
+	// min heading / max heading / first-seen), an optimistic
+	// envelope, and the honest compressed count.
+	struct FFCellState {
+		int rep[4];
+		float best_sp = -1e30f, hmin = 1e30f, hmax = -1e30f;
+		int members = 0;
+		float max_speed_seen = 0.f;
+	};
+	struct FFFace {
+		int face = -1, brush = -1, side = -1;
+		Vec3 n, ldir;
+		float zmin = 0.f, zmax = 0.f;
+		float bx0 = 0.f, by0 = 0.f, bx1 = 0.f, by1 = 0.f;
+		std::vector<unsigned char> win;
+		std::vector<float> lmin, lmax;
+		int last_open = -1;
+	};
 	struct FFStats {
-		long long moveticks = 0;
-		long long expanded = 0;   // representative-action expansions
-		long long retained = 0;   // states binned into frontiers
-		long long strikes = 0;
-		long long dead = 0;
-		int  max_frontier = 0;
-		int  overflow = 0;        // frontier-cap losses (REPORTED)
-		int  window_end = -1;     // tick the vertical window closed
-		long long reach_pruned = 0; // certified-cone eliminations
+		long long moveticks = 0, expanded = 0, retained = 0;
+		long long strikes = 0, dead = 0, reach_pruned = 0;
+		long long cells_total = 0, reps_total = 0;
+		int max_frontier = 0, peak_cells = 0;
+		bool aborted = false;
+		int abort_tick = -1;
 		double ms = 0.0;
-		std::map<long long, FFCell> board;
+		std::map<unsigned long long, FFCellOut> board;
+		long long face_cells[8];
 	};
 
-	long long FFCellKey(float x, float y, float r) {
-		const long long cx = static_cast<long long>(
-			floorf(x / r));
-		const long long cy = static_cast<long long>(
-			floorf(y / r));
-		return (cx << 24) ^ (cy & 0xFFFFFF);
+	// Board cell key: (face, arrival tick T, along-slice lambda index,
+	// edge bit). Edge cells (within h of the slice extent) bin at half
+	// pitch - the denser 1D boundary layer.
+	unsigned long long FFBoardKey(int face, int tick, float lam,
+	                              float lmin, float lmax, float h) {
+		const bool edge = lam < lmin + h || lam > lmax - h;
+		const float pitch = edge ? h * 0.5f : h;
+		const long long li = static_cast<long long>(
+			floorf(lam / pitch)) + (1 << 20);
+		return (static_cast<unsigned long long>(face) << 52)
+			^ (static_cast<unsigned long long>(tick) << 30)
+			^ (static_cast<unsigned long long>(li) << 1)
+			^ (edge ? 1ULL : 0ULL);
 	}
 
-	// THE SECOND CANCELLED TERM (the certified reach cone): in clean
-	// air the per-tick horizontal velocity change is bounded by the
-	// accel law's cap (addspeed <= air_speed_cap = 30, exactly), so a
-	// state's reachable XY at k ticks ahead lies within the coast
-	// point plus a disc of radius sum(30*dt*j) ~ 0.225*k^2. A state
-	// whose cone misses the face's XY box at EVERY remaining
-	// strike-window tick can never strike - a certified elimination,
-	// evaluated as arithmetic per state, never simulation.
-	bool FFReachable(const Vec3& pos, const Vec3& vel, int t,
-	                 const std::vector<unsigned char>& in_window,
-	                 float dt, float bx0, float by0, float bx1,
-	                 float by1) {
-		for (size_t k = static_cast<size_t>(t) + 1;
-			k < in_window.size(); ++k) {
-			if (!in_window[k])
+	void FFPrepFaces(const Route::Graph& g, const MoveParams& p,
+	                 const PlayerState& S0, int nh,
+	                 std::vector<FFFace>* out, int* last_any) {
+		out->clear();
+		*last_any = -1;
+		for (size_t fi = 0; fi < g.faces.size(); ++fi) {
+			const Route::Face& fc = g.faces[fi];
+			const float hn = sqrtf(fc.n.X * fc.n.X
+				+ fc.n.Y * fc.n.Y);
+			if (hn < 1e-4f)
 				continue;
-			const float kd = static_cast<float>(k
-				- static_cast<size_t>(t));
-			const float cx = pos.X + vel.X * kd * dt;
-			const float cy = pos.Y + vel.Y * kd * dt;
-			const float slack = 0.225f * kd * kd + 48.f;
-			const float ddx = cx < bx0 ? bx0 - cx
-				: cx > bx1 ? cx - bx1 : 0.f;
-			const float ddy = cy < by0 ? by0 - cy
-				: cy > by1 ? cy - by1 : 0.f;
-			if (ddx * ddx + ddy * ddy <= slack * slack)
-				return true;
-		}
-		return false;
-	}
-
-	FFStats ForwardSweep(const PlayerState& S0,
-	                     const Steer::CtlState& ctl0, const World& w,
-	                     const MoveParams& p, const Route::Graph& g,
-	                     int face_j, int nh, float r,
-	                     std::vector<FFLin>* lins_out) {
-		FFStats st;
-		const auto t0 = std::chrono::steady_clock::now();
-		const long long mt0 = g_movetick_count;
-		const Route::Face& fj = g.faces[static_cast<size_t>(face_j)];
-		const int min_gap = static_cast<int>(
-			ceilf((1.f / p.dt) / p.strafe_rate_max));
-		const float C[4] = { 0.9995f, 0.98f, 0.9f, 0.75f };
-		const int kMaxFrontier = 200000;
-		// Precompute the shared vertical strike window (arithmetic).
-		std::vector<unsigned char> in_window(
-			static_cast<size_t>(nh), 0);
-		{
+			FFFace f;
+			f.face = static_cast<int>(fi);
+			f.brush = fc.brush;
+			f.side = fc.side;
+			f.n = fc.n;
+			f.zmin = fc.zmin;
+			f.zmax = fc.zmax;
+			f.ldir = Vec3(-fc.n.Y / hn, fc.n.X / hn, 0.f);
+			f.bx0 = 1e30f; f.by0 = 1e30f;
+			f.bx1 = -1e30f; f.by1 = -1e30f;
+			for (const Vec3& v : fc.verts) {
+				f.bx0 = v.X < f.bx0 ? v.X : f.bx0;
+				f.by0 = v.Y < f.by0 ? v.Y : f.by0;
+				f.bx1 = v.X > f.bx1 ? v.X : f.bx1;
+				f.by1 = v.Y > f.by1 ? v.Y : f.by1;
+			}
+			f.win.assign(static_cast<size_t>(nh), 0);
+			f.lmin.assign(static_cast<size_t>(nh), 0.f);
+			f.lmax.assign(static_cast<size_t>(nh), 0.f);
+			float fl_lo = 1e30f, fl_hi = -1e30f;
+			for (const Vec3& v : fc.verts) {
+				const float lv = v.X * f.ldir.X + v.Y * f.ldir.Y;
+				fl_lo = lv < fl_lo ? lv : fl_lo;
+				fl_hi = lv > fl_hi ? lv : fl_hi;
+			}
 			float zz = S0.pos.Z, vz = S0.vel.Z;
 			for (int k = 0; k < nh; ++k) {
 				vz -= p.gravity * S0.gravity_scale * p.dt;
 				zz += vz * p.dt;
-				if (zz >= fj.zmin - 8.f && zz <= fj.zmax + 80.f)
-					in_window[static_cast<size_t>(k)] = 1;
-				if (zz < fj.zmin - 8.f && vz < 0.f)
+				if (zz >= f.zmin - 8.f && zz <= f.zmax + 80.f) {
+					f.win[static_cast<size_t>(k)] = 1;
+					f.last_open = k;
+					// slice extent at z(k): clip polygon edges
+					float lo = 1e30f, hi = -1e30f;
+					const size_t nv = fc.verts.size();
+					for (size_t a = 0; a < nv; ++a) {
+						const Vec3& va = fc.verts[a];
+						const Vec3& vb = fc.verts[(a + 1) % nv];
+						const float da = va.Z - zz;
+						const float db = vb.Z - zz;
+						if ((da <= 0.f && db >= 0.f)
+							|| (da >= 0.f && db <= 0.f)) {
+							const float dd = db - da;
+							const float tt = fabsf(dd) > 1e-6f
+								? -da / dd : 0.f;
+							const Vec3 q(va.X + (vb.X - va.X)
+								* tt, va.Y + (vb.Y - va.Y) * tt,
+								0.f);
+							const float lv = q.X * f.ldir.X
+								+ q.Y * f.ldir.Y;
+							lo = lv < lo ? lv : lo;
+							hi = lv > hi ? lv : hi;
+						}
+					}
+					if (lo > hi) {
+						lo = fl_lo;
+						hi = fl_hi;
+					}
+					f.lmin[static_cast<size_t>(k)] = lo;
+					f.lmax[static_cast<size_t>(k)] = hi;
+				}
+				if (zz < f.zmin - 8.f && vz < 0.f)
 					break;
 			}
+			if (f.last_open > *last_any)
+				*last_any = f.last_open;
+			out->push_back(f);
 		}
-		float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
-		for (const Vec3& v2 : fj.verts) {
-			bx0 = v2.X < bx0 ? v2.X : bx0;
-			by0 = v2.Y < by0 ? v2.Y : by0;
-			bx1 = v2.X > bx1 ? v2.X : bx1;
-			by1 = v2.Y > by1 ? v2.Y : by1;
+	}
+
+	// Certified reach cone vs ANY face with an open future window.
+	bool FFReachAny(const Vec3& pos, const Vec3& vel, int t,
+	                const std::vector<FFFace>& faces, float dt) {
+		for (const FFFace& f : faces) {
+			for (int k = t + 1; k <= f.last_open; ++k) {
+				if (!f.win[static_cast<size_t>(k)])
+					continue;
+				const float kd = static_cast<float>(k - t);
+				const float cx = pos.X + vel.X * kd * dt;
+				const float cy = pos.Y + vel.Y * kd * dt;
+				const float slack = 0.225f * kd * kd + 48.f;
+				const float ddx = cx < f.bx0 ? f.bx0 - cx
+					: cx > f.bx1 ? cx - f.bx1 : 0.f;
+				const float ddy = cy < f.by0 ? f.by0 - cy
+					: cy > f.by1 ? cy - f.by1 : 0.f;
+				if (ddx * ddx + ddy * ddy <= slack * slack)
+					return true;
+			}
 		}
+		return false;
+	}
+
+	// State-cell keys. Scheme A = the session-20 arbitrary bins.
+	// Schemes B/C = the resolution-DERIVED lattice: position at h,
+	// cartesian velocity at h/tau (which realizes both dv ~ h/tau and
+	// dtheta ~ h/(s*tau)), exact (side, age) always.
+	unsigned long long FFKeyA(const PlayerState& ns, signed char side,
+	                          signed char age, float h) {
+		const float nsd = Len2D(ns.vel);
+		const float nhd = nsd > 1.f ? atan2f(ns.vel.Y, ns.vel.X)
+			: 0.f;
+		const int hsec = static_cast<int>((nhd + 3.14159265f)
+			* (48.f / 6.2831853f)) & 63;
+		const int spb = static_cast<int>(nsd / 25.f);
+		unsigned long long key = static_cast<unsigned long long>(
+			static_cast<long long>(floorf(ns.pos.X / h)) + (1 << 20));
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(
+				static_cast<long long>(floorf(ns.pos.Y / h))
+				+ (1 << 20));
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(hsec);
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(spb);
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(side + 1);
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(age);
+		return key;
+	}
+	unsigned long long FFKeyDerived(const PlayerState& ns,
+	                                signed char side, signed char age,
+	                                float h, float tau) {
+		const float dv = h / (tau > 1e-3f ? tau : 1e-3f);
+		unsigned long long key = static_cast<unsigned long long>(
+			static_cast<long long>(floorf(ns.pos.X / h)) + (1 << 20));
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(
+				static_cast<long long>(floorf(ns.pos.Y / h))
+				+ (1 << 20));
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(
+				static_cast<long long>(floorf(ns.vel.X / dv))
+				+ (1 << 20));
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(
+				static_cast<long long>(floorf(ns.vel.Y / dv))
+				+ (1 << 20));
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(side + 1);
+		key = key * 1099511628211ULL
+			^ static_cast<unsigned long long>(age);
+		return key;
+	}
+
+	// scheme: 0 = A (session-20 bins, 2 fastest reps, 200k cap kept
+	// for continuity with the measured v0), 1 = B (derived lattice,
+	// 1 representative), 2 = C (derived lattice, 4 representatives).
+	FFStats ForwardSweep2(const PlayerState& S0,
+	                      const Steer::CtlState& ctl0, const World& w,
+	                      const MoveParams& p,
+	                      const std::vector<FFFace>& faces,
+	                      int last_any, int nh, float h, int scheme,
+	                      std::vector<FFLin>* lins_out,
+	                      std::vector<std::set<unsigned long long> >*
+	                          tick_cells) {
+		FFStats st;
+		memset(st.face_cells, 0, sizeof(st.face_cells));
+		const auto t0 = std::chrono::steady_clock::now();
+		const long long mt0 = g_movetick_count;
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const float C[4] = { 0.9995f, 0.98f, 0.9f, 0.75f };
+		const int kCapA = 200000;
+		const int kAbort = 1500000;
+		float zfloor = 1e30f;
+		for (const FFFace& f : faces)
+			zfloor = f.zmin < zfloor ? f.zmin : zfloor;
 		std::vector<FFLin>& lins = *lins_out;
 		lins.clear();
+		if (tick_cells)
+			tick_cells->assign(static_cast<size_t>(nh) + 1,
+				std::set<unsigned long long>());
 		std::vector<FFRep> cur, nxt;
 		{
 			FFRep r0;
@@ -13814,32 +13959,23 @@ namespace {
 			r0.lin = 0;
 			cur.push_back(r0);
 		}
-		// THE FIRST CANCELLED TERM (the deterministic vertical): with
-		// no duck/jump input, every frontier state at tick t shares
-		// EXACTLY the same z(t), vz(t) - gravity is the only vertical
-		// force. Once z has fallen below the face's lowest point with
-		// vz < 0, no state can ever strike it again: the entire sweep
-		// stops. This is the ballistic-window reachability filter
-		// operating as arithmetic, not simulation.
-		// bin map rebuilt per tick: key -> up to 2 rep indices in nxt
-		std::map<unsigned long long, std::pair<int, int> > bins;
+		std::map<unsigned long long, FFCellState> bins;
 		for (int t = 0; t < nh && !cur.empty(); ++t) {
-			if (cur[0].ps.pos.Z < fj.zmin - 8.f
-				&& cur[0].ps.vel.Z < 0.f) {
-				st.window_end = t;
+			if (t > last_any
+				|| (cur[0].ps.pos.Z < zfloor - 8.f
+					&& cur[0].ps.vel.Z < 0.f))
 				break;
-			}
 			nxt.clear();
 			bins.clear();
 			if (static_cast<int>(cur.size()) > st.max_frontier)
 				st.max_frontier = static_cast<int>(cur.size());
+			const float tau_all = static_cast<float>(
+				last_any - t > 0 ? last_any - t : 1) * p.dt;
 			for (size_t ci = 0; ci < cur.size(); ++ci) {
 				const FFRep rep = cur[ci];
 				const float s2d = Len2D(rep.ps.vel);
-				const float h = s2d > 1.f
+				const float hcur = s2d > 1.f
 					? atan2f(rep.ps.vel.Y, rep.ps.vel.X) : 0.f;
-				// actions: coast + {L,R} x cosa samples (flips
-				// gated by the dwell law)
 				for (int ai = 0; ai < 9; ++ai) {
 					signed char ds;
 					float ca = 1.f;
@@ -13854,37 +13990,57 @@ namespace {
 						ca = C[cidx];
 						if (rep.side != 0 && ds != rep.side
 							&& rep.age < min_gap)
-							continue;   // illegal flip
+							continue;
 					}
 					PlayerState ns = rep.ps;
-					float yaw = h * 57.2957795f;
+					float yaw = hcur * 57.2957795f;
 					float fm = 0.f, sm = 0.f;
 					if (ds != 0 && s2d > 1.f)
-						Air::WishInputs(h, ds, ca, &yaw, &fm, &sm);
+						Air::WishInputs(hcur, ds, ca, &yaw, &fm,
+							&sm);
 					TickEvents ev;
 					MoveTick(ns, w, p, 0.f, yaw, fm, sm, 0.f,
 						ns.ducked ? IN_DUCK : 0, &ev);
 					st.expanded++;
-					bool struck = false, dead = false;
+					const FFFace* hitf = nullptr;
+					bool dead = false;
 					for (int c = 0; c < ev.ncontacts; ++c) {
-						if (ev.contact_brush[c] == fj.brush
-							&& ev.contact_plane[c] == fj.side)
-							struck = true;
-						else
+						bool matched = false;
+						for (const FFFace& f : faces)
+							if (ev.contact_brush[c] == f.brush
+								&& ev.contact_plane[c]
+									== f.side) {
+								hitf = &f;
+								matched = true;
+								break;
+							}
+						if (!matched)
 							dead = true;
 					}
-					if (ns.on_ground && !struck)
+					if (ns.on_ground && !hitf)
 						dead = true;
-					if (struck) {
+					if (hitf) {
 						FFLin nl;
 						nl.parent = rep.lin;
 						nl.side = ds;
 						nl.cosa_idx = cidx;
 						lins.push_back(nl);
+						const float lam = ns.pos.X
+							* hitf->ldir.X + ns.pos.Y
+							* hitf->ldir.Y;
+						const size_t tw = static_cast<size_t>(t)
+							< hitf->win.size()
+							&& hitf->win[static_cast<size_t>(t)]
+							? static_cast<size_t>(t)
+							: static_cast<size_t>(
+								hitf->last_open > 0
+								? hitf->last_open : 0);
+						const unsigned long long bk = FFBoardKey(
+							hitf->face, t + 1, lam,
+							hitf->lmin[tw], hitf->lmax[tw], h);
+						FFCellOut& cell = st.board[bk];
 						const float en = ExitField::EBoundary(ns,
 							p);
-						FFCell& cell = st.board[FFCellKey(
-							ns.pos.X, ns.pos.Y, r)];
 						cell.strikes++;
 						if (en > cell.bestE) {
 							cell.bestE = en;
@@ -13899,12 +14055,11 @@ namespace {
 						st.dead++;
 						continue;
 					}
-					if (!FFReachable(ns.pos, ns.vel, t, in_window,
-						p.dt, bx0, by0, bx1, by1)) {
+					if (!FFReachAny(ns.pos, ns.vel, t, faces,
+						p.dt)) {
 						st.reach_pruned++;
 						continue;
 					}
-					// bin the survivor
 					const signed char nside = ds != 0 ? ds
 						: rep.side;
 					const signed char nage =
@@ -13916,87 +14071,134 @@ namespace {
 					const float nsd = Len2D(ns.vel);
 					const float nhd = nsd > 1.f
 						? atan2f(ns.vel.Y, ns.vel.X) : 0.f;
-					const int hsec = static_cast<int>(
-						(nhd + 3.14159265f)
-						* (48.f / 6.2831853f)) & 63;
-					const int spb = static_cast<int>(nsd / 25.f);
-					unsigned long long key =
-						static_cast<unsigned long long>(
-							FFCellKey(ns.pos.X, ns.pos.Y, r));
-					key = key * 1099511628211ULL
-						^ static_cast<unsigned long long>(hsec);
-					key = key * 1099511628211ULL
-						^ static_cast<unsigned long long>(spb);
-					key = key * 1099511628211ULL
-						^ static_cast<unsigned long long>(
-							nside + 1);
-					key = key * 1099511628211ULL
-						^ static_cast<unsigned long long>(nage);
-					std::pair<int, int>& slot = bins.insert(
-						std::make_pair(key,
-							std::make_pair(-1, -1)))
-						.first->second;
-					auto place = [&](int which) {
-						if (static_cast<int>(nxt.size())
-							>= kMaxFrontier) {
-							st.overflow++;
-							return;
-						}
-						FFLin nl;
-						nl.parent = rep.lin;
-						nl.side = ds;
-						nl.cosa_idx = cidx;
-						lins.push_back(nl);
-						FFRep nr;
-						nr.ps = ns;
-						nr.side = nside;
-						nr.age = nage;
-						nr.lin = static_cast<int>(lins.size())
-							- 1;
-						nxt.push_back(nr);
-						if (which == 0)
-							slot.first = static_cast<int>(
-								nxt.size()) - 1;
-						else
-							slot.second = static_cast<int>(
-								nxt.size()) - 1;
-					};
-					if (slot.first < 0) {
-						place(0);
-					} else if (slot.second < 0) {
-						place(1);
-					} else {
-						// keep the two FASTEST representatives
-						const float sA = Len2D(nxt[
-							static_cast<size_t>(
-								slot.first)].ps.vel);
-						const float sB = Len2D(nxt[
-							static_cast<size_t>(
-								slot.second)].ps.vel);
-						const int weak = sA <= sB ? 0 : 1;
-						const float wsp = sA <= sB ? sA : sB;
-						if (nsd > wsp) {
-							const int wi = weak == 0
-								? slot.first : slot.second;
-							FFLin nl;
-							nl.parent = rep.lin;
-							nl.side = ds;
-							nl.cosa_idx = cidx;
-							lins.push_back(nl);
-							nxt[static_cast<size_t>(wi)].ps = ns;
-							nxt[static_cast<size_t>(wi)].side =
-								nside;
-							nxt[static_cast<size_t>(wi)].age =
-								nage;
-							nxt[static_cast<size_t>(wi)].lin =
-								static_cast<int>(lins.size())
-									- 1;
+					const unsigned long long key = scheme == 0
+						? FFKeyA(ns, nside, nage, h)
+						: FFKeyDerived(ns, nside, nage, h,
+							tau_all);
+					FFCellState* cell;
+					{
+						std::map<unsigned long long,
+							FFCellState>::iterator it =
+							bins.find(key);
+						if (it == bins.end()) {
+							FFCellState fresh;
+							fresh.rep[0] = -1;
+							fresh.rep[1] = -1;
+							fresh.rep[2] = -1;
+							fresh.rep[3] = -1;
+							cell = &bins.insert(
+								std::make_pair(key, fresh))
+								.first->second;
+						} else {
+							cell = &it->second;
 						}
 					}
+					cell->members++;
+					if (nsd > cell->max_speed_seen)
+						cell->max_speed_seen = nsd;
+					// which representative slots does this state
+					// win? A(0): 2 fastest; B(1): 1 fastest;
+					// C(2): fastest / hmin / hmax / first.
+					int wins = 0;
+					if (scheme == 0) {
+						if (cell->rep[0] < 0 || nsd
+							> cell->best_sp)
+							wins |= 1;
+						else if (cell->rep[1] < 0)
+							wins |= 2;
+					} else if (scheme == 1) {
+						if (cell->rep[0] < 0
+							|| nsd > cell->best_sp)
+							wins |= 1;
+					} else {
+						if (cell->rep[0] < 0
+							|| nsd > cell->best_sp)
+							wins |= 1;
+						if (cell->rep[1] < 0
+							|| nhd < cell->hmin)
+							wins |= 2;
+						if (cell->rep[2] < 0
+							|| nhd > cell->hmax)
+							wins |= 4;
+						if (cell->rep[3] < 0)
+							wins |= 8;
+					}
+					if (!wins)
+						continue;
+					if (scheme == 0 && static_cast<int>(
+						nxt.size()) >= kCapA)
+						continue;
+					FFLin nl;
+					nl.parent = rep.lin;
+					nl.side = ds;
+					nl.cosa_idx = cidx;
+					lins.push_back(nl);
+					FFRep nr;
+					nr.ps = ns;
+					nr.side = nside;
+					nr.age = nage;
+					nr.lin = static_cast<int>(lins.size()) - 1;
+					nxt.push_back(nr);
+					const int me = static_cast<int>(nxt.size())
+						- 1;
+					if (wins & 1) {
+						cell->rep[0] = me;
+						cell->best_sp = nsd;
+					}
+					if (wins & 2) {
+						cell->rep[1] = me;
+						if (scheme == 2)
+							cell->hmin = nhd;
+					}
+					if (wins & 4) {
+						cell->rep[2] = me;
+						cell->hmax = nhd;
+					}
+					if (wins & 8)
+						cell->rep[3] = me;
 				}
 			}
-			st.retained += static_cast<long long>(nxt.size());
-			cur.swap(nxt);
+			// collect the next frontier = unique referenced reps
+			std::vector<FFRep> keep;
+			keep.reserve(bins.size() * 2);
+			{
+				std::set<int> uniq;
+				for (std::map<unsigned long long,
+					FFCellState>::iterator it = bins.begin();
+					it != bins.end(); ++it)
+					for (int rr = 0; rr < 4; ++rr)
+						if (it->second.rep[rr] >= 0)
+							uniq.insert(it->second.rep[rr]);
+				for (std::set<int>::iterator u = uniq.begin();
+					u != uniq.end(); ++u)
+					keep.push_back(nxt[static_cast<size_t>(*u)]);
+				st.reps_total += static_cast<long long>(
+					uniq.size());
+			}
+			st.cells_total += static_cast<long long>(bins.size());
+			if (static_cast<int>(bins.size()) > st.peak_cells)
+				st.peak_cells = static_cast<int>(bins.size());
+			if (tick_cells) {
+				std::set<unsigned long long>& tc =
+					(*tick_cells)[static_cast<size_t>(t) + 1];
+				for (std::map<unsigned long long,
+					FFCellState>::iterator it = bins.begin();
+					it != bins.end(); ++it)
+					tc.insert(it->first);
+			}
+			st.retained += static_cast<long long>(keep.size());
+			if (static_cast<int>(keep.size()) > kAbort) {
+				st.aborted = true;
+				st.abort_tick = t;
+				break;
+			}
+			cur.swap(keep);
+		}
+		for (std::map<unsigned long long, FFCellOut>::iterator it =
+			st.board.begin(); it != st.board.end(); ++it) {
+			const int fidx = static_cast<int>(it->first >> 52);
+			if (fidx >= 0 && fidx < 8)
+				st.face_cells[fidx]++;
 		}
 		st.moveticks = g_movetick_count - mt0;
 		st.ms = std::chrono::duration<double, std::milli>(
@@ -14022,10 +14224,6 @@ namespace {
 			printf("forwardfield: route build failed\n");
 			return 1;
 		}
-		// ---- construct THE problem deterministically: the real
-		// f0 -> f1 transfer from the production march (anchor -> yaw-0
-		// run -> entrance to f0 -> board -> exit query -> the top
-		// prior-ordered air exit).
 		PlayerState anchor;
 		anchor.pos = w.spawn_origin;
 		{
@@ -14048,13 +14246,6 @@ namespace {
 			sx1 = v2.X > sx1 ? v2.X : sx1;
 			sy1 = v2.Y > sy1 ? v2.Y : sy1;
 		}
-		// Candidate score = ticks where the deterministic vertical
-		// window AND the certified horizontal reach cone both admit a
-		// strike - the composite cancelled-term filter, evaluated as
-		// pure arithmetic per exit. (The first audit run measured the
-		// flat/high prior selecting a dive whose window closed in ~3
-		// ticks; window-only selection then picked a westward exit
-		// whose cone never touches the face.)
 		auto wr_score = [&](const PlayerState& e0) -> int {
 			float zz = e0.pos.Z, vz = e0.vel.Z;
 			int sc = 0;
@@ -14079,8 +14270,6 @@ namespace {
 			}
 			return sc;
 		};
-		// Roots from both productive launch directions (the run-4
-		// f0->f1 witness came from the yaw-15 root, not yaw-0).
 		PlayerState S0;
 		Steer::CtlState ctl0;
 		int best_score = -1;
@@ -14169,168 +14358,387 @@ namespace {
 				"window+cone score (best %d)\n", best_score);
 			return 1;
 		}
-		printf("forwardfield: exit selected by window+cone score %d "
-			"(yaw arm %d, speed %.0f)\n", best_score, best_yaw,
-			best_sp);
-		const Route::Face& fj = g.faces[f1];
-		const float dxy = Len2D(fj.centroid - S0.pos);
-		int nh = static_cast<int>(dxy / (300.f * p.dt)) + 30;
+		const float dxy0 = Len2D(fjsel.centroid - S0.pos);
+		int nh = static_cast<int>(dxy0 / (300.f * p.dt)) + 30;
 		if (nh > 400) nh = 400;
-		printf("forwardfield: THE PROBLEM: S0 pos (%.1f, %.1f, %.1f) "
-			"vel (%.0f, %.0f, %.0f) ctl(side %d age %d) -> face %d, "
-			"horizon %d\n", S0.pos.X, S0.pos.Y, S0.pos.Z, S0.vel.X,
-			S0.vel.Y, S0.vel.Z, ctl0.side, ctl0.age, f1, nh);
+		printf("forwardfield: THE PROBLEM: S0 pos (%.1f, %.1f, "
+			"%.1f) vel (%.0f, %.0f, %.0f) ctl(side %d age %d), "
+			"window+cone score %d (yaw arm %d), horizon %d - the "
+			"sweep is WORLD-FIRST-CONTACT (no target face)\n",
+			S0.pos.X, S0.pos.Y, S0.pos.Z, S0.vel.X, S0.vel.Y,
+			S0.vel.Z, ctl0.side, ctl0.age, best_score, best_yaw,
+			nh);
 
-		// ---- ARM 1: the forward reachable-state sweep at every
-		// board resolution.
-		printf("forwardfield: ---- FORWARD SWEEP (one search "
-			"populates the whole field) ----\n");
-		printf("forwardfield:   r | moveticks | expanded | retained "
-			"| maxfront | ovf | wend | strikes | cells | bestE | "
-			"medE | ms\n");
-		std::map<long long, FFCell> fwd_board8;
-		for (int ri = 0; ri < 5; ++ri) {
-			const float r = ri == 0 ? 32.f : ri == 1 ? 16.f
-				: ri == 2 ? 8.f : ri == 3 ? 4.f : 2.f;
-			std::vector<FFLin> lins;
-			FFStats fs = ForwardSweep(S0, ctl0, w, p, g, f1, nh, r,
-				&lins);
-			std::vector<float> bes;
-			for (std::map<long long, FFCell>::iterator it =
-				fs.board.begin(); it != fs.board.end(); ++it)
-				bes.push_back(it->second.bestE);
-			std::sort(bes.begin(), bes.end());
-			printf("forwardfield:  %2.0f | %9lld | %8lld | %8lld | "
-				"%8d | %8d | %4d | %7lld | %5d | %5.0fk | %5.0fk "
-				"| %.0f\n", r, fs.moveticks, fs.expanded,
-				fs.retained, fs.max_frontier, fs.overflow,
-				fs.window_end, fs.strikes,
-				static_cast<int>(fs.board.size()),
-				bes.empty() ? 0.f : bes.back() / 1000.f,
-				bes.empty() ? 0.f
-					: bes[bes.size() / 2] / 1000.f, fs.ms);
-			if (ri == 2)
-				fwd_board8 = fs.board;
+		std::vector<FFFace> faces;
+		int last_any = -1;
+		FFPrepFaces(g, p, S0, nh, &faces, &last_any);
+		printf("forwardfield: faces prepped:");
+		for (const FFFace& f : faces)
+			printf(" f%d[win..%d]", f.face, f.last_open);
+		printf(" | last_any %d\n", last_any);
+
+		// ---- THE COMPRESSION BENCHMARK. Scheme A = session-20
+		// arbitrary bins (200k cap, for continuity with the measured
+		// v0); B = resolution-derived lattice, 1 rep; C = derived
+		// lattice, 4 reps. The abort ceiling (1.5M frontier) reports
+		// explosion honestly - it is a FINDING, never a silent cap.
+		printf("forwardfield: ---- COMPRESSION BENCHMARK "
+			"(world-first-contact; board = (T, lambda) cells; edge "
+			"cells at half pitch) ----\n");
+		printf("forwardfield: sch |  h | moveticks | retained | "
+			"peakcell | reps/cl | board | f1cells | f1maxE | "
+			"info*1e3 | ms | note\n");
+		std::map<unsigned long long, FFCellOut> c8_board;
+		std::vector<std::set<unsigned long long> > c8_ticks;
+		std::vector<std::pair<int, float> > row_ids;
+		std::vector<std::map<unsigned long long, FFCellOut> >
+			row_boards;
+		std::vector<FFLin> lins;
+		const float hs_a[3] = { 32.f, 8.f, 2.f };
+		const float hs_bc[5] = { 32.f, 16.f, 8.f, 4.f, 2.f };
+		const float kDiagH = 32.f;   // the diagnostic runs against a
+		                             // COMPLETE sweep (fine-h sweeps
+		                             // abort; that is their finding)
+		for (int sch = 0; sch < 3; ++sch) {
+			const int nhs = sch == 0 ? 3 : 5;
+			for (int hi = 0; hi < nhs; ++hi) {
+				const float h = sch == 0 ? hs_a[hi] : hs_bc[hi];
+				std::vector<std::set<unsigned long long> >* tc =
+					(sch == 2 && h == kDiagH) ? &c8_ticks
+						: nullptr;
+				FFStats fs = ForwardSweep2(S0, ctl0, w, p, faces,
+					last_any, nh, h, sch, &lins, tc);
+				row_ids.push_back(std::make_pair(sch, h));
+				row_boards.push_back(fs.board);
+				float f1max = -1e30f;
+				for (std::map<unsigned long long,
+					FFCellOut>::iterator it = fs.board.begin();
+					it != fs.board.end(); ++it)
+					if (static_cast<int>(it->first >> 52) == f1
+						&& it->second.bestE > f1max)
+						f1max = it->second.bestE;
+				const double info = fs.retained > 0
+					? 1000.0 * static_cast<double>(
+						fs.board.size())
+						/ static_cast<double>(fs.retained)
+					: 0.0;
+				printf("forwardfield:   %c | %2.0f | %9lld | "
+					"%8lld | %8d | %7.2f | %5d | %7lld | %5.0fk "
+					"| %8.2f | %.0f | %s\n",
+					'A' + sch, h, fs.moveticks, fs.retained,
+					fs.peak_cells,
+					fs.cells_total > 0
+						? static_cast<double>(fs.reps_total)
+							/ static_cast<double>(fs.cells_total)
+						: 0.0,
+					static_cast<int>(fs.board.size()),
+					fs.face_cells[f1],
+					f1max > -1e29f ? f1max / 1000.f : 0.f,
+					info, fs.ms,
+					fs.aborted ? "ABORTED (honest ceiling)"
+						: "");
+				if (sch == 2 && h == kDiagH)
+					c8_board = fs.board;
+				if (sch == 2 && h == kDiagH) {
+					printf("forwardfield:   C@%.0f per-face "
+						"cells (ONE sweep, views):", kDiagH);
+					for (const FFFace& f : faces)
+						printf(" f%d:%lld", f.face,
+							fs.face_cells[f.face]);
+					printf(" | strikes %lld dead %lld "
+						"cone-pruned %lld\n", fs.strikes,
+						fs.dead, fs.reach_pruned);
+				}
+			}
 		}
 
-		// ---- ARM 2: the production inverse path on the SAME
-		// problem: per-aim RefSolve ladder exactly as production runs
-		// it (600 / 1800 / 3600 as independent profile actions).
-		printf("forwardfield: ---- REFSOLVE (production inverse "
-			"path) ----\n");
-		std::vector<std::pair<Vec3, float> > ref_strikes; // pos, E
+		// ---- THE ORACLE: production RefSolve on f1, witnesses kept
+		// WITH their exact schedules for the first-lost-state
+		// diagnostic.
+		struct OWit {
+			Vec3 pos;
+			float E = 0.f;
+			int tick = 0;
+			std::vector<signed char> side;
+			std::vector<float> cosa;
+			int horizon = 0;
+		};
+		std::vector<OWit> owits;
 		std::vector<Vec3> aims;
 		{
 			Vec3 bq;
-			if (BallisticAim(S0.pos, S0.vel, fj, p, 400, &bq))
+			if (BallisticAim(S0.pos, S0.vel, fjsel, p, 400, &bq))
 				aims.push_back(bq);
-			aims.push_back(fj.centroid);
-			const float dl2 = Len(fj.downhill);
-			Vec3 dn2 = dl2 > 1e-4f ? Scale(fj.downhill, 1.f / dl2)
+			aims.push_back(fjsel.centroid);
+			const float dl2 = Len(fjsel.downhill);
+			Vec3 dn2 = dl2 > 1e-4f ? Scale(fjsel.downhill, 1.f / dl2)
 				: Vec3(0.f, 0.f, 0.f);
 			float ext2 = 0.f;
-			for (const Vec3& v2 : fj.verts) {
-				const float e2 = Dot(v2 - fj.centroid, dn2);
+			for (const Vec3& v2 : fjsel.verts) {
+				const float e2 = Dot(v2 - fjsel.centroid, dn2);
 				if (e2 > ext2)
 					ext2 = e2;
 			}
-			aims.push_back(fj.centroid + Scale(dn2, ext2 * 0.55f));
+			aims.push_back(fjsel.centroid + Scale(dn2,
+				ext2 * 0.55f));
 		}
-		printf("forwardfield:   aim | budget | evals | moveticks | "
-			"strikes | ms\n");
-		long long ref_mt_total = 0;
-		double ref_ms_total = 0.0;
-		long long ref_evals_total = 0;
+		long long ref_mt = 0;
+		long long ref_evals = 0;
+		double ref_ms = 0.0;
 		for (size_t ai = 0; ai < aims.size(); ++ai) {
 			const int budgets[3] = { 600, 1800, 3600 };
 			for (int bi = 0; bi < 3; ++bi) {
 				const long long mt0 = g_movetick_count;
 				const auto t0 =
 					std::chrono::steady_clock::now();
-				size_t sk0 = ref_strikes.size();
 				Entrance::RefResult rr = Entrance::RefSolve(S0,
 					w, p, g, f1, aims[ai], 28.f, nh,
-					budgets[bi], false, nullptr, fj.zmin,
+					budgets[bi], false, nullptr, fjsel.zmin,
 					ctl0,
 					[&](const Air::Result& sr,
-						const std::vector<signed char>&,
-						const std::vector<float>&, int) {
-						if (sr.hit && sr.struck_brush < 0)
-							ref_strikes.push_back(
-								std::make_pair(sr.pos,
-									ExitField::EBoundary(
-										sr.end_state, p)));
+						const std::vector<signed char>& ws,
+						const std::vector<float>& wc,
+						int whz) {
+						if (sr.hit && sr.struck_brush < 0) {
+							OWit ow;
+							ow.pos = sr.end_state.pos;
+							ow.E = ExitField::EBoundary(
+								sr.end_state, p);
+							ow.tick = sr.tick;
+							ow.side = ws;
+							ow.cosa = wc;
+							ow.horizon = whz;
+							owits.push_back(ow);
+						}
 					});
-				const double ms =
-					std::chrono::duration<double,
-						std::milli>(
-						std::chrono::steady_clock::now()
-							- t0).count();
-				ref_mt_total += g_movetick_count - mt0;
-				ref_ms_total += ms;
-				ref_evals_total += rr.evals;
-				printf("forwardfield:   %3d | %6d | %5d | %9lld "
-					"| %7d | %.0f\n",
-					static_cast<int>(ai), budgets[bi],
-					rr.evals, g_movetick_count - mt0,
-					static_cast<int>(ref_strikes.size()
-						- sk0), ms);
+				ref_mt += g_movetick_count - mt0;
+				ref_evals += rr.evals;
+				ref_ms += std::chrono::duration<double,
+					std::milli>(
+					std::chrono::steady_clock::now() - t0)
+					.count();
 			}
 		}
-		// bin the production strikes at every resolution
-		printf("forwardfield: refsolve totals: evals %lld, "
-			"moveticks %lld, ms %.0f | cells at r 32/16/8/4/2:",
-			ref_evals_total, ref_mt_total, ref_ms_total);
-		std::map<long long, FFCell> ref_board8;
-		for (int ri = 0; ri < 5; ++ri) {
-			const float r = ri == 0 ? 32.f : ri == 1 ? 16.f
-				: ri == 2 ? 8.f : ri == 3 ? 4.f : 2.f;
-			std::map<long long, FFCell> b;
-			for (size_t si = 0; si < ref_strikes.size(); ++si) {
-				FFCell& c = b[FFCellKey(ref_strikes[si].first.X,
-					ref_strikes[si].first.Y, r)];
-				c.strikes++;
-				if (ref_strikes[si].second > c.bestE)
-					c.bestE = ref_strikes[si].second;
-			}
-			printf(" %d", static_cast<int>(b.size()));
-			if (ri == 2)
-				ref_board8 = b;
-		}
-		printf("\n");
-
-		// ---- THE COMPARISON at r = 8 + the oracle readout.
-		{
-			int both = 0, fwd_only = 0, ref_only = 0, ref_wins = 0;
-			float worst_gap = 0.f;
-			for (std::map<long long, FFCell>::iterator it =
-				fwd_board8.begin(); it != fwd_board8.end(); ++it) {
-				std::map<long long, FFCell>::iterator jt =
-					ref_board8.find(it->first);
-				if (jt == ref_board8.end()) {
-					fwd_only++;
+		// bin oracle strikes into the same (T, lambda) board at any h
+		const FFFace* ff1 = nullptr;
+		for (const FFFace& f : faces)
+			if (f.face == f1)
+				ff1 = &f;
+		auto bin_oracle = [&](float h)
+			-> std::map<unsigned long long, FFCellOut> {
+			std::map<unsigned long long, FFCellOut> b;
+			for (size_t oi = 0; oi < owits.size() && ff1; ++oi) {
+				const OWit& ow = owits[oi];
+				if (ow.tick < 0 || ow.tick > nh)
 					continue;
-				}
-				both++;
-				const float gap = jt->second.bestE
-					- it->second.bestE;
-				if (gap > 1000.f) {
-					ref_wins++;
-					if (gap > worst_gap)
-						worst_gap = gap;
+				const float lam = ow.pos.X * ff1->ldir.X
+					+ ow.pos.Y * ff1->ldir.Y;
+				const size_t tw = static_cast<size_t>(
+					ow.tick - 1) < ff1->win.size()
+					&& ff1->win[static_cast<size_t>(
+						ow.tick - 1)]
+					? static_cast<size_t>(ow.tick - 1)
+					: static_cast<size_t>(ff1->last_open > 0
+						? ff1->last_open : 0);
+				const unsigned long long bk = FFBoardKey(f1,
+					ow.tick, lam, ff1->lmin[tw],
+					ff1->lmax[tw], h);
+				FFCellOut& c = b[bk];
+				c.strikes++;
+				if (ow.E > c.bestE) {
+					c.bestE = ow.E;
+					c.lin = static_cast<int>(oi);
+					c.tick = ow.tick;
 				}
 			}
-			for (std::map<long long, FFCell>::iterator jt =
-				ref_board8.begin(); jt != ref_board8.end(); ++jt)
-				if (fwd_board8.find(jt->first)
-					== fwd_board8.end())
+			return b;
+		};
+		std::map<unsigned long long, FFCellOut> ref_board =
+			bin_oracle(kDiagH);
+		printf("forwardfield: ---- ORACLE (RefSolve, f1, 3 aims x "
+			"600/1800/3600) ----\n");
+		printf("forwardfield: evals %lld | moveticks %lld | ms %.0f "
+			"| witnesses %d | (T,lambda) cells at h=%.0f: %d\n",
+			ref_evals, ref_mt, ref_ms,
+			static_cast<int>(owits.size()), kDiagH,
+			static_cast<int>(ref_board.size()));
+		// per-row oracle recovery: how much of the oracle's field
+		// (binned at that row's own h) each scheme recovered.
+		printf("forwardfield: oracle recovery per row: sch h "
+			"oracle-cells recovered missed ref-wins>1k\n");
+		for (size_t ri = 0; ri < row_ids.size(); ++ri) {
+			const float h = row_ids[ri].second;
+			std::map<unsigned long long, FFCellOut> ob =
+				bin_oracle(h);
+			int rec = 0, mis = 0, rwin = 0;
+			for (std::map<unsigned long long,
+				FFCellOut>::iterator jt = ob.begin();
+				jt != ob.end(); ++jt) {
+				std::map<unsigned long long,
+					FFCellOut>::iterator it =
+					row_boards[ri].find(jt->first);
+				if (it == row_boards[ri].end()) {
+					mis++;
+				} else {
+					rec++;
+					if (jt->second.bestE
+						> it->second.bestE + 1000.f)
+						rwin++;
+				}
+			}
+			printf("forwardfield:   %c %2.0f | %4d | %4d | %4d | "
+				"%3d\n", 'A' + row_ids[ri].first, h,
+				static_cast<int>(ob.size()), rec, mis, rwin);
+		}
+
+		// ---- head-to-head + FIRST-LOST-STATE diagnostic (C@8).
+		{
+			int shared = 0, fwd_only = 0, ref_only = 0,
+				ref_wins = 0;
+			std::vector<std::pair<float, int> > missing;
+			for (std::map<unsigned long long,
+				FFCellOut>::iterator jt = ref_board.begin();
+				jt != ref_board.end(); ++jt) {
+				std::map<unsigned long long,
+					FFCellOut>::iterator it = c8_board.find(
+					jt->first);
+				const bool have = it != c8_board.end();
+				if (have)
+					shared++;
+				else
 					ref_only++;
-			printf("forwardfield: ---- HEAD-TO-HEAD (r=8) ----\n");
-			printf("forwardfield: cells: forward-only %d | shared "
-				"%d | refsolve-only %d (the oracle's miss list) "
-				"| refsolve beats forward by >1k E in %d shared "
-				"cells (worst gap %.0f)\n", fwd_only, both,
-				ref_only, ref_wins, worst_gap);
+				const float gap = jt->second.bestE
+					- (have ? it->second.bestE : -1e30f);
+				if (!have || gap > 1000.f) {
+					if (have)
+						ref_wins++;
+					missing.push_back(std::make_pair(
+						jt->second.bestE, jt->second.lin));
+				}
+			}
+			for (std::map<unsigned long long,
+				FFCellOut>::iterator it = c8_board.begin();
+				it != c8_board.end(); ++it)
+				if (static_cast<int>(it->first >> 52) == f1
+					&& ref_board.find(it->first)
+						== ref_board.end())
+					fwd_only++;
+			printf("forwardfield: HEAD-TO-HEAD f1 (T,lambda) "
+				"h=%.0f: fwd-only %d | shared %d | ref-only %d | "
+				"ref wins-by->1k %d | valuable-missing %d\n",
+				kDiagH, fwd_only, shared, ref_only, ref_wins,
+				static_cast<int>(missing.size()));
+			// first-lost-state: replay each valuable-missing
+			// witness and find the first tick whose state cell the
+			// forward representation no longer contained.
+			std::sort(missing.rbegin(), missing.rend());
+			int shown = 0;
+			int lost_hist[8];
+			memset(lost_hist, 0, sizeof(lost_hist));
+			int cone_bugs = 0;
+			for (size_t mi = 0; mi < missing.size()
+				&& shown < 12; ++mi) {
+				const OWit& ow = owits[static_cast<size_t>(
+					missing[mi].second)];
+				PlayerState s = S0;
+				signed char side = ctl0.side;
+				signed char age = static_cast<signed char>(
+					ctl0.age < 7 ? ctl0.age : 7);
+				int lost = -1;
+				bool parent_present = true, cone_ok = true;
+				bool prev_present = true;
+				const int n2 = static_cast<int>(ow.side.size());
+				for (int k = 0; k < ow.horizon
+					&& k < ow.tick; ++k) {
+					const float s2d = Len2D(s.vel);
+					const float hh = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					const signed char ds = k < n2
+						? ow.side[static_cast<size_t>(k)]
+						: (n2 > 0 ? ow.side[
+							static_cast<size_t>(n2) - 1]
+							: static_cast<signed char>(0));
+					float yaw = hh * 57.2957795f;
+					float fm = 0.f, sm = 0.f;
+					if (ds != 0 && s2d > 1.f) {
+						const float ca = k < n2
+							? ow.cosa[static_cast<size_t>(k)]
+							: (n2 > 0 ? ow.cosa[
+								static_cast<size_t>(n2) - 1]
+								: 1.f);
+						Air::WishInputs(hh, ds, ca, &yaw,
+							&fm, &sm);
+					}
+					TickEvents ev;
+					MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f,
+						s.ducked ? IN_DUCK : 0, &ev);
+					if (ev.ncontacts > 0)
+						break;
+					const signed char nside = ds != 0 ? ds
+						: side;
+					const signed char nage =
+						(ds != 0 && side != 0 && ds != side)
+						? static_cast<signed char>(1)
+						: static_cast<signed char>(
+							age < 7 ? age + 1 : 7);
+					side = nside;
+					age = nage;
+					const float tau_all = static_cast<float>(
+						last_any - k > 0 ? last_any - k : 1)
+						* p.dt;
+					const unsigned long long key = FFKeyDerived(
+						s, nside, nage, kDiagH, tau_all);
+					const size_t ti = static_cast<size_t>(k)
+						+ 1;
+					const bool here = ti < c8_ticks.size()
+						&& c8_ticks[ti].find(key)
+							!= c8_ticks[ti].end();
+					if (!here) {
+						lost = k;
+						parent_present = prev_present;
+						cone_ok = FFReachAny(s.pos, s.vel, k,
+							faces, p.dt);
+						break;
+					}
+					prev_present = here;
+				}
+				if (lost >= 0) {
+					const int bucket = lost * 8
+						/ (last_any > 0 ? last_any + 1 : 1);
+					lost_hist[bucket < 8 ? (bucket < 0 ? 0
+						: bucket) : 7]++;
+					if (!cone_ok)
+						cone_bugs++;
+					if (shown < 6)
+						printf("forwardfield:   miss E %.0fk "
+							"(T %d): first lost at tick %d - "
+							"%s (cone_ok %d)\n",
+							missing[mi].first / 1000.f,
+							ow.tick, lost,
+							parent_present
+								? "parent cell PRESENT => "
+									"control sampling could "
+									"not produce this cell"
+								: "cascade (parent already "
+									"lost)",
+							cone_ok ? 1 : 0);
+					shown++;
+				} else if (shown < 6) {
+					printf("forwardfield:   miss E %.0fk "
+						"(T %d): state cells PRESENT along "
+						"the whole path - representative "
+						"rule lost the outcome, not the "
+						"cell\n",
+						missing[mi].first / 1000.f, ow.tick);
+					shown++;
+				}
+			}
+			printf("forwardfield: first-lost histogram (8 window "
+				"octiles):");
+			for (int b = 0; b < 8; ++b)
+				printf(" %d", lost_hist[b]);
+			printf(" | cone-flagged %d (must be 0; nonzero = "
+				"certified-cone bug)\n", cone_bugs);
 		}
 		fflush(stdout);
 		return 0;
