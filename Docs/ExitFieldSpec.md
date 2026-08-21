@@ -1057,3 +1057,205 @@ second lever if post-batching f2 states still fall short.
 from the session binary; gmap runs consistent (all edges cold-replay
 bitwise, 0 topo violations, no tape reachable); h_cert = 0; no
 incumbent yet, competitive horizons still unexercised.
+
+---
+
+## THE SEARCH ARCHITECTURE CORRECTION (advisor 2026-08-20d — STANDING)
+
+Two different things were gradually conflated and are now formally
+separated:
+
+    the DEFINITION of the exact optimum        (strong; unchanged)
+    the ALGORITHM used to search for it        (under reconstruction)
+
+**The correction in one line: the exact simulator is CHEAP; the
+current search FORMULATION is expensive.** The recoded engine exists
+precisely to support enormous exact search rates. Production must
+never respond to the throughput problem by approximating the
+simulator — search RESOLUTION is adaptive; simulator ACCURACY never
+changes.
+
+**The category error being corrected:** `RefSolve` is an INVERSE
+boundary solver — built and certified (AirRec era) to answer "given
+an arbitrary known-reachable boundary condition (Q, T, theta), can
+the machinery recover it cold?" That is a solver CAPABILITY test. It
+was then promoted into the ordinary production mechanism for
+populating the board field: every acceptance ball, heading interval,
+resolution rung, and profile launches its own guided-shooting
+optimization run, each flying hundreds-to-thousands of exact
+trajectories. One physical (air start, face) becomes many independent
+solves (sessions 18-19 measured 84-85% of all entrance evals as
+repeat-share across such queries — 4.2-4.4 queries per distinct
+physical problem). The heatmap became thousands of search problems;
+it was supposed to be the OUTPUT of one search.
+
+**The intended computational shape (restored as the standing
+production architecture):**
+
+    billions of cheap deterministic evaluations   (arithmetic: the
+        cancelled terms - deterministic vertical, certified reach
+        cones, turn/gain laws, board-loss bounds)
+      -> millions of surviving candidate evolutions (exact cheap
+        state transitions through the REAL simulator)
+      -> thousands of retained representative states (adaptive
+        binning/compression of the reachable set)
+      -> hundreds of exact witnesses deposited into the field
+
+    The heatmap H(Q) is an output of forward reachable-state
+    enumeration. Field values remain ACTUAL replayed trajectories -
+    the old field's failure mode (combining independently-optimistic
+    quantities into a nonexistent trajectory) stays dead. L(Q) comes
+    from witnesses; U(Q) is cheap and certified; most of a map may
+    keep a wide (L, U) gap forever; only competitive cells earn
+    refinement.
+
+**The state variables of the free-air search** (why it is compact):
+(x, y, vx, vy, carried side d, dwell age a<=6) plus tick t. z(t) and
+vz(t) are DETERMINISTIC per tick (no duck/jump input) — every
+frontier state at tick t shares them exactly. The dwell-6 reversal
+law is explicit finite structure (runs of held side). The certified
+strafe law gives the exact one-tick speed/turn response. Per-tick
+horizontal |dv| <= air_speed_cap = 30 exactly (the accel law), so
+reach cones are certified.
+
+**RefSolve's retained roles (it is NOT deleted):** falsifying forward
+coverage (the recoverability oracle — cells it wins reveal which
+state/control dimension the sweep under-resolves); locally polishing
+a promising frontier region; constructing better witnesses inside an
+identified basin; regression gates. It stops being the per-cell field
+engine.
+
+**The core open research problem (named, not yet solved): the state
+equivalence/partition rule.** Forward-enumerating every continuous
+cosa schedule exactly is infinite; the audit's v0 binning (xy cell x
+heading sector x speed bucket x side x dwell, 2 representatives)
+already collapses millions of strikes into ~1000 cells but
+hemorrhages coverage at a hard frontier cap. The exhaustive search
+target is adaptive branch-and-bound over reachable-state cells, each
+carrying exact witnessed representatives + a certified optimistic
+envelope + honest unresolved status — refined when it could matter,
+eliminated only by certified bounds.
+
+---
+
+### Session 20 (2026-08-20) — the search-architecture audit:
+### `forwardfield`, the funnel, and the honest head-to-head
+
+User direction: real maps (30+ ramps, 60+ s) must solve in <10 min
+(~30 min exhaustive); basictest must trend toward seconds-to-<1-min.
+Confidence in the architecture was withdrawn pending an audit.
+Advisor: pause batching, launch work, service tuning, and G0R runs;
+expose what one Entrance search actually does; the simulator is never
+approximated.
+
+**Changes landed this session:**
+
+1. `g_movetick_count` — a process-wide count of authoritative ticks
+   inside `MoveTick`. OBSERVABILITY ONLY: no physics state, no
+   control flow. No-drift proof: groute 11/11 and the airrec fixture
+   hash de1b000e431a84fb VERIFIED bit-identical after the change.
+2. `forwardfield` (SolverLab command) — the audit instrument. Builds
+   ONE real Entrance problem deterministically (anchor -> yaw 0/15
+   run -> entrance to f0 -> board -> exit query -> exit selected by
+   the composite window+cone score) and runs both arms on it:
+   - ARM 1 `ForwardSweep`: v0 forward reachable-state enumeration.
+     Per tick, actions = {coast, hold/flip side x 4 cosa samples},
+     flips gated by dwell-6; states bin by (xy cell at r, 48 heading
+     sectors, 25 u/s speed buckets, side, capped age), keeping the 2
+     fastest exact representatives per bin; compact lineage arena =
+     witnesses; every target-face contact deposits
+     (Q, E_boundary, lineage) into the field. Board resolutions
+     32/16/8/4/2u.
+   - THE CANCELLED TERMS operate as arithmetic inside the sweep: the
+     DETERMINISTIC VERTICAL WINDOW (all states share z(t), vz(t)
+     exactly; once below the face floor with vz < 0 the entire sweep
+     stops) and the CERTIFIED REACH CONE (per-tick air |dv| <= 30
+     exactly => coast point + 0.225k^2 disc; a state whose cone
+     misses the face box at every remaining window tick is eliminated
+     — a certified prune).
+   - ARM 2: the production inverse path — per-aim (ballistic /
+     centroid / low-region) RefSolve ladder exactly as production
+     runs it (600/1800/3600 as independent actions), every strike
+     collected via on_strike and binned into the same grids.
+
+**Audit run 1 (the selection lesson):** the fixture's fast/flat/high
+prior selected a south-diving exit whose vertical window closes in ~3
+ticks; the v0 sweep (no window rule yet) burned 48.7-75.5M MoveTicks
+/ 28-52 s per resolution marching a dead domain, and RefSolve burned
+its full 12,000-eval ladder for zero strikes. Both arms failed
+identically — the FIRST measured demonstration that the cancelled
+terms must run BEFORE any simulation, and that priors are not
+reachability.
+
+**Audit run 2 (window selection only):** the window rule collapsed
+the dead sweep to instant (~104k ticks, 60 ms) but window-only
+selection picked a westward exit (window 12 ticks, cone never touches
+f1) — zero strikes again. The composite window+cone score fixed
+selection: score 72, the yaw-15 root, 601 u/s — the REAL f0->f1
+transfer state (run 4's witness lineage).
+
+**Audit run 3 (the head-to-head, real problem):**
+
+    FORWARD SWEEP v0 (per resolution):
+      r | moveticks | maxfront |   overflow | strikes | cells | bestE
+     32 |     57.9M |  200,000 |    115,815 |   1.96M |    66 |  581k
+     16 |     63.7M |  200,000 |    924,268 |   3.12M |   162 |  581k
+      8 |     59.1M |  200,000 |  3,002,442 |   4.84M |   330 |  581k
+      4 |     52.3M |  200,000 |  5,927,828 |   6.23M |   704 |  581k
+      2 |     49.4M |  200,000 | 10,216,995 |   5.63M |  1105 |  581k
+      (~40-48 s per sweep, single-threaded)
+
+    REFSOLVE production ladder (3 aims x 600/1800/3600):
+      18,000 evals | 1.14M MoveTicks | 0.77 s | 12,183 strikes
+      cells at 32/16/8/4/2: 64 / 152 / 331 / 691 / 1246
+
+    HEAD-TO-HEAD at r = 8: forward-only 250 cells | shared 80 |
+    refsolve-only 251 | RefSolve beats forward by >1k E in 27 shared
+    cells (worst gap 302,761).
+
+**The honest verdicts:**
+
+- THE SCALING CRITERION (advisor's pass/fail): the forward
+  representation PASSES — exact work stays flat (58M -> 49M ticks)
+  while covered cells grow 66 -> 1105 from ONE sweep, rebinned. The
+  production inverse path FAILS it — its strikes are fixed per solve;
+  finer coverage requires new per-region solves (the 84-85% dup is
+  that failure measured at global scale).
+- v0 FORWARD DOES NOT YET BEAT REFSOLVE per cell: on this EASY target
+  (ballistic aim valid, strikes plentiful) RefSolve is ~50x more
+  MoveTick-efficient per covered cell (3.4k vs 179k MT/cell) and
+  finds far higher-E arrivals in 27 shared cells. RefSolve is a good
+  LOCAL optimizer; the production pathology is the invocation pattern
+  (per-region x per-profile x duplication on hard/empty targets),
+  not the solver.
+- THE STATE-COMPRESSION PROBLEM is now measured, not hypothesized:
+  6.2M strikes collapse to ~1100 cells; the 200k frontier cap
+  overflowed by up to 10.2M states (reported, never silent). The v0
+  bin rule (2 fastest per bin) keeps redundancy and drops coverage
+  arbitrarily at the cap. This is the advisor's named core research
+  problem for the reconstruction.
+- APPLES-TO-APPLES THROUGHPUT: the exact simulator executes ~1.35-1.5M
+  MoveTicks/sec single-threaded (one RefSolve "flight eval" ~ 63
+  exact ticks on this problem; session-18's "12k evals/sec" is
+  therefore ~0.8-2M MoveTicks/sec — the simulator was never the
+  bottleneck). The old "billions of options/minute" were ARITHMETIC
+  candidates; the funnel's arithmetic layer (window + cone tests)
+  already evaluates at that scale inline. CPU: single-threaded
+  throughout; parallelism untouched headroom.
+
+**What this session deliberately did NOT do:** no batching build, no
+launch probe, no service tuning, no G0R march, no approximate
+simulator, no operator/physics changes, no global-layer changes. The
+resource lane and all session-19 state stand.
+
+**Milestones:** A0 (the audit) DELIVERED. G0Q stands directionally
+passed. G0R deferred behind the search reconstruction. NEXT (advisor
+gate): the state equivalence/partition rule for the forward
+representation — make the sweep's per-cell efficiency competitive
+with RefSolve on easy targets while keeping its one-sweep-many-cells
+scaling — then rebuild Entrance production on the forward field with
+RefSolve as oracle/polisher, then return to G0R.
+
+Board: thirteen suites green from the session binary (groute 11/11;
+airrec fixture hash bit-identical across the MoveTick-counter
+change).

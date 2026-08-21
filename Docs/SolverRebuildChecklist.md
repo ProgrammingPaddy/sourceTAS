@@ -15,6 +15,37 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-20d (session 20): THE SEARCH ARCHITECTURE CORRECTION
+— THE AUDIT IS DELIVERED; PRODUCTION SEARCH IS UNDER RECONSTRUCTION.**
+The standing correction (advisor 2026-08-20d, now a top-level section
+of `Docs/ExitFieldSpec.md`): the exact simulator is CHEAP (~1.35-1.5M
+MoveTicks/sec single-threaded, measured) and must never be
+approximated; the expensive thing is the search FORMULATION —
+`RefSolve` (the certified INVERSE boundary solver) was promoted into
+the production field engine, so the heatmap became thousands of
+per-acceptance-ball optimization runs instead of the OUTPUT of one
+forward reachable-state sweep. The `forwardfield` audit ran both arms
+on the real f0->f1 problem: the cancelled terms work as arithmetic
+(the deterministic vertical window collapsed a dead 48.7M-tick sweep
+to a 3-tick answer; the certified 30/tick reach cone prunes en
+route); the forward representation PASSES the resolution-scaling
+criterion (exact work flat while cells grow 66 -> 1105 from one
+sweep) and the production inverse path FAILS it (finer coverage =
+more solves; the 84-85% dup is that failure at global scale); but v0
+forward is ~50x LESS MoveTick-efficient per cell than one RefSolve
+ladder on an easy target and loses 27 shared cells by up to 302k E —
+the STATE EQUIVALENCE/PARTITION RULE is the named core research
+problem (6.2M strikes -> ~1100 cells; 10.2M frontier-cap overflow).
+RefSolve is retained as oracle/polisher/witness-constructor, never
+the per-cell engine. User targets recorded: real maps < 10 min (~30
+exhaustive); basictest toward seconds-to-<1-min. Paused per advisor:
+batching, launch probe, service tuning, G0R marches. NEXT: the
+compression rule, then rebuild Entrance production on the forward
+field, then G0R. New: `g_movetick_count` (observability only;
+airrec hash bit-identical), `forwardfield` command. See
+`Docs/ExitFieldSpec.md` "THE SEARCH ARCHITECTURE CORRECTION" +
+session 20.
+
 **STATUS 2026-08-20c (session 19): G0Q DIRECTIONALLY CONFIRMED; THE
 84% K-DUPLICATION CEILING IS THE MEASURED PATH TO THE 5-MINUTE
 TARGET.** The resource-preservation service lane (advisor
@@ -402,6 +433,48 @@ assembly, the carve port and full-map Phase B are FROZEN behind Stage A.
 ---
 
 ## Change log
+
+- 2026-08-20d (session 20, THE SEARCH ARCHITECTURE CORRECTION + THE
+  forwardfield AUDIT): user withdrew confidence in the search
+  architecture ("it isn't fulfilling the promise of deterministic,
+  cheap evaluation that can be exhaustively searched"); advisor
+  2026-08-20d: the simulator is cheap, the FORMULATION is expensive -
+  RefSolve (inverse boundary solver, a capability-test tool) was
+  promoted into the production field engine; the heatmap must be the
+  OUTPUT of one forward reachable-state sweep, not thousands of
+  per-ball solves; pause batching/launch/service/G0R; simulator
+  accuracy is never traded for throughput. LANDED: (1)
+  `g_movetick_count` in MoveTick - observability only, no-drift
+  proven by groute 11/11 + the airrec fixture hash bit-identical;
+  (2) the `forwardfield` audit command - deterministic real-problem
+  construction (yaw 0/15 roots -> f0 board -> exit selected by the
+  composite vertical-window + certified-reach-cone score) and both
+  arms on one problem: v0 forward sweep (per-tick action set
+  {coast, +-side x 4 cosa}, dwell-6 gating, (xy, heading, speed,
+  side, age) binning with 2 exact reps, compact lineage witnesses,
+  200k frontier cap with REPORTED overflow) vs the production
+  RefSolve ladder (3 aims x 600/1800/3600, strikes via on_strike).
+  MEASURED: audit run 1 - the flat/high prior picked a 3-tick-window
+  dive; both arms burned everything for zero strikes (priors are not
+  reachability; cancelled terms must precede simulation). Run 2 -
+  the window rule made the dead sweep instant; window-only selection
+  still picked an unreachable exit; the composite score found the
+  real transfer (yaw-15 root, 601 u/s). Run 3 (the head-to-head) -
+  forward: ~50-58M MoveTicks/sweep, 40-48 s, strikes 1.9-6.2M, cells
+  66->1105 across 32->2u with exact work FLAT (PASSES the advisor's
+  scaling criterion); RefSolve: 18k evals = 1.14M MoveTicks = 0.77 s,
+  12,183 strikes, 331 cells at 8u, ~50x better MT/cell on this easy
+  target and beats forward in 27 shared cells by up to 302k E (the
+  oracle role works). The named core research problem: the state
+  equivalence/partition rule (6.2M strikes -> 1105 cells; 10.2M cap
+  overflow). Throughput truth: simulator ~1.35-1.5M MoveTicks/sec
+  single-thread (~63 ticks per RefSolve eval); the old
+  billions/minute were arithmetic candidates - the funnel's
+  arithmetic layer already runs at that scale. User targets: real
+  maps <10 min (~30 exhaustive), basictest -> seconds-to-<1-min.
+  Milestones: A0 delivered; G0R deferred behind the reconstruction.
+  Thirteen suites green. Full tables: `Docs/ExitFieldSpec.md`
+  session 20 + the standing SEARCH ARCHITECTURE CORRECTION section.
 
 - 2026-08-20c (session 19, THE RESOURCE-PRESERVATION SERVICE LANE -
   G0Q directionally confirmed; the 84% K-duplication ceiling): advisor

@@ -13670,6 +13670,672 @@ namespace {
 		return rc;
 	}
 
+	// ================= forwardfield: THE SEARCH-ARCHITECTURE AUDIT
+	// (advisor 2026-08-20d, session 20). The correction under test:
+	// the exact simulator is CHEAP; the current search FORMULATION is
+	// expensive. Production turned "one forward reachable-state sweep
+	// that deposits a board field" into "thousands of per-acceptance-
+	// ball inverse RefSolve jobs". This command runs both on ONE real
+	// Entrance problem (the basictest f0 -> f1 transfer) and prints
+	// the head-to-head: exact tick transitions, states, cells covered,
+	// best energy per cell, and wall time - at board resolutions
+	// 32/16/8/4/2u. The simulator is NEVER approximated; search
+	// resolution is adaptive, simulator accuracy is not.
+	//
+	// The forward arm is deliberately primitive v0 (the research
+	// question is the state representation, not polish): per tick,
+	// actions = {hold/flip side x 4 cosa samples, coast}, flips gated
+	// by the dwell-6 law; states bin by (xy cell, heading sector,
+	// speed bucket, side, age) with up to 2 exact representatives per
+	// bin (max speed); z/vz are deterministic per tick (asserted).
+	// Every target-face contact deposits (Q, E_boundary, witness
+	// lineage) into the field - the heatmap is an OUTPUT of the sweep.
+	// RefSolve runs afterward as the production baseline AND the
+	// recoverability oracle (cells it wins reveal which state/control
+	// dimension the sweep under-resolves).
+
+	namespace {
+
+	struct FFLin {              // compact lineage (witness = the walk)
+		int parent = -1;
+		signed char side = 0;
+		unsigned char cosa_idx = 0;
+	};
+	struct FFRep {              // one frontier representative
+		PlayerState ps;
+		signed char side = 0;   // carried strafe side
+		signed char age = 7;    // dwell ticks (capped)
+		int lin = -1;
+	};
+	struct FFCell {
+		float bestE = -1e30f;
+		int strikes = 0;
+		int lin = -1;           // lineage of the best strike
+		int tick = 0;
+	};
+	struct FFStats {
+		long long moveticks = 0;
+		long long expanded = 0;   // representative-action expansions
+		long long retained = 0;   // states binned into frontiers
+		long long strikes = 0;
+		long long dead = 0;
+		int  max_frontier = 0;
+		int  overflow = 0;        // frontier-cap losses (REPORTED)
+		int  window_end = -1;     // tick the vertical window closed
+		long long reach_pruned = 0; // certified-cone eliminations
+		double ms = 0.0;
+		std::map<long long, FFCell> board;
+	};
+
+	long long FFCellKey(float x, float y, float r) {
+		const long long cx = static_cast<long long>(
+			floorf(x / r));
+		const long long cy = static_cast<long long>(
+			floorf(y / r));
+		return (cx << 24) ^ (cy & 0xFFFFFF);
+	}
+
+	// THE SECOND CANCELLED TERM (the certified reach cone): in clean
+	// air the per-tick horizontal velocity change is bounded by the
+	// accel law's cap (addspeed <= air_speed_cap = 30, exactly), so a
+	// state's reachable XY at k ticks ahead lies within the coast
+	// point plus a disc of radius sum(30*dt*j) ~ 0.225*k^2. A state
+	// whose cone misses the face's XY box at EVERY remaining
+	// strike-window tick can never strike - a certified elimination,
+	// evaluated as arithmetic per state, never simulation.
+	bool FFReachable(const Vec3& pos, const Vec3& vel, int t,
+	                 const std::vector<unsigned char>& in_window,
+	                 float dt, float bx0, float by0, float bx1,
+	                 float by1) {
+		for (size_t k = static_cast<size_t>(t) + 1;
+			k < in_window.size(); ++k) {
+			if (!in_window[k])
+				continue;
+			const float kd = static_cast<float>(k
+				- static_cast<size_t>(t));
+			const float cx = pos.X + vel.X * kd * dt;
+			const float cy = pos.Y + vel.Y * kd * dt;
+			const float slack = 0.225f * kd * kd + 48.f;
+			const float ddx = cx < bx0 ? bx0 - cx
+				: cx > bx1 ? cx - bx1 : 0.f;
+			const float ddy = cy < by0 ? by0 - cy
+				: cy > by1 ? cy - by1 : 0.f;
+			if (ddx * ddx + ddy * ddy <= slack * slack)
+				return true;
+		}
+		return false;
+	}
+
+	FFStats ForwardSweep(const PlayerState& S0,
+	                     const Steer::CtlState& ctl0, const World& w,
+	                     const MoveParams& p, const Route::Graph& g,
+	                     int face_j, int nh, float r,
+	                     std::vector<FFLin>* lins_out) {
+		FFStats st;
+		const auto t0 = std::chrono::steady_clock::now();
+		const long long mt0 = g_movetick_count;
+		const Route::Face& fj = g.faces[static_cast<size_t>(face_j)];
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const float C[4] = { 0.9995f, 0.98f, 0.9f, 0.75f };
+		const int kMaxFrontier = 200000;
+		// Precompute the shared vertical strike window (arithmetic).
+		std::vector<unsigned char> in_window(
+			static_cast<size_t>(nh), 0);
+		{
+			float zz = S0.pos.Z, vz = S0.vel.Z;
+			for (int k = 0; k < nh; ++k) {
+				vz -= p.gravity * S0.gravity_scale * p.dt;
+				zz += vz * p.dt;
+				if (zz >= fj.zmin - 8.f && zz <= fj.zmax + 80.f)
+					in_window[static_cast<size_t>(k)] = 1;
+				if (zz < fj.zmin - 8.f && vz < 0.f)
+					break;
+			}
+		}
+		float bx0 = 1e30f, by0 = 1e30f, bx1 = -1e30f, by1 = -1e30f;
+		for (const Vec3& v2 : fj.verts) {
+			bx0 = v2.X < bx0 ? v2.X : bx0;
+			by0 = v2.Y < by0 ? v2.Y : by0;
+			bx1 = v2.X > bx1 ? v2.X : bx1;
+			by1 = v2.Y > by1 ? v2.Y : by1;
+		}
+		std::vector<FFLin>& lins = *lins_out;
+		lins.clear();
+		std::vector<FFRep> cur, nxt;
+		{
+			FFRep r0;
+			r0.ps = S0;
+			r0.side = ctl0.side;
+			r0.age = static_cast<signed char>(
+				ctl0.age < 7 ? ctl0.age : 7);
+			FFLin l0;
+			lins.push_back(l0);
+			r0.lin = 0;
+			cur.push_back(r0);
+		}
+		// THE FIRST CANCELLED TERM (the deterministic vertical): with
+		// no duck/jump input, every frontier state at tick t shares
+		// EXACTLY the same z(t), vz(t) - gravity is the only vertical
+		// force. Once z has fallen below the face's lowest point with
+		// vz < 0, no state can ever strike it again: the entire sweep
+		// stops. This is the ballistic-window reachability filter
+		// operating as arithmetic, not simulation.
+		// bin map rebuilt per tick: key -> up to 2 rep indices in nxt
+		std::map<unsigned long long, std::pair<int, int> > bins;
+		for (int t = 0; t < nh && !cur.empty(); ++t) {
+			if (cur[0].ps.pos.Z < fj.zmin - 8.f
+				&& cur[0].ps.vel.Z < 0.f) {
+				st.window_end = t;
+				break;
+			}
+			nxt.clear();
+			bins.clear();
+			if (static_cast<int>(cur.size()) > st.max_frontier)
+				st.max_frontier = static_cast<int>(cur.size());
+			for (size_t ci = 0; ci < cur.size(); ++ci) {
+				const FFRep rep = cur[ci];
+				const float s2d = Len2D(rep.ps.vel);
+				const float h = s2d > 1.f
+					? atan2f(rep.ps.vel.Y, rep.ps.vel.X) : 0.f;
+				// actions: coast + {L,R} x cosa samples (flips
+				// gated by the dwell law)
+				for (int ai = 0; ai < 9; ++ai) {
+					signed char ds;
+					float ca = 1.f;
+					unsigned char cidx = 0;
+					if (ai == 0) {
+						ds = 0;
+					} else {
+						ds = ai <= 4 ? static_cast<signed char>(1)
+							: static_cast<signed char>(-1);
+						cidx = static_cast<unsigned char>(
+							(ai - 1) % 4);
+						ca = C[cidx];
+						if (rep.side != 0 && ds != rep.side
+							&& rep.age < min_gap)
+							continue;   // illegal flip
+					}
+					PlayerState ns = rep.ps;
+					float yaw = h * 57.2957795f;
+					float fm = 0.f, sm = 0.f;
+					if (ds != 0 && s2d > 1.f)
+						Air::WishInputs(h, ds, ca, &yaw, &fm, &sm);
+					TickEvents ev;
+					MoveTick(ns, w, p, 0.f, yaw, fm, sm, 0.f,
+						ns.ducked ? IN_DUCK : 0, &ev);
+					st.expanded++;
+					bool struck = false, dead = false;
+					for (int c = 0; c < ev.ncontacts; ++c) {
+						if (ev.contact_brush[c] == fj.brush
+							&& ev.contact_plane[c] == fj.side)
+							struck = true;
+						else
+							dead = true;
+					}
+					if (ns.on_ground && !struck)
+						dead = true;
+					if (struck) {
+						FFLin nl;
+						nl.parent = rep.lin;
+						nl.side = ds;
+						nl.cosa_idx = cidx;
+						lins.push_back(nl);
+						const float en = ExitField::EBoundary(ns,
+							p);
+						FFCell& cell = st.board[FFCellKey(
+							ns.pos.X, ns.pos.Y, r)];
+						cell.strikes++;
+						if (en > cell.bestE) {
+							cell.bestE = en;
+							cell.lin = static_cast<int>(
+								lins.size()) - 1;
+							cell.tick = t + 1;
+						}
+						st.strikes++;
+						continue;
+					}
+					if (dead) {
+						st.dead++;
+						continue;
+					}
+					if (!FFReachable(ns.pos, ns.vel, t, in_window,
+						p.dt, bx0, by0, bx1, by1)) {
+						st.reach_pruned++;
+						continue;
+					}
+					// bin the survivor
+					const signed char nside = ds != 0 ? ds
+						: rep.side;
+					const signed char nage =
+						(ds != 0 && rep.side != 0
+							&& ds != rep.side)
+						? static_cast<signed char>(1)
+						: static_cast<signed char>(
+							rep.age < 7 ? rep.age + 1 : 7);
+					const float nsd = Len2D(ns.vel);
+					const float nhd = nsd > 1.f
+						? atan2f(ns.vel.Y, ns.vel.X) : 0.f;
+					const int hsec = static_cast<int>(
+						(nhd + 3.14159265f)
+						* (48.f / 6.2831853f)) & 63;
+					const int spb = static_cast<int>(nsd / 25.f);
+					unsigned long long key =
+						static_cast<unsigned long long>(
+							FFCellKey(ns.pos.X, ns.pos.Y, r));
+					key = key * 1099511628211ULL
+						^ static_cast<unsigned long long>(hsec);
+					key = key * 1099511628211ULL
+						^ static_cast<unsigned long long>(spb);
+					key = key * 1099511628211ULL
+						^ static_cast<unsigned long long>(
+							nside + 1);
+					key = key * 1099511628211ULL
+						^ static_cast<unsigned long long>(nage);
+					std::pair<int, int>& slot = bins.insert(
+						std::make_pair(key,
+							std::make_pair(-1, -1)))
+						.first->second;
+					auto place = [&](int which) {
+						if (static_cast<int>(nxt.size())
+							>= kMaxFrontier) {
+							st.overflow++;
+							return;
+						}
+						FFLin nl;
+						nl.parent = rep.lin;
+						nl.side = ds;
+						nl.cosa_idx = cidx;
+						lins.push_back(nl);
+						FFRep nr;
+						nr.ps = ns;
+						nr.side = nside;
+						nr.age = nage;
+						nr.lin = static_cast<int>(lins.size())
+							- 1;
+						nxt.push_back(nr);
+						if (which == 0)
+							slot.first = static_cast<int>(
+								nxt.size()) - 1;
+						else
+							slot.second = static_cast<int>(
+								nxt.size()) - 1;
+					};
+					if (slot.first < 0) {
+						place(0);
+					} else if (slot.second < 0) {
+						place(1);
+					} else {
+						// keep the two FASTEST representatives
+						const float sA = Len2D(nxt[
+							static_cast<size_t>(
+								slot.first)].ps.vel);
+						const float sB = Len2D(nxt[
+							static_cast<size_t>(
+								slot.second)].ps.vel);
+						const int weak = sA <= sB ? 0 : 1;
+						const float wsp = sA <= sB ? sA : sB;
+						if (nsd > wsp) {
+							const int wi = weak == 0
+								? slot.first : slot.second;
+							FFLin nl;
+							nl.parent = rep.lin;
+							nl.side = ds;
+							nl.cosa_idx = cidx;
+							lins.push_back(nl);
+							nxt[static_cast<size_t>(wi)].ps = ns;
+							nxt[static_cast<size_t>(wi)].side =
+								nside;
+							nxt[static_cast<size_t>(wi)].age =
+								nage;
+							nxt[static_cast<size_t>(wi)].lin =
+								static_cast<int>(lins.size())
+									- 1;
+						}
+					}
+				}
+			}
+			st.retained += static_cast<long long>(nxt.size());
+			cur.swap(nxt);
+		}
+		st.moveticks = g_movetick_count - mt0;
+		st.ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+		return st;
+	}
+
+	} // namespace
+
+	int CmdForwardField(const std::string& map_path,
+	                    const ReplayOpts& o) {
+		World w;
+		std::string err;
+		w.true_interval_corner = o.corner_true;
+		if (!w.Load(map_path, o.hulls, &err, o.edge_bevels)) {
+			printf("LOAD FAILED (bsp): %s\n", err.c_str());
+			return 1;
+		}
+		const MoveParams& p = o.params;
+		Route::Graph g;
+		if (!Route::Build(w, &g, 2000.f, &err)
+			|| g.faces.size() < 2) {
+			printf("forwardfield: route build failed\n");
+			return 1;
+		}
+		// ---- construct THE problem deterministically: the real
+		// f0 -> f1 transfer from the production march (anchor -> yaw-0
+		// run -> entrance to f0 -> board -> exit query -> the top
+		// prior-ordered air exit).
+		PlayerState anchor;
+		anchor.pos = w.spawn_origin;
+		{
+			TraceResult tr;
+			const float gf = w.TraceHull(anchor.pos,
+				anchor.pos - Vec3(0.f, 0.f, 2.f), false, &tr);
+			if (gf < 1.f && tr.brush >= 0
+				&& tr.normal.Z >= p.walkable_z) {
+				anchor.pos.Z -= 2.f * gf;
+				anchor.on_ground = true;
+				anchor.ground_brush = tr.brush;
+			}
+		}
+		const int f0 = 0, f1 = 1;
+		const Route::Face& fjsel = g.faces[f1];
+		float sx0 = 1e30f, sy0 = 1e30f, sx1 = -1e30f, sy1 = -1e30f;
+		for (const Vec3& v2 : fjsel.verts) {
+			sx0 = v2.X < sx0 ? v2.X : sx0;
+			sy0 = v2.Y < sy0 ? v2.Y : sy0;
+			sx1 = v2.X > sx1 ? v2.X : sx1;
+			sy1 = v2.Y > sy1 ? v2.Y : sy1;
+		}
+		// Candidate score = ticks where the deterministic vertical
+		// window AND the certified horizontal reach cone both admit a
+		// strike - the composite cancelled-term filter, evaluated as
+		// pure arithmetic per exit. (The first audit run measured the
+		// flat/high prior selecting a dive whose window closed in ~3
+		// ticks; window-only selection then picked a westward exit
+		// whose cone never touches the face.)
+		auto wr_score = [&](const PlayerState& e0) -> int {
+			float zz = e0.pos.Z, vz = e0.vel.Z;
+			int sc = 0;
+			for (int k = 1; k <= 400; ++k) {
+				vz -= p.gravity * e0.gravity_scale * p.dt;
+				zz += vz * p.dt;
+				if (zz < fjsel.zmin - 8.f && vz < 0.f)
+					break;
+				if (zz < fjsel.zmin - 8.f
+					|| zz > fjsel.zmax + 80.f)
+					continue;
+				const float kd = static_cast<float>(k);
+				const float cx = e0.pos.X + e0.vel.X * kd * p.dt;
+				const float cy = e0.pos.Y + e0.vel.Y * kd * p.dt;
+				const float slack = 0.225f * kd * kd + 48.f;
+				const float ddx = cx < sx0 ? sx0 - cx
+					: cx > sx1 ? cx - sx1 : 0.f;
+				const float ddy = cy < sy0 ? sy0 - cy
+					: cy > sy1 ? cy - sy1 : 0.f;
+				if (ddx * ddx + ddy * ddy <= slack * slack)
+					sc++;
+			}
+			return sc;
+		};
+		// Roots from both productive launch directions (the run-4
+		// f0->f1 witness came from the yaw-15 root, not yaw-0).
+		PlayerState S0;
+		Steer::CtlState ctl0;
+		int best_score = -1;
+		float best_sp = -1e30f;
+		int best_yaw = -1;
+		for (int yi = 0; yi < 2; ++yi) {
+			const float yawd = yi == 0 ? 0.f : 15.f;
+			PlayerState s = anchor;
+			bool air = false;
+			for (int k = 0; k < 300; ++k) {
+				TickEvents ev;
+				MoveTick(s, w, p, 0.f, yawd, 450.f, 0.f, 0.f, 0,
+					&ev);
+				if (!s.on_ground) {
+					air = true;
+					break;
+				}
+			}
+			if (!air)
+				continue;
+			const Route::Face& fc = g.faces[f0];
+			std::vector<Vec3> aims;
+			Vec3 bq;
+			if (BallisticAim(s.pos, s.vel, fc, p, 400, &bq))
+				aims.push_back(bq);
+			aims.push_back(fc.centroid);
+			Entrance::QueryState qs;
+			bool found = false;
+			for (size_t ai = 0; ai < aims.size() && !found; ++ai) {
+				Entrance::QueryState q2;
+				for (int prof = 0; prof <= 1 && !found; ++prof) {
+					Entrance::RefineStep(&q2, s, w, p, g, f0,
+						aims[ai], 28.f, 120, fc.zmin,
+						Steer::CtlState());
+					found = q2.has_L;
+				}
+				if (found)
+					qs = q2;
+			}
+			if (!found)
+				continue;
+			Air::Target vt;
+			vt.face = f0;
+			vt.dot_cap = 3000.f;
+			vt.aim = fc.centroid;
+			vt.max_ticks = qs.horizon;
+			Air::Result ar = Air::FlyWishSchedule(s, w, p, vt, g,
+				qs.wside, qs.wcosa, qs.horizon);
+			if (!ar.hit || ar.struck_brush >= 0)
+				continue;
+			Ride::BoundaryState B0;
+			B0.ps = ar.end_state;
+			Steer::CtlState c2;
+			for (int k = 0; k < ar.tick; ++k)
+				Ride::CtlAdvance(&c2, k < static_cast<int>(
+					qs.wside.size())
+					? static_cast<int>(qs.wside[
+						static_cast<size_t>(k)])
+					: (qs.wside.empty() ? 0
+						: static_cast<int>(qs.wside.back())));
+			B0.ctl = c2;
+			B0.face = f0;
+			ExitField::ExitQuery Q;
+			ExitField::QueryInit(&Q, B0, 240, w, p);
+			for (int pr = 0; pr <= 2; ++pr)
+				ExitField::QueryRefine(&Q, w, p, g, pr);
+			for (const ExitField::Partition& P : Q.view)
+				for (const Ride::ExitTransition& t : P.active) {
+					if (t.kind != Ride::kAirExit)
+						continue;
+					const int sc = wr_score(t.s_plus);
+					const float sp = Len2D(t.s_plus.vel);
+					if (sc > best_score
+						|| (sc == best_score
+							&& sp > best_sp)) {
+						best_score = sc;
+						best_sp = sp;
+						S0 = t.s_plus;
+						ctl0 = t.ctl_plus;
+						best_yaw = yi;
+					}
+				}
+		}
+		if (best_score <= 0) {
+			printf("forwardfield: no exit with a nonempty "
+				"window+cone score (best %d)\n", best_score);
+			return 1;
+		}
+		printf("forwardfield: exit selected by window+cone score %d "
+			"(yaw arm %d, speed %.0f)\n", best_score, best_yaw,
+			best_sp);
+		const Route::Face& fj = g.faces[f1];
+		const float dxy = Len2D(fj.centroid - S0.pos);
+		int nh = static_cast<int>(dxy / (300.f * p.dt)) + 30;
+		if (nh > 400) nh = 400;
+		printf("forwardfield: THE PROBLEM: S0 pos (%.1f, %.1f, %.1f) "
+			"vel (%.0f, %.0f, %.0f) ctl(side %d age %d) -> face %d, "
+			"horizon %d\n", S0.pos.X, S0.pos.Y, S0.pos.Z, S0.vel.X,
+			S0.vel.Y, S0.vel.Z, ctl0.side, ctl0.age, f1, nh);
+
+		// ---- ARM 1: the forward reachable-state sweep at every
+		// board resolution.
+		printf("forwardfield: ---- FORWARD SWEEP (one search "
+			"populates the whole field) ----\n");
+		printf("forwardfield:   r | moveticks | expanded | retained "
+			"| maxfront | ovf | wend | strikes | cells | bestE | "
+			"medE | ms\n");
+		std::map<long long, FFCell> fwd_board8;
+		for (int ri = 0; ri < 5; ++ri) {
+			const float r = ri == 0 ? 32.f : ri == 1 ? 16.f
+				: ri == 2 ? 8.f : ri == 3 ? 4.f : 2.f;
+			std::vector<FFLin> lins;
+			FFStats fs = ForwardSweep(S0, ctl0, w, p, g, f1, nh, r,
+				&lins);
+			std::vector<float> bes;
+			for (std::map<long long, FFCell>::iterator it =
+				fs.board.begin(); it != fs.board.end(); ++it)
+				bes.push_back(it->second.bestE);
+			std::sort(bes.begin(), bes.end());
+			printf("forwardfield:  %2.0f | %9lld | %8lld | %8lld | "
+				"%8d | %8d | %4d | %7lld | %5d | %5.0fk | %5.0fk "
+				"| %.0f\n", r, fs.moveticks, fs.expanded,
+				fs.retained, fs.max_frontier, fs.overflow,
+				fs.window_end, fs.strikes,
+				static_cast<int>(fs.board.size()),
+				bes.empty() ? 0.f : bes.back() / 1000.f,
+				bes.empty() ? 0.f
+					: bes[bes.size() / 2] / 1000.f, fs.ms);
+			if (ri == 2)
+				fwd_board8 = fs.board;
+		}
+
+		// ---- ARM 2: the production inverse path on the SAME
+		// problem: per-aim RefSolve ladder exactly as production runs
+		// it (600 / 1800 / 3600 as independent profile actions).
+		printf("forwardfield: ---- REFSOLVE (production inverse "
+			"path) ----\n");
+		std::vector<std::pair<Vec3, float> > ref_strikes; // pos, E
+		std::vector<Vec3> aims;
+		{
+			Vec3 bq;
+			if (BallisticAim(S0.pos, S0.vel, fj, p, 400, &bq))
+				aims.push_back(bq);
+			aims.push_back(fj.centroid);
+			const float dl2 = Len(fj.downhill);
+			Vec3 dn2 = dl2 > 1e-4f ? Scale(fj.downhill, 1.f / dl2)
+				: Vec3(0.f, 0.f, 0.f);
+			float ext2 = 0.f;
+			for (const Vec3& v2 : fj.verts) {
+				const float e2 = Dot(v2 - fj.centroid, dn2);
+				if (e2 > ext2)
+					ext2 = e2;
+			}
+			aims.push_back(fj.centroid + Scale(dn2, ext2 * 0.55f));
+		}
+		printf("forwardfield:   aim | budget | evals | moveticks | "
+			"strikes | ms\n");
+		long long ref_mt_total = 0;
+		double ref_ms_total = 0.0;
+		long long ref_evals_total = 0;
+		for (size_t ai = 0; ai < aims.size(); ++ai) {
+			const int budgets[3] = { 600, 1800, 3600 };
+			for (int bi = 0; bi < 3; ++bi) {
+				const long long mt0 = g_movetick_count;
+				const auto t0 =
+					std::chrono::steady_clock::now();
+				size_t sk0 = ref_strikes.size();
+				Entrance::RefResult rr = Entrance::RefSolve(S0,
+					w, p, g, f1, aims[ai], 28.f, nh,
+					budgets[bi], false, nullptr, fj.zmin,
+					ctl0,
+					[&](const Air::Result& sr,
+						const std::vector<signed char>&,
+						const std::vector<float>&, int) {
+						if (sr.hit && sr.struck_brush < 0)
+							ref_strikes.push_back(
+								std::make_pair(sr.pos,
+									ExitField::EBoundary(
+										sr.end_state, p)));
+					});
+				const double ms =
+					std::chrono::duration<double,
+						std::milli>(
+						std::chrono::steady_clock::now()
+							- t0).count();
+				ref_mt_total += g_movetick_count - mt0;
+				ref_ms_total += ms;
+				ref_evals_total += rr.evals;
+				printf("forwardfield:   %3d | %6d | %5d | %9lld "
+					"| %7d | %.0f\n",
+					static_cast<int>(ai), budgets[bi],
+					rr.evals, g_movetick_count - mt0,
+					static_cast<int>(ref_strikes.size()
+						- sk0), ms);
+			}
+		}
+		// bin the production strikes at every resolution
+		printf("forwardfield: refsolve totals: evals %lld, "
+			"moveticks %lld, ms %.0f | cells at r 32/16/8/4/2:",
+			ref_evals_total, ref_mt_total, ref_ms_total);
+		std::map<long long, FFCell> ref_board8;
+		for (int ri = 0; ri < 5; ++ri) {
+			const float r = ri == 0 ? 32.f : ri == 1 ? 16.f
+				: ri == 2 ? 8.f : ri == 3 ? 4.f : 2.f;
+			std::map<long long, FFCell> b;
+			for (size_t si = 0; si < ref_strikes.size(); ++si) {
+				FFCell& c = b[FFCellKey(ref_strikes[si].first.X,
+					ref_strikes[si].first.Y, r)];
+				c.strikes++;
+				if (ref_strikes[si].second > c.bestE)
+					c.bestE = ref_strikes[si].second;
+			}
+			printf(" %d", static_cast<int>(b.size()));
+			if (ri == 2)
+				ref_board8 = b;
+		}
+		printf("\n");
+
+		// ---- THE COMPARISON at r = 8 + the oracle readout.
+		{
+			int both = 0, fwd_only = 0, ref_only = 0, ref_wins = 0;
+			float worst_gap = 0.f;
+			for (std::map<long long, FFCell>::iterator it =
+				fwd_board8.begin(); it != fwd_board8.end(); ++it) {
+				std::map<long long, FFCell>::iterator jt =
+					ref_board8.find(it->first);
+				if (jt == ref_board8.end()) {
+					fwd_only++;
+					continue;
+				}
+				both++;
+				const float gap = jt->second.bestE
+					- it->second.bestE;
+				if (gap > 1000.f) {
+					ref_wins++;
+					if (gap > worst_gap)
+						worst_gap = gap;
+				}
+			}
+			for (std::map<long long, FFCell>::iterator jt =
+				ref_board8.begin(); jt != ref_board8.end(); ++jt)
+				if (fwd_board8.find(jt->first)
+					== fwd_board8.end())
+					ref_only++;
+			printf("forwardfield: ---- HEAD-TO-HEAD (r=8) ----\n");
+			printf("forwardfield: cells: forward-only %d | shared "
+				"%d | refsolve-only %d (the oracle's miss list) "
+				"| refsolve beats forward by >1k E in %d shared "
+				"cells (worst gap %.0f)\n", fwd_only, both,
+				ref_only, ref_wins, worst_gap);
+		}
+		fflush(stdout);
+		return 0;
+	}
+
 	// ================= efrefine: THE OPERATOR-LEVEL ANYTIME GATE
 	// (advisor ruling 2026-08-19d). The anytime contract lives ABOVE
 	// the local optimizer: a whole fixed local solve is one atomic
@@ -18311,6 +18977,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdGMap(argv[2], o);
+	}
+	if (cmd == "forwardfield" && argc >= 3) {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 3, o))
+			return 1;
+		return CmdForwardField(argv[2], o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

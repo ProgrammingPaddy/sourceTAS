@@ -170,6 +170,11 @@ namespace Solver {
 		bool  teleported = false;  // trigger_teleport fired this tick
 	};
 
+	// Observability only (session 20): total authoritative ticks
+	// executed by this process. Never read by physics or search
+	// decisions - profiling and audits only.
+	extern long long g_movetick_count;
+
 	void MoveTick(PlayerState& s, const World& w, const MoveParams& p,
 	              float pitch, float yaw, float fmove, float smove, float umove,
 	              int buttons, TickEvents* ev);
