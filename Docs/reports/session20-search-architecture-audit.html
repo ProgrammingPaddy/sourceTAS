@@ -1,0 +1,251 @@
+<title>Search Architecture Audit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#F6F8F7; --surface:#FFFFFF; --ink:#17211F; --ink2:#4A5A57; --ink3:#7A8A87;
+  --line:#DCE4E2; --line2:#EAEFEE;
+  --fwd:#0E7C6B; --fwd-soft:#D5EAE6; --ref:#B4610E; --ref-soft:#F3E2CC;
+  --neu:#5A6B68; --good:#1B7A3D; --bad:#B3372B; --warn:#9A6B00;
+  --chip:#EDF2F1;
+}
+:root:not([data-theme="light"]){}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#101514; --surface:#171D1C; --ink:#E6EDEB; --ink2:#A7B5B2; --ink3:#748280;
+    --line:#2A3331; --line2:#1F2725;
+    --fwd:#34B39D; --fwd-soft:#123A33; --ref:#E0912E; --ref-soft:#3A2A12;
+    --neu:#8FA19D; --good:#4CC272; --bad:#E0715F; --warn:#D2A63C;
+    --chip:#1E2624;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#101514; --surface:#171D1C; --ink:#E6EDEB; --ink2:#A7B5B2; --ink3:#748280;
+  --line:#2A3331; --line2:#1F2725;
+  --fwd:#34B39D; --fwd-soft:#123A33; --ref:#E0912E; --ref-soft:#3A2A12;
+  --neu:#8FA19D; --good:#4CC272; --bad:#E0715F; --warn:#D2A63C;
+  --chip:#1E2624;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:16px/1.55 "IBM Plex Sans",system-ui,sans-serif;margin:0;padding:0}
+.wrap{max-width:880px;margin:0 auto;padding:40px 24px 80px}
+h1,h2,h3{font-family:"IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;text-wrap:balance;line-height:1.15}
+h1{font-size:44px;font-weight:700;margin:6px 0 4px}
+h2{font-size:24px;font-weight:700;margin:44px 0 10px;padding-top:20px;border-top:1px solid var(--line)}
+h3{font-size:17px;font-weight:600;margin:20px 0 6px}
+p{max-width:68ch;color:var(--ink)}
+p.lede{font-size:18px;color:var(--ink2);max-width:64ch}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3)}
+.mono{font-family:"IBM Plex Mono",monospace}
+.k{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:22px 0}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:14px 16px}
+.tile .v{font-family:"IBM Plex Mono",monospace;font-size:26px;font-weight:600;letter-spacing:-.01em}
+.tile .l{font-size:12.5px;color:var(--ink2);margin-top:2px}
+.tile .s{font-size:11.5px;color:var(--ink3);margin-top:6px}
+.verdict{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;letter-spacing:.08em;padding:2px 8px;border-radius:4px}
+.v-pass{background:var(--fwd-soft);color:var(--fwd)}
+.v-fail{background:var(--ref-soft);color:var(--ref)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:20px 22px;margin:18px 0}
+.panel .cap{font-size:12.5px;color:var(--ink3);margin-top:10px;max-width:70ch}
+table{border-collapse:collapse;width:100%;font-size:14px}
+.tablewrap{overflow-x:auto}
+th{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);text-align:left;font-weight:500;padding:6px 10px;border-bottom:1px solid var(--line)}
+td{padding:7px 10px;border-bottom:1px solid var(--line2);vertical-align:top}
+td.num{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.armF{color:var(--fwd);font-weight:600}
+.armR{color:var(--ref);font-weight:600}
+.swF,.swR,.swN{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:baseline}
+.swF{background:var(--fwd)} .swR{background:var(--ref)} .swN{background:var(--neu)}
+.magline{margin:14px 0 4px}
+.mag{display:grid;grid-template-columns:190px 1fr;gap:10px;align-items:center;margin:10px 0}
+.mag .lab{font-size:13px;color:var(--ink2)}
+.mag .track{position:relative;height:26px}
+.mag .rail{position:absolute;left:0;right:0;top:12px;height:2px;background:var(--line)}
+.mag .dot{position:absolute;top:6px;width:14px;height:14px;border-radius:50%;border:2px solid var(--surface)}
+.mag .val{position:absolute;top:-6px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--ink2);white-space:nowrap;transform:translateX(-50%)}
+.axis{display:grid;grid-template-columns:190px 1fr;gap:10px}
+.axis .ticks{position:relative;height:18px;font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--ink3)}
+.axis .ticks span{position:absolute;transform:translateX(-50%)}
+.funnel .frow{display:grid;grid-template-columns:220px 1fr 110px;gap:10px;align-items:center;margin:7px 0}
+.funnel .fl{font-size:13px;color:var(--ink2)}
+.funnel .fbar{height:16px;border-radius:3px 3px 3px 3px;min-width:2px}
+.funnel .fn{font-family:"IBM Plex Mono",monospace;font-size:12.5px;text-align:right;color:var(--ink)}
+.owner{display:flex;height:26px;border-radius:4px;overflow:hidden;margin:10px 0 2px}
+.owner div{display:flex;align-items:center;justify-content:center;font-family:"IBM Plex Mono",monospace;font-size:12px;color:#fff}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:13px;color:var(--ink2);margin:8px 0}
+.note{border-left:3px solid var(--fwd);background:var(--surface);padding:12px 16px;margin:16px 0;border-radius:0 6px 6px 0}
+.note.warn{border-left-color:var(--ref)}
+.note p{margin:4px 0;font-size:14.5px}
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:700px){.cols2{grid-template-columns:1fr}.mag,.axis{grid-template-columns:120px 1fr}.funnel .frow{grid-template-columns:130px 1fr 90px}}
+.arch{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+@media (max-width:700px){.arch{grid-template-columns:1fr}}
+.arch .box{border:1px solid var(--line);border-radius:8px;padding:14px 16px;background:var(--surface)}
+.arch .box h3{margin-top:0}
+.arch .step{font-size:13.5px;padding:7px 10px;border-radius:4px;margin:6px 0;background:var(--chip);color:var(--ink)}
+.arch .step.hot{background:var(--ref-soft);color:var(--ink)}
+.arch .step.cool{background:var(--fwd-soft);color:var(--ink)}
+.arch .x{text-align:center;color:var(--ink3);font-size:12px;margin:2px 0}
+svg text{font-family:"IBM Plex Mono",monospace;fill:var(--ink2)}
+.footer{margin-top:56px;padding-top:16px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink3)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.chip{font-family:"IBM Plex Mono",monospace;font-size:12px;background:var(--chip);border:1px solid var(--line);color:var(--ink2);padding:3px 10px;border-radius:12px}
+</style>
+
+<div class="wrap">
+<div class="eyebrow">SourceTAS solver &middot; session 20 &middot; 2026-08-20 &middot; surf_basictest</div>
+<h1>Search Architecture Audit</h1>
+<p class="lede">The exact simulator was never the bottleneck. The search <em>formulation</em> was: an inverse boundary solver, built as a capability test, became the production field engine. This is the audit that measured it — and the correction now standing in the design of record.</p>
+
+<div class="tiles">
+  <div class="tile"><div class="v k">1.4M<span style="font-size:15px">/s</span></div><div class="l">exact MoveTicks per second, single thread</div><div class="s">the simulator, measured — ~63 ticks per "flight eval"</div></div>
+  <div class="tile"><div class="v k">84&ndash;85%</div><div class="l">of all entrance evals are repeat work</div><div class="s">policy-invariant across sessions 18&ndash;19</div></div>
+  <div class="tile"><div class="v k">48.7M&rarr;3</div><div class="l">ticks to answer a dead domain</div><div class="s">the vertical window as arithmetic, not simulation</div></div>
+  <div class="tile"><div class="v"><span class="verdict v-pass">PASS</span> / <span class="verdict v-fail">FAIL</span></div><div class="l">scaling criterion: forward / inverse</div><div class="s">one sweep re-bins; per-ball solves multiply</div></div>
+</div>
+
+<h2>Where the compute went</h2>
+<p>The old solver's "billions of options per minute" were <strong>arithmetic candidates</strong> — tiny equations, not trajectories. The current production path put full exact trajectory optimization inside the innermost loop, then repeated it across acceptance regions and refinement profiles. Every step down this ladder is a different unit; the collapse is the architecture, not the simulator.</p>
+<div class="panel magline">
+  <div class="mag"><div class="lab">Cheap arithmetic candidates <span class="mono" style="font-size:11px">(old solver, per sec)</span></div><div class="track"><div class="rail"></div><div class="dot" style="left:calc(94% - 7px);background:var(--neu)"></div><div class="val" style="left:94%">~1.7&times;10<sup>8</sup></div></div></div>
+  <div class="mag"><div class="lab">Exact MoveTicks <span class="mono" style="font-size:11px">(measured, 1 thread)</span></div><div class="track"><div class="rail"></div><div class="dot" style="left:calc(70% - 7px);background:var(--fwd)"></div><div class="val" style="left:70%">1.4&times;10<sup>6</sup></div></div></div>
+  <div class="mag"><div class="lab">Production "flight evals" <span class="mono" style="font-size:11px">(sessions 18&ndash;19)</span></div><div class="track"><div class="rail"></div><div class="dot" style="left:calc(47% - 7px);background:var(--ref)"></div><div class="val" style="left:47%">1.2&times;10<sup>4</sup></div></div></div>
+  <div class="mag"><div class="lab">Global edges witnessed <span class="mono" style="font-size:11px">(per sec, session 18)</span></div><div class="track"><div class="rail"></div><div class="dot" style="left:calc(8% - 7px);background:var(--ref)"></div><div class="val" style="left:8%">~0.5</div></div></div>
+  <div class="axis"><div></div><div class="ticks"><span style="left:8%">10<sup>0</sup></span><span style="left:24%">10<sup>2</sup></span><span style="left:47%">10<sup>4</sup></span><span style="left:70%">10<sup>6</sup></span><span style="left:94%">10<sup>8</sup></span></div></div>
+  <div class="cap">Log scale, events per second. One production flight eval &asymp; 63 exact ticks; one session-18 global edge cost ~22,000 flight evals — five orders of magnitude between the simulator's native rate and the rate at which search results actually appeared.</div>
+</div>
+
+<h2>The category error, drawn</h2>
+<div class="arch">
+  <div class="box">
+    <h3><span class="swR"></span>What production was doing</h3>
+    <div class="step hot">Global state asks: "can I board region Q&#8321; of face F?"</div>
+    <div class="x">&darr; launches</div>
+    <div class="step hot">RefSolve(Q&#8321;) — guided shooting, 600&ndash;3600 exact flights</div>
+    <div class="x">&darr; then, independently</div>
+    <div class="step hot">RefSolve(Q&#8322;), RefSolve(Q&#8323;)&hellip; same physics, re-flown</div>
+    <div class="x">&darr; then, per refinement profile</div>
+    <div class="step hot">the whole ladder again (600 / 1800 / 3600)</div>
+    <div class="x">= 84&ndash;85% duplicate work; 129k evals per global expansion</div>
+  </div>
+  <div class="box">
+    <h3><span class="swF"></span>The intended shape (now standing)</h3>
+    <div class="step cool">Cancelled terms first: vertical window + certified reach cone (arithmetic)</div>
+    <div class="x">&darr; survivors only</div>
+    <div class="step cool">ONE forward sweep of exact cheap transitions from S&#8320;</div>
+    <div class="x">&darr; every face strike deposits</div>
+    <div class="step cool">the board field — many Q cells populated by one search</div>
+    <div class="x">&darr; RefSolve demoted to</div>
+    <div class="step cool">oracle / polisher / witness constructor on competitive cells</div>
+    <div class="x">= the heatmap is an output, not thousands of solves</div>
+  </div>
+</div>
+<p>RefSolve is not deleted. It was built to answer "can the machinery recover an arbitrary reachable boundary condition, cold?" — a certification instrument. The error was promoting it into the ordinary mechanism behind every field query. The audit below shows both its genuine strength and the cost of that promotion.</p>
+
+<h2>The audit: one real problem, both arms</h2>
+<p>The instrument (<span class="mono">forwardfield</span>) builds one real Entrance problem deterministically — the f0&rarr;f1 transfer, from the yaw-15 launch root, exit selected by the composite window+cone score (72 admissible ticks, 601&nbsp;u/s) — and runs the v0 forward sweep and the production RefSolve ladder on exactly the same physics.</p>
+
+<div class="note warn">
+<p><strong>Audit run 1 caught the priors red-handed.</strong> The fixture's fast/flat/high exit prior selected a south-diving state whose vertical strike window closes in ~3 ticks. The un-windowed sweep burned 48.7M exact ticks marching a dead domain; RefSolve burned its full 12,000-eval ladder on the same corpse. Priors are not reachability — the cancelled terms must run <em>before</em> any simulation. With the window rule, the same dead query resolves in ~3 ticks of arithmetic.</p>
+</div>
+
+<div class="panel funnel">
+  <h3 style="margin-top:0">The forward funnel at r = 8 <span class="mono" style="font-size:11px;color:var(--ink3)">(one sweep, 44 s single-thread)</span></h3>
+  <div class="frow"><div class="fl">Exact transitions expanded</div><div><div class="fbar" style="width:100%;background:var(--fwd)"></div></div><div class="fn">59.1M</div></div>
+  <div class="frow"><div class="fl">Retained after binning</div><div><div class="fbar" style="width:16.2%;background:var(--fwd)"></div></div><div class="fn">9.6M</div></div>
+  <div class="frow"><div class="fl">Face strikes (witnesses)</div><div><div class="fbar" style="width:8.2%;background:var(--fwd)"></div></div><div class="fn">4.8M</div></div>
+  <div class="frow"><div class="fl">Board cells populated</div><div><div class="fbar" style="width:.35%;background:var(--fwd)"></div></div><div class="fn">330</div></div>
+  <div class="frow" style="opacity:.75"><div class="fl">Frontier-cap overflow (lost)</div><div><div class="fbar" style="width:5.1%;background:var(--bad)"></div></div><div class="fn">3.0M</div></div>
+  <div class="cap">4.8M strikes collapsing into 330 cells — and 3M states lost at a 200k frontier cap — is the state-compression problem measured, not hypothesized. The equivalence/partition rule is the named research problem of the reconstruction.</div>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">Head-to-head at r = 8</h3>
+  <div class="tablewrap"><table>
+    <tr><th></th><th style="text-align:right">MoveTicks</th><th style="text-align:right">Wall</th><th style="text-align:right">Strikes</th><th style="text-align:right">Cells</th><th style="text-align:right">MT / cell</th></tr>
+    <tr><td><span class="swF"></span><span class="armF">Forward sweep v0</span></td><td class="num">59.1M</td><td class="num">44 s</td><td class="num">4,844,556</td><td class="num">330</td><td class="num">179k</td></tr>
+    <tr><td><span class="swR"></span><span class="armR">RefSolve ladder</span> <span class="mono" style="font-size:11px;color:var(--ink3)">(3 aims &times; 600/1800/3600)</span></td><td class="num">1.14M</td><td class="num">0.77 s</td><td class="num">12,183</td><td class="num">331</td><td class="num">3.4k</td></tr>
+  </table></div>
+  <div class="legend" style="margin-top:12px"><span>Cell ownership at r = 8:</span></div>
+  <div class="owner">
+    <div style="width:43%;background:var(--fwd)">forward-only 250</div>
+    <div style="width:14%;background:var(--neu)">shared 80</div>
+    <div style="width:43%;background:var(--ref)">RefSolve-only 251</div>
+  </div>
+  <div class="cap">On this <em>easy</em> target (valid ballistic aim, strikes plentiful) RefSolve is ~50&times; more tick-efficient per covered cell, and in 27 of the 80 shared cells its guided optimization beats the sweep's best arrival by up to <span class="k">302,761</span> energy — the oracle role works, and v0's compression rule is what's leaking. Each arm also covers ~250 cells the other missed: breadth vs. depth, exactly the two tools the corrected architecture composes.</div>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">The scaling criterion — the architectural pass/fail</h3>
+  <svg viewBox="0 0 780 250" style="width:100%;height:auto" role="img" aria-label="Indexed scaling of forward sweep: exact work flat, cells covered rising steeply as resolution refines from 32u to 2u">
+    <line x1="60" y1="20" x2="60" y2="200" stroke="var(--line)" stroke-width="1"/>
+    <line x1="60" y1="200" x2="750" y2="200" stroke="var(--line)" stroke-width="1"/>
+    <text x="55" y="205" text-anchor="end" font-size="11">100</text>
+    <text x="55" y="112" text-anchor="end" font-size="11">900</text>
+    <text x="55" y="25" text-anchor="end" font-size="11">1700</text>
+    <text x="20" y="115" font-size="11" transform="rotate(-90 20 115)">index (r=32 = 100)</text>
+    <text x="60" y="222" text-anchor="middle" font-size="11">32u</text>
+    <text x="232" y="222" text-anchor="middle" font-size="11">16u</text>
+    <text x="405" y="222" text-anchor="middle" font-size="11">8u</text>
+    <text x="577" y="222" text-anchor="middle" font-size="11">4u</text>
+    <text x="750" y="222" text-anchor="middle" font-size="11">2u</text>
+    <text x="405" y="242" text-anchor="middle" font-size="11" fill="var(--ink3)">board resolution (finer &rarr;)</text>
+    <polyline points="60,200 232,189 405,170 577,128 750,17" fill="none" stroke="var(--fwd)" stroke-width="2.5"/>
+    <circle cx="60" cy="200" r="4" fill="var(--fwd)" stroke="var(--surface)" stroke-width="2"/>
+    <circle cx="232" cy="189" r="4" fill="var(--fwd)" stroke="var(--surface)" stroke-width="2"/>
+    <circle cx="405" cy="170" r="4" fill="var(--fwd)" stroke="var(--surface)" stroke-width="2"/>
+    <circle cx="577" cy="128" r="4" fill="var(--fwd)" stroke="var(--surface)" stroke-width="2"/>
+    <circle cx="750" cy="17" r="4" fill="var(--fwd)" stroke="var(--surface)" stroke-width="2"/>
+    <text x="700" y="30" text-anchor="end" font-size="12" fill="var(--fwd)" font-weight="600">cells covered (66 &rarr; 1105)</text>
+    <polyline points="60,200 232,199 405,200 577,201 750,202" fill="none" stroke="var(--neu)" stroke-width="2.5" stroke-dasharray="6 4"/>
+    <circle cx="750" cy="202" r="4" fill="var(--neu)" stroke="var(--surface)" stroke-width="2"/>
+    <text x="700" y="192" text-anchor="end" font-size="12" fill="var(--neu)" font-weight="600">exact MoveTicks (~flat, 58M &rarr; 49M)</text>
+  </svg>
+  <div class="cap"><strong>The forward representation passes:</strong> refining the field 16&times; multiplies covered cells ~17&times; while exact simulation work stays flat — one sweep, re-binned. <strong>The production inverse path fails the same criterion</strong>: its strikes are fixed per solve, so finer coverage demands new per-region solves — which is precisely the 84&ndash;85% duplication measured at global scale in sessions 18&ndash;19.</div>
+</div>
+
+<h2>Every change in this update</h2>
+<div class="tablewrap"><table>
+  <tr><th>Change</th><th>Where</th><th>Why / proof</th></tr>
+  <tr><td><span class="mono">g_movetick_count</span> — process-wide count of authoritative ticks</td><td class="mono" style="font-size:12.5px">SolverMove.cpp / .h</td><td>The one observability touch to engine code: no physics state, no control flow. No-drift proof: all thirteen suites green, airrec fixture hash <span class="mono">de1b000e431a84fb</span> bit-identical.</td></tr>
+  <tr><td><span class="mono">forwardfield</span> — the audit instrument: deterministic real-problem construction + both arms + all tables</td><td class="mono" style="font-size:12.5px">SolverLab.cpp</td><td>One fixed f0&rarr;f1 problem; v0 forward sweep vs the production RefSolve ladder on identical physics; resolutions 32/16/8/4/2u.</td></tr>
+  <tr><td>The vertical strike window — sweep stops when the shared z(t) falls below the face floor with vz&lt;0</td><td class="mono" style="font-size:12.5px">ForwardSweep</td><td>Deterministic vertical: every frontier state at tick t shares z, vz exactly. Collapsed a dead 48.7M-tick sweep to a 3-tick answer.</td></tr>
+  <tr><td>The certified reach cone — coast point + 0.225k&sup2; disc from the exact per-tick |&Delta;v| &le; 30 accel bound</td><td class="mono" style="font-size:12.5px">FFReachable</td><td>A certified elimination evaluated as arithmetic per state; prunes states whose cone misses the face at every remaining window tick.</td></tr>
+  <tr><td>Composite window+cone exit selection (replacing prior-based selection in the audit)</td><td class="mono" style="font-size:12.5px">CmdForwardField</td><td>Runs 1&ndash;2 measured that flat/high priors and window-only selection both pick unreachable exits; the composite score found the real transfer.</td></tr>
+  <tr><td>The Search Architecture Correction — standing top-level section</td><td class="mono" style="font-size:12.5px">Docs/ExitFieldSpec.md</td><td>Definition vs algorithm separated; the intended cheap-breadth&rarr;exact-tail shape; RefSolve's retained roles; the compression rule named as the core research problem.</td></tr>
+  <tr><td>STATUS + change-log entries; performance targets recorded</td><td class="mono" style="font-size:12.5px">Docs/SolverRebuildChecklist.md</td><td>Real maps &lt;10 min (~30 exhaustive); basictest &rarr; seconds-to-sub-minute.</td></tr>
+</table></div>
+
+<h3>Explicitly paused (advisor directive)</h3>
+<div class="chips">
+  <span class="chip">batched EntranceField build</span>
+  <span class="chip">LaunchFrontier capability probe</span>
+  <span class="chip">service-lane tuning</span>
+  <span class="chip">G0R hour-marches</span>
+  <span class="chip">any simulator approximation — permanently off the table</span>
+</div>
+
+<h2>How sessions 18&ndash;19 led here</h2>
+<div class="cols2">
+  <div class="panel" style="margin:0">
+    <h3 style="margin-top:0">Session 18 — the march works</h3>
+    <p style="font-size:14px">First real-map runs: launch aims, service order, horizons, and exit diversity each measured and fixed. The explorer autonomously chains f0&rarr;f1&rarr;f2 with every edge replaying bitwise; f3 blocked by slow arrivals. Entrance refinement measured at <span class="k">98&ndash;99.5%</span> of all wall-clock.</p>
+  </div>
+  <div class="panel" style="margin:0">
+    <h3 style="margin-top:0">Session 19 — the smoking gun</h3>
+    <p style="font-size:14px">The resource-preservation service lane lifted the f2 capability tail (606 u/s @ z 157 vs 510 @ 125) but couldn't buy f3 in an hour. The K-duplication instrument found <span class="k">84&ndash;85%</span> of all entrance evals re-solving ~5,400&ndash;6,000 distinct physical problems 4.2&times; over — <em>policy-invariant</em>. Duplication this structural pointed past batching to the formulation itself.</p>
+  </div>
+</div>
+
+<h2>What happens next</h2>
+<div class="note">
+<p><strong>1. The state equivalence/partition rule.</strong> Make the forward sweep's per-cell efficiency competitive with RefSolve on easy targets while keeping its one-sweep-many-cells scaling. The measured leaks: 4.8M strikes &rarr; 330 cells of information; 10.2M states lost at an arbitrary cap. Adaptive cells with exact representatives + certified optimistic envelopes + honest unresolved status.</p>
+<p><strong>2. Rebuild Entrance production on the forward field.</strong> RefSolve becomes the oracle (its 251 exclusive cells and 27 quality wins are the falsification feed), polisher, and witness constructor. Field values remain actual replayed trajectories — the old field's optimistic-composite failure stays dead.</p>
+<p><strong>3. Then G0R</strong>, with identical search semantics, and the wall-time ledger: unique physical problems, unique schedules, exact replays, total MoveTicks, states, edges.</p>
+<p style="color:var(--ink2)"><strong>Targets:</strong> real maps (30+ ramps, 60+ s) under 10 minutes, ~30 for exhaustive; basictest trending to seconds-to-sub-minute. The simulator's measured 1.4M ticks/s single-thread — with arithmetic-first pruning, honest compression, and untouched parallel headroom — is what makes those numbers reachable without trading away a single bit of exactness.</p>
+</div>
+
+<div class="footer">
+SourceTAS &middot; branch <span class="mono">x64-port-tas-engine</span> &middot; session 20 &middot; suites: groute 11/11, faceleg 6/6, exitlazy 8/8, exitenv 8/8, exitfrontier 9/9, exitfit 10/10, efrefine 7/7, airprops 24/24, airsuite 48/48, airrec VERIFIED, wishparity, carve M1.4, airsolve M1.3 &middot; design of record: Docs/ExitFieldSpec.md
+</div>
+</div>
