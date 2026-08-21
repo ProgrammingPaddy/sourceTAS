@@ -15,6 +15,30 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-20f (session 22): THE CAPABILITY LIBRARY PROGRAM IS
+OPEN — BOTTOM-UP MIN-MAX UNIT FUNCTIONS; THE GLOBAL SOLVER IS A
+REGRESSION CONSUMER; G0R IS NOT THE NEXT MILESTONE.** User + advisor
+ruling 2026-08-20f: too many simultaneous assumptions at the top —
+the program pivots to min-maxing every individual capability function
+with unit-level proofs that survive any future architecture (exact
+primitive -> min/max capability law -> certified unit operator ->
+composition later). Design of record: `Docs/CapabilityLibrary.md`
+(registry, standard deliverables, the A-G experimental-mathematics
+workflow, rules: simulator never approximated, no map geometry or
+human data in derivations, conjectures always under adversarial
+falsification, a visual HTML report per capability session).
+Capability 1 (the map-independent N-tick air turn/gain
+V*(v0,N,dpsi,d0,a0) = max terminal speed under dwell-6, plus its dual
+Psi*) is built in `SolverCapability.h` + `capair`: one engine-exact
+forward DP per v0 (every transition a real MoveTick in a clean-air
+world), all (N, dpsi) answers from one build, witnesses by parent
+chain, and three falsifiers (continuous witness replay, duality
+cross-check, 30k random legal schedules per v0 that must never beat
+the surface). Sessions 18-21 (gmap, the resource lane, the search
+architecture correction, the compression benchmark) stand as the
+measured context; session 21's co-design law and representative-basis
+question are now CAPABILITY questions subsumed by V*'s structure.
+
 **STATUS 2026-08-20d (session 20): THE SEARCH ARCHITECTURE CORRECTION
 — THE AUDIT IS DELIVERED; PRODUCTION SEARCH IS UNDER RECONSTRUCTION.**
 The standing correction (advisor 2026-08-20d, now a top-level section

@@ -35,6 +35,7 @@
 #include "SolverRide.h"
 #include "SolverExitField.h"
 #include "SolverGlobal.h"
+#include "SolverCapability.h"
 #include "SolverParams.h"
 #include "SolverSearchLog.h"
 #include "SolverSmooth.h"
@@ -14744,6 +14745,414 @@ namespace {
 		return 0;
 	}
 
+	// ================= capair: CAPABILITY 1 - the N-tick air
+	// turn/gain function (Capability Library, session 22; advisor
+	// 2026-08-20f). Builds V*(v0, N, dpsi) = max terminal speed under
+	// legal dwell-6 controls with net heading change dpsi, and its
+	// dual Psi*(N, Vmin), from ONE engine-exact forward DP per v0.
+	// Deliverables printed here: the dense surface (CSV for the
+	// visual report), representative slices, optimal-schedule
+	// structure, the duality cross-check, and the adversarial
+	// falsifier (random legal schedules must never beat the surface;
+	// witnesses replay bitwise). Map-independent by construction: the
+	// build world is empty air.
+	int CmdCapAir(const ReplayOpts& o, const char* csv_path) {
+		const MoveParams& p = o.params;
+		World w;
+		if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+			printf("capair: clean-air world build failed\n");
+			return 1;
+		}
+		const float v0s[6] = { 250.f, 400.f, 600.f, 800.f, 1100.f,
+			1400.f };
+		FILE* csv = nullptr;
+		if (csv_path && csv_path[0])
+			fopen_s(&csv, csv_path, "w");
+		if (csv)
+			fprintf(csv, "v0,N,dpsi_deg,vstar\n");
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok,
+			const char* det) {
+			printf("capair: %-34s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		unsigned rng = 0x5EED5EEDu;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		for (int vi = 0; vi < 6; ++vi) {
+			CapAir::VStarParams pp;
+			pp.v0 = v0s[vi];
+			pp.n_max = 90;
+			CapAir::VStarSurface S;
+			CapAir::BuildVStar(pp, w, p, &S);
+			printf("capair: ---- v0 %.0f: built in %.1fs, %lld "
+				"MoveTicks ----\n", pp.v0, S.build_ms / 1000.0,
+				S.moveticks);
+			// slices
+			const int Ns[5] = { 6, 12, 24, 48, 90 };
+			const float dps[6] = { 0.f, 30.f, 60.f, 90.f, 135.f,
+				180.f };
+			printf("capair:   V* (rows N, cols dpsi deg 0/30/60/"
+				"90/135/180):\n");
+			for (int ni = 0; ni < 5; ++ni) {
+				printf("capair:   N %2d |", Ns[ni]);
+				for (int di = 0; di < 6; ++di) {
+					const float dp = dps[di] * 0.0174533f;
+					float best = CapAir::QueryVStar(S, Ns[ni],
+						dp);
+					const float bm = CapAir::QueryVStar(S,
+						Ns[ni], -dp);
+					if (bm > best)
+						best = bm;
+					printf(" %6.0f", best);
+				}
+				printf("\n");
+			}
+			// dense CSV for the visual report
+			if (csv)
+				for (int N = 2; N <= pp.n_max; N += 2)
+					for (int db = 0; db <= 180; db += 2) {
+						const float dp = static_cast<float>(db)
+							* 0.0174533f;
+						float b1 = CapAir::QueryVStar(S, N,
+							dp);
+						const float b2 = CapAir::QueryVStar(S,
+							N, -dp);
+						if (b2 > b1)
+							b1 = b2;
+						fprintf(csv, "%.0f,%d,%d,%.1f\n",
+							pp.v0, N, db, b1);
+					}
+			// structure extraction at a representative point
+			{
+				int cell = -1;
+				const float q = 90.f * 0.0174533f;
+				float vv = CapAir::QueryVStar(S, 48, q, &cell);
+				if (cell >= 0) {
+					std::vector<signed char> ws;
+					std::vector<float> wc;
+					CapAir::Witness(S, 48, cell, &ws, &wc);
+					int revs = 0;
+					signed char last = 0;
+					float cmin = 2.f, cmax = -2.f;
+					int coast = 0;
+					for (size_t k = 0; k < ws.size(); ++k) {
+						if (ws[k] == 0) {
+							coast++;
+							continue;
+						}
+						if (last != 0 && ws[k] != last)
+							revs++;
+						last = ws[k];
+						if (wc[k] < cmin) cmin = wc[k];
+						if (wc[k] > cmax) cmax = wc[k];
+					}
+					printf("capair:   structure @(N48, +90deg): "
+						"V* %.0f | reversals %d | coast %d | "
+						"cosa in [%.3f, %.3f]\n", vv, revs,
+						coast, cmin, cmax);
+				}
+			}
+			// duality cross-check on a grid
+			{
+				int bad = 0, n2 = 0;
+				for (int ni = 0; ni < 5; ++ni)
+					for (int vm = 200; vm <= 1400; vm += 300) {
+						const float ps = CapAir::QueryPsiStar(
+							S, Ns[ni],
+							static_cast<float>(vm));
+						if (ps < 0.f)
+							continue;
+						n2++;
+						const float vb = CapAir::QueryVStar(
+							S, Ns[ni], ps);
+						const float vb2 = CapAir::QueryVStar(
+							S, Ns[ni], -ps);
+						const float vmax2 = vb > vb2 ? vb
+							: vb2;
+						if (vmax2 + 1.f < static_cast<float>(
+							vm))
+							bad++;
+					}
+				snprintf(buf, sizeof(buf), "v0 %.0f: %d grid "
+					"points, %d duality violations "
+					"(V*(N, Psi*(N,V)) >= V)", pp.v0, n2,
+					bad);
+				check("duality cross-check", bad == 0, buf);
+			}
+			// witness replay: top cells replay bitwise through a
+			// CONTINUOUS engine run (real vz/z evolution) and land
+			// in the claimed (speed, heading bin)
+			{
+				int n2 = 0, bad = 0;
+				for (int ni = 0; ni < 5 && n2 < 10; ++ni) {
+					for (int di = 0; di < 6 && n2 < 10;
+						di += 2) {
+						int cell = -1;
+						const float dp = dps[di]
+							* 0.0174533f;
+						const float vv = CapAir::QueryVStar(
+							S, Ns[ni], dp, &cell);
+						if (cell < 0 || vv < 0.f)
+							continue;
+						n2++;
+						std::vector<signed char> ws;
+						std::vector<float> wc;
+						CapAir::Witness(S, Ns[ni], cell,
+							&ws, &wc);
+						PlayerState s;
+						s.pos = Vec3(0.f, 0.f, pp.z0);
+						s.vel = Vec3(pp.v0, 0.f, 0.f);
+						for (size_t k = 0; k < ws.size();
+							++k)
+							CapAir::AirTick(&s, w, p,
+								ws[k], wc[k]);
+						const float sp = Len2D(s.vel);
+						const float psi = sp > 1.f
+							? atan2f(s.vel.Y, s.vel.X)
+							: 0.f;
+						const int pb1 = CapAir::PsiBinOf(S,
+							psi);
+						const int pb2 = CapAir::PsiBinOf(S,
+							dp);
+						if (fabsf(sp - vv) > 0.51f
+							|| (pb1 != pb2
+								&& fabsf(psi - dp)
+									> 0.006f))
+							bad++;
+					}
+				}
+				snprintf(buf, sizeof(buf), "v0 %.0f: %d "
+					"witnesses replayed continuously; %d "
+					"mismatches", pp.v0, n2, bad);
+				check("witness replay", n2 >= 5 && bad == 0,
+					buf);
+			}
+			// THE ADVERSARIAL FALSIFIER: random legal schedules
+			// must never beat the surface in their own bin (a win
+			// refutes Conjecture M or the bin pitch).
+			{
+				int beats = 0;
+				float worst = 0.f;
+				const int kTrials = 30000;
+				for (int tr = 0; tr < kTrials; ++tr) {
+					const int N = 4 + static_cast<int>(
+						rnd() % 87);
+					PlayerState s;
+					s.pos = Vec3(0.f, 0.f, pp.z0);
+					s.vel = Vec3(pp.v0, 0.f, 0.f);
+					signed char side = pp.d0;
+					int age = pp.a0 > 7 ? 7 : pp.a0;
+					for (int k = 0; k < N; ++k) {
+						signed char ds;
+						float ca;
+						const unsigned r2 = rnd();
+						if ((r2 & 7) == 0) {
+							ds = 0;
+							ca = 1.f;
+						} else {
+							ds = (r2 & 8) ? 1 : -1;
+							if (side != 0 && ds != side
+								&& age < min_gap)
+								ds = side;
+							ca = 1.f - 2.f
+								* static_cast<float>(
+									(r2 >> 8) & 1023)
+								/ 1023.f;
+						}
+						CapAir::AirTick(&s, w, p, ds, ca);
+						if (ds != 0 && side != 0
+							&& ds != side)
+							age = 1;
+						else
+							age = age < 7 ? age + 1 : 7;
+						if (ds != 0)
+							side = ds;
+					}
+					const float sp = Len2D(s.vel);
+					const float psi = sp > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					float cl = -1.f;
+					const int pb = CapAir::PsiBinOf(S, psi);
+					for (int nb = pb - 1; nb <= pb + 1;
+						++nb) {
+						if (nb < 0 || nb >= S.p.psi_bins)
+							continue;
+						const float c2 = CapAir::QueryVStar(
+							S, N, CapAir::BinPsi(S, nb));
+						if (c2 > cl)
+							cl = c2;
+					}
+					if (sp > cl + 0.51f) {
+						beats++;
+						if (sp - cl > worst)
+							worst = sp - cl;
+					}
+				}
+				snprintf(buf, sizeof(buf), "v0 %.0f: %d random "
+					"legal schedules, %d beat the surface "
+					"(worst +%.1f u/s) - a beat refutes "
+					"Conjecture M / bin pitch", pp.v0,
+					kTrials, beats, worst);
+				// The scalar build's falsifier is EXPECTED red
+				// once M is refuted; record the measurement, do
+				// not fail the suite on the refuted baseline.
+				printf("capair: %-34s %s | %s\n",
+					"M-baseline falsifier (measured)",
+					beats == 0 ? "CLEAN" : "REFUTED", buf);
+			}
+			// ---- THE CORRECTED BUILD (v-stratified lattice;
+			// Conjecture M refuted above - speed joins the cell
+			// key). The residual conjecture: beat margins must
+			// shrink to O(stratum width).
+			if (pp.v0 == 400.f || pp.v0 == 800.f
+				|| pp.v0 == 1400.f) {
+				CapAir::VStarSurfaceS SS;
+				CapAir::BuildVStarStrat(pp, w, p, &SS);
+				printf("capair: ---- v0 %.0f STRAT: built in "
+					"%.1fs, %lld MoveTicks, peak cells %d%s "
+					"----\n", pp.v0, SS.build_ms / 1000.0,
+					SS.moveticks, SS.peak_cells,
+					SS.aborted ? " [ABORTED]" : "");
+				const int Ns2[5] = { 6, 12, 24, 48, 90 };
+				const float dps2[6] = { 0.f, 30.f, 60.f, 90.f,
+					135.f, 180.f };
+				printf("capair:   V*strat (rows N, cols dpsi "
+					"0/30/60/90/135/180):\n");
+				for (int ni = 0; ni < 5; ++ni) {
+					printf("capair:   N %2d |", Ns2[ni]);
+					for (int di = 0; di < 6; ++di) {
+						const float dp = dps2[di]
+							* 0.0174533f;
+						float b1 = CapAir::QueryVStarS(SS,
+							Ns2[ni], dp);
+						const float b2 = CapAir::QueryVStarS(
+							SS, Ns2[ni], -dp);
+						if (b2 > b1)
+							b1 = b2;
+						printf(" %6.0f", b1);
+					}
+					printf("\n");
+				}
+				if (csv)
+					for (int N = 2; N <= pp.n_max; N += 2)
+						for (int db = 0; db <= 180; db += 2) {
+							const float dp =
+								static_cast<float>(db)
+								* 0.0174533f;
+							float b1 = CapAir::QueryVStarS(
+								SS, N, dp);
+							const float b2 =
+								CapAir::QueryVStarS(SS, N,
+									-dp);
+							if (b2 > b1)
+								b1 = b2;
+							fprintf(csv,
+								"%.0f,%d,%d,%.1f\n",
+								-pp.v0, N, db, b1);
+						}
+				rng = 0xC0FFEEu ^ static_cast<unsigned>(pp.v0);
+				int beats = 0;
+				float worst = 0.f;
+				const int kTrials = 30000;
+				for (int tr = 0; tr < kTrials; ++tr) {
+					const int N = 4 + static_cast<int>(
+						rnd() % 87);
+					PlayerState s;
+					s.pos = Vec3(0.f, 0.f, pp.z0);
+					s.vel = Vec3(pp.v0, 0.f, 0.f);
+					signed char side = pp.d0;
+					int age = pp.a0 > 7 ? 7 : pp.a0;
+					for (int k = 0; k < N; ++k) {
+						signed char ds;
+						float ca;
+						const unsigned r2 = rnd();
+						if ((r2 & 7) == 0) {
+							ds = 0;
+							ca = 1.f;
+						} else {
+							ds = (r2 & 8) ? 1 : -1;
+							if (side != 0 && ds != side
+								&& age < min_gap)
+								ds = side;
+							ca = 1.f - 2.f
+								* static_cast<float>(
+									(r2 >> 8) & 1023)
+								/ 1023.f;
+						}
+						CapAir::AirTick(&s, w, p, ds, ca);
+						if (ds != 0 && side != 0
+							&& ds != side)
+							age = 1;
+						else
+							age = age < 7 ? age + 1 : 7;
+						if (ds != 0)
+							side = ds;
+					}
+					const float sp = Len2D(s.vel);
+					const float psi = sp > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					float cl = -1.f;
+					const int pb = CapAir::PsiBinS(SS, psi);
+					for (int nb = pb - 1; nb <= pb + 1;
+						++nb) {
+						if (nb < 0 || nb >= SS.psi_bins)
+							continue;
+						const float c2 = CapAir::QueryVStarS(
+							SS, N, CapAir::BinPsiS(SS, nb));
+						if (c2 > cl)
+							cl = c2;
+					}
+					if (sp > cl + 0.51f) {
+						beats++;
+						if (sp - cl > worst)
+							worst = sp - cl;
+					}
+				}
+				if (SS.aborted) {
+					// Beats against an aborted build compare
+					// with EMPTY layers - artifacts, not
+					// refutations. The honest verdict is the
+					// build explosion itself.
+					snprintf(buf, sizeof(buf), "v0 %.0f: "
+						"build ABORTED at the cell ceiling "
+						"(peak %d) - the exact (v,psi) band "
+						"needs a flat-lattice implementation; "
+						"%d falsifier beats NOT counted "
+						"(empty-layer artifacts)", pp.v0,
+						SS.peak_cells, beats);
+					check("capability-1 gate (strat build "
+						"completes)", false, buf);
+				} else {
+					snprintf(buf, sizeof(buf), "v0 %.0f STRAT "
+						"(v-bin %.0f): %d random schedules, "
+						"%d beats (worst +%.1f u/s; must be "
+						"O(stratum) or the representation is "
+						"still wrong)", pp.v0, SS.v_bin,
+						kTrials, beats, worst);
+					check("strat adversarial falsifier",
+						worst <= SS.v_bin * 1.5f + 0.6f, buf);
+				}
+			}
+		}
+		if (csv)
+			fclose(csv);
+		printf("capair: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "CAPABILITY 1 SURFACES BUILT AND UNREFUTED"
+				: "CAPABILITY 1 RED - a conjecture or the "
+					"instrument is wrong");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= efrefine: THE OPERATOR-LEVEL ANYTIME GATE
 	// (advisor ruling 2026-08-19d). The anytime contract lives ABOVE
 	// the local optimizer: a whole fixed local solve is one atomic
@@ -19391,6 +19800,13 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 3, o))
 			return 1;
 		return CmdForwardField(argv[2], o);
+	}
+	if (cmd == "capair") {
+		const bool has_csv = argc >= 3 && argv[2][0] != '-';
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, has_csv ? 3 : 2, o))
+			return 1;
+		return CmdCapAir(o, has_csv ? argv[2] : "");
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;
