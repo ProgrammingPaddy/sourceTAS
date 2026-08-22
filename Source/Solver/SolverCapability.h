@@ -1469,7 +1469,8 @@ namespace CapP2P {
 		float ex = 0.f, ey = 0.f;    // achieved endpoint
 		float evx = 0.f, evy = 0.f;  // achieved terminal velocity
 		float residual = 1e30f;      // |endpoint - target|
-		int rollouts = 0;            // exact rollouts spent
+		int rollouts = 0;            // exact kernel rollouts spent
+		long long law_evals = 0;     // O(1) segment-composition evals
 		int start_side = 1;
 		int nrev = 0;
 		int revs[3] = { 0, 0, 0 };
@@ -1554,6 +1555,96 @@ namespace CapP2P {
 	//     from the max-gain shell deep into the interior;
 	// (c) the exact-hit tail gets more authority (longer tail, more
 	//     Newton iterations, restarts).
+	// ---- v4 (session 27): EXACT SEGMENT COMPOSITION for reversal
+	// schedules. Under maximum gain the per-tick turn magnitude
+	// atan(cap/s_n) and step length s_{n+1}*dt are schedule-
+	// independent, so a constant-side run [a, b) is always the SAME
+	// spiral segment (or its mirror for the other side). Precomputing
+	// the all-plus trajectory's prefix headings/positions therefore
+	// lets ANY reversal schedule's endpoint be composed in O(k) with
+	// no trigonometry (rotation composition uses the tabled cos/sin).
+	// This is the robotics motion-primitive concatenation trick
+	// specialized to our spirals (the family itself is the Dubins
+	// arc-segment structure with speed-varying turn radius). It makes
+	// the candidate enumeration EXHAUSTIVE over k <= 2 and dense over
+	// k = 3 at ~100 ns per candidate; the certified law-identity gate
+	// bounds the law-vs-kernel deviation (~1u over 90 ticks), and the
+	// top candidates are kernel-verified before refinement.
+	struct SegTables {
+		int N = 0;
+		std::vector<double> cpsi, spsi;   // cos/sin of prefix heading
+		std::vector<double> wx, wy;       // prefix position
+	};
+	inline void BuildSegTables(const MoveParams& p, float v0, int N,
+	                           SegTables* T) {
+		T->N = N;
+		T->cpsi.assign(static_cast<size_t>(N) + 1, 1.0);
+		T->spsi.assign(static_cast<size_t>(N) + 1, 0.0);
+		T->wx.assign(static_cast<size_t>(N) + 1, 0.0);
+		T->wy.assign(static_cast<size_t>(N) + 1, 0.0);
+		double psi = 0.0, x = 0.0, y = 0.0;
+		double s2 = static_cast<double>(v0) * v0;
+		const double cap = p.air_speed_cap;
+		const double dt = p.dt;
+		for (int n = 0; n < N; ++n) {
+			const double s = sqrt(s2);
+			psi += atan2(cap, s);       // turn BEFORE the step
+			s2 += cap * cap;
+			const double snew = sqrt(s2);
+			x += snew * dt * cos(psi);  // step along the NEW heading
+			y += snew * dt * sin(psi);
+			T->cpsi[static_cast<size_t>(n) + 1] = cos(psi);
+			T->spsi[static_cast<size_t>(n) + 1] = sin(psi);
+			T->wx[static_cast<size_t>(n) + 1] = x;
+			T->wy[static_cast<size_t>(n) + 1] = y;
+		}
+	}
+	inline void EvalSegs(const SegTables& T, int s0sign,
+	                     const int* revs, int nrev, float* ex,
+	                     float* ey) {
+		double cphi = 1.0, sphi = 0.0;
+		double px = 0.0, py = 0.0;
+		int a = 0;
+		int sign = s0sign;
+		for (int j = 0; j <= nrev; ++j) {
+			const int b = j < nrev ? revs[j] : T.N;
+			if (b > a) {
+				const double dx = T.wx[static_cast<size_t>(b)]
+					- T.wx[static_cast<size_t>(a)];
+				const double dy = T.wy[static_cast<size_t>(b)]
+					- T.wy[static_cast<size_t>(a)];
+				const double ca = T.cpsi[static_cast<size_t>(a)];
+				const double sa = T.spsi[static_cast<size_t>(a)];
+				const double cb = T.cpsi[static_cast<size_t>(b)];
+				const double sb = T.spsi[static_cast<size_t>(b)];
+				// the segment in its own starting frame
+				double lx = ca * dx + sa * dy;
+				double ly = -sa * dx + ca * dy;
+				// the segment's rotation e^{i(psi_b - psi_a)}
+				double cd = cb * ca + sb * sa;
+				double sd = sb * ca - cb * sa;
+				// THE BASIS BRIDGE (SolverStrafe.h): a STORED side
+				// of +1 rotates the heading NEGATIVE (true rotation
+				// side = -stored side, measured 98/98). The tables
+				// are built positive-rotation, so stored +1 takes
+				// the mirror.
+				if (sign > 0) {
+					ly = -ly;
+					sd = -sd;
+				}
+				px += cphi * lx - sphi * ly;
+				py += sphi * lx + cphi * ly;
+				const double nc = cphi * cd - sphi * sd;
+				sphi = cphi * sd + sphi * cd;
+				cphi = nc;
+			}
+			sign = -sign;
+			a = b;
+		}
+		*ex = static_cast<float>(px);
+		*ey = static_cast<float>(py);
+	}
+
 	struct P2PCand {
 		float res = 1e30f;
 		int ss = 1;
@@ -1615,25 +1706,39 @@ namespace CapP2P {
 				top[worst].bl = bl2;
 			}
 		};
+		// segment tables for this (v0, N): the law endpoints of any
+		// reversal schedule in O(k) each
+		SegTables T;
+		BuildSegTables(k.p, v0, N, &T);
+		auto offerSeg = [&](int ss, const int* revs, int nrev) {
+			float ex, ey;
+			EvalSegs(T, ss, revs, nrev, &ex, &ey);
+			best.law_evals++;
+			const float dx = ex - tx, dy = ey - ty;
+			offer(sqrtf(dx * dx + dy * dy), ss, revs, nrev, 0, 0);
+		};
 		for (int ss = -1; ss <= 1; ss += 2) {
 			int revs[3] = { 0, 0, 0 };
-			offer(eval(ss, revs, 0, 0, 0, 0, 0.f, 0.f), ss, revs,
-				0, 0, 0);
-			for (int r1 = 1; r1 < N; r1 += 3) {
+			offerSeg(ss, revs, 0);
+			// k = 1 and k = 2: EXHAUSTIVE (every legal reversal
+			// placement)
+			for (int r1 = 1; r1 < N; ++r1) {
 				revs[0] = r1;
-				offer(eval(ss, revs, 1, 0, 0, 0, 0.f, 0.f), ss,
-					revs, 1, 0, 0);
-			}
-			for (int r1 = 1; r1 < N; r1 += 6) {
-				revs[0] = r1;
-				for (int r2 = r1 + 6; r2 < N; r2 += 6) {
+				offerSeg(ss, revs, 1);
+				for (int r2 = r1 + 6; r2 < N; ++r2) {
 					revs[1] = r2;
-					offer(eval(ss, revs, 2, 0, 0, 0, 0.f, 0.f),
-						ss, revs, 2, 0, 0);
-					for (int r3 = r2 + 6; r3 < N; r3 += 12) {
+					offerSeg(ss, revs, 2);
+				}
+			}
+			// k = 3: dense (strides 2/2/3; the stage-2 climb spans
+			// the gaps)
+			for (int r1 = 1; r1 < N; r1 += 2) {
+				revs[0] = r1;
+				for (int r2 = r1 + 6; r2 < N; r2 += 2) {
+					revs[1] = r2;
+					for (int r3 = r2 + 6; r3 < N; r3 += 3) {
 						revs[2] = r3;
-						offer(eval(ss, revs, 3, 0, 0, 0, 0.f,
-							0.f), ss, revs, 3, 0, 0);
+						offerSeg(ss, revs, 3);
 					}
 				}
 			}
@@ -1665,7 +1770,11 @@ namespace CapP2P {
 			if (top[ci].res > 1e29f)
 				continue;
 			P2PCand c = top[ci];
-			float cur = c.res;
+			// kernel-truth seed evaluation of the candidate's own
+			// shape (stage 1's law ranking is ~1u off the kernel;
+			// v3 also never kernel-evaluated an unimproved winner)
+			float cur = eval(c.ss, c.revs, c.nrev, c.bs, c.bl, 0,
+				0.f, 0.f);
 			bool improved = true;
 			int guard = 0;
 			while (improved && guard++ < 12) {
@@ -1848,4 +1957,270 @@ namespace CapP2P {
 	}
 
 } // namespace CapP2P
+
+// ======================================================================
+// CAPGROUND - registry A25 (flat-ground movement law) and A30 (jump
+// law), session 27. Partial evaluation of the GROUNDED MoveTick chain
+// under the FLAT-FLOOR domain: one axial floor plane, standing hull,
+// no duck (A29 debt), no water (A32), no walls within a tick's sweep,
+// surface_friction 1 on ground. Every elision cites the engine line:
+//   - walk tick (MoveTick 931-957 grounded branch): stamina drain
+//     (887-891) -> StartGravity half (933) -> basevel.Z (934-935) ->
+//     jump gate -> grounded vz zero + Friction (940-943) ->
+//     CheckVelocity -> WalkMove (465-531: stamina pow scale, wish,
+//     ground accelerate with NO 30 cap, vz zero, <1 u/s stop, flat
+//     trace frac 1, StayOnGround, vz zero) -> CategorizePosition
+//     (state-only on flat ground, no origin snap) -> CheckVelocity ->
+//     FinishGravity half (951) -> grounded vz zero -> CheckVelocity.
+//   - jump tick (CheckJumpButton 295-379, ADD path): gates ->
+//     leaves ground -> vz = float(double(impulse) + double(startz))
+//     -> stamina scale -> stamina armed -> FinishGravity FUNCTION
+//     (275-289, the (g*e)*(dt*0.5) pairing + CheckVelocity) -> then
+//     the AIRBORNE chain of the tick (the A4 kernel's own middle).
+// Gates: capground (parity vs the engine on the flat world, bitwise).
+// ======================================================================
+namespace CapGround {
+
+	struct GroundCtx {
+		MoveParams p;
+		Vec3 basevel;                 // runtime zeros
+		float rest_z = 0.f;           // settled feet height (measured)
+		float floor_top_padded = 0.f; // rest-frame plane for the
+		                              // StayOnGround analytic trace
+	};
+	inline GroundCtx MakeGroundCtx(const MoveParams& p, float rest_z) {
+		GroundCtx g;
+		g.p = p;
+		g.rest_z = rest_z;
+		// the settled hull rests ONE trace epsilon (1/32) above the
+		// hull-expanded floor plane - the analytic StayOnGround trace
+		// measures distances to the PLANE (measured: engine keeps
+		// feet z 0.03125 with the plane at 0)
+		g.floor_top_padded = rest_z - 0.03125f;
+		return g;
+	}
+	// the flat-floor test world: an axial slab, top at z = 0
+	inline bool MakeFlatWorld(World* w, const Hulls& hulls) {
+		std::vector<Vec3> ns;
+		std::vector<float> ds;
+		ns.push_back(Vec3(0.f, 0.f, 1.f));
+		ds.push_back(0.f);
+		ns.push_back(Vec3(0.f, 0.f, -1.f));
+		ds.push_back(200.f);
+		ns.push_back(Vec3(1.f, 0.f, 0.f));
+		ds.push_back(20000.f);
+		ns.push_back(Vec3(-1.f, 0.f, 0.f));
+		ds.push_back(20000.f);
+		ns.push_back(Vec3(0.f, 1.f, 0.f));
+		ds.push_back(20000.f);
+		ns.push_back(Vec3(0.f, -1.f, 0.f));
+		ds.push_back(20000.f);
+		if (!w->AddTestBrush(ns, ds, hulls))
+			return false;
+		w->FinalizeTestWorld();
+		return true;
+	}
+	// Friction, re-coded 1-to-1 (SolverMove.cpp 260-272; the function
+	// is file-local there)
+	inline void KFriction(const MoveParams& p, float sf, Vec3* vel) {
+		const float speed = Len(*vel);
+		if (speed < 0.1f)
+			return;
+		const float control = (speed < p.stopspeed) ? p.stopspeed
+			: speed;
+		const float drop = control * p.friction * sf * p.dt;
+		float newspeed = speed - drop;
+		if (newspeed < 0.f)
+			newspeed = 0.f;
+		if (newspeed != speed)
+			*vel = Scale(*vel, newspeed / speed);
+	}
+	// FinishGravity FUNCTION pairing (SolverMove.cpp 275-289): fires
+	// only inside a successful jump
+	inline void KFinishGravityFn(const MoveParams& p,
+	                             float gravity_scale, Vec3* vel) {
+		float ent_gravity = gravity_scale;
+		if (ent_gravity == 0.f)
+			ent_gravity = 1.f;
+		vel->Z -= (p.gravity * ent_gravity) * (p.dt * 0.5f);
+		CapAir::KernelCheckVelocity(p, &vel->X, &vel->Y, &vel->Z);
+	}
+	// The flat-ground WALK tick (buttons = 0 or a refused jump).
+	// Outputs the full next state; stamina is carried state.
+	inline void WalkKernelTick(const GroundCtx& g, float px, float py,
+	                           float pz, float vx, float vy,
+	                           float stamina, float yaw, float fm,
+	                           float sm, float* npx, float* npy,
+	                           float* npz, float* nvx, float* nvy,
+	                           float* nst) {
+		const MoveParams& p = g.p;
+		Vec3 pos(px, py, pz);
+		Vec3 vel(vx, vy, 0.f);
+		// stamina drain (887-891)
+		float st = stamina;
+		if (st > 0.f) {
+			st -= p.dt * 1000.f;
+			if (st < 0.f)
+				st = 0.f;
+		}
+		// StartGravity half + basevel.Z (933-935)
+		vel.Z -= 1.f * p.gravity * 0.5f * p.dt;
+		vel.Z += g.basevel.Z * p.dt;
+		// grounded: vz zero + Friction (940-943)
+		vel.Z = 0.f;
+		KFriction(p, 1.f, &vel);
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		// WalkMove (465-531)
+		if (st > 0.f) {
+			const float base = 1.f - st * p.stamina_scale_per_ms;
+			const float ratio = powf(base, p.dt
+				* p.stamina_pow_rate);
+			vel.X *= ratio;
+			vel.Y *= ratio;
+		}
+		float wx, wy;
+		Fn::WishFromInput(yaw, fm, sm, &wx, &wy);
+		float wishspeed = sqrtf(wx * wx + wy * wy);
+		Vec3 wishdir(0.f, 0.f, 0.f);
+		if (wishspeed > 1e-6f)
+			wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
+		if (wishspeed > p.maxspeed)
+			wishspeed = p.maxspeed;
+		const float cur = Dot(vel, wishdir);
+		const float add = wishspeed - cur;
+		if (add > 0.f) {
+			float accelspeed = p.accelerate * p.dt * wishspeed
+				* 1.f;
+			if (accelspeed > add)
+				accelspeed = add;
+			vel = vel + Scale(wishdir, accelspeed);
+		}
+		vel.Z = 0.f;
+		bool early_stop = false;
+		if (Len(vel) < 1.f) {
+			vel = Vec3();
+			early_stop = true;   // WalkMove returns before the move
+		}
+		if (!early_stop) {
+			const Vec3 bv(g.basevel.X, g.basevel.Y, 0.f);
+			vel = vel + bv;
+			// the straight trace is free on the flat floor
+			// (frac 1, 519-524)
+			pos = Vec3(pos.X + vel.X * p.dt, pos.Y + vel.Y * p.dt,
+				pos.Z);
+			vel = vel - bv;
+			// StayOnGround (446-463) against the single floor
+			// plane: up-trace free (fu = 1), down-trace fraction
+			// mirrors TraceHull3's padded entry
+			{
+				const float startz = pos.Z + 2.f;
+				const float endz = pos.Z - p.stepsize;
+				const float d0 = startz - g.floor_top_padded;
+				const float d1 = endz - g.floor_top_padded;
+				if (d0 > 0.f && d1 <= 0.f) {
+					float tt = (d0 - 0.03125f) / (d0 - d1);
+					if (tt < 0.f)
+						tt = 0.f;
+					if (tt < 1.f) {
+						const float landz = startz
+							+ tt * (endz - startz);
+						if (fabsf(pos.Z - landz) > 0.015625f)
+							pos.Z = landz;
+					}
+				}
+			}
+			vel.Z = 0.f;
+		}
+		// CategorizePosition: state-only on flat ground (no snap);
+		// CheckVelocity; FinishGravity half; grounded vz zero;
+		// CheckVelocity (949-957)
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		vel.Z -= 1.f * p.gravity * 0.5f * p.dt;
+		vel.Z = 0.f;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		*npx = pos.X;
+		*npy = pos.Y;
+		*npz = pos.Z;
+		*nvx = vel.X;
+		*nvy = vel.Y;
+		*nst = st;
+	}
+	// The JUMP tick (grounded, IN_JUMP accepted: fresh press, or the
+	// autobunnyhopping bypass). ADD path only - the standing domain
+	// (the SET path belongs to the A29 duck debt).
+	inline void JumpKernelTick(const GroundCtx& g, float px, float py,
+	                           float pz, float vx, float vy,
+	                           float stamina, float yaw, float fm,
+	                           float sm, float* npx, float* npy,
+	                           float* npz, float* nvx, float* nvy,
+	                           float* nvz, float* nst) {
+		const MoveParams& p = g.p;
+		Vec3 pos(px, py, pz);
+		Vec3 vel(vx, vy, 0.f);
+		float st = stamina;
+		if (st > 0.f) {
+			st -= p.dt * 1000.f;
+			if (st < 0.f)
+				st = 0.f;
+		}
+		vel.Z -= 1.f * p.gravity * 0.5f * p.dt;
+		vel.Z += g.basevel.Z * p.dt;
+		// CheckJumpButton, ADD path (295-379); enablebunnyhopping
+		// true in the surf params so no 1.1x clamp
+		const float startz = vel.Z;
+		vel.Z = static_cast<float>(
+			static_cast<double>(1.f) * p.jump_impulse_d
+			+ static_cast<double>(startz));
+		if (st > 0.f) {
+			const float ratio = 1.f - st * p.stamina_scale_per_ms;
+			vel.Z *= ratio;
+		}
+		st = p.stamina_jump_ms;
+		KFinishGravityFn(p, 1.f, &vel);
+		// now airborne: friction skipped; CheckVelocity (944); the
+		// A4 air chain for the rest of the tick
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		float wx, wy;
+		Fn::WishFromInput(yaw, fm, sm, &wx, &wy);
+		float wishspeed = sqrtf(wx * wx + wy * wy);
+		Vec3 wishdir(0.f, 0.f, 0.f);
+		if (wishspeed > 1e-6f)
+			wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
+		if (wishspeed > p.maxspeed)
+			wishspeed = p.maxspeed;
+		const float wishspd = (wishspeed > p.air_speed_cap)
+			? p.air_speed_cap : wishspeed;
+		const float cur = Dot(vel, wishdir);
+		const float add = wishspd - cur;
+		if (add > 0.f) {
+			float accelspeed = p.airaccelerate * wishspeed * p.dt
+				* 1.f;
+			if (accelspeed > add)
+				accelspeed = add;
+			vel = vel + Scale(wishdir, accelspeed);
+		}
+		const Vec3 bv(g.basevel.X, g.basevel.Y, 0.f);
+		vel = vel + bv;
+		if (Len2(vel) == 0.f) {
+			vel = Vec3();
+		} else {
+			const Vec3 end = pos + Scale(vel, p.dt);
+			pos = pos + Scale(end - pos, 1.f);
+		}
+		vel = vel - bv;
+		// CategorizePosition: vz > non_jump_velocity skips the
+		// ground probe (state-only); the airborne tail (950-957)
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		vel.Z -= 1.f * p.gravity * 0.5f * p.dt;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		*npx = pos.X;
+		*npy = pos.Y;
+		*npz = pos.Z;
+		*nvx = vel.X;
+		*nvy = vel.Y;
+		*nvz = vel.Z;
+		*nst = st;
+	}
+
+} // namespace CapGround
 } // namespace Solver

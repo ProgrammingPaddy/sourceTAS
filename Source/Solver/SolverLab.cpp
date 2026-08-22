@@ -15289,6 +15289,296 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= capground: registry A25 (flat-ground movement
+	// law) + A30 (jump law), session 27. The decoded ground laws
+	// (friction, ground accelerate with no 30 cap, the stamina power
+	// curve, the double-precision jump impulse with its three gravity
+	// half-steps) packaged as kernels and proven BITWISE against the
+	// engine on a flat-floor world.
+	int CmdCapGround(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		World w;
+		if (!CapGround::MakeFlatWorld(&w, o.hulls)) {
+			printf("capground: flat world build failed\n");
+			return 1;
+		}
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capground: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		unsigned rng = 0x6E0B0DDu;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		// ---- settle: drop onto the floor, measure the rest height
+		float rest_z = 0.f;
+		{
+			PlayerState s;
+			s.pos = Vec3(0.f, 0.f, 50.f);
+			s.vel = Vec3(0.f, 0.f, 0.f);
+			for (int t = 0; t < 80; ++t)
+				MoveTick(s, w, p, 0.f, 0.f, 0.f, 0.f, 0.f, 0,
+					nullptr);
+			rest_z = s.pos.Z;
+			snprintf(buf, sizeof(buf), "grounded %d, rest feet z "
+				"%.6f, vel (%.3f %.3f %.3f)",
+				s.on_ground ? 1 : 0, rest_z, s.vel.X, s.vel.Y,
+				s.vel.Z);
+			check("settle onto the floor", s.on_ground
+				&& fabsf(s.vel.Z) < 0.001f, buf);
+		}
+		const CapGround::GroundCtx g = CapGround::MakeGroundCtx(p,
+			rest_z);
+		// ---- A25 walk-tick parity, bitwise
+		{
+			long long tested = 0, mm = 0;
+			int printed = 0;
+			for (int i = 0; i < 200000; ++i) {
+				const float sp = static_cast<float>(rnd() % 3500000)
+					/ 1000.f;
+				const float hh = static_cast<float>(rnd() % 628319)
+					/ 100000.f - 3.14159f;
+				const float vx = sp * cosf(hh);
+				const float vy = sp * sinf(hh);
+				const float yaw = static_cast<float>(rnd() % 72000)
+					/ 100.f - 360.f;
+				// stick mix: full/partial/zero forward and side
+				static const float sticks[5] = { 0.f, 113.f,
+					250.f, -113.f, -250.f };
+				const float fm = sticks[rnd() % 5u];
+				const float sm = sticks[rnd() % 5u];
+				const float st = (rnd() & 1)
+					? static_cast<float>(rnd() % 1315000) / 1000.f
+					: 0.f;
+				const float px = static_cast<float>(
+					static_cast<int>(rnd() % 20000u)) - 10000.f;
+				const float py = static_cast<float>(
+					static_cast<int>(rnd() % 20000u)) - 10000.f;
+				PlayerState s;
+				s.pos = Vec3(px, py, rest_z);
+				s.vel = Vec3(vx, vy, 0.f);
+				s.on_ground = true;
+				s.ground_brush = 0;
+				s.surface_friction = 1.f;
+				s.stamina = st;
+				MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, 0,
+					nullptr);
+				float npx, npy, npz, nvx, nvy, nst;
+				CapGround::WalkKernelTick(g, px, py,
+					rest_z, vx, vy, st, yaw, fm, sm, &npx, &npy,
+					&npz, &nvx, &nvy, &nst);
+				tested++;
+				const bool ok = memcmp(&s.vel.X, &nvx, 4) == 0
+					&& memcmp(&s.vel.Y, &nvy, 4) == 0
+					&& memcmp(&s.pos.X, &npx, 4) == 0
+					&& memcmp(&s.pos.Y, &npy, 4) == 0
+					&& memcmp(&s.pos.Z, &npz, 4) == 0
+					&& memcmp(&s.stamina, &nst, 4) == 0
+					&& s.vel.Z == 0.f;
+				if (!ok) {
+					mm++;
+					if (printed < 3) {
+						printed++;
+						printf("capground:   WALK MISMATCH v(%.6f "
+							"%.6f) st %.2f -> engine v(%.6f %.6f "
+							"%.6f) z %.6f | kernel v(%.6f %.6f) "
+							"z %.6f\n", vx, vy, st, s.vel.X,
+							s.vel.Y, s.vel.Z, s.pos.Z, nvx, nvy,
+							npz);
+					}
+				}
+			}
+			snprintf(buf, sizeof(buf), "%lld random grounded ticks "
+				"(speeds, sticks, stamina); %lld bitwise "
+				"mismatches (velocity, feet z, stamina)", tested,
+				mm);
+			check("A25 walk-tick parity", mm == 0, buf);
+		}
+		// wait - the position channel: the kernel starts from the
+		// SAME pre-tick position as the engine; compare x/y too
+		{
+			long long tested = 0, mm = 0;
+			for (int i = 0; i < 50000; ++i) {
+				const float sp = static_cast<float>(rnd() % 3500000)
+					/ 1000.f;
+				const float hh = static_cast<float>(rnd() % 628319)
+					/ 100000.f - 3.14159f;
+				const float px = static_cast<float>(
+					static_cast<int>(rnd() % 20000u)) - 10000.f;
+				const float py = static_cast<float>(
+					static_cast<int>(rnd() % 20000u)) - 10000.f;
+				const float yaw = static_cast<float>(rnd() % 72000)
+					/ 100.f - 360.f;
+				PlayerState s;
+				s.pos = Vec3(px, py, rest_z);
+				s.vel = Vec3(sp * cosf(hh), sp * sinf(hh), 0.f);
+				s.on_ground = true;
+				s.ground_brush = 0;
+				s.surface_friction = 1.f;
+				MoveTick(s, w, p, 0.f, yaw, 250.f, 0.f, 0.f, 0,
+					nullptr);
+				float npx, npy, npz, nvx, nvy, nst;
+				CapGround::WalkKernelTick(g, px, py, rest_z,
+					sp * cosf(hh), sp * sinf(hh), 0.f, yaw, 250.f,
+					0.f, &npx, &npy, &npz, &nvx, &nvy, &nst);
+				tested++;
+				if (memcmp(&s.pos.X, &npx, 4) != 0
+					|| memcmp(&s.pos.Y, &npy, 4) != 0)
+					mm++;
+			}
+			snprintf(buf, sizeof(buf), "%lld ticks; %lld position "
+				"x/y mismatches", tested, mm);
+			check("A25 position advance parity", mm == 0, buf);
+		}
+		// ---- A30 jump-tick parity, bitwise (fresh press)
+		{
+			long long tested = 0, mm = 0;
+			int printed = 0;
+			for (int i = 0; i < 50000; ++i) {
+				const float sp = static_cast<float>(rnd() % 3500000)
+					/ 1000.f;
+				const float hh = static_cast<float>(rnd() % 628319)
+					/ 100000.f - 3.14159f;
+				const float yaw = static_cast<float>(rnd() % 72000)
+					/ 100.f - 360.f;
+				const float st = (rnd() & 1)
+					? static_cast<float>(rnd() % 1315000) / 1000.f
+					: 0.f;
+				PlayerState s;
+				s.pos = Vec3(0.f, 0.f, rest_z);
+				s.vel = Vec3(sp * cosf(hh), sp * sinf(hh), 0.f);
+				s.on_ground = true;
+				s.ground_brush = 0;
+				s.surface_friction = 1.f;
+				s.stamina = st;
+				s.old_buttons = 0;
+				MoveTick(s, w, p, 0.f, yaw, 250.f, 0.f, 0.f,
+					IN_JUMP, nullptr);
+				float npx, npy, npz, nvx, nvy, nvz, nst;
+				CapGround::JumpKernelTick(g, 0.f, 0.f, rest_z,
+					sp * cosf(hh), sp * sinf(hh), st, yaw, 250.f,
+					0.f, &npx, &npy, &npz, &nvx, &nvy, &nvz,
+					&nst);
+				tested++;
+				const bool ok = memcmp(&s.vel.X, &nvx, 4) == 0
+					&& memcmp(&s.vel.Y, &nvy, 4) == 0
+					&& memcmp(&s.vel.Z, &nvz, 4) == 0
+					&& memcmp(&s.pos.X, &npx, 4) == 0
+					&& memcmp(&s.pos.Y, &npy, 4) == 0
+					&& memcmp(&s.pos.Z, &npz, 4) == 0
+					&& memcmp(&s.stamina, &nst, 4) == 0;
+				if (!ok) {
+					mm++;
+					if (printed < 3) {
+						printed++;
+						printf("capground:   JUMP MISMATCH st %.2f "
+							"-> engine v(%.6f %.6f %.6f) | kernel "
+							"v(%.6f %.6f %.6f)\n", st, s.vel.X,
+							s.vel.Y, s.vel.Z, nvx, nvy, nvz);
+					}
+				}
+			}
+			snprintf(buf, sizeof(buf), "%lld random jump ticks "
+				"(speeds, headings, stamina); %lld bitwise "
+				"mismatches (all channels + stamina)", tested, mm);
+			check("A30 jump-tick parity", mm == 0, buf);
+		}
+		// ---- A30 jump vz law table (measured)
+		{
+			printf("capground: jump vz law (stamina -> post-tick "
+				"vz): ");
+			const float sts[4] = { 0.f, 500.f, 1000.f, 1315.789f };
+			for (int i = 0; i < 4; ++i) {
+				PlayerState s;
+				s.pos = Vec3(0.f, 0.f, rest_z);
+				s.vel = Vec3(300.f, 0.f, 0.f);
+				s.on_ground = true;
+				s.ground_brush = 0;
+				s.stamina = sts[i];
+				MoveTick(s, w, p, 0.f, 0.f, 0.f, 0.f, 0.f,
+					IN_JUMP, nullptr);
+				printf(" %.0f->%.3f", sts[i], s.vel.Z);
+			}
+			printf("\n");
+		}
+		// ---- the release gate and the autobunnyhop bypass
+		{
+			PlayerState s;
+			s.pos = Vec3(0.f, 0.f, rest_z);
+			s.vel = Vec3(300.f, 0.f, 0.f);
+			s.on_ground = true;
+			s.ground_brush = 0;
+			s.old_buttons = IN_JUMP;   // held from last tick
+			MoveTick(s, w, p, 0.f, 0.f, 0.f, 0.f, 0.f, IN_JUMP,
+				nullptr);
+			const bool refused = s.on_ground && s.vel.Z == 0.f;
+			MoveParams pb = p;
+			pb.autobunnyhopping = true;
+			PlayerState s2;
+			s2.pos = Vec3(0.f, 0.f, rest_z);
+			s2.vel = Vec3(300.f, 0.f, 0.f);
+			s2.on_ground = true;
+			s2.ground_brush = 0;
+			s2.old_buttons = IN_JUMP;
+			MoveTick(s2, w, pb, 0.f, 0.f, 0.f, 0.f, 0.f, IN_JUMP,
+				nullptr);
+			snprintf(buf, sizeof(buf), "held jump: refused %d "
+				"(autobhop off), jumped %d (autobhop on, vz "
+				"%.2f)", refused ? 1 : 0,
+				s2.on_ground ? 0 : 1, s2.vel.Z);
+			check("A30 release gate + autobhop bypass", refused
+				&& !s2.on_ground, buf);
+		}
+		// ---- bench: engine grounded tick vs the walk kernel
+		{
+			PlayerState s;
+			s.pos = Vec3(0.f, 0.f, rest_z);
+			s.vel = Vec3(250.f, 0.f, 0.f);
+			s.on_ground = true;
+			s.ground_brush = 0;
+			const auto t0 = std::chrono::steady_clock::now();
+			for (int i = 0; i < 500000; ++i) {
+				s.pos = Vec3(0.f, 0.f, rest_z);
+				MoveTick(s, w, p, 0.f, 30.f, 250.f, 0.f, 0.f, 0,
+					nullptr);
+			}
+			const double es = std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - t0).count();
+			float vx = 250.f, vy = 0.f;
+			float sink = 0.f;
+			const auto t1 = std::chrono::steady_clock::now();
+			for (int i = 0; i < 20000000; ++i) {
+				float npx, npy, npz, nvx, nvy, nst;
+				CapGround::WalkKernelTick(g, 0.f, 0.f, rest_z, vx,
+					vy, 0.f, 30.f, 250.f, 0.f, &npx, &npy, &npz,
+					&nvx, &nvy, &nst);
+				vx = nvx;
+				vy = nvy;
+				sink += npz;
+			}
+			const double ks = std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - t1).count();
+			snprintf(buf, sizeof(buf), "engine %.2fM ticks/s, "
+				"kernel %.2fM ticks/s, multiple %.1fx (sink %.0f)",
+				0.5 / es, 20.0 / ks, (20.0 / ks) / (0.5 / es),
+				sink);
+			check("bench: ground kernel multiple", (20.0 / ks)
+				> (0.5 / es), buf);
+		}
+		printf("capground: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "A25/A30 GROUND AND JUMP LAWS "
+				"BITWISE-CERTIFIED"
+				: "A25/A30 RED - a law or the instrument is wrong");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capboard: registry A15/A16/A17
 	// + the A18 one-tick ride law harness (session 24). The clip
 	// itself is the engine's exported Fn::ClipVelocity (A15, solved) -
@@ -21170,6 +21460,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapP2P(o);
+	}
+	if (cmd == "capground") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapGround(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

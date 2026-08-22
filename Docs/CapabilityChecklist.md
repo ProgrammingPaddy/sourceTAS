@@ -32,7 +32,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A8 | directional reach D* | arc length L(N), projections | B2, B13, corridor checks | certified bounds (single query); on-demand sweep (batch) | parametric family endpoints (future, exact); finer local refinement | bounds O(N) ~µs; sweep 31.1M nodes / 101 s at pitch (96, 24), N=60 | `[x]` LB+UB at measured pitch; `[ ]` direction-aware UB, local refinement |
 | A9 | displacement with terminal constraint | endpoint + (ψ_N or V_N) | A22 pairing | A12 family with terminal constraint added | Pareto layer of A8 sweep | target ~10² µs | `[d]` |
 | A10 | minimum air time N_min | N window, feasibility | route timing, B21 | O(1) feasibility scan over the A1 window + A12 solve at first feasible N | table lookup | target <1 ms | `[d]` — build with A12 |
-| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail | A12 core | max-gain reversal family + BRAKE-RUN range control + top-3 refinement + 2-parameter exact-hit Newton | continuum closed-form initializer (the designed fix for the remaining misses); shooting oracle; reach-table batch | **measured v3 (capp2p): own-family targets 92–98% hit, general targets 29–99% (best at long flights), 0.4–7.0 ms/solve, 415–1411 rollouts; all hard gates green (dwell legality, 145/145 bitwise replays)**; target 10–30 µs stands via the initializer | `[~]` suite RED on the 99% machinery gate — initializer is the named binding constraint |
+| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 12/0): machinery 99–100/100 everywhere (worst residual 0.25–2.3u); general targets 29–99% (interior at short flights = the brake family's measured limit); 0.6–3.3 ms/solve; 150/150 bitwise replays** | `[x]` machinery; `[~]` short-flight interior coverage (measured line) |
 | A12 | point-to-point air solver | all of A10/A11 | C7, gap feasibility (B13/B14), A22 pairing | A11 iterated over N | shooting oracle (cross-check); R_N table (batch) | inherits A11 + N-scan | `[d]` after A11 goes green |
 | A13 | point-to-face solve | (T, λ) targets | entrance/transfer | A12 at 1-D λ targets per candidate tick | generic 2-D targeting (wasteful) | target ~10× A11 per face | `[d]` |
 | A14 | first-contact prediction | trace, local brush set | A28, event scans | exact trace vs pruned local brush set | full-world trace (the engine's own) | engine trace ~µs; local-set target ~100 ns | `[~]` engine path exists; local-set pruning not built |
@@ -46,12 +46,12 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | ride point-to-point: the A12 construction on the plane with in-plane gravity | DP table per face (baseline/falsifier) | target 10–100 µs/pair | `[d]` — the ride's A12 |
 | A23 | ride edge interception | edge geometry, exit λ | launch selection | A20 bounds + A22 solve at edge targets | — | target ~A22 | `[ ]` |
 | A24 | direct contact transfer | adjacent-face clip chain | face-to-face routing | exact clip transform at the shared edge | full engine roll-through | ~ns/edge | `[~]` clip exists; adjacency composition not packaged |
-| A25 | ground/runoff acceleration | friction, stopspeed, accelerate, stamina | spawn/launch prep | closed recurrences (decoded laws) packaged as LAW + event scan | full MoveTick baseline | target ~ns/tick law | `[ ]` laws decoded in engine mirror, capability not packaged |
+| A25 | ground/runoff acceleration | friction, stopspeed, accelerate, stamina power curve | spawn/launch prep | `CapGround::WalkKernelTick` — the grounded MoveTick chain partially evaluated on the flat-floor domain | full MoveTick baseline | **40.8M ticks/s = 10.9× engine; 200k walk ticks + 50k position checks, 0 bitwise mismatches (velocity, feet z, stamina)** | `[x]` capground 6/6 (s27) |
 | A26 | edge launch | leave-ground event, launch state | route segments | event detector on exact rollouts | — | ~engine-tick cost per scan tick | `[~]` instruments exist (LaunchWitness/ReplayLaunch); API not unified |
 | A27 | END-volume crossing | Minkowski box, z-window | finish timing | per-tick 1-D interval test from A1 window + box | full trace | ~ns/tick | `[~]` box computed; packaged predicate pending |
 | A28 | obstacle/corridor traversal | first contact along family | route validation | A14 local-set checks along A12 candidate paths | swept-volume precomputation | target ~µs/leg | `[ ]` last in air chain |
 | A29 | duck capability (NEW, gap) | duck flag/hull/timer, 8.5u shift, 0.34 speed crop | duck-required routes, A3 hulls | package the decoded duck state machine as LAW + hull switch | — | ~ns/tick law | `[ ]` currently domain-stamped OUT of all air/ride families — the stamp is the gap record |
-| A30 | jump capability (NEW, gap) | jump impulse (double const), stamina scale, autobhop gate | spawn runs, bhop segments, launches | closed jump law (decoded) + A25 integration | — | ~ns/event | `[ ]` decoded in mirror, not packaged |
+| A30 | jump capability | jump impulse (double const), stamina scale, autobhop gate, three gravity half-steps | spawn runs, bhop segments, launches | `CapGround::JumpKernelTick` (jump head + the A4 air chain) | — | **50k jump ticks, 0 bitwise mismatches on all channels + stamina; vz law: stamina 0→283.993, 1315.8→210.839; release gate + autobhop bypass verified** | `[x]` capground (s27); SET path (ducked) = A29 debt |
 | A31 | trigger interactions (NEW, gap) | basevel, gravity_scale, teleport | maps with push/teleport/gravity | mirror the trigger application rules as transforms | — | ~ns/event | `[ ]` engine mirror carries state; capability + tests not built |
 | A32 | water / ladders (exclusion) | — | — | — | — | — | `[-]` excluded: surf maps in scope have neither; revisit only if a target map does |
 
@@ -122,6 +122,17 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | END box | Minkowski intersection, feet-z window | A27 |
 
 ## Change log
+- 2026-08-22 (session 27): **A11 VERIFIED** (capp2p 12/0) — the
+  exact-segment-composition enumeration (robotics motion-primitive
+  concatenation on our spirals; exhaustive k≤2) fixed the machinery
+  gate at 99–100/100 everywhere; the stored-vs-true wish-basis sign
+  and a stale incremental build were the two failure causes found on
+  the way (full-rebuild discipline noted). **A25 + A30
+  BITWISE-CERTIFIED** (capground 6/6): the flat-ground walk law and
+  the jump law packaged as kernels, 300k parity ticks total with 0
+  mismatches, ground kernel 10.9× engine; the settled hull measured
+  one trace epsilon (1/32) above the hull-expanded floor plane. No
+  drift: capkern 5/5, capboard 4/4, groute 11/11.
 - 2026-08-22 (session 26): A11 implemented and iterated v1→v3 under
   its own falsifiers. v1: own-family targets 55–87% hit, general 0%
   — the max-gain family provably lives on a thin arc-length shell.

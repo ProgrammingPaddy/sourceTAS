@@ -397,8 +397,20 @@ law; the A22 board→exit kernel; direction-aware D* UB; local
 refinement for R_N; then C6/C7 sampled kernels toward the 10⁶-pair
 end-state test.
 
+**Row-list note (session 27):** `Docs/CapabilityChecklist.md` is the
+CANONICAL complete row list (it extends the registry with A29–A32 and
+B22 from the session-26 gap audit); this document remains the
+deep-status and session-log record.
+
 ## Change log
 
+- 2026-08-22c (session 27): A11 (fixed-tick point-to-point) VERIFIED
+  — capp2p 12/0 via exact segment composition (exhaustive k≤2
+  reversal enumeration); A25 (flat-ground walk law) and A30 (jump
+  law) BITWISE-CERTIFIED — capground 6/6, ground kernel 10.9×
+  engine, 300k parity ticks 0 mismatches. No drift: capkern 5/5,
+  capboard 4/4, groute 11/11. Remaining A11 ambers recorded
+  (short-flight interior coverage; analytic inversion for cost).
 - 2026-08-21b (session 24): **the capability build-out opens** —
   A4-prod kernel bitwise-certified (`capkern`, 8.9×); A6's
   exact band completes ×6 with bitwise witnesses + the certified

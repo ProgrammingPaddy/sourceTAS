@@ -256,6 +256,22 @@ scans.
 
 ## Change log
 
+- 2026-08-22 (session 27): A11 VERIFIED via exact segment
+  composition — the research transfer paid off: the problem is the
+  Dubins bounded-curvature setting with speed-varying turn radius,
+  and the robotics motion-primitive concatenation trick (prefix
+  rotations/positions of the all-plus spiral; any reversal schedule
+  in O(k), no trigonometry) made the k ≤ 2 enumeration EXHAUSTIVE.
+  Machinery 99–100/100 everywhere. Two instructive failures en
+  route: the stored-vs-true wish-basis sign (the documented bridge
+  bit exactly as SolverStrafe.h warns) and a stale incremental build
+  (full-rebuild discipline for header-only kernel changes). A25/A30
+  packaged and bitwise-certified (capground 6/6) — the ground walk
+  law at 10.9× engine throughput, and the analytic single-plane
+  StayOnGround trace needed the measured one-epsilon (1/32) offset
+  between the resting hull and the hull-expanded plane. Remaining
+  A11 ambers: short-flight interior coverage (brake-family
+  refinement) and the analytic inversion for the 10–30 µs target.
 - 2026-08-22 (session 26): A11 built and measured against its own
   falsifiers (three iterations in one session — the honest record is
   in `Docs/CapabilityChecklist.md`). Two design facts are now

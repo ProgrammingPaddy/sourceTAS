@@ -15,6 +15,30 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-22c (session 27): A11 VERIFIED; A25 + A30
+BITWISE-CERTIFIED — THREE CHECKLIST ROWS CLOSED IN ONE SESSION.**
+A11 (fixed-tick point-to-point): the Dubins/motion-primitive research
+transfer produced the EXACT SEGMENT COMPOSITION enumeration (prefix
+tables of the all-plus spiral give any reversal schedule's endpoint
+in O(k) with no trigonometry → k ≤ 2 exhaustive, k = 3 dense), and
+capp2p went 12/0: machinery 99–100/100 at every (v0, N), worst
+residual 0.25–2.3u, 0.6–3.3 ms/solve, 150/150 bitwise replays, all
+schedules dwell-legal. Two failures found and fixed en route: the
+stored-vs-true wish-basis sign (exactly the SolverStrafe.h bridge),
+and a stale incremental build that masked the fix (full-rebuild
+discipline for header-only kernel changes). Honest ambers: general
+interior targets at short flights 29–88% (the brake family's
+measured limit) and the 10–30 µs cost target (analytic inversion
+still open). A25 (flat-ground walk law) + A30 (jump law):
+`CapGround::WalkKernelTick`/`JumpKernelTick` + the capground suite
+6/6 — 200k walk ticks + 50k position checks + 50k jump ticks with 0
+bitwise mismatches across velocity, position, feet z, and stamina;
+ground kernel 40.8M ticks/s = 10.9× engine; the jump vz law measured
+(stamina 0 → 283.993, full tax → 210.839); release gate and
+autobunnyhop bypass verified; the settled hull measured one trace
+epsilon (1/32) above the hull-expanded floor plane. No drift:
+capkern 5/5, capboard 4/4, groute 11/11.
+
 **STATUS 2026-08-22b (session 26): THE MASTER CHECKLIST OPENED; A11
 BUILT AND ITERATED v1→v3 UNDER ITS OWN FALSIFIERS.** New:
 `Docs/CapabilityChecklist.md` — the single master table (every
