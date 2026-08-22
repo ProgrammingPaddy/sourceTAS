@@ -256,6 +256,18 @@ scans.
 
 ## Change log
 
+- 2026-08-22 (session 26): A11 built and measured against its own
+  falsifiers (three iterations in one session — the honest record is
+  in `Docs/CapabilityChecklist.md`). Two design facts are now
+  MEASURED, not conjectured: (1) the max-gain family alone lives on
+  a thin arc-length shell — general fixed-tick targets sit interior
+  and need the brake-run range control, which works (general
+  coverage 0% → up to 99%); (2) with the family fixed, the binding
+  constraint is the INITIALIZER — coarse grids with local refinement
+  stall in neighboring basins (machinery 92–98% vs the 99% gate)
+  and cost ~1300 rollouts. The continuum closed-form initializer
+  (section 2.3's step "initial guess") is therefore the next build:
+  it carries both the remaining hits and the 10–30 µs cost target.
 - 2026-08-22 (session 25): document opened. The c-coordinate
   path-determines-speed reduction formalized from Strafe::TickLaw;
   the point-to-point PARAM-EXACT design selected over tables and

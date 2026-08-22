@@ -1439,4 +1439,413 @@ namespace CapReach {
 	}
 
 } // namespace CapReach
+
+// ======================================================================
+// CAPP2P - registry A11 (fixed-tick point-to-point air solve) and the
+// A12 iteration over candidate tick counts (session 26; design:
+// Docs/CapabilityMethods.md section 2.3).
+//
+// Canonical frame: start at the origin with velocity (v0, 0), fresh
+// state, clean air. The control family is MAXIMUM-GAIN wishes (stored
+// cosa 0 = wish perpendicular to velocity = the engine's best gain,
+// +900 to squared speed per tick) whose only freedom is the strafe
+// side: k <= 3 reversal times, all >= 6 ticks apart (the dwell law).
+// An EXACT-HIT TAIL then frees the stored cosa of the last tail_m
+// ticks (two constant values over two halves) so the endpoint moves
+// continuously and Newton's method can land on the target exactly.
+// Every candidate is evaluated as an exact rollout through the
+// bitwise-certified A4 kernel - the answer is an exact, replayable
+// input schedule, never an approximation.
+// ======================================================================
+namespace CapP2P {
+
+	struct P2PSchedule {
+		signed char side[128];
+		float cosa[128];
+		int n = 0;
+	};
+	struct P2PResult {
+		bool solved = false;
+		float ex = 0.f, ey = 0.f;    // achieved endpoint
+		float evx = 0.f, evy = 0.f;  // achieved terminal velocity
+		float residual = 1e30f;      // |endpoint - target|
+		int rollouts = 0;            // exact rollouts spent
+		int start_side = 1;
+		int nrev = 0;
+		int revs[3] = { 0, 0, 0 };
+		// v2 range control: a braking run (stored cosa near +1 =
+		// true wish opposing velocity) of brake_len ticks starting
+		// at brake_start; 0 length = none
+		int brake_start = 0, brake_len = 0;
+		float brake_cosa = 0.9f;
+		float tail_c1 = 0.f, tail_c2 = 0.f;
+		P2PSchedule sched;
+	};
+
+	// Schedule text: constant stored-cosa-0 strafing on start_side,
+	// flipping at each reversal tick; the last tail_m ticks override
+	// stored cosa with c1 (first half) and c2 (second half).
+	inline void BuildSchedule(int N, int start_side, const int* revs,
+	                          int nrev, int brake_start, int brake_len,
+	                          float brake_cosa, int tail_m, float c1,
+	                          float c2, P2PSchedule* s) {
+		s->n = N;
+		signed char cur = static_cast<signed char>(start_side);
+		int ri = 0;
+		for (int t = 0; t < N; ++t) {
+			if (ri < nrev && t == revs[ri]) {
+				cur = static_cast<signed char>(-cur);
+				ri++;
+			}
+			s->side[t] = cur;
+			s->cosa[t] = 0.f;
+		}
+		// the brake run overrides stored cosa only (side changes are
+		// what dwell constrains; cosa is free every tick)
+		for (int t = brake_start;
+			t < brake_start + brake_len && t < N; ++t)
+			if (t >= 0)
+				s->cosa[t] = brake_cosa;
+		if (tail_m > 0) {
+			const int t0 = N - tail_m;
+			const int half = tail_m / 2;
+			for (int t = t0; t < N; ++t)
+				if (t >= 0)
+					s->cosa[t] = (t < t0 + half) ? c1 : c2;
+		}
+	}
+
+	// One exact rollout from the canonical start (positions live in
+	// the kernel's own advance; vz = 0 per tick, the stamped domain).
+	inline void Roll(const CapAir::AirKernelCtx& k, float v0,
+	                 const P2PSchedule& s, float* ex, float* ey,
+	                 float* evx, float* evy) {
+		float px = 0.f, py = 0.f;
+		float vx = v0, vy = 0.f;
+		for (int t = 0; t < s.n; ++t) {
+			float npx, npy, npz, nvx, nvy, nvz;
+			CapAir::KernelTick(k, px, py, 8000.f, vx, vy, 0.f,
+				s.side[t], s.cosa[t], &npx, &npy, &npz, &nvx,
+				&nvy, &nvz);
+			px = npx;
+			py = npy;
+			vx = nvx;
+			vy = nvy;
+		}
+		*ex = px;
+		*ey = py;
+		*evx = vx;
+		*evy = vy;
+	}
+
+	// The fixed-tick solve (registry A11), v2. The v1 measurement
+	// (session 26) drove three changes, all recorded honestly:
+	// (a) single-candidate hill-climbing stalled in local minima
+	//     (55-87% hits on the solver's OWN family targets) ->
+	//     stage 1 now keeps the top-6 coarse candidates and refines
+	//     each;
+	// (b) the family-sufficiency falsifier showed max-gain paths
+	//     live on a thin arc-length shell (general targets ~0% hit,
+	//     interior by up to ~1300u) -> the BRAKE RUN range control:
+	//     a run of ticks with the stored cosa near +1 (true wish
+	//     opposing velocity) sheds speed at up to the accel budget
+	//     per tick, shortening the path; max-gain ticks re-gain
+	//     afterward. Two integers (start, length) span the range
+	//     from the max-gain shell deep into the interior;
+	// (c) the exact-hit tail gets more authority (longer tail, more
+	//     Newton iterations, restarts).
+	struct P2PCand {
+		float res = 1e30f;
+		int ss = 1;
+		int nrev = 0;
+		int revs[3] = { 0, 0, 0 };
+		int bs = 0, bl = 0;
+	};
+	inline void SolveFixedN(const CapAir::AirKernelCtx& k,
+	                        float v0, float tx, float ty, int N,
+	                        P2PResult* out) {
+		P2PResult best;
+		P2PSchedule s;
+		const float bc = 0.9f;   // brake strength (stored cosa)
+		auto eval = [&](int ss, const int* revs, int nrev, int bs2,
+			int bl2, int tail_m, float c1, float c2) {
+			BuildSchedule(N, ss, revs, nrev, bs2, bl2, bc, tail_m,
+				c1, c2, &s);
+			float ex, ey, evx, evy;
+			Roll(k, v0, s, &ex, &ey, &evx, &evy);
+			best.rollouts++;
+			const float dx = ex - tx, dy = ey - ty;
+			const float r = sqrtf(dx * dx + dy * dy);
+			if (r < best.residual) {
+				best.residual = r;
+				best.ex = ex;
+				best.ey = ey;
+				best.evx = evx;
+				best.evy = evy;
+				best.start_side = ss;
+				best.nrev = nrev;
+				for (int i = 0; i < 3; ++i)
+					best.revs[i] = i < nrev ? revs[i] : 0;
+				best.brake_start = bs2;
+				best.brake_len = bl2;
+				best.brake_cosa = bc;
+				best.tail_c1 = c1;
+				best.tail_c2 = c2;
+				best.sched = s;
+			}
+			return r;
+		};
+		// ---- stage 1: coarse grid over both start sides, keeping
+		// the top-6 candidates for refinement
+		const int K = 6;
+		P2PCand top[6];
+		auto offer = [&](float r, int ss, const int* revs, int nrev,
+			int bs2, int bl2) {
+			int worst = 0;
+			for (int i = 1; i < K; ++i)
+				if (top[i].res > top[worst].res)
+					worst = i;
+			if (r < top[worst].res) {
+				top[worst].res = r;
+				top[worst].ss = ss;
+				top[worst].nrev = nrev;
+				for (int i = 0; i < 3; ++i)
+					top[worst].revs[i] = i < nrev ? revs[i] : 0;
+				top[worst].bs = bs2;
+				top[worst].bl = bl2;
+			}
+		};
+		for (int ss = -1; ss <= 1; ss += 2) {
+			int revs[3] = { 0, 0, 0 };
+			offer(eval(ss, revs, 0, 0, 0, 0, 0.f, 0.f), ss, revs,
+				0, 0, 0);
+			for (int r1 = 1; r1 < N; r1 += 3) {
+				revs[0] = r1;
+				offer(eval(ss, revs, 1, 0, 0, 0, 0.f, 0.f), ss,
+					revs, 1, 0, 0);
+			}
+			for (int r1 = 1; r1 < N; r1 += 6) {
+				revs[0] = r1;
+				for (int r2 = r1 + 6; r2 < N; r2 += 6) {
+					revs[1] = r2;
+					offer(eval(ss, revs, 2, 0, 0, 0, 0.f, 0.f),
+						ss, revs, 2, 0, 0);
+					for (int r3 = r2 + 6; r3 < N; r3 += 12) {
+						revs[2] = r3;
+						offer(eval(ss, revs, 3, 0, 0, 0, 0.f,
+							0.f), ss, revs, 3, 0, 0);
+					}
+				}
+			}
+			// the brake probes (range control): straight-line and
+			// one-reversal shapes with a brake run at several
+			// start positions (short flights need the variety)
+			const int bss[3] = { 1, N / 4, N / 2 };
+			for (int bi = 0; bi < 3; ++bi)
+				for (int bl = N / 8; bl <= (3 * N) / 4;
+					bl += N / 8) {
+					if (bl < 2)
+						continue;
+					int rv0[3] = { 0, 0, 0 };
+					offer(eval(ss, rv0, 0, bss[bi], bl, 0, 0.f,
+						0.f), ss, rv0, 0, bss[bi], bl);
+					for (int r1 = 6; r1 < N; r1 += 12) {
+						rv0[0] = r1;
+						offer(eval(ss, rv0, 1, bss[bi], bl, 0,
+							0.f, 0.f), ss, rv0, 1, bss[bi],
+							bl);
+					}
+				}
+		}
+		// ---- stage 2: refine EACH top candidate (single reversal
+		// steps, PAIRED translation of the whole pattern - coupled
+		// valleys stall one-at-a-time moves - and brake steps),
+		// writing the refined shape back into the candidate list
+		for (int ci = 0; ci < K; ++ci) {
+			if (top[ci].res > 1e29f)
+				continue;
+			P2PCand c = top[ci];
+			float cur = c.res;
+			bool improved = true;
+			int guard = 0;
+			while (improved && guard++ < 12) {
+				improved = false;
+				for (int i = 0; i < c.nrev; ++i)
+					for (int d = -6; d <= 6; ++d) {
+						if (d == 0)
+							continue;
+						int revs[3] = { c.revs[0], c.revs[1],
+							c.revs[2] };
+						revs[i] += d;
+						bool ok = true;
+						for (int j = 0; j < c.nrev; ++j) {
+							if (revs[j] < 1 || revs[j] >= N)
+								ok = false;
+							if (j > 0 && revs[j] - revs[j - 1]
+								< 6)
+								ok = false;
+						}
+						if (!ok)
+							continue;
+						const float r = eval(c.ss, revs, c.nrev,
+							c.bs, c.bl, 0, 0.f, 0.f);
+						if (r < cur - 1e-4f) {
+							cur = r;
+							for (int j = 0; j < 3; ++j)
+								c.revs[j] = revs[j];
+							improved = true;
+						}
+					}
+				// paired translation of the whole pattern
+				if (c.nrev > 0) {
+					const int dts[4] = { -6, -3, 3, 6 };
+					for (int m = 0; m < 4; ++m) {
+						int revs[3] = { c.revs[0], c.revs[1],
+							c.revs[2] };
+						bool ok = true;
+						for (int j = 0; j < c.nrev; ++j) {
+							revs[j] += dts[m];
+							if (revs[j] < 1 || revs[j] >= N)
+								ok = false;
+						}
+						if (!ok)
+							continue;
+						const float r = eval(c.ss, revs, c.nrev,
+							c.bs, c.bl, 0, 0.f, 0.f);
+						if (r < cur - 1e-4f) {
+							cur = r;
+							for (int j = 0; j < 3; ++j)
+								c.revs[j] = revs[j];
+							improved = true;
+						}
+					}
+				}
+				if (c.bl > 0) {
+					const int dbs[4] = { -4, -2, 2, 4 };
+					for (int m = 0; m < 4; ++m) {
+						const int nb = c.bs + dbs[m];
+						if (nb < 0 || nb >= N)
+							continue;
+						const float r = eval(c.ss, c.revs,
+							c.nrev, nb, c.bl, 0, 0.f, 0.f);
+						if (r < cur - 1e-4f) {
+							cur = r;
+							c.bs = nb;
+							improved = true;
+						}
+					}
+					const int dbl[4] = { -6, -3, 3, 6 };
+					for (int m = 0; m < 4; ++m) {
+						const int nl = c.bl + dbl[m];
+						if (nl < 0 || c.bs + nl > N)
+							continue;
+						const float r = eval(c.ss, c.revs,
+							c.nrev, c.bs, nl, 0, 0.f, 0.f);
+						if (r < cur - 1e-4f) {
+							cur = r;
+							c.bl = nl;
+							improved = true;
+						}
+					}
+				}
+			}
+			top[ci] = c;
+			top[ci].res = cur;
+		}
+		// ---- stage 3: the exact-hit tail - 2-parameter Newton on
+		// the two stored-cosa values of the tail halves, from three
+		// starting points, on the TOP THREE refined candidates
+		// (running it only on the global best left basins unclosed -
+		// the v2 machinery measurement)
+		{
+			const int tail_m = N >= 48 ? 24
+				: (N >= 24 ? 12 : (N >= 12 ? 8 : 0));
+			for (int rank = 0; rank < 3 && tail_m > 0
+				&& best.residual > 0.25f; ++rank) {
+				// select the best not-yet-consumed refined
+				// candidate (consumed ones are marked -1)
+				int sel = -1;
+				float selr = 1e30f;
+				for (int i = 0; i < K; ++i)
+					if (top[i].res >= 0.f && top[i].res < selr) {
+						selr = top[i].res;
+						sel = i;
+					}
+				if (sel < 0)
+					break;
+				top[sel].res = -1.f;   // mark consumed
+				int revs[3] = { top[sel].revs[0],
+					top[sel].revs[1], top[sel].revs[2] };
+				const int nrev = top[sel].nrev;
+				const int ss = top[sel].ss;
+				const int bs2 = top[sel].bs;
+				const int bl2 = top[sel].bl;
+				const float starts[3][2] = {
+					{ 0.f, 0.f }, { 0.35f, -0.35f },
+					{ -0.35f, 0.35f } };
+				for (int st = 0; st < 3
+					&& best.residual > 0.25f; ++st) {
+					float c1 = starts[st][0];
+					float c2 = starts[st][1];
+					for (int it = 0; it < 8; ++it) {
+						BuildSchedule(N, ss, revs, nrev, bs2,
+							bl2, bc, tail_m, c1, c2, &s);
+						float ex, ey, evx, evy;
+						Roll(k, v0, s, &ex, &ey, &evx, &evy);
+						best.rollouts++;
+						const float fx = ex - tx, fy = ey - ty;
+						const float r0 = sqrtf(fx * fx
+							+ fy * fy);
+						if (r0 < best.residual) {
+							best.residual = r0;
+							best.ex = ex;
+							best.ey = ey;
+							best.evx = evx;
+							best.evy = evy;
+							best.tail_c1 = c1;
+							best.tail_c2 = c2;
+							best.sched = s;
+						}
+						if (r0 <= 0.25f)
+							break;
+						const float h = 0.02f;
+						float ex1, ey1, ex2, ey2, dvx, dvy;
+						BuildSchedule(N, ss, revs, nrev, bs2,
+							bl2, bc, tail_m, c1 + h, c2, &s);
+						Roll(k, v0, s, &ex1, &ey1, &dvx, &dvy);
+						BuildSchedule(N, ss, revs, nrev, bs2,
+							bl2, bc, tail_m, c1, c2 + h, &s);
+						Roll(k, v0, s, &ex2, &ey2, &dvx, &dvy);
+						best.rollouts += 2;
+						const float j11 = (ex1 - ex) / h;
+						const float j21 = (ey1 - ey) / h;
+						const float j12 = (ex2 - ex) / h;
+						const float j22 = (ey2 - ey) / h;
+						const float det = j11 * j22
+							- j12 * j21;
+						if (fabsf(det) < 1e-6f)
+							break;
+						float d1 = (-fx * j22 + fy * j12)
+							/ det;
+						float d2 = (-j11 * fy + j21 * fx)
+							/ det;
+						if (d1 > 0.3f) d1 = 0.3f;
+						if (d1 < -0.3f) d1 = -0.3f;
+						if (d2 > 0.3f) d2 = 0.3f;
+						if (d2 < -0.3f) d2 = -0.3f;
+						c1 += d1;
+						c2 += d2;
+						if (c1 > 0.95f) c1 = 0.95f;
+						if (c1 < -0.95f) c1 = -0.95f;
+						if (c2 > 0.95f) c2 = 0.95f;
+						if (c2 < -0.95f) c2 = -0.95f;
+					}
+				}
+			}
+		}
+		best.solved = best.residual <= 0.5f;
+		*out = best;
+	}
+
+} // namespace CapP2P
 } // namespace Solver

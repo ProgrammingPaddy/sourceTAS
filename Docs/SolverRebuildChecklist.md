@@ -15,6 +15,30 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-22b (session 26): THE MASTER CHECKLIST OPENED; A11
+BUILT AND ITERATED v1→v3 UNDER ITS OWN FALSIFIERS.** New:
+`Docs/CapabilityChecklist.md` — the single master table (every
+capability A0–A32 / B0–B22 / C0–C15 with terms, consumers, primary
+method, alternative methods, efficiency figure, and checklist
+status), with the gap rows the audit found: A29 duck (currently
+domain-stamped out everywhere), A30 jump/bunnyhop (laws decoded, not
+packaged), A31 triggers, A32 explicit exclusions, B22 heading-aware
+speed ceiling. A11 (fixed-tick point-to-point air solve,
+`CapP2P::SolveFixedN` + the `capp2p` suite) implemented and iterated
+against its own gates: v1 exposed that max-gain reversal schedules
+live on a thin arc-length shell (general targets 0% hit); v2's
+brake-run range control (stored cosa ≈ +1 = true wish opposing
+velocity) opened the interior (0 → 13–97%); v3 (paired-translation
+refinement, top-3 candidates through the exact-hit tail) reached
+machinery 92–98% and general up to 99% at 0.4–7.0 ms/solve — with
+every emitted schedule dwell-legal and 145/145 solved schedules
+replaying through the real engine bitwise. The suite is HONESTLY RED
+on the ≥99% machinery gate: the measured binding constraint is the
+initializer (coarse grid + local climbing stalls in neighboring
+basins), and the continuum closed-form initializer from
+`Docs/CapabilityMethods.md` 2.3 is the named next build, carrying
+both the remaining hit-rate and the 10–30 µs cost target.
+
 **STATUS 2026-08-22 (session 25): METHOD SELECTION PER ATOMIC — THE
 POINT-TO-POINT DESIGN, AND THE NAMING DISCIPLINE.** User directives:
 be precise always (registry IDs are the ONLY capability names — the
