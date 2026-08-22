@@ -1,0 +1,217 @@
+<title>Method Selection per Atomic</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:48px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:700px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px;
+    border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.mono{font-family:"IBM Plex Mono",monospace; white-space:nowrap; font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .c-plan{background:var(--amber-soft); color:var(--amber)}
+  .c-info{background:var(--blue-soft); color:var(--blue)}
+  .law{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--teal);
+    padding:16px 22px; margin:18px 0; font-family:"IBM Plex Mono",monospace; font-size:14.5px}
+  .law .why{font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--muted); margin-top:8px; max-width:none}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; margin:14px 0}
+  .panel h3{margin:2px 0 8px; font-size:16px}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  .steps{counter-reset:st; margin:14px 0; padding:0; list-style:none}
+  .steps li{counter-increment:st; display:flex; gap:14px; padding:10px 0;
+    border-bottom:1px solid var(--line); font-size:14px; max-width:none}
+  .steps li:last-child{border-bottom:none}
+  .steps li::before{content:counter(st); flex:none; width:28px; height:28px; border-radius:50%;
+    background:var(--teal); color:var(--bg); display:flex; align-items:center; justify-content:center;
+    font-family:"IBM Plex Mono",monospace; font-weight:600; font-size:13px; margin-top:1px}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 25</div>
+  <h1>Method Selection per Atomic</h1>
+  <p class="sub">For every atomic function: all candidate solution methods considered, the best one
+  selected with measured cost arithmetic, organized so the blocks recombine under any future
+  architecture. Centerpiece: the point-to-point air solver design, built on the fact that in this
+  engine the path determines the speed.</p>
+  <div class="meta">
+    <span>2026-08-22</span>
+    <span>design of record: Docs/CapabilityMethods.md</span>
+    <span>naming: registry IDs are the only capability names</span>
+  </div>
+</header>
+
+<h2><span class="idx">01</span>The naming fix</h2>
+<p class="lede">One capability, one name — its registry ID (A0–A28 physical functions, B0–B21
+certified reducers, C0–C15 composition functions) plus a plain-English phrase. The session-22
+ordinal numbering ("capability 1") is retired and has been purged from the design documents and
+from every suite output label (for example, the test formerly printed as
+<code>capability-1 gate (build)</code> now prints as <code>A6 band build gate</code>, where A6 is
+the N-tick air turn/gain maximum). Explanations in reports and chat now define each term where it
+first appears.</p>
+
+<h2><span class="idx">02</span>The one-tick law, in plain language</h2>
+<p class="lede">Everything in the air family reduces to one per-tick rule. Each tick, the player
+chooses a wish direction. Let α be the angle between that wish and the current velocity, s the
+current horizontal speed, and define <b>c = s·cos α</b> — the part of the current velocity that
+points along the wish. With a full stick, the engine then adds exactly
+a = min(30 − c,&nbsp;budget) units of velocity along the wish (budget = 562.5 × surface-friction;
+surface friction only matters for hard braking). Two consequences follow by algebra:</p>
+<div class="law">change in s² this tick &nbsp;=&nbsp; 900 − c² &nbsp;&nbsp;&nbsp;(cap-limited regime)<br>
+heading change this tick &nbsp;=&nbsp; atan2(a·sin α, s + a·cos α)
+  <div class="why">One scalar, c, controls both. Gain is maximal at c = 0 (wish exactly
+  perpendicular to velocity): +900 to s² per tick. Turning harder than the free rate costs speed
+  quadratically. This law already existed in code (<code>Strafe::TickLaw</code>) with a 168-row
+  measurement; this session added a <b>one-million-state certificate</b>: across random speeds
+  2–3400 u/s, all headings, and random wish actions, the closed form matches the bitwise-exact
+  kernel to worst |Δ(s²)| = 5.0 (float-rounding scale — s² itself is ~10⁷) and worst heading
+  deviation 1.7×10⁻⁵ radians (~0.001°). Suite: <code>capkern</code>, now 5 checks, all passing.</div></div>
+
+<h2><span class="idx">03</span>"Let speed be determined by the path" — formalized</h2>
+<p class="lede">Because one scalar controls both speed change and turn, you can eliminate it:
+given the current speed and the turn you demand this tick, the speed change is <b>determined</b>.
+A path (a heading sequence) therefore induces its speed profile exactly, tick by tick. Path and
+speed are not independent unknowns — exactly as conjectured. The most useful special case:</p>
+<div class="panel"><h3>The maximum-gain trajectory family</h3>
+<p>Hold c = 0 every tick (wish perpendicular to velocity). Then, <span class="hl">provably and
+measured</span>:</p>
+<ul>
+<li>the speed profile is fixed: s after n ticks satisfies s² = s₀² + 900·n — this is the certified
+ceiling from session 24, and the built surfaces sit on it exactly;</li>
+<li>the per-tick turn <span class="hl">magnitude</span> is fixed: atan(30/s) — about 2.9° at
+600 u/s, shrinking as speed grows;</li>
+<li>the per-tick step length is fixed (post-update speed × 0.015 s), so <span class="hl">every
+maximum-gain flight of N ticks has the same arc length</span>;</li>
+<li>the only freedom left is the turn <span class="hl">sign</span> each tick, and signs may flip
+at most once per 6 ticks (the dwell rule). "Straight" motion is the minimum-curvature motif —
+signs alternating every 6 ticks (measured cost: the reach sweep's straight-line distance came
+within 1.0 unit of the theoretical arc length).</li>
+</ul>
+<p>So the whole family is parameterized by its <span class="hl">reversal times</span> — and the
+certified A6 surfaces measured that optimal flights use at most three reversals. A trajectory
+space of 43⁹⁰ raw control choices collapses to one, two, or three numbers.</p></div>
+
+<h2><span class="idx">04</span>The point-to-point solver design (registry A12, with A10/A11/A13 as query modes)</h2>
+<p class="lede">Problem: from an exact start state, reach a target point (or a face position at a
+given tick), producing an exact input schedule, in minimum ticks. Vertical motion is a closed
+form, so a 3-D target fixes a small window of candidate arrival ticks; each candidate makes the
+problem two-dimensional. The selected construction:</p>
+<ol class="steps">
+<li><b>Feasibility in constant time.</b> Target beyond the certified travel bound (the max-speed
+integral), or a required terminal speed above √(s₀² + 900N), is impossible — with a proof. These
+prunes cost nanoseconds and are the certified side of the pair.</li>
+<li><b>Closed-form initial guess.</b> Integrating the maximum-gain law continuously gives endpoint
+position as a function of the reversal times in closed form; invert it analytically.</li>
+<li><b>Exact polish.</b> Newton's method on the reversal times, where every residual evaluation is
+one exact rollout through the bitwise-certified kernel (90 ticks ≈ 5.6 microseconds at the
+measured 16.0M ticks/second). Expected 2–5 rollouts.</li>
+<li><b>Exact hit.</b> The last one or two ticks leave the perpendicular wish free (two scalar
+unknowns, two endpoint equations) to absorb sub-step error — the returned schedule lands on the
+target and replays through the engine exactly.</li>
+</ol>
+<div class="tablewrap"><table>
+<tr><th>Method considered</th><th>Cost per query (measured basis)</th><th>Exactness</th><th>Verdict</th></tr>
+<tr><td class="nm">Parametric reversal family + Newton</td><td class="mono">~10–30 µs</td><td class="note">exact schedule out; the family's sufficiency is a stated conjecture under falsification</td><td><span class="chip c-plan">SELECTED — next build</span></td></tr>
+<tr><td class="nm">Reachability table (A8 sweep) per start</td><td class="mono">30–400 s per start, then O(1) lookups</td><td class="note">witnessed lower bounds on a lattice</td><td><span class="chip c-info">batched queries + falsifier baseline only</span></td></tr>
+<tr><td class="nm">Guided shooting (the existing inverse solver)</td><td class="mono">~10³–10⁴ tick-equivalents</td><td class="note">exact but iterative-heavy</td><td><span class="chip c-info">cross-check oracle</span></td></tr>
+<tr><td class="nm">Certified bounds alone</td><td class="mono">constant</td><td class="note">impossibility proofs, no witness</td><td><span class="chip c-pass">the cull layer (kept)</span></td></tr>
+<tr><td class="nm">Continuum (differential-equation) solution</td><td class="mono">constant</td><td class="note">approximate — never a product answer</td><td><span class="chip c-info">initial guesses only</span></td></tr>
+</table></div>
+<p class="lede">Falsification plan shipped with the design: endpoints must replay exactly; solve
+times must beat the oracle on random targets; and any target the family cannot hit that the
+reachability sweep proves reachable refutes the family and grows it. If the three-reversal
+conjecture fails anywhere, the falsifier will say where and why.</p>
+
+<h2><span class="idx">05</span>The terms catalog (what every solver is allowed to think in)</h2>
+<div class="tablewrap"><table>
+<tr><th>Term</th><th>Exact law</th><th>Why it matters</th></tr>
+<tr><td class="nm">s² (squared speed)</td><td class="note">changes by 900 − c² per tick — affine in the control</td><td class="note">the natural linear variable; tables should stratify in s², not s</td></tr>
+<tr><td class="nm">c = s·cos α</td><td class="note">the one control scalar; true-vs-stored wish bases bridge by negation (measured)</td><td class="note">parameterizes the whole air family</td></tr>
+<tr><td class="nm">step, arc length</td><td class="note">step = post-update speed × dt, exactly; max-gain arc length deterministic</td><td class="note">endpoint maps; the travel bound</td></tr>
+<tr><td class="nm">turn magnitude atan(30/s)</td><td class="note">the free turn at maximum gain</td><td class="note">curvature budget; the 1/speed turning tax</td></tr>
+<tr><td class="nm">reversal times</td><td class="note">sign flips of the strafe side, ≥6 ticks apart</td><td class="note">the coordinates of the point-to-point family</td></tr>
+<tr><td class="nm">z, vz</td><td class="note">closed form (gravity halves)</td><td class="note">arrival-tick windows; face targets</td></tr>
+<tr><td class="nm">surface friction state</td><td class="note">1 falling / 0.25 rising; scales only the braking budget</td><td class="note">cap-limited ticks are invariant to it — the family is robust</td></tr>
+<tr><td class="nm">v·n at a face</td><td class="note">boarding needs v·n &lt; 0; loss = |v·n|; post-speed closed form</td><td class="note">the board layer (solved)</td></tr>
+<tr><td class="nm">in-plane gravity on a ramp</td><td class="note">constant per face; enters the proven one-tick ride law</td><td class="note">the ride family inherits every air method</td></tr>
+</table></div>
+<p class="lede">The full catalog (twenty terms, each with its exact update law and its consumers)
+is section 1 of <code>Docs/CapabilityMethods.md</code>.</p>
+
+<h2><span class="idx">06</span>Selection matrix — production method and certificate method per atomic</h2>
+<div class="tablewrap"><table>
+<tr><th>Registry ID</th><th>Function</th><th>Production</th><th>Certificate</th></tr>
+<tr><td class="nm">A1 / A2 / A5</td><td class="note">vertical state · face slice · dwell rule</td><td>closed form</td><td>same</td></tr>
+<tr><td class="nm">A4</td><td class="note">one-tick air law</td><td>closed law + bitwise kernel (8.9×)</td><td>capkern 5/5 incl. the million-state law identity</td></tr>
+<tr><td class="nm">A6 / A7</td><td class="note">N-tick turn/gain maximum + dual</td><td>closed-form ceiling; band table for full surfaces</td><td>coast monotonicity, duality, ceiling, bitwise witnesses</td></tr>
+<tr><td class="nm">A8</td><td class="note">directional reach</td><td>bounds for single queries; on-demand sweep for batches</td><td>max-speed-integral upper bound + witnessed lower bound</td></tr>
+<tr><td class="nm">A10–A13</td><td class="note">point-to-point family</td><td><b>parametric reversal family (next build)</b></td><td>B6/B13 culls + bounds + shooting oracle</td></tr>
+<tr><td class="nm">A15–A17</td><td class="note">board clip, best/worst, feasibility</td><td>closed forms</td><td>enumeration gates (done)</td></tr>
+<tr><td class="nm">A18</td><td class="note">one-tick ride law</td><td>proven composition (1246/1246 bitwise)</td><td>the ramp harness (done)</td></tr>
+<tr><td class="nm">A19–A22</td><td class="note">ride turn/gain, reach, board→exit</td><td>ride law form → same parametric treatment as air</td><td>U_E ceiling + enumeration baselines</td></tr>
+<tr><td class="nm">A25–A27</td><td class="note">ground, launch, END crossing</td><td>closed forms + event scans</td><td>replay gates</td></tr>
+</table></div>
+
+<h2><span class="idx">07</span>What ships next</h2>
+<p class="lede">In order: the A12 point-to-point solver (family + Newton + culls + falsifiers);
+the ride law in algebraic form so the ride family (A19–A22) gets the identical treatment; the
+heading-aware air upper bound (closing the high-speed 180° corner); action-density study for the
+band tables only where falsifier baselines require it. Nothing above assumes the current full-map
+architecture — each block stands alone and recombines.</p>
+
+<footer>SourceTAS Capability Library · session 25 · 2026-08-22 · designs: Docs/CapabilityMethods.md ·
+registry: Docs/CapabilityLibrary.md · all costs quoted from this week's measured throughputs</footer>
+</div>

@@ -659,7 +659,8 @@ namespace CapAir {
 	}
 
 	// ==================================================================
-	// CAPABILITY 1 - THE EXACT-BAND FLAT-LATTICE BUILD (session 24).
+	// A6/A7 (N-TICK AIR TURN/GAIN V* AND ITS DUAL) - THE EXACT-BAND
+	// FLAT-LATTICE BUILD (session 24).
 	// The corrected representation after Conjecture M's refutation:
 	// cells = (psi bin, v stratum, side, dwell age), on DENSE arrays
 	// (the std::map build hit its 400k-cell honest abort). Every

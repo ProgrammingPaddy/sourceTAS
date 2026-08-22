@@ -160,7 +160,7 @@ carries everything: **D\*** is its support function; **V\*/Ψ\*** are
 its velocity marginals; **N_min** is a membership scan over N;
 **A11/A12/A13** are witness queries into it (A13 through (T, λ)
 slices). One build, five capabilities — and one free falsifier: V*
-read from R_N must agree with capability 1's independent build.
+read from R_N must agree with A6's independent build.
 
 Two consumption modes, both exact:
 
@@ -272,12 +272,12 @@ The core chains:
   edge corpus: v≈0, cosα=±1, speeds at caps). Expected order
   30–100× MoveTick (estimate; MoveTick measured 1.35–1.5M/s). Every
   S-type build downstream runs on this kernel.
-- **Phase 1 — finish capability 1 + the reach family.** Flat-lattice
+- **Phase 1 — finish A6/A7 + the A8 reach family.** Flat-lattice
   exact (v, ψ) band on A4-prod (~1.5–4B transitions/v0 ≈ minutes on
   the kernel; the 400k+ cells/layer are arrays, ~0.5–2 GB); falsifier
   margins must go to zero/O(pitch); the turn-then-accelerate theorem
   step. Then R_N (one sweep per canonical start) with D* + the query
-  modes A9–A13, cross-falsified against capability 1.
+  modes A9–A13, cross-falsified against A6.
 - **Phase 2 — board + boundary events.** A16/A17 frozen from the clip
   law (near-analytic); A26/A27 formalized from the existing
   launch/END instruments.
@@ -297,7 +297,11 @@ The core chains:
 
 ---
 
-## Capability 1 — the N-tick air turn/gain function
+## A6/A7 — the N-tick air turn/gain maximum V* and its dual Ψ*
+
+**Naming note (session 25):** sessions 22–24 called this function
+"capability 1" from a retired numbering. Registry IDs (A6/A7) are the
+only names now — in documents, in suite output, and in discussion.
 
     V*(v0, N, dψ, d0, a0) = max over legal dwell-6 control schedules
     of terminal speed, subject to net velocity-heading change dψ
@@ -323,7 +327,7 @@ The core chains:
    phase — turn-then-accelerate. At N = 90 heading is nearly free at
    any surf speed; short horizons pay steeply.
 
-**Next for capability 1 (revised session 23):** A4-prod kernel FIRST
+**Next for A6/A7 (revised session 23):** A4-prod kernel FIRST
 (Phase 0), then the flat-lattice exact band on it, falsifier rerun
 (margins → 0), then the theorem step (the turn/accelerate branch
 family), then the LB surfaces retire into interval semantics.
@@ -342,7 +346,7 @@ family), then the LB surfaces retire into interval semantics.
    estimate: the transcendental chain — atan2f + two sincos per
    action — is the irreducible cost; per-node hoisting of atan2f is a
    recorded future ~20–25%).
-2. **Capability 1's exact band completes ×6** on the kernel (the
+2. **A6's exact band completes ×6** on the kernel (the
    std::map ceiling is gone): 22.3M–95.5M nodes, 48–276 s/v0, peak
    layer 311k–1.21M. Every kernel-built extremal schedule replays
    through the REAL engine bit for bit (the composition gate).
@@ -350,12 +354,12 @@ family), then the LB surfaces retire into interval semantics.
    V*(N) ≤ √(v0² + cap²·N) from the accel algebra
    (per tick, |v'|² − |v|² = a(2·cur + a) ≤ wishspd² ≤ cap²), and
    the measured free-heading surfaces SIT ON it (379 vs 378.8;
-   491 vs 491.0). Capability 1 is now a certified interval
+   491 vs 491.0). A6 is now a certified interval
    [witnessed LB, closed-form UB] with the falsifier gap as the
    measured tightness. B6 gains the library's first certified air
    cull.
 4. **The session-20 reach cone is REFUTED** — the program's second
-   falsified "certainty," caught by capability 2's falsifier
+   falsified "certainty," caught by A8's falsifier
    (61,513 real-schedule violations) and independently by the swept
    LB itself (witnessed backward reach 365u vs the cone's 284u at
    N=60). The flaw: "per-tick |Δv| ≤ 30" fails for braking wishes
@@ -374,7 +378,7 @@ family), then the LB surfaces retire into interval semantics.
    engine-zeroed (ramp-bug) ticks appeared in the ride domain.
    A19/A20 (ride V*/D*) are unblocked with sf as carried state.
 7. **The free reach set is much bigger than any map-directed sweep**
-   (capability 2's ladder: 11.1M nodes at hp 128 → 31.1M at 96 →
+   (A8's ladder: 11.1M nodes at hp 128 → 31.1M at 96 →
    >42M aborted at 64, N=60, one v0) — the session-21 pitch was
    validated with the map doing the culling. The reach family
    ships LB + UB v1 at the measured pitch; direction-aware UB
@@ -396,10 +400,10 @@ end-state test.
 ## Change log
 
 - 2026-08-21b (session 24): **the capability build-out opens** —
-  A4-prod kernel bitwise-certified (`capkern`, 8.9×); capability 1's
+  A4-prod kernel bitwise-certified (`capkern`, 8.9×); A6's
   exact band completes ×6 with bitwise witnesses + the certified
   closed-form speed UB (tight at free heading); the s20 reach cone
-  REFUTED by capability 2's falsifier and replaced (B2 demoted, B6
+  REFUTED by A8's falsifier and replaced (B2 demoted, B6
   promoted to a certified cull); board A16/A17 solved; **A18 ride law
   proven bitwise on interiors (1246/1246)**; reach ladder measured;
   gates matured to proof-backed-only after a 3-skeptic adversarial

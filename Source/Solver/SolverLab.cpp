@@ -14931,6 +14931,69 @@ namespace {
 				"differences", mmz);
 			check("vz-decoupling (horizontal)", mmz == 0, buf);
 		}
+		// A4 LAW IDENTITY, dense (session 25): the closed-form
+		// one-tick law (Strafe::TickLaw - real arithmetic, in the
+		// TRUE-wish basis) against the bitwise kernel, across the
+		// whole legal domain. This is the certificate behind the
+		// path-determines-speed reduction (Docs/CapabilityMethods.md):
+		// per tick, (speed-squared change, heading change) is fully
+		// parameterized by the one scalar c = s*cos(alpha_true).
+		// wishparity measured 168 rows in session-19 units; this runs
+		// one million and REPORTS the measured float deviation.
+		{
+			double worst_ds2 = 0.0, worst_dpsi = 0.0;
+			long long n2 = 0;
+			int bad = 0;
+			for (int i = 0; i < 1000000; ++i) {
+				const float sp = 2.f + static_cast<float>(
+					rnd() % 3400000) / 1000.f;
+				const float hh = static_cast<float>(rnd() % 628319)
+					/ 100000.f - 3.14159f;
+				const float vx = sp * cosf(hh);
+				const float vy = sp * sinf(hh);
+				const signed char sd = (rnd() & 1) ? 1 : -1;
+				const float stored_ca = 1.f - 2.f
+					* static_cast<float>(rnd() % 100001)
+					/ 100000.f;
+				float px2, py2, pz2, nvx, nvy, nvz;
+				CapAir::KernelTick(k, 0.f, 0.f, 8000.f, vx, vy,
+					0.f, sd, stored_ca, &px2, &py2, &pz2, &nvx,
+					&nvy, &nvz);
+				const Strafe::TickLaw law = Strafe::Law(p, sp, 1.f,
+					false);
+				const Strafe::TrueWishCos tc =
+					Strafe::ToTrueWishCos(stored_ca);
+				const float pred_s2 = law.NewSpeed2(tc);
+				const float meas_s2 = nvx * nvx + nvy * nvy;
+				float sina = 1.f - tc.v * tc.v;
+				sina = sina > 0.f ? sqrtf(sina) : 0.f;
+				const int true_side = Strafe::ToTrueRotSide(sd);
+				const float pred_dpsi = static_cast<float>(
+					true_side) * law.TurnRad(tc, sina);
+				float meas_dpsi = atan2f(nvy, nvx) - hh;
+				if (meas_dpsi > 3.14159265f)
+					meas_dpsi -= 6.2831853f;
+				if (meas_dpsi < -3.14159265f)
+					meas_dpsi += 6.2831853f;
+				n2++;
+				const double d1 = fabs(static_cast<double>(
+					pred_s2) - static_cast<double>(meas_s2));
+				const double d2 = fabs(static_cast<double>(
+					pred_dpsi) - static_cast<double>(meas_dpsi));
+				if (d1 > worst_ds2) worst_ds2 = d1;
+				if (d2 > worst_dpsi) worst_dpsi = d2;
+				// tolerances: float-rounding scale, measured far
+				// below them (reported); a real disagreement is
+				// orders larger
+				if (d1 > 16.0 || d2 > 1e-4)
+					bad++;
+			}
+			snprintf(buf, sizeof(buf), "%lld states x random "
+				"(side, stored cosa): worst |d speed^2| %.3f, "
+				"worst |d heading| %.2e rad; %d beyond tolerance",
+				n2, worst_ds2, worst_dpsi, bad);
+			check("A4 law identity (dense)", bad == 0, buf);
+		}
 		// bench: the engine transition chain vs the kernel
 		{
 			PlayerState s;
@@ -14987,7 +15050,7 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
-	// ================= capboard: CAPABILITY 4 (registry A15/A16/A17)
+	// ================= capboard: registry A15/A16/A17
 	// + the A18 one-tick ride law harness (session 24). The clip
 	// itself is the engine's exported Fn::ClipVelocity (A15, solved) -
 	// this suite verifies the ANALYTIC optimization layer on top of it
@@ -15315,7 +15378,7 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
-	// ================= capreach: CAPABILITY 2 (registry A8) - the
+	// ================= capreach: registry A8 - the
 	// reach family R_N and its support function D* (session 24).
 	// SESSION-24 MEASUREMENT: the FREE canonical reach set is far
 	// larger than any map-directed sweep - the session-21 pitch
@@ -15539,7 +15602,7 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
-	// ================= capair: CAPABILITY 1 - the N-tick air
+	// ================= capair: registry A6/A7 - the N-tick air
 	// turn/gain function (Capability Library, session 22; advisor
 	// 2026-08-20f). Builds V*(v0, N, dpsi) = max terminal speed under
 	// legal dwell-6 controls with net heading change dpsi, and its
@@ -16054,7 +16117,7 @@ namespace {
 						SX.total_nodes, SX.peak_layer_cells,
 						SX.build_ms / 1000.0);
 					snprintf(nm, sizeof(nm),
-						"capability-1 gate (build) [%s]", tag);
+						"A6 band build gate [%s]", tag);
 					check(nm, !SX.aborted, buf);
 					// two falsifier passes, both MEASURED (the
 					// review showed the old worst <= v_bin*1.5+0.6
@@ -16182,9 +16245,10 @@ namespace {
 		if (csv)
 			fclose(csv);
 		printf("capair: %d passed, %d failed | %s\n", pass, fail,
-			fail == 0 ? "CAPABILITY 1 LB SURFACES CERTIFIED - the "
-				"falsifier gaps above are the measured tightness"
-				: "CAPABILITY 1 RED - a proof-backed gate failed");
+			fail == 0 ? "A6/A7 SURFACES CERTIFIED (witnessed LB + "
+				"closed-form UB) - falsifier gaps above are the "
+				"measured tightness"
+				: "A6/A7 RED - a proof-backed gate failed");
 		fflush(stdout);
 		return fail == 0 ? 0 : 2;
 	}

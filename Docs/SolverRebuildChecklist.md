@@ -15,18 +15,49 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-22 (session 25): METHOD SELECTION PER ATOMIC — THE
+POINT-TO-POINT DESIGN, AND THE NAMING DISCIPLINE.** User directives:
+be precise always (registry IDs are the ONLY capability names — the
+retired "capability 1/2" ordinals are purged from documents and suite
+labels); for every atomic function consider every candidate method
+and select the best; point-to-point solving is the priority and
+should be near-constant-time; do not restrict designs to the current
+full-map architecture. New design of record for method selection:
+`Docs/CapabilityMethods.md` — exactness classes; the TERMS CATALOG
+(every useful quantity with its exact law: s² is the natural linear
+variable, c = s·cos(alpha_true) is the one-scalar control, step
+length = post-accel speed × dt, arc length of max-gain flight is
+deterministic, sf scales only the budget so cap-limited ticks are
+sf-invariant); per-atomic method menus (dense DP tables / parametric
+exact schedule families / guided shooting / certified bounds /
+continuum initial guesses) with production + certificate verdicts;
+and the A12 POINT-TO-POINT DESIGN: the path-determines-speed
+reduction (per tick, speed change is a function of the turn executed
+— formalized from Strafe::TickLaw), the max-gain reversal-time
+family (fixed speed profile s_n² = s0² + 900n, fixed turn magnitudes
+atan(30/s_n), only reversal times free, k ≤ 3 measured, terminal
+2-tick adjustment for exact hits), continuum closed-form initial
+guess + discrete Newton with exact kernel rollouts (~10–30 µs per
+solve, output an exact replayable schedule), certified feasibility
+culls on both sides, and a falsification plan (bounds, shooting
+oracle, R_N sweeps). NEW GATE: `A4 law identity (dense)` in capkern —
+one MILLION random states × stored-basis actions: the closed-form law
+matches the bitwise kernel to worst |Δ(speed²)| = 5.0 (float scale at
+s² ~ 10⁷) and worst |Δheading| = 1.7e-5 rad; capkern now 5/5.
+Implementation of the A12 solver is the next session's headline.
+
 **STATUS 2026-08-21b (session 24): THE CAPABILITY BUILD-OUT — PHASE 0
 DONE, THE SPINE MOVING, TWO FALSE CERTAINTIES KILLED BY THE
 FALSIFIERS.** A4-prod (`CapAir::KernelTick`) is bitwise-certified by
 `capkern` (2.05M+ engine pairs, 0 mismatches, all six channels,
 vz-decoupling certified; 16.0M ticks/s = 8.9× MoveTick measured).
-Capability 1's exact (ψ, v-stratum) band now COMPLETES for all six v0
+A6's exact (ψ, v-stratum) band now COMPLETES for all six v0
 on the kernel (22–96M nodes, 48–276 s; the std::map ceiling is gone)
 with bitwise engine witness replay, and gains a CERTIFIED closed-form
 UB: V* ≤ sqrt(v0² + cap²·N) from the accel algebra — TIGHT at free
 heading (379 vs 378.8; 491 vs 491.0); falsifier beats are the
 MEASURED tightness (worst +19.6…+93.4 continuous-action), and the
-LB-vs-band collapse count measures sub-cell state loss. Capability 2
+LB-vs-band collapse count measures sub-cell state loss. A8
 (reach family R_N, D* LB/UB) ran its pitch ladder (11.1M/31.1M/42M+
 nodes at hp 128/96/64, N=60 — the FREE reach set is far bigger than
 any map-directed sweep) — and its falsifier REFUTED THE SESSION-20
