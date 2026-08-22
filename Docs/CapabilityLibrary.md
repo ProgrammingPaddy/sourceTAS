@@ -122,23 +122,23 @@ lower bound only) · PART (partial assets exist) · TBD.
 | A1 | Vertical state z(N), vz(N) | T | CERT | closed form; deployed as the session-20 vertical-window cancellation | — |
 | A2 | Face slice z -> [λmin, λmax] | T | CERT | (T, λ) destination cells (session 21) | — |
 | A3 | Hull contact geometry | T | PART | standing hull 0x1C50; Minkowski END box computed (session 18) | — |
-| A4 | One-tick air turn/gain | T | CERT ref; **PROD kernel is the named next build** | `MoveTick` (ref), `Strafe::TickLaw` (law), `wishparity` (gate), `Air::WishInputs` (realization). Missing: the cartesian in-loop kernel (vx,vy,d,a,u)->(vx',vy',d',a') | — |
-| A5 | Dwell/reversal automaton | T | CERT | min_gap = 6 law; age dimension in every table | — |
-| A6 | N-tick air turn/gain V* | S | LB (exact band in progress) | `CapAir::BuildVStar` LB surfaces ×6 witnessed; Conjecture M REFUTED; `BuildVStarStrat` aborts at cell ceiling — flat lattice waits on A4-prod | A4, A5 |
-| A7 | Dual Ψ* | S | LB | `QueryPsiStar` reads A6 layers; duality green | A6 |
-| A8 | Air directional displacement D* | S | TBD (next after 1) | **merged into the reach family** — D* = support function of R_N (see below) | A0, A4, A5 |
+| A4 | One-tick air turn/gain | T | **CERT + PROD (s24)** | `CapAir::KernelTick`, bitwise-certified by `capkern`: 2.05M+ engine pairs, 0 mismatches on all six channels incl. vz≠0 and signed zeros; vz-decoupling of the horizontal channels certified (1M pairs); 16.0M ticks/s = **8.9× MoveTick** measured | — |
+| A5 | Dwell/reversal automaton | T | CERT | min_gap = 6 law; age dimension in every table; the `dwell law matches the lattice` gate guards the param/lattice agreement (s24 review) | — |
+| A6 | N-tick air turn/gain V* | S | **LB + closed-form UB (s24)** | Exact-band flat lattice completes ×6 on A4-prod (22–96M nodes, 48–276s); bitwise witness replay green; **certified UB V\* ≤ √(v0²+cap²·N)** from the accel algebra, TIGHT at free heading (379 vs 378.8 at v0 250, 491 vs 491.0 at v0 400); falsifier gaps = measured tightness; sub-cell state collapse measured | A4, A5 |
+| A7 | Dual Ψ* | S | LB | `QueryPsiStarX` reads A6 layers; duality green | A6 |
+| A8 | Air directional displacement D* | S | **LB + UB v1 (s24)** | R_N sweep on the kernel; pitch ladder measured (11.1M/31.1M/42M+ nodes at hp 128/96/64, N=60); D* witnesses bitwise (position AND velocity); **the s20 cone REFUTED** (61,513 schedule violations; the LB itself beat it by 190u backward) → replaced by the certified max-speed-integral UB | A0, A4, A5 |
 | A9 | Displacement with terminal constraint | X | TBD | Pareto layer of R_N | A8 |
 | A10 | Minimum air time N_min | X | TBD | membership query over N (A1 bounds the N range) | A8, A1 |
 | A11 | Fixed-time air point solver | X | TBD | witness query into R_N at Q | A8 |
 | A12 | Air point-to-point solver | X | TBD | A11 over feasible N; `RefSolve` stays demoted to oracle/polisher here | A8, A1 |
 | A13 | Air point-to-face solver | X | TBD | A12 over (T, λ) slices — 1-D per tick, never generic XYZ | A8, A2 |
 | A14 | First-contact air prediction | T | REF | world-first-contact sweep + `FlyZoneSchedule` (zone-tested-per-tick); prod = trace vs small local brush set. Map geometry enters HERE only | — |
-| A15 | Board clip | T | CERT | analytic, overbounce 1: v' = v − (v·n)n; loss = |v·n| | — |
-| A16 | Best/worst board capability | S | TBD (near-analytic) | max post-board speed = minimize |v·n| over admissible arrivals — closed form for fixed speed/vz | A15 |
-| A17 | Board feasibility (inverse) | X | TBD | inverse of A16 | A16 |
-| A18 | One-tick planar ride law | T | REF | `MoveTick`-on-plane (ref). Prod hypothesis: air kernel + single-plane clip + constant in-plane gravity, interior-of-face only; edges keep the general path | A4, A15 |
-| A19 | N-tick ride turn/gain V*_ride | S | TBD | V* machinery + one slope parameter (in-plane gravity vector vs heading) | A18 |
-| A20 | Ride directional displacement D*_ride | S | TBD | reach-family machinery on the plane (2-D positions: λ, along-slope) | A18 |
+| A15 | Board clip | T | CERT | analytic, overbounce 1: v' = v − (v·n)n; loss = |v·n|; post-speed law verified vs `Fn::ClipVelocity` to **0.0034 u/s worst** over 33k arrivals (s24) | — |
+| A16 | Best/worst board capability | S | **SOLVED (s24)** | `CapBoard::BestWorstBoard` closed form (candidates: endpoints, cos extrema, zero crossings); 640 configs vs 7200-step enumeration, 0 disagreements, worst dev 1e-4 | A15 |
+| A17 | Board feasibility (inverse) | X | **SOLVED (s24)** | `CapBoard::LossFeasibleArcs` (≤2 arcs per period); 24 configs × 7200 headings, 0 mismatches | A16 |
+| A18 | One-tick planar ride law | T | **PROVEN interior (s24)** | `CapBoard::RideGrayTick`: start-gravity → clamp → air-accel(stale sf) → ONE `Fn::ClipVelocity` → clamp → finish-gravity → clamp; **1246/1246 contact ticks bitwise** across 3 ramps × 12 runs; 0 multi-plane, 0 engine-zeroed in the ride domain; velocity is frac-independent on single-plane ticks | A4, A15 |
+| A19 | N-tick ride turn/gain V*_ride | S | TBD — **unblocked by A18** | V* machinery + one slope parameter (in-plane gravity vector vs heading); surface_friction is carried state (0.25 when rising) | A18 |
+| A20 | Ride directional displacement D*_ride | S | TBD — unblocked | reach-family machinery on the plane (2-D positions: λ, along-slope) | A18 |
 | A21 | Minimum ride time between points | X | TBD | inverse A19/A20 | A19, A20 |
 | A22 | Board→exit Pareto solver | S | TBD | THE central sampled-ramp kernel. Regression seeds: exitfrontier/exitfit/efrefine suites; U_E is a standing cross-check | A18–A20 |
 | A23 | Ride edge interception | X | TBD | plane/edge geometry + A20 | A20 |
@@ -204,11 +204,11 @@ record.
 |----|---------|--------|--------------|-----------------|
 | B0 | Exact vertical tick window per face | CERT | A1 + A2 | deployed: collapsed a dead 48.7M-tick sweep to a 3-tick answer (session 20) |
 | B1 | Face-slice validity region | CERT | A2 | (T, λ) machinery |
-| B2 | Horizontal reach envelope | PART (outer) | A8 | certified 30/tick cone: coast point + 0.225k² slack disc (`FFReachable`/`FFReachAny`); exact envelope waits on R_N |
+| B2 | Horizontal reach envelope | **REFUTED as stated → replaced (s24)** | A8 | **the s20 cone's premise "per-tick |Δv| ≤ 30" is FALSE for braking wishes** (add = cap + |v|; the accel budget ~562 u/s binds) — capreach measured 61,513 real-schedule violations and witnessed states 190u beyond it. `FFReachable`/`FFReachAny` must NOT hard-prune. Replacement: the certified max-speed-integral bound (`CapReach::DStarUB`) |
 | B3 | Earliest possible contact tick | PART | A1 + A8 | B0 × B2 intersection as deployed |
 | B4 | Latest useful contact tick | TBD | A1 + geometry | — |
-| B5 | Required heading-change feasibility | LB only | A6/A7 | V* LB can certify FEASIBLE today; culling waits on the exact band |
-| B6 | Required terminal-speed feasibility | LB only | A6 | same |
+| B5 | Required heading-change feasibility | LB only | A6/A7 | V* LB can certify FEASIBLE today; heading-aware culling still needs the theorem step |
+| B6 | Required terminal-speed feasibility | **CERT cull (s24)** | A6 | the closed-form speed UB is a true certified cull: required V > √(v0²+cap²·N) ⟹ IMPOSSIBLE — the library's first air UB prune |
 | B7 | Combined point/region reachability | PART | A1 + A6 + A8 | B0 × B2 today; exact via R_N membership |
 | B8 | Boardability bound | TBD | A16/A17 | — |
 | B9 | Minimum unavoidable board loss | TBD | A16 | near-analytic: min |v·n| over admissible arrivals |
@@ -328,8 +328,85 @@ The core chains:
 (margins → 0), then the theorem step (the turn/accelerate branch
 family), then the LB surfaces retire into interval semantics.
 
+## Session 24 — the capability build-out (Phase 0 + spine)
+
+1. **A4-prod exists and is bitwise-certified.** `CapAir::KernelTick`
+   is partial evaluation of the verified MoveTick airborne chain
+   under the stamped fresh-state clean-air domain, with every elision
+   citing the engine line it removes. `capkern`: 2.05M+ engine pairs
+   (random + edge corpora incl. signed zeros, exact caps, the s2d = 1
+   gate, the total-stop branch, vz ≠ 0), **0 bitwise mismatches on
+   all six state channels**; vz-decoupling of the horizontal channels
+   certified separately (1M pairs). Throughput 16.0M ticks/s vs
+   1.79M = **8.9× measured** (the honest number vs the 30–100×
+   estimate: the transcendental chain — atan2f + two sincos per
+   action — is the irreducible cost; per-node hoisting of atan2f is a
+   recorded future ~20–25%).
+2. **Capability 1's exact band completes ×6** on the kernel (the
+   std::map ceiling is gone): 22.3M–95.5M nodes, 48–276 s/v0, peak
+   layer 311k–1.21M. Every kernel-built extremal schedule replays
+   through the REAL engine bit for bit (the composition gate).
+3. **The closed-form speed law is certified and TIGHT:**
+   V*(N) ≤ √(v0² + cap²·N) from the accel algebra
+   (per tick, |v'|² − |v|² = a(2·cur + a) ≤ wishspd² ≤ cap²), and
+   the measured free-heading surfaces SIT ON it (379 vs 378.8;
+   491 vs 491.0). Capability 1 is now a certified interval
+   [witnessed LB, closed-form UB] with the falsifier gap as the
+   measured tightness. B6 gains the library's first certified air
+   cull.
+4. **The session-20 reach cone is REFUTED** — the program's second
+   falsified "certainty," caught by capability 2's falsifier
+   (61,513 real-schedule violations) and independently by the swept
+   LB itself (witnessed backward reach 365u vs the cone's 284u at
+   N=60). The flaw: "per-tick |Δv| ≤ 30" fails for braking wishes
+   (add = cap + |v|; the budget ~562 u/s binds). Retroactive: B2's
+   `FFReachable`/`FFReachAny` are demoted — nothing may hard-prune
+   with them. Replacement: the certified max-speed-integral UB.
+5. **The board analytic layer is solved** (A16/A17 closed forms
+   verified against dense enumeration of the exact clip; the
+   post-speed law within 0.0034 u/s of `Fn::ClipVelocity` over 33k
+   arrivals).
+6. **The one-tick ride law is PROVEN on face interiors** (A18):
+   the decomposition start-gravity → clamp → air-accel(stale
+   surface_friction) → single clip → clamp → finish-gravity → clamp
+   reproduced **1246/1246** engine contact ticks bitwise across
+   3 synthetic ramps × 12 runs; 0 multi-plane ticks and 0
+   engine-zeroed (ramp-bug) ticks appeared in the ride domain.
+   A19/A20 (ride V*/D*) are unblocked with sf as carried state.
+7. **The free reach set is much bigger than any map-directed sweep**
+   (capability 2's ladder: 11.1M nodes at hp 128 → 31.1M at 96 →
+   >42M aborted at 64, N=60, one v0) — the session-21 pitch was
+   validated with the map doing the culling. The reach family
+   ships LB + UB v1 at the measured pitch; direction-aware UB
+   tightening and local refinement are the open theorem steps.
+8. **Falsifier semantics matured** (adversarial review, 3 verdicts):
+   suite-failing gates are now PROOF-BACKED only (build completes,
+   bitwise witnesses, duality, coast monotonicity — new theorem
+   gate, closed-form UB, LB/UB sandwich, UB-never-beaten, dwell/
+   lattice agreement); falsifier beats are MEASURED tightness, never
+   an underived threshold; the LB-vs-band comparison is per-sign
+   (chirality-aware) and seam-wrapped.
+
+**Next (spine order):** the theorem step for V* (turn-then-accelerate
+branch family + heading-aware UB); ride A19/A20 on the proven A18
+law; the A22 board→exit kernel; direction-aware D* UB; local
+refinement for R_N; then C6/C7 sampled kernels toward the 10⁶-pair
+end-state test.
+
 ## Change log
 
+- 2026-08-21b (session 24): **the capability build-out opens** —
+  A4-prod kernel bitwise-certified (`capkern`, 8.9×); capability 1's
+  exact band completes ×6 with bitwise witnesses + the certified
+  closed-form speed UB (tight at free heading); the s20 reach cone
+  REFUTED by capability 2's falsifier and replaced (B2 demoted, B6
+  promoted to a certified cull); board A16/A17 solved; **A18 ride law
+  proven bitwise on interiors (1246/1246)**; reach ladder measured;
+  gates matured to proof-backed-only after a 3-skeptic adversarial
+  review. New commands: `capkern`, `capboard`, `capreach`; `capair`
+  gains the exact arm + FINE experiment. Regressions green: groute
+  11/11, airprops 24/24, airrec hash bit-identical. Report:
+  `Docs/reports/session24-capability-buildout.html`.
 - 2026-08-21a (session 23): **the registry adopted** — advisor A/B/C
   taxonomy (A0–A28, B0–B21, C0–C15) is the canonical vocabulary;
   every existing asset mapped to its ID; three amendments recorded:

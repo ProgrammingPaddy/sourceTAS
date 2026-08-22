@@ -15,6 +15,41 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-21b (session 24): THE CAPABILITY BUILD-OUT — PHASE 0
+DONE, THE SPINE MOVING, TWO FALSE CERTAINTIES KILLED BY THE
+FALSIFIERS.** A4-prod (`CapAir::KernelTick`) is bitwise-certified by
+`capkern` (2.05M+ engine pairs, 0 mismatches, all six channels,
+vz-decoupling certified; 16.0M ticks/s = 8.9× MoveTick measured).
+Capability 1's exact (ψ, v-stratum) band now COMPLETES for all six v0
+on the kernel (22–96M nodes, 48–276 s; the std::map ceiling is gone)
+with bitwise engine witness replay, and gains a CERTIFIED closed-form
+UB: V* ≤ sqrt(v0² + cap²·N) from the accel algebra — TIGHT at free
+heading (379 vs 378.8; 491 vs 491.0); falsifier beats are the
+MEASURED tightness (worst +19.6…+93.4 continuous-action), and the
+LB-vs-band collapse count measures sub-cell state loss. Capability 2
+(reach family R_N, D* LB/UB) ran its pitch ladder (11.1M/31.1M/42M+
+nodes at hp 128/96/64, N=60 — the FREE reach set is far bigger than
+any map-directed sweep) — and its falsifier REFUTED THE SESSION-20
+REACH CONE (61,513 real-schedule violations; the witnessed LB itself
+beat the "certified" bound by 190u backward): the premise "per-tick
+|Δv| ≤ 30" fails for braking wishes (add = cap + |v|, budget ~562
+u/s). B2 (FFReachable/FFReachAny) is DEMOTED — nothing hard-prunes
+with it; the replacement is the certified max-speed-integral UB, and
+B6 becomes the library's first certified air cull. Board: A16/A17
+SOLVED (closed forms vs dense exact-clip enumeration; post-speed law
+within 0.0034 u/s over 33k arrivals). **A18 (one-tick ride law)
+PROVEN bitwise on face interiors: 1246/1246 contact ticks across 3
+ramps** — gravity-half → clamp → accel(stale sf) → ONE clip → clamp →
+gravity-half → clamp; 0 multi-plane, 0 ramp-bug zeroings in the ride
+domain; ride V*/D* unblocked. A 3-skeptic adversarial review drove
+the gate semantics to proof-backed-only (coast monotonicity theorem
+gate, per-sign chirality-aware LB comparison, seam wraps, dwell/
+lattice guard, kernel basevel.Z ride fix). Regressions green: groute
+11/11, airprops 24/24, airrec hash de1b000e431a84fb bit-identical.
+New commands: capkern, capboard, capreach. See
+`Docs/CapabilityLibrary.md` session-24 section + the registry
+status columns; report `Docs/reports/session24-capability-buildout.html`.
+
 **STATUS 2026-08-21a (session 23): THE CAPABILITY REGISTRY IS
 ADOPTED — A/B/C IS THE CANONICAL VOCABULARY; A4-PROD IS PHASE 0.**
 User + advisor taxonomy 2026-08-21a: the full atomic-capability

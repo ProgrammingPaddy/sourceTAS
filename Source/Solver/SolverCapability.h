@@ -47,7 +47,10 @@
 // the world used for the build has no geometry within reach. (The
 // falsifier's random schedules exercise the same fact.)
 
+#include <algorithm>
+#include <cstring>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #include "SolverAir.h"
@@ -524,6 +527,384 @@ namespace CapAir {
 		}
 	}
 
+	// ==================================================================
+	// A4-PROD: THE EXACT CLEAN-AIR KERNEL (session 24).
+	// Partial evaluation of the verified engine under the proven
+	// clean-air domain: no world, no trace, no hull - the SAME float
+	// operations in the SAME order as AirTick's WishInputs+MoveTick
+	// chain, gated bitwise by the airkparity suite. NOT approximation:
+	// a kernel that fails parity by one ulp does not ship.
+	// The kernel body is defined in KernelTick below (filled from the
+	// engine-recon op-order extraction; see Docs/CapabilityLibrary.md
+	// Phase 0).
+	// ==================================================================
+	// DOMAIN (stamped): the exact domain CapAir::AirTick executes - a
+	// fresh PlayerState (surface_friction 1, gravity_scale 1, basevel 0,
+	// no duck, airborne, buttons 0, no water) in clean air (no contact
+	// within the swept tick - a CALLER GUARANTEE: the shipped builds
+	// fly at z0 = 8000 with the only brush at z <= -15800, and the
+	// suite's engine witness replay enforces the elision downstream).
+	// Each elision below cites the engine line it partially evaluates:
+	//   - timers/Duck (SolverMove.cpp 887-929): state-only at buttons 0.
+	//   - jump gate (936-939): airborne CheckJumpButton is state-only.
+	//   - friction + grounded vz zeroes (940-943, 952-953): on_ground
+	//     false in this domain.
+	//   - TryPlayerMove (55-173): no contact => one full-fraction bump;
+	//     velocity untouched EXCEPT the exact-zero tail (64, 171-172);
+	//     position advances by the engine's re-derived delta (96/106).
+	//   - CategorizePosition (949): no ground in clean air; the
+	//     surface_friction it leaves is next-tick state, which this
+	//     domain resets (fresh states) - carried as a ctx input.
+	//   - triggers (964-988): none in the build worlds.
+	// The basevel +/- ride and the *1.f surface_friction multiply are
+	// kept as RUNTIME values so signed-zero and rounding semantics match
+	// the engine bit for bit.
+	struct AirKernelCtx {
+		MoveParams p;
+		Vec3 basevel;                   // runtime zeros (the +/- ride)
+		float surface_friction = 1.f;   // fresh-state value
+		float gravity_scale = 1.f;
+	};
+	inline AirKernelCtx MakeAirKernel(const MoveParams& p) {
+		AirKernelCtx k;
+		k.p = p;
+		return k;
+	}
+	// CheckVelocity, velocity channel, re-coded 1-to-1 from
+	// SolverMove.cpp:22-36 (the origin check there is unreachable in
+	// this model's arithmetic; component order X, Y, Z).
+	inline void KernelCheckVelocity(const MoveParams& p, float* vx,
+	                                float* vy, float* vz) {
+		float* v[3] = { vx, vy, vz };
+		for (int i = 0; i < 3; ++i) {
+			unsigned bits;
+			memcpy(&bits, v[i], 4);
+			if ((bits & 0x7f800000u) == 0x7f800000u)
+				*v[i] = 0.f;
+			if (*v[i] > p.maxvelocity)
+				*v[i] = p.maxvelocity;
+			else if (*v[i] < -p.maxvelocity)
+				*v[i] = -p.maxvelocity;
+		}
+	}
+	inline void KernelTick(const AirKernelCtx& k,
+	                       float px, float py, float pz,
+	                       float vx, float vy, float vz,
+	                       signed char side, float cosa,
+	                       float* npx, float* npy, float* npz,
+	                       float* nvx, float* nvy, float* nvz) {
+		const MoveParams& p = k.p;
+		// ---- the AirTick preamble (this file, AirTick - same calls)
+		Vec3 vel(vx, vy, vz);
+		Vec3 pos(px, py, pz);
+		const float s2d = Len2D(vel);
+		const float h = s2d > 1.f ? atan2f(vel.Y, vel.X) : 0.f;
+		float yaw = h * 57.2957795f;
+		float fm = 0.f, sm = 0.f;
+		if (side != 0 && s2d > 1.f)
+			Air::WishInputs(h, static_cast<int>(side), cosa, &yaw,
+				&fm, &sm);
+		// ---- MoveTick airborne chain (SolverMove.cpp:931-957)
+		// StartGravity half + basevel.Z integrate-and-CLEAR (933-935):
+		// the ride below therefore carries Z = 0, exactly as the
+		// engine's cleared s.basevel does (review finding, session 24)
+		vel.Z -= k.gravity_scale * p.gravity * 0.5f * p.dt;
+		vel.Z += k.basevel.Z * p.dt;
+		const Vec3 bv(k.basevel.X, k.basevel.Y, 0.f);
+		KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);      // 944
+		// AirMove (533-569); cap_ducked false in this domain
+		float wx, wy;
+		Fn::WishFromInput(yaw, fm, sm, &wx, &wy);
+		float wishspeed = sqrtf(wx * wx + wy * wy);
+		Vec3 wishdir(0.f, 0.f, 0.f);
+		if (wishspeed > 1e-6f)
+			wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
+		const float effmax = p.maxspeed;
+		if (wishspeed > effmax)
+			wishspeed = effmax;
+		const float wishspd = (wishspeed > p.air_speed_cap)
+			? p.air_speed_cap : wishspeed;
+		const float cur = Dot(vel, wishdir);
+		const float add = wishspd - cur;
+		if (add > 0.f) {
+			float accelspeed = p.airaccelerate * wishspeed * p.dt
+				* k.surface_friction;
+			if (accelspeed > add)
+				accelspeed = add;
+			vel = vel + Scale(wishdir, accelspeed);
+		}
+		// basevel rides TryPlayerMove (566-568; Z already cleared)
+		vel = vel + bv;
+		// TryPlayerMove under no contact (55-173)
+		if (Len2(vel) == 0.f) {
+			vel = Vec3();          // the all_fraction == 0 tail (171)
+		} else {
+			const float time_left = p.dt;
+			const Vec3 end = pos + Scale(vel, time_left);
+			const float frac = 1.f;   // the trace misses everything
+			pos = pos + Scale(end - pos, frac);   // 106
+		}
+		vel = vel - bv;
+		// CategorizePosition: state-only in clean air (949)
+		KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);      // 950
+		// FinishGravity half, MoveTick's inline pairing (951)
+		vel.Z -= k.gravity_scale * p.gravity * 0.5f * p.dt;
+		KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);      // 957
+		*npx = pos.X;
+		*npy = pos.Y;
+		*npz = pos.Z;
+		*nvx = vel.X;
+		*nvy = vel.Y;
+		*nvz = vel.Z;
+	}
+
+	// ==================================================================
+	// CAPABILITY 1 - THE EXACT-BAND FLAT-LATTICE BUILD (session 24).
+	// The corrected representation after Conjecture M's refutation:
+	// cells = (psi bin, v stratum, side, dwell age), on DENSE arrays
+	// (the std::map build hit its 400k-cell honest abort). Every
+	// transition is one A4-prod KernelTick (bitwise-equal to MoveTick
+	// by the airkparity gate), so the surface remains engine-exact.
+	// Witness replay of extrema still runs through the REAL MoveTick
+	// chain and must reproduce the node's terminal velocity BITWISE.
+	// ==================================================================
+	struct VNodeX {
+		float vx = 0.f, vy = 0.f;   // exact velocity (the payload)
+		int   parent = -1;          // node index in the PREVIOUS layer
+		int   key = -1;             // slot key (pb, vb, side, age)
+		short action = -1;
+	};
+	struct VStarSurfaceX {
+		VStarParams p;
+		float v_bin = 10.f;
+		int   psi_bins = 721;
+		int   vb_max = 512;
+		int   slots = 0;            // psi_bins * vb_max * 3 * 6
+		std::vector<std::vector<VNodeX> > layers;  // compact per layer
+		// per-(layer, psi bin) query accelerators
+		std::vector<std::vector<float> > pb_vmax;  // max speed
+		std::vector<std::vector<int> >   pb_node;  // best node index
+		long long kernel_ticks = 0;
+		long long node_budget = 150000000; // honest abort (~3 GB)
+		long long total_nodes = 0;
+		int   peak_layer_cells = 0;
+		bool  aborted = false;
+		double build_ms = 0.0;
+		std::vector<signed char> act_side;
+		std::vector<float> act_cosa;
+	};
+	inline int KeyX(const VStarSurfaceX& S, int pb, int vb,
+	                int side_idx, int age) {
+		const int a = age < 1 ? 1 : (age > 6 ? 6 : age);
+		return (((pb * S.vb_max) + vb) * 3 + side_idx) * 6 + (a - 1);
+	}
+	inline int PsiBinX(const VStarSurfaceX& S, float psi) {
+		const float u = (psi + 3.14159265f) / 6.2831853f;
+		int b = static_cast<int>(u * static_cast<float>(S.psi_bins));
+		if (b < 0) b = 0;
+		if (b >= S.psi_bins) b = S.psi_bins - 1;
+		return b;
+	}
+	inline float BinPsiX(const VStarSurfaceX& S, int bin) {
+		return (static_cast<float>(bin) + 0.5f)
+			/ static_cast<float>(S.psi_bins) * 6.2831853f
+			- 3.14159265f;
+	}
+	inline void BuildVStarX(const VStarParams& pp, const MoveParams& p,
+	                        const AirKernelCtx& k, VStarSurfaceX* S) {
+		S->p = pp;
+		S->slots = S->psi_bins * S->vb_max * 3 * 6;
+		S->layers.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<VNodeX>());
+		S->pb_vmax.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<float>());
+		S->pb_node.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<int>());
+		static const float kCosa[21] = {
+			1.f, 0.9995f, 0.998f, 0.995f, 0.99f, 0.98f, 0.96f,
+			0.93f, 0.9f, 0.85f, 0.8f, 0.7f, 0.6f, 0.45f, 0.3f,
+			0.15f, 0.f, -0.2f, -0.5f, -0.8f, -1.f };
+		S->act_side.clear();
+		S->act_cosa.clear();
+		S->act_side.push_back(0);
+		S->act_cosa.push_back(1.f);
+		for (int sd = 0; sd < 2; ++sd)
+			for (int ci = 0; ci < 21; ++ci) {
+				S->act_side.push_back(sd == 0
+					? static_cast<signed char>(1)
+					: static_cast<signed char>(-1));
+				S->act_cosa.push_back(kCosa[ci]);
+			}
+		const int n_act = static_cast<int>(S->act_side.size());
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const auto t0 = std::chrono::steady_clock::now();
+		// transient slot map, reused per layer
+		std::vector<int> slot(static_cast<size_t>(S->slots), -1);
+		{
+			VNodeX c;
+			c.vx = pp.v0;
+			c.vy = 0.f;
+			const int side_idx = pp.d0 < 0 ? 0
+				: (pp.d0 == 0 ? 1 : 2);
+			int vb = static_cast<int>(pp.v0 / S->v_bin);
+			if (vb >= S->vb_max) vb = S->vb_max - 1;
+			c.key = KeyX(*S, PsiBinX(*S, 0.f), vb, side_idx,
+				pp.a0 > 6 ? 6 : pp.a0);
+			S->layers[0].push_back(c);
+			S->total_nodes = 1;
+		}
+		for (int t = 0; t < pp.n_max; ++t) {
+			const std::vector<VNodeX>& curL = S->layers[
+				static_cast<size_t>(t)];
+			std::vector<VNodeX>& nxtL = S->layers[
+				static_cast<size_t>(t) + 1];
+			std::fill(slot.begin(), slot.end(), -1);
+			for (size_t ni = 0; ni < curL.size(); ++ni) {
+				const VNodeX cell = curL[ni];
+				const int side_code = (cell.key / 6) % 3;
+				const signed char cside = side_code == 0
+					? static_cast<signed char>(-1)
+					: (side_code == 1
+						? static_cast<signed char>(0)
+						: static_cast<signed char>(1));
+				const int cage = (cell.key % 6) + 1;
+				for (int ai = 0; ai < n_act; ++ai) {
+					const signed char ds = S->act_side[
+						static_cast<size_t>(ai)];
+					const float ca = S->act_cosa[
+						static_cast<size_t>(ai)];
+					if (ds != 0 && cside != 0 && ds != cside
+						&& cage < min_gap)
+						continue;   // illegal reversal
+					float dpx, dpy, dpz, nvz;
+					float nvx, nvy;
+					KernelTick(k, 0.f, 0.f, pp.z0,
+						cell.vx, cell.vy, 0.f, ds, ca,
+						&dpx, &dpy, &dpz, &nvx, &nvy, &nvz);
+					++S->kernel_ticks;
+					const float nsp = sqrtf(nvx * nvx
+						+ nvy * nvy);
+					const float npsi = nsp > 1.f
+						? atan2f(nvy, nvx) : 0.f;
+					const signed char nside = ds != 0 ? ds
+						: cside;
+					const int nage = (ds != 0 && cside != 0
+						&& ds != cside) ? 1
+						: (cage < 6 ? cage + 1 : 6);
+					const int nsidx = nside < 0 ? 0
+						: (nside == 0 ? 1 : 2);
+					int vb = static_cast<int>(nsp / S->v_bin);
+					if (vb >= S->vb_max) vb = S->vb_max - 1;
+					const int nk = KeyX(*S, PsiBinX(*S, npsi),
+						vb, nsidx, nage);
+					const int have = slot[static_cast<size_t>(
+						nk)];
+					if (have < 0) {
+						VNodeX nc;
+						nc.vx = nvx;
+						nc.vy = nvy;
+						nc.parent = static_cast<int>(ni);
+						nc.key = nk;
+						nc.action = static_cast<short>(ai);
+						slot[static_cast<size_t>(nk)] =
+							static_cast<int>(nxtL.size());
+						nxtL.push_back(nc);
+					} else {
+						VNodeX& dst = nxtL[
+							static_cast<size_t>(have)];
+						const float dsp = sqrtf(dst.vx * dst.vx
+							+ dst.vy * dst.vy);
+						if (nsp > dsp) {
+							dst.vx = nvx;
+							dst.vy = nvy;
+							dst.parent = static_cast<int>(ni);
+							dst.action =
+								static_cast<short>(ai);
+						}
+					}
+				}
+			}
+			if (static_cast<int>(nxtL.size())
+				> S->peak_layer_cells)
+				S->peak_layer_cells = static_cast<int>(
+					nxtL.size());
+			S->total_nodes += static_cast<long long>(nxtL.size());
+			if (S->total_nodes > S->node_budget) {
+				S->aborted = true;
+				break;
+			}
+		}
+		// query accelerators: per-(layer, psi bin) best node
+		for (size_t t = 0; t < S->layers.size(); ++t) {
+			S->pb_vmax[t].assign(static_cast<size_t>(S->psi_bins),
+				-1.f);
+			S->pb_node[t].assign(static_cast<size_t>(S->psi_bins),
+				-1);
+			const std::vector<VNodeX>& L = S->layers[t];
+			for (size_t ni = 0; ni < L.size(); ++ni) {
+				const int pb = L[ni].key / (S->vb_max * 18);
+				const float sp = sqrtf(L[ni].vx * L[ni].vx
+					+ L[ni].vy * L[ni].vy);
+				if (sp > S->pb_vmax[t][static_cast<size_t>(pb)]) {
+					S->pb_vmax[t][static_cast<size_t>(pb)] = sp;
+					S->pb_node[t][static_cast<size_t>(pb)] =
+						static_cast<int>(ni);
+				}
+			}
+		}
+		S->build_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+	}
+	// V*(N, dpsi) from the exact-band surface. -1 if unreached.
+	inline float QueryVStarX(const VStarSurfaceX& S, int N, float dpsi,
+	                         int* node_out = nullptr) {
+		if (N < 0 || N > S.p.n_max)
+			return -1.f;
+		const int pb = PsiBinX(S, dpsi);
+		const float v = S.pb_vmax[static_cast<size_t>(N)][
+			static_cast<size_t>(pb)];
+		if (v >= 0.f && node_out)
+			*node_out = S.pb_node[static_cast<size_t>(N)][
+				static_cast<size_t>(pb)];
+		return v;
+	}
+	// Psi*(N, Vmin) from the same accelerators.
+	inline float QueryPsiStarX(const VStarSurfaceX& S, int N,
+	                           float vmin) {
+		if (N < 0 || N > S.p.n_max)
+			return -1.f;
+		float best = -1.f;
+		for (int pb = 0; pb < S.psi_bins; ++pb) {
+			if (S.pb_vmax[static_cast<size_t>(N)][
+				static_cast<size_t>(pb)] < vmin)
+				continue;
+			const float ap = fabsf(BinPsiX(S, pb));
+			if (ap > best)
+				best = ap;
+		}
+		return best;
+	}
+	// Reconstruct the exact control schedule reaching (N, node).
+	inline void WitnessX(const VStarSurfaceX& S, int N, int node,
+	                     std::vector<signed char>* side,
+	                     std::vector<float>* cosa) {
+		side->assign(static_cast<size_t>(N), 0);
+		cosa->assign(static_cast<size_t>(N), 1.f);
+		int ni = node;
+		for (int t = N; t >= 1; --t) {
+			const VNodeX& c = S.layers[static_cast<size_t>(t)][
+				static_cast<size_t>(ni)];
+			(*side)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_side[static_cast<size_t>(c.action)] : 0;
+			(*cosa)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_cosa[static_cast<size_t>(c.action)] : 1.f;
+			ni = c.parent;
+			if (ni < 0)
+				break;
+		}
+	}
+
 	// Reconstruct the exact control schedule reaching (N, cell).
 	inline void Witness(const VStarSurface& S, int N, int cell,
 	                    std::vector<signed char>* side,
@@ -545,4 +926,516 @@ namespace CapAir {
 	}
 
 } // namespace CapAir
+
+// ======================================================================
+// CAPBOARD - registry A15 (board clip, solved), A16/A17 (best/worst
+// board + feasibility, the analytic layer), and the A18 one-tick ride
+// law harness (session 24). A15's authoritative implementation is the
+// engine's own exported Fn::ClipVelocity - never re-derived here. The
+// analytic law it realizes (overbounce 1):
+//     out = in - n * (in.n)  (+ one adjust pass when out.n < 0)
+//     loss = |in.n| ; post_speed^2 = |in|^2 - (in.n)^2   (real math)
+// A16/A17 optimize that law over arrival headings in closed form and
+// are verified against dense enumeration of the EXACT clip.
+// ======================================================================
+namespace CapBoard {
+
+	// v.n as a function of arrival heading theta at fixed horizontal
+	// speed s_h and vertical speed vz:
+	//     v.n = s_h * n_h * cos(theta - phi_n) + vz * n_z
+	// with n_h = sqrt(nx^2 + ny^2), phi_n = atan2(ny, nx). Boarding
+	// requires v.n < 0 (moving into the face).
+	inline float BoardVdotN(float s_h, float theta, float vz,
+	                        const Vec3& n) {
+		return s_h * (n.X * cosf(theta) + n.Y * sinf(theta))
+			+ vz * n.Z;
+	}
+
+	struct BoardOpt {
+		float theta = 0.f;       // argopt heading
+		float vdotn = 0.f;       // v.n there (real math)
+		bool  boardable = false; // v.n <= 0 at the optimum
+		bool  grazing = false;   // the zero-loss boundary is inside
+	};
+
+	// A16: over theta in [t0, t1] (t0 <= t1, radians, may span the
+	// circle), the least-loss and most-loss boardable arrivals.
+	// Closed-form candidate set: interval endpoints, the cos extrema
+	// (phi, phi+pi), and the zero crossings phi +/- acos(-B/A).
+	inline void BestWorstBoard(float s_h, float vz, const Vec3& n,
+	                           float t0, float t1, BoardOpt* best,
+	                           BoardOpt* worst) {
+		const float A = s_h * sqrtf(n.X * n.X + n.Y * n.Y);
+		const float B = vz * n.Z;
+		const float phi = atan2f(n.Y, n.X);
+		float cand[10];
+		int nc = 0;
+		cand[nc++] = t0;
+		cand[nc++] = t1;
+		const float kTau = 6.2831853f;
+		auto addwrap = [&](float th) {
+			for (int m = -2; m <= 2; ++m) {
+				const float t = th + kTau * static_cast<float>(m);
+				if (t >= t0 && t <= t1 && nc < 10)
+					cand[nc++] = t;
+			}
+		};
+		addwrap(phi);
+		addwrap(phi + 3.14159265f);
+		bool zero_inside = false;
+		if (A > 0.f && fabsf(B) <= A) {
+			const float d = acosf(-B / A);
+			const int nc0 = nc;
+			addwrap(phi + d);
+			addwrap(phi - d);
+			zero_inside = nc > nc0;
+		}
+		float lo = 1e30f, hi = -1e30f;
+		float tlo = t0, thi = t0;
+		for (int i = 0; i < nc; ++i) {
+			const float v = BoardVdotN(s_h, cand[i], vz, n);
+			if (v < lo) {
+				lo = v;
+				tlo = cand[i];
+			}
+			if (v > hi) {
+				hi = v;
+				thi = cand[i];
+			}
+		}
+		// worst boardable = most negative v.n (max loss)
+		worst->theta = tlo;
+		worst->vdotn = lo;
+		worst->boardable = lo < 0.f;
+		worst->grazing = false;
+		// best boardable = v.n closest to 0 from below; if the zero
+		// boundary is inside the interval, the best loss is 0 exactly
+		// (grazing) at the crossing.
+		if (zero_inside && lo < 0.f) {
+			// pick the crossing candidate with |v.n| smallest
+			float bt = tlo, bv = lo;
+			for (int i = 0; i < nc; ++i) {
+				const float v = BoardVdotN(s_h, cand[i], vz, n);
+				if (v <= 0.f && v > bv) {
+					bv = v;
+					bt = cand[i];
+				}
+			}
+			best->theta = bt;
+			best->vdotn = bv;
+			best->boardable = true;
+			best->grazing = true;
+		} else {
+			// no zero inside: v.n keeps one sign on [t0, t1]
+			if (hi < 0.f) {
+				best->theta = thi;   // all boardable; least loss
+				best->vdotn = hi;
+				best->boardable = true;
+			} else if (lo >= 0.f) {
+				best->theta = tlo;   // nothing boards
+				best->vdotn = lo;
+				best->boardable = false;
+			} else {
+				best->theta = thi;
+				best->vdotn = hi;
+				best->boardable = hi <= 0.f;
+			}
+			best->grazing = false;
+		}
+	}
+
+	// A17 (inverse): the heading set where the arrival BOARDS with
+	// loss <= L:   -L <= v.n < 0. With v.n = A cos(theta-phi) + B the
+	// set is { theta : cos(theta-phi) in [(-L-B)/A, -B/A) } - at most
+	// two arcs per period, returned as up to 2 [lo, hi] intervals
+	// around phi (theta = phi +/- acos(c)). Count returned.
+	inline int LossFeasibleArcs(float s_h, float vz, const Vec3& n,
+	                            float L, float arcs[2][2]) {
+		const float A = s_h * sqrtf(n.X * n.X + n.Y * n.Y);
+		const float B = vz * n.Z;
+		const float phi = atan2f(n.Y, n.X);
+		if (A <= 0.f) {
+			// heading-independent: v.n = B everywhere
+			if (B < 0.f && -L <= B) {
+				arcs[0][0] = -3.14159265f;
+				arcs[0][1] = 3.14159265f;
+				return 1;
+			}
+			return 0;
+		}
+		float clo = (-L - B) / A;   // cos lower bound
+		float chi = (-B) / A;       // cos upper bound (exclusive)
+		if (clo > 1.f || chi < -1.f || clo >= chi)
+			return 0;
+		if (clo < -1.f) clo = -1.f;
+		if (chi > 1.f) chi = 1.f;
+		// cos(u) in [clo, chi] with u = theta - phi in [-pi, pi]:
+		// u in [-acos(clo), -acos(chi)] U [acos(chi), acos(clo)]
+		const float ulo = acosf(chi);   // smaller angle
+		const float uhi = acosf(clo);   // larger angle
+		int na = 0;
+		arcs[na][0] = phi + ulo;
+		arcs[na][1] = phi + uhi;
+		na++;
+		if (ulo > 1e-7f) {   // the mirrored arc is distinct
+			arcs[na][0] = phi - uhi;
+			arcs[na][1] = phi - ulo;
+			na++;
+		}
+		return na;
+	}
+
+	// The synthetic ramp world for the A18 harness: one big tilted
+	// slab whose top face has normal
+	//     n = (sin a cos b, sin a sin b, cos a)
+	// with a > 45.57 deg so nz < 0.7 (surfable, never walkable).
+	inline bool MakeRampWorld(World* w, const Hulls& hulls,
+	                          float alpha_deg, float beta_deg,
+	                          Vec3* n_out) {
+		const float a = alpha_deg * 0.0174533f;
+		const float b = beta_deg * 0.0174533f;
+		const Vec3 n(sinf(a) * cosf(b), sinf(a) * sinf(b), cosf(a));
+		if (n_out)
+			*n_out = n;
+		std::vector<Vec3> ns;
+		std::vector<float> ds;
+		ns.push_back(n);
+		ds.push_back(0.f);
+		ns.push_back(Vec3(-n.X, -n.Y, -n.Z));
+		ds.push_back(2000.f);
+		ns.push_back(Vec3(1.f, 0.f, 0.f));
+		ds.push_back(20000.f);
+		ns.push_back(Vec3(-1.f, 0.f, 0.f));
+		ds.push_back(20000.f);
+		ns.push_back(Vec3(0.f, 1.f, 0.f));
+		ds.push_back(20000.f);
+		ns.push_back(Vec3(0.f, -1.f, 0.f));
+		ds.push_back(20000.f);
+		// AddTestBrush requires full axial coverage; these far caps
+		// only clip the slab thousands of units from the ride region
+		ns.push_back(Vec3(0.f, 0.f, 1.f));
+		ds.push_back(20000.f);
+		ns.push_back(Vec3(0.f, 0.f, -1.f));
+		ds.push_back(20000.f);
+		if (!w->AddTestBrush(ns, ds, hulls))
+			return false;
+		w->FinalizeTestWorld();
+		return true;
+	}
+
+	// A18 GRAY-BOX one-tick ride prediction (the decomposition
+	// HYPOTHESIS under test): for an airborne player in contact with
+	// ONE plane, the tick's velocity law is
+	//   start-gravity half -> clamp -> air-accelerate (stale
+	//   surface_friction) -> single ClipVelocity against the plane ->
+	//   clamp -> finish-gravity half -> clamp
+	// (velocity is frac-independent on a single-plane tick: a partial
+	// move re-bases the clip set but not the velocity). Every
+	// arithmetic piece is the engine's own exported function; only the
+	// COMPOSITION is hypothesized, and the harness tests it BITWISE.
+	inline void RideGrayTick(const MoveParams& p, const Vec3& n,
+	                         float sf, const Vec3& basevel, Vec3 vel,
+	                         signed char side, float cosa, Vec3* out) {
+		const float s2d = Len2D(vel);
+		const float h = s2d > 1.f ? atan2f(vel.Y, vel.X) : 0.f;
+		float yaw = h * 57.2957795f;
+		float fm = 0.f, sm = 0.f;
+		if (side != 0 && s2d > 1.f)
+			Air::WishInputs(h, static_cast<int>(side), cosa, &yaw,
+				&fm, &sm);
+		vel.Z -= 1.f * p.gravity * 0.5f * p.dt;
+		// basevel.Z integrates once and clears (MoveTick 934-935);
+		// the ride sandwich below then carries Z = 0.
+		vel.Z += basevel.Z * p.dt;
+		const Vec3 bv(basevel.X, basevel.Y, 0.f);
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		float wx, wy;
+		Fn::WishFromInput(yaw, fm, sm, &wx, &wy);
+		float wishspeed = sqrtf(wx * wx + wy * wy);
+		Vec3 wishdir(0.f, 0.f, 0.f);
+		if (wishspeed > 1e-6f)
+			wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
+		if (wishspeed > p.maxspeed)
+			wishspeed = p.maxspeed;
+		const float wishspd = (wishspeed > p.air_speed_cap)
+			? p.air_speed_cap : wishspeed;
+		const float cur = Dot(vel, wishdir);
+		const float add = wishspd - cur;
+		if (add > 0.f) {
+			float accelspeed = p.airaccelerate * wishspeed * p.dt
+				* sf;
+			if (accelspeed > add)
+				accelspeed = add;
+			vel = vel + Scale(wishdir, accelspeed);
+		}
+		// the basevel ride around TryPlayerMove (AirMove 566-568)
+		vel = vel + bv;
+		Vec3 clipped;
+		Fn::ClipVelocity(vel, n, &clipped);
+		vel = clipped;
+		vel = vel - bv;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		vel.Z -= 1.f * p.gravity * 0.5f * p.dt;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		*out = vel;
+	}
+
+} // namespace CapBoard
+
+// ======================================================================
+// CAPREACH - registry A8, the reach family R_N (session 24): the
+// fixed-time reachable set in (x, y, vx, vy, side, age) swept forward
+// from a canonical start with the A4-prod kernel, vz = 0 per tick (the
+// horizontal channels are vz-invariant - certified by capkern's
+// vz-decoupling gate; the vertical channel is the A1 closed form).
+// D*(N, phi) is served as an INTERVAL:
+//   LB = witnessed (max projection over swept states; every state has
+//        a replayable schedule), and
+//   UB = certified (the session-20 cone: per-tick |dv| <= air_speed_cap
+//        = 30 exactly, so the position deviates from the coast point by
+//        at most sum_i 30*dt*i = 0.225*N*(N+1); the coast projection
+//        plus that slack bounds every schedule).
+// CONJECTURE R1 (stated, under falsification): the max-SPEED
+// representative per (pos@hp, vel@hv, side, age) cell loses at most
+// O(lattice pitch) of D*. The falsifier measures the actual gap.
+// ======================================================================
+namespace CapReach {
+
+	struct RParams {
+		float v0 = 600.f;
+		int   n_max = 90;
+		signed char d0 = 0;
+		int   a0 = 1000;
+		float z0 = 8000.f;
+		float hp = 32.f;      // position pitch (session-21 validated)
+		float hv = 8.f;       // velocity pitch
+	};
+	struct RNode {
+		float x = 0.f, y = 0.f;
+		float vx = 0.f, vy = 0.f;
+		int   parent = -1;
+		short action = -1;
+		unsigned char sa = 0;   // side_idx * 8 + age
+	};
+	struct RSurface {
+		RParams p;
+		std::vector<std::vector<RNode> > layers;
+		// per-layer witnessed D* LB at 16 sampled directions
+		std::vector<std::vector<float> > dslb;   // [layer][16]
+		std::vector<std::vector<int> >   dsnode; // [layer][16]
+		long long kernel_ticks = 0;
+		long long total_nodes = 0;
+		long long node_budget = 40000000;  // honest abort ceiling
+		int  peak_layer = 0;
+		bool aborted = false;
+		int  aborted_at = -1;              // last COMPLETE layer
+		double build_ms = 0.0;
+		std::vector<signed char> act_side;
+		std::vector<float> act_cosa;
+	};
+	inline long long RKey(const RParams& pp, float x, float y,
+	                      float vx, float vy, int sidx, int age) {
+		int ix = static_cast<int>((x + 4800.f) / pp.hp);
+		int iy = static_cast<int>((y + 4800.f) / pp.hp);
+		int ivx = static_cast<int>((vx + 3600.f) / pp.hv);
+		int ivy = static_cast<int>((vy + 3600.f) / pp.hv);
+		if (ix < 0) ix = 0;
+		if (ix > 399) ix = 399;
+		if (iy < 0) iy = 0;
+		if (iy > 399) iy = 399;
+		if (ivx < 0) ivx = 0;
+		if (ivx > 999) ivx = 999;
+		if (ivy < 0) ivy = 0;
+		if (ivy > 999) ivy = 999;
+		const int a = age < 1 ? 1 : (age > 6 ? 6 : age);
+		return ((((static_cast<long long>(ix) * 400 + iy) * 1000
+			+ ivx) * 1000 + ivy) * 18) + sidx * 6 + (a - 1);
+	}
+	// THE CERTIFIED MAX-SPEED-INTEGRAL UB (session 24). This REPLACES
+	// the session-20 "reach cone", which capreach's falsifier REFUTED
+	// with 61,513 real-schedule violations and the sweep's own
+	// witnessed LB exceeded by up to 190 u at backward directions:
+	// the cone's premise "per-tick |dv| <= air_speed_cap" is FALSE
+	// for braking wishes, where add = cap + |v| and the accel budget
+	// (airaccelerate * wishspeed * dt * sf, ~562 u/s at surf params)
+	// binds instead. The sound lemma, from the engine's own accel
+	// algebra: per tick,
+	//     |v'|^2 - |v|^2 = a * (2*cur + a) <= wishspd^2 <= cap^2
+	// (since 0 <= a <= add = wishspd - cur gives (a + cur)^2 <=
+	// wishspd^2, and a past the sign flip only decreases speed), so
+	//     |v_i| <= sqrt(v0^2 + cap^2 * i)
+	// (sf-independent, clamp-safe), and any displacement projection
+	// is at most dt * sum_i |v_i|. Direction-aware tightening
+	// (braking-time analysis) is this capability's open theorem step.
+	// NOTE the retroactive consequence recorded in the registry: B2's
+	// old cone (FFReachable/FFReachAny) is DEMOTED from certified to
+	// refuted-as-stated; nothing may hard-prune with it.
+	inline float DStarUB(const RParams& pp, const MoveParams& p,
+	                     int N, float phi) {
+		(void)phi;   // v1 is direction-independent (loose backward)
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		float s = 0.f;
+		for (int i = 1; i <= N; ++i)
+			s += sqrtf(pp.v0 * pp.v0
+				+ cap2 * static_cast<float>(i));
+		return s * p.dt;
+	}
+	inline void BuildReach(const RParams& pp, const MoveParams& p,
+	                       const CapAir::AirKernelCtx& k,
+	                       RSurface* S) {
+		S->p = pp;
+		S->layers.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<RNode>());
+		S->dslb.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<float>());
+		S->dsnode.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<int>());
+		static const float kCosa[21] = {
+			1.f, 0.9995f, 0.998f, 0.995f, 0.99f, 0.98f, 0.96f,
+			0.93f, 0.9f, 0.85f, 0.8f, 0.7f, 0.6f, 0.45f, 0.3f,
+			0.15f, 0.f, -0.2f, -0.5f, -0.8f, -1.f };
+		S->act_side.clear();
+		S->act_cosa.clear();
+		S->act_side.push_back(0);
+		S->act_cosa.push_back(1.f);
+		for (int sd = 0; sd < 2; ++sd)
+			for (int ci = 0; ci < 21; ++ci) {
+				S->act_side.push_back(sd == 0
+					? static_cast<signed char>(1)
+					: static_cast<signed char>(-1));
+				S->act_cosa.push_back(kCosa[ci]);
+			}
+		const int n_act = static_cast<int>(S->act_side.size());
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const auto t0 = std::chrono::steady_clock::now();
+		{
+			RNode c;
+			c.vx = pp.v0;
+			const int sidx = pp.d0 < 0 ? 0 : (pp.d0 == 0 ? 1 : 2);
+			const int a = pp.a0 > 6 ? 6 : (pp.a0 < 1 ? 1 : pp.a0);
+			c.sa = static_cast<unsigned char>(sidx * 8 + a);
+			S->layers[0].push_back(c);
+			S->total_nodes = 1;
+		}
+		std::unordered_map<long long, int> slot;
+		for (int t = 0; t < pp.n_max; ++t) {
+			const std::vector<RNode>& curL = S->layers[
+				static_cast<size_t>(t)];
+			std::vector<RNode>& nxtL = S->layers[
+				static_cast<size_t>(t) + 1];
+			slot.clear();
+			slot.reserve(curL.size() * 8 + 64);
+			for (size_t ni = 0; ni < curL.size(); ++ni) {
+				const RNode cell = curL[ni];
+				const int sidx = cell.sa / 8;
+				const signed char cside = sidx == 0
+					? static_cast<signed char>(-1)
+					: (sidx == 1 ? static_cast<signed char>(0)
+						: static_cast<signed char>(1));
+				const int cage = cell.sa % 8;
+				for (int ai = 0; ai < n_act; ++ai) {
+					const signed char ds = S->act_side[
+						static_cast<size_t>(ai)];
+					const float ca = S->act_cosa[
+						static_cast<size_t>(ai)];
+					if (ds != 0 && cside != 0 && ds != cside
+						&& cage < min_gap)
+						continue;
+					float nx, ny, nz2, nvx, nvy, nvz;
+					CapAir::KernelTick(k, cell.x, cell.y, pp.z0,
+						cell.vx, cell.vy, 0.f, ds, ca,
+						&nx, &ny, &nz2, &nvx, &nvy, &nvz);
+					++S->kernel_ticks;
+					const signed char nside = ds != 0 ? ds
+						: cside;
+					const int nage = (ds != 0 && cside != 0
+						&& ds != cside) ? 1
+						: (cage < 6 ? cage + 1 : 6);
+					const int nsidx = nside < 0 ? 0
+						: (nside == 0 ? 1 : 2);
+					const long long nk = RKey(pp, nx, ny, nvx,
+						nvy, nsidx, nage);
+					std::unordered_map<long long, int>::iterator
+						jt = slot.find(nk);
+					if (jt == slot.end()) {
+						RNode nc;
+						nc.x = nx;
+						nc.y = ny;
+						nc.vx = nvx;
+						nc.vy = nvy;
+						nc.parent = static_cast<int>(ni);
+						nc.action = static_cast<short>(ai);
+						nc.sa = static_cast<unsigned char>(
+							nsidx * 8 + nage);
+						slot[nk] = static_cast<int>(nxtL.size());
+						nxtL.push_back(nc);
+					} else {
+						RNode& dst = nxtL[static_cast<size_t>(
+							jt->second)];
+						const float nsp = nvx * nvx + nvy * nvy;
+						const float dsp = dst.vx * dst.vx
+							+ dst.vy * dst.vy;
+						if (nsp > dsp) {
+							dst.x = nx;
+							dst.y = ny;
+							dst.vx = nvx;
+							dst.vy = nvy;
+							dst.parent = static_cast<int>(ni);
+							dst.action = static_cast<short>(ai);
+						}
+					}
+				}
+			}
+			if (static_cast<int>(nxtL.size()) > S->peak_layer)
+				S->peak_layer = static_cast<int>(nxtL.size());
+			S->total_nodes += static_cast<long long>(nxtL.size());
+			if (S->total_nodes > S->node_budget) {
+				S->aborted = true;
+				S->aborted_at = t + 1;
+				break;
+			}
+		}
+		// the witnessed D* LB tables at 16 directions per layer
+		for (size_t t = 0; t < S->layers.size(); ++t) {
+			S->dslb[t].assign(16, -1e30f);
+			S->dsnode[t].assign(16, -1);
+			const std::vector<RNode>& L = S->layers[t];
+			for (size_t ni = 0; ni < L.size(); ++ni)
+				for (int ph = 0; ph < 16; ++ph) {
+					const float phi = static_cast<float>(ph)
+						* 0.39269908f;
+					const float pr = L[ni].x * cosf(phi)
+						+ L[ni].y * sinf(phi);
+					if (pr > S->dslb[t][static_cast<size_t>(
+						ph)]) {
+						S->dslb[t][static_cast<size_t>(ph)] = pr;
+						S->dsnode[t][static_cast<size_t>(ph)] =
+							static_cast<int>(ni);
+					}
+				}
+		}
+		S->build_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+	}
+	inline void WitnessR(const RSurface& S, int N, int node,
+	                     std::vector<signed char>* side,
+	                     std::vector<float>* cosa) {
+		side->assign(static_cast<size_t>(N), 0);
+		cosa->assign(static_cast<size_t>(N), 1.f);
+		int ni = node;
+		for (int t = N; t >= 1; --t) {
+			const RNode& c = S.layers[static_cast<size_t>(t)][
+				static_cast<size_t>(ni)];
+			(*side)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_side[static_cast<size_t>(c.action)] : 0;
+			(*cosa)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_cosa[static_cast<size_t>(c.action)] : 1.f;
+			ni = c.parent;
+			if (ni < 0)
+				break;
+		}
+	}
+
+} // namespace CapReach
 } // namespace Solver

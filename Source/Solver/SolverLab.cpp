@@ -14745,6 +14745,800 @@ namespace {
 		return 0;
 	}
 
+	// ================= capkern: A4-PROD PARITY + BENCH (session 24,
+	// Phase 0 of the capability build-out). CapAir::KernelTick is
+	// partial evaluation of the verified MoveTick airborne chain under
+	// the fresh-state clean-air domain. This suite proves it BITWISE
+	// against the authoritative engine over random + edge corpora
+	// (velocity AND position channels, vz = 0 and vz != 0), then
+	// measures both throughputs. A kernel that fails parity by one ulp
+	// does not ship - every downstream capability build runs on it.
+	int CmdCapKern(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		World w;
+		if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+			printf("capkern: clean-air world build failed\n");
+			return 1;
+		}
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capkern: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+		// the 43-action table (the builds' action set)
+		signed char act_side[43];
+		float act_cosa[43];
+		{
+			static const float kCosa[21] = {
+				1.f, 0.9995f, 0.998f, 0.995f, 0.99f, 0.98f, 0.96f,
+				0.93f, 0.9f, 0.85f, 0.8f, 0.7f, 0.6f, 0.45f, 0.3f,
+				0.15f, 0.f, -0.2f, -0.5f, -0.8f, -1.f };
+			act_side[0] = 0;
+			act_cosa[0] = 1.f;
+			int na = 1;
+			for (int sd = 0; sd < 2; ++sd)
+				for (int ci = 0; ci < 21; ++ci) {
+					act_side[na] = sd == 0
+						? static_cast<signed char>(1)
+						: static_cast<signed char>(-1);
+					act_cosa[na] = kCosa[ci];
+					na++;
+				}
+		}
+		long long tested = 0, mm = 0;
+		int printed = 0;
+		auto cmp1 = [&](float vx, float vy, float vz, signed char ds,
+			float ca) {
+			PlayerState s;
+			s.pos = Vec3(0.f, 0.f, 8000.f);
+			s.vel = Vec3(vx, vy, vz);
+			CapAir::AirTick(&s, w, p, ds, ca);
+			float npx, npy, npz, nvx, nvy, nvz;
+			CapAir::KernelTick(k, 0.f, 0.f, 8000.f, vx, vy, vz, ds,
+				ca, &npx, &npy, &npz, &nvx, &nvy, &nvz);
+			tested++;
+			const bool ok =
+				memcmp(&s.vel.X, &nvx, 4) == 0
+				&& memcmp(&s.vel.Y, &nvy, 4) == 0
+				&& memcmp(&s.vel.Z, &nvz, 4) == 0
+				&& memcmp(&s.pos.X, &npx, 4) == 0
+				&& memcmp(&s.pos.Y, &npy, 4) == 0
+				&& memcmp(&s.pos.Z, &npz, 4) == 0;
+			if (!ok) {
+				mm++;
+				if (printed < 3) {
+					printed++;
+					printf("capkern:   MISMATCH v(%.9g %.9g %.9g) "
+						"side %d cosa %.6f -> engine v(%.9g %.9g "
+						"%.9g) p(%.9g %.9g %.9g) kernel v(%.9g "
+						"%.9g %.9g) p(%.9g %.9g %.9g)\n",
+						vx, vy, vz, static_cast<int>(ds), ca,
+						s.vel.X, s.vel.Y, s.vel.Z, s.pos.X,
+						s.pos.Y, s.pos.Z, nvx, nvy, nvz, npx,
+						npy, npz);
+				}
+			}
+		};
+		unsigned rng = 0xA1B2C3D4u;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		// corpus A: random states, random actions, vz mix
+		{
+			const auto t0 = std::chrono::steady_clock::now();
+			for (int i = 0; i < 2000000; ++i) {
+				const float sp = static_cast<float>(rnd() % 3600000)
+					/ 1000.f;
+				const float hh = static_cast<float>(rnd() % 628319)
+					/ 100000.f - 3.14159f;
+				const float vx = sp * cosf(hh);
+				const float vy = sp * sinf(hh);
+				float vz = 0.f;
+				if ((rnd() & 3) == 0)
+					vz = static_cast<float>(
+						static_cast<int>(rnd() % 7200000)
+						- 3600000) / 1000.f;
+				const int ai = static_cast<int>(rnd() % 43u);
+				cmp1(vx, vy, vz, act_side[ai], act_cosa[ai]);
+			}
+			const double ms = std::chrono::duration<double,
+				std::milli>(std::chrono::steady_clock::now()
+				- t0).count();
+			snprintf(buf, sizeof(buf), "%lld pairs in %.1fs; %lld "
+				"bitwise mismatches (all six channels)", tested,
+				ms / 1000.0, mm);
+			check("parity: random corpus", mm == 0, buf);
+		}
+		// corpus B: edges - exact caps, the s2d = 1 gate, signed
+		// zeros, clamp boundaries, every action
+		{
+			const long long t0n = tested;
+			static const float sps[16] = { 0.f, 0.25f, 0.999999f,
+				1.f, 1.000001f, 2.f, 29.9f, 30.f, 30.1f, 249.f,
+				250.f, 251.f, 600.f, 3499.f, 3500.f, 3510.f };
+			static const float vzs[7] = { 0.f, 6.f, -6.f, 140.f,
+				146.f, -3500.f, 3505.f };
+			for (int si = 0; si < 16; ++si)
+				for (int hi = 0; hi < 12; ++hi) {
+					const float hh = static_cast<float>(hi)
+						* 0.5235988f - 3.1415927f;
+					const float vx = sps[si] * cosf(hh);
+					const float vy = sps[si] * sinf(hh);
+					for (int zi = 0; zi < 7; ++zi)
+						for (int ai = 0; ai < 43; ++ai)
+							cmp1(vx, vy, vzs[zi], act_side[ai],
+								act_cosa[ai]);
+				}
+			for (int ai = 0; ai < 43; ++ai) {
+				cmp1(0.f, 0.f, 0.f, act_side[ai], act_cosa[ai]);
+				// the total-stop branch: vz exactly +6 lands vz at
+				// 0 after StartGravity (review finding, session 24)
+				cmp1(0.f, 0.f, 6.f, act_side[ai], act_cosa[ai]);
+				cmp1(1e-25f, 0.f, 6.f, act_side[ai],
+					act_cosa[ai]);
+				cmp1(-0.f, 0.f, 0.f, act_side[ai], act_cosa[ai]);
+				cmp1(0.f, -0.f, 0.f, act_side[ai], act_cosa[ai]);
+				cmp1(-0.f, -0.f, -0.f, act_side[ai],
+					act_cosa[ai]);
+				cmp1(-600.f, 0.f, 0.f, act_side[ai],
+					act_cosa[ai]);
+				cmp1(0.f, -600.f, 0.f, act_side[ai],
+					act_cosa[ai]);
+			}
+			snprintf(buf, sizeof(buf), "%lld edge pairs; %lld "
+				"total bitwise mismatches", tested - t0n, mm);
+			check("parity: edge corpus", mm == 0, buf);
+		}
+		// vz-decoupling: the horizontal channels (vx, vy, px, py) are
+		// invariant to vz. Certified HERE once (bitwise, kernel vs
+		// kernel-at-vz-0; the kernel itself is engine-bitwise by the
+		// gates above) - the reach family builds on this fact.
+		{
+			long long mmz = 0;
+			for (int i = 0; i < 1000000; ++i) {
+				const float sp = static_cast<float>(rnd() % 3600000)
+					/ 1000.f;
+				const float hh = static_cast<float>(rnd() % 628319)
+					/ 100000.f - 3.14159f;
+				const float vx = sp * cosf(hh);
+				const float vy = sp * sinf(hh);
+				const float vz = static_cast<float>(
+					static_cast<int>(rnd() % 7200000) - 3600000)
+					/ 1000.f;
+				const int ai = static_cast<int>(rnd() % 43u);
+				float ax, ay, az, avx, avy, avz;
+				float bx, by, bz, bvx, bvy, bvz;
+				CapAir::KernelTick(k, 0.f, 0.f, 8000.f, vx, vy, vz,
+					act_side[ai], act_cosa[ai], &ax, &ay, &az,
+					&avx, &avy, &avz);
+				CapAir::KernelTick(k, 0.f, 0.f, 8000.f, vx, vy, 0.f,
+					act_side[ai], act_cosa[ai], &bx, &by, &bz,
+					&bvx, &bvy, &bvz);
+				if (memcmp(&avx, &bvx, 4) != 0
+					|| memcmp(&avy, &bvy, 4) != 0
+					|| memcmp(&ax, &bx, 4) != 0
+					|| memcmp(&ay, &by, 4) != 0)
+					mmz++;
+			}
+			snprintf(buf, sizeof(buf), "1000000 random states with "
+				"vz != 0 vs vz = 0; %lld horizontal-channel "
+				"differences", mmz);
+			check("vz-decoupling (horizontal)", mmz == 0, buf);
+		}
+		// bench: the engine transition chain vs the kernel
+		{
+			PlayerState s;
+			s.pos = Vec3(0.f, 0.f, 8000.f);
+			s.vel = Vec3(600.f, 0.f, 0.f);
+			const long long mt0 = g_movetick_count;
+			const auto t0 = std::chrono::steady_clock::now();
+			unsigned r2 = 0x1234567u;
+			for (int i = 0; i < 2000000; ++i) {
+				r2 ^= r2 << 13;
+				r2 ^= r2 >> 17;
+				r2 ^= r2 << 5;
+				const int ai = static_cast<int>(r2 % 43u);
+				s.vel.Z = 0.f;
+				s.pos = Vec3(0.f, 0.f, 8000.f);
+				CapAir::AirTick(&s, w, p, act_side[ai],
+					act_cosa[ai]);
+			}
+			const double es = std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - t0).count();
+			const long long emt = g_movetick_count - mt0;
+			float vx = 600.f, vy = 0.f;
+			float sink = 0.f;
+			const auto t1 = std::chrono::steady_clock::now();
+			r2 = 0x1234567u;
+			for (long long i = 0; i < 100000000ll; ++i) {
+				r2 ^= r2 << 13;
+				r2 ^= r2 >> 17;
+				r2 ^= r2 << 5;
+				const int ai = static_cast<int>(r2 % 43u);
+				float px2, py2, pz2, vz2;
+				float nvx, nvy;
+				CapAir::KernelTick(k, 0.f, 0.f, 8000.f, vx, vy,
+					0.f, act_side[ai], act_cosa[ai], &px2, &py2,
+					&pz2, &nvx, &nvy, &vz2);
+				vx = nvx;
+				vy = nvy;
+				sink += vz2;
+			}
+			const double ks = std::chrono::duration<double>(
+				std::chrono::steady_clock::now() - t1).count();
+			const double erate = static_cast<double>(emt) / es;
+			const double krate = 100000000.0 / ks;
+			snprintf(buf, sizeof(buf), "engine %.2fM ticks/s, "
+				"kernel %.2fM ticks/s, multiple %.1fx (sink %.0f)",
+				erate / 1e6, krate / 1e6, krate / erate, sink);
+			check("bench: kernel multiple", krate > erate, buf);
+		}
+		printf("capkern: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "A4-PROD KERNEL BITWISE-CERTIFIED"
+				: "A4-PROD KERNEL NOT CERTIFIED - do not build on "
+					"it");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= capboard: CAPABILITY 4 (registry A15/A16/A17)
+	// + the A18 one-tick ride law harness (session 24). The clip
+	// itself is the engine's exported Fn::ClipVelocity (A15, solved) -
+	// this suite verifies the ANALYTIC optimization layer on top of it
+	// against dense enumeration of the exact clip, then tests the A18
+	// decomposition hypothesis BITWISE on synthetic surf ramps.
+	int CmdCapBoard(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capboard: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const float kD2R = 0.0174533f;
+		const float alphas[4] = { 50.f, 60.f, 70.f, 80.f };
+		const float betas[5] = { 0.f, 45.f, 90.f, 180.f, 270.f };
+		// ---- gate 1: A16 closed form vs dense enumeration of v.n
+		{
+			int cfg = 0, bad = 0;
+			float wdev = 0.f;
+			const float shs[4] = { 300.f, 600.f, 1000.f, 1500.f };
+			const float vzs[4] = { -800.f, -200.f, 0.f, 200.f };
+			for (int ia = 0; ia < 4; ++ia)
+				for (int ib = 0; ib < 5; ++ib) {
+					const float a = alphas[ia] * kD2R;
+					const float b = betas[ib] * kD2R;
+					const Vec3 n(sinf(a) * cosf(b),
+						sinf(a) * sinf(b), cosf(a));
+					for (int is = 0; is < 4; ++is)
+						for (int iz = 0; iz < 4; ++iz)
+							for (int iv = 0; iv < 2; ++iv) {
+								const float t0 = iv == 0
+									? -3.14159265f : 0.3f;
+								const float t1 = iv == 0
+									? 3.14159265f : 2.4f;
+								cfg++;
+								CapBoard::BoardOpt bo, wo;
+								CapBoard::BestWorstBoard(
+									shs[is], vzs[iz], n, t0,
+									t1, &bo, &wo);
+								float elo = 1e30f,
+									ehi = -1e30f;
+								const int kSteps = 7200;
+								for (int st = 0; st <= kSteps;
+									++st) {
+									const float th = t0
+										+ (t1 - t0)
+										* static_cast<float>(
+											st)
+										/ static_cast<float>(
+											kSteps);
+									const float v =
+										CapBoard::BoardVdotN(
+											shs[is], th,
+											vzs[iz], n);
+									if (v < elo) elo = v;
+									if (v > ehi) ehi = v;
+								}
+								bool ok = fabsf(wo.vdotn
+									- elo) <= 0.01f;
+								float dev = fabsf(wo.vdotn
+									- elo);
+								if (ehi < -0.01f) {
+									if (fabsf(bo.vdotn - ehi)
+										> 0.01f
+										|| !bo.boardable
+										|| bo.grazing)
+										ok = false;
+									if (fabsf(bo.vdotn - ehi)
+										> dev)
+										dev = fabsf(bo.vdotn
+											- ehi);
+								} else if (elo > 0.01f) {
+									if (bo.boardable)
+										ok = false;
+								} else {
+									if (bo.grazing
+										&& bo.vdotn > 0.f)
+										ok = false;
+								}
+								if (!ok)
+									bad++;
+								if (dev > wdev)
+									wdev = dev;
+							}
+				}
+			snprintf(buf, sizeof(buf), "%d configs (4 tilts x 5 "
+				"azimuths x speeds x vz x 2 intervals), %d "
+				"disagreements vs 7200-step enumeration (worst "
+				"dev %.4f)", cfg, bad, wdev);
+			check("A16 closed form vs enumeration", bad == 0, buf);
+		}
+		// ---- gate 2: the post-speed law vs the EXACT engine clip
+		{
+			long long n2 = 0;
+			float wdev = 0.f;
+			for (int ia = 0; ia < 4; ++ia)
+				for (int ib = 0; ib < 5; ++ib) {
+					const float a = alphas[ia] * kD2R;
+					const float b = betas[ib] * kD2R;
+					const Vec3 n(sinf(a) * cosf(b),
+						sinf(a) * sinf(b), cosf(a));
+					const float shs2[2] = { 300.f, 1000.f };
+					const float vzs2[2] = { -400.f, 0.f };
+					for (int is = 0; is < 2; ++is)
+						for (int iz = 0; iz < 2; ++iz)
+							for (int st = 0; st < 720; ++st) {
+								const float th =
+									static_cast<float>(st)
+									* 0.00872665f
+									- 3.14159265f;
+								const Vec3 v(shs2[is]
+									* cosf(th), shs2[is]
+									* sinf(th), vzs2[iz]);
+								const float vdn =
+									CapBoard::BoardVdotN(
+										shs2[is], th,
+										vzs2[iz], n);
+								if (vdn >= 0.f)
+									continue;
+								n2++;
+								Vec3 out;
+								Fn::ClipVelocity(v, n, &out);
+								const float pe = Len(out);
+								float q = Len2(v) - vdn * vdn;
+								if (q < 0.f)
+									q = 0.f;
+								const float pl = sqrtf(q);
+								const float dev = fabsf(pe
+									- pl);
+								if (dev > wdev)
+									wdev = dev;
+							}
+				}
+			snprintf(buf, sizeof(buf), "%lld boardable arrivals "
+				"vs Fn::ClipVelocity; worst |post_exact - "
+				"post_law| = %.5f u/s", n2, wdev);
+			check("A15 post-speed law vs exact clip",
+				wdev <= 0.05f, buf);
+		}
+		// ---- gate 3: A17 loss-feasible arcs vs enumeration
+		{
+			int bad = 0, cfg = 0;
+			const float Ls[3] = { 20.f, 100.f, 400.f };
+			for (int ia = 0; ia < 4; ++ia)
+				for (int ib = 0; ib < 2; ++ib) {
+					const float a = alphas[ia] * kD2R;
+					const float b = betas[ib] * kD2R;
+					const Vec3 n(sinf(a) * cosf(b),
+						sinf(a) * sinf(b), cosf(a));
+					for (int il = 0; il < 3; ++il) {
+						cfg++;
+						float arcs[2][2];
+						const int na = CapBoard::LossFeasibleArcs(
+							600.f, -300.f, n, Ls[il], arcs);
+						for (int st = 0; st < 7200; ++st) {
+							const float th =
+								static_cast<float>(st)
+								* 0.000872665f - 3.14159265f;
+							const float vdn =
+								CapBoard::BoardVdotN(600.f,
+									th, -300.f, n);
+							const bool in_enum = vdn < 0.f
+								&& vdn >= -Ls[il];
+							bool in_ana = false;
+							for (int ar = 0; ar < na; ++ar)
+								for (int m = -1; m <= 1; ++m) {
+									const float t = th
+										+ 6.2831853f
+										* static_cast<float>(
+											m);
+									if (t >= arcs[ar][0]
+										&& t <= arcs[ar][1])
+										in_ana = true;
+								}
+							if (in_enum != in_ana
+								&& fabsf(vdn) > 0.02f
+								&& fabsf(vdn + Ls[il])
+									> 0.02f)
+								bad++;
+						}
+					}
+				}
+			snprintf(buf, sizeof(buf), "%d configs x 7200 "
+				"headings; %d membership mismatches away from "
+				"the arc boundaries", cfg, bad);
+			check("A17 feasible arcs vs enumeration", bad == 0,
+				buf);
+		}
+		// ---- gate 4: the A18 decomposition hypothesis, BITWISE on
+		// synthetic ramps. Classify every contact tick; on
+		// single-contact non-zeroed ticks the gray-box law must
+		// reproduce the engine velocity bit for bit.
+		{
+			long long t_nocontact = 0, t_contact = 0, t_zeroed = 0,
+				t_multi = 0, t_single = 0, t_match = 0;
+			int printed = 0;
+			const float ralphas[3] = { 50.f, 60.f, 70.f };
+			for (int ia = 0; ia < 3; ++ia) {
+				World w2;
+				Vec3 n;
+				if (!CapBoard::MakeRampWorld(&w2, o.hulls,
+					ralphas[ia], 0.f, &n)) {
+					printf("capboard: ramp world %d failed\n",
+						ia);
+					return 1;
+				}
+				const float nh = sqrtf(n.X * n.X + n.Y * n.Y);
+				const float thf = atan2f(-n.Y / nh, -n.X / nh);
+				const float speeds[2] = { 400.f, 800.f };
+				const float heads[2] = { thf, thf + 0.5f };
+				for (int is = 0; is < 2; ++is)
+					for (int ih = 0; ih < 2; ++ih)
+						for (int pat = 0; pat < 3; ++pat) {
+							PlayerState s;
+							s.pos = Vec3(n.X * 150.f,
+								n.Y * 150.f, n.Z * 150.f);
+							s.vel = Vec3(speeds[is]
+								* cosf(heads[ih]), speeds[is]
+								* sinf(heads[ih]), -100.f);
+							signed char cside = 0;
+							int cage = 1000;
+							for (int t = 0; t < 80; ++t) {
+								signed char side = 0;
+								float ca = 1.f;
+								if (pat == 1) {
+									side = 1;
+									ca = 0.9f;
+								} else if (pat == 2) {
+									if (cage >= 6) {
+										side = cside == 1
+											? static_cast<
+												signed char>(
+												-1)
+											: static_cast<
+												signed char>(
+												1);
+										cage = 1;
+									} else {
+										side = cside;
+										cage++;
+									}
+									ca = 0.3f;
+								}
+								const Vec3 pre_vel = s.vel;
+								const Vec3 pre_bv = s.basevel;
+								const float pre_sf =
+									s.surface_friction;
+								const float s2d = Len2D(s.vel);
+								const float h = s2d > 1.f
+									? atan2f(s.vel.Y, s.vel.X)
+									: 0.f;
+								float yaw = h * 57.2957795f;
+								float fmv = 0.f, smv = 0.f;
+								if (side != 0 && s2d > 1.f)
+									Air::WishInputs(h,
+										static_cast<int>(
+											side), ca, &yaw,
+										&fmv, &smv);
+								TickEvents ev;
+								MoveTick(s, w2, p, 0.f, yaw,
+									fmv, smv, 0.f, 0, &ev);
+								if (side != 0)
+									cside = side;
+								if (ev.ncontacts == 0) {
+									t_nocontact++;
+									continue;
+								}
+								t_contact++;
+								const bool zeroed =
+									s.vel.X == 0.f
+									&& s.vel.Y == 0.f
+									&& s.vel.Z == 0.f;
+								if (zeroed) {
+									t_zeroed++;
+									continue;
+								}
+								if (ev.ncontacts > 1) {
+									t_multi++;
+									continue;
+								}
+								t_single++;
+								Vec3 pred;
+								CapBoard::RideGrayTick(p, n,
+									pre_sf, pre_bv, pre_vel,
+									side, ca, &pred);
+								if (memcmp(&pred.X, &s.vel.X,
+									4) == 0
+									&& memcmp(&pred.Y,
+										&s.vel.Y, 4) == 0
+									&& memcmp(&pred.Z,
+										&s.vel.Z, 4) == 0) {
+									t_match++;
+								} else if (printed < 3) {
+									printed++;
+									printf("capboard:   A18 "
+										"mismatch ramp %.0f "
+										"t%d: engine (%.6f "
+										"%.6f %.6f) pred "
+										"(%.6f %.6f %.6f)\n",
+										ralphas[ia], t,
+										s.vel.X, s.vel.Y,
+										s.vel.Z, pred.X,
+										pred.Y, pred.Z);
+								}
+							}
+						}
+			}
+			printf("capboard: A18 taxonomy (measured): %lld "
+				"airborne, %lld contact = %lld single + %lld "
+				"multi + %lld engine-zeroed (the ramp bug)\n",
+				t_nocontact, t_contact, t_single, t_multi,
+				t_zeroed);
+			snprintf(buf, sizeof(buf), "%lld single-contact ticks; "
+				"%lld bitwise matches", t_single, t_match);
+			check("A18 single-contact law (bitwise)",
+				t_single >= 500 && t_match == t_single, buf);
+		}
+		printf("capboard: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "BOARD CAPABILITY LAYER VERIFIED"
+				: "BOARD CAPABILITY RED - a law or the instrument "
+					"is wrong");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= capreach: CAPABILITY 2 (registry A8) - the
+	// reach family R_N and its support function D* (session 24).
+	// SESSION-24 MEASUREMENT: the FREE canonical reach set is far
+	// larger than any map-directed sweep - the session-21 pitch
+	// (32, 8) was validated with a map's vertical window and face
+	// targets doing most of the culling, and at a free start it blew
+	// past 10 minutes without finishing one build. capreach therefore
+	// runs a PITCH LADDER at one v0 with an honest node-budget abort
+	// and MEASURES the frontier scaling; the finest COMPLETE config
+	// carries the gates: the LB/UB sandwich (hard - UB is the
+	// certified session-20 cone), bitwise witness replay, UB never
+	// beaten by 30k random engine schedules (hard), and the LB gap
+	// (measured, conjecture R1).
+	int CmdCapReach(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		World w;
+		if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+			printf("capreach: clean-air world build failed\n");
+			return 1;
+		}
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capreach: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		snprintf(buf, sizeof(buf), "min_gap %d from params (dt %.4f, "
+			"strafe_rate_max %.1f); lattice caps 6", min_gap, p.dt,
+			p.strafe_rate_max);
+		check("dwell law matches the lattice", min_gap == 6, buf);
+		unsigned rng = 0x0D5EEDu;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		// the pitch ladder (coarse -> fine), one canonical start
+		const float hps[3] = { 128.f, 96.f, 64.f };
+		const float hvs[3] = { 32.f, 24.f, 16.f };
+		int finest = -1;
+		CapReach::RSurface Sf;
+		for (int ci = 0; ci < 3; ++ci) {
+			CapReach::RParams pp;
+			pp.v0 = 600.f;
+			pp.n_max = 60;
+			pp.hp = hps[ci];
+			pp.hv = hvs[ci];
+			CapReach::RSurface S;
+			CapReach::BuildReach(pp, p, k, &S);
+			printf("capreach: ---- v0 %.0f (hp %.0f, hv %.0f, N "
+				"%d): %.1fs, %lld kernel ticks, peak layer %d, "
+				"nodes %lld%s ----\n", pp.v0, pp.hp, pp.hv,
+				pp.n_max, S.build_ms / 1000.0, S.kernel_ticks,
+				S.peak_layer, S.total_nodes, S.aborted
+					? " [ABORTED]" : "");
+			fflush(stdout);
+			if (!S.aborted) {
+				finest = ci;
+				Sf = std::move(S);
+			}
+		}
+		snprintf(buf, sizeof(buf), "finest complete config: %s",
+			finest < 0 ? "NONE - every rung aborted"
+				: (finest == 0 ? "hp 128 / hv 32"
+					: (finest == 1 ? "hp 96 / hv 24"
+						: "hp 64 / hv 16")));
+		check("pitch ladder yields a surface", finest >= 0, buf);
+		if (finest >= 0) {
+			const CapReach::RParams& pp = Sf.p;
+			// D* slices at the horizon: witnessed LB vs certified UB
+			printf("capreach:   D*(60, phi) LB/UB (phi 0/45/90/135/"
+				"180 deg):\n");
+			printf("capreach:  ");
+			for (int ph = 0; ph <= 8; ph += 2) {
+				const float phi = static_cast<float>(ph)
+					* 0.39269908f;
+				printf("  %7.0f/%-7.0f",
+					Sf.dslb[60][static_cast<size_t>(ph)],
+					CapReach::DStarUB(pp, p, 60, phi));
+			}
+			printf("\n");
+			// gate: the LB/UB sandwich at 16 phi x 3 N
+			{
+				int bad = 0;
+				float wgap = 1e30f;
+				const int Ns3[3] = { 24, 48, 60 };
+				for (int ni = 0; ni < 3; ++ni)
+					for (int ph = 0; ph < 16; ++ph) {
+						const float phi = static_cast<float>(ph)
+							* 0.39269908f;
+						const float lb = Sf.dslb[
+							static_cast<size_t>(Ns3[ni])][
+							static_cast<size_t>(ph)];
+						const float ub = CapReach::DStarUB(pp,
+							p, Ns3[ni], phi);
+						if (lb > ub + 0.001f)
+							bad++;
+						if (ub - lb < wgap)
+							wgap = ub - lb;
+					}
+				snprintf(buf, sizeof(buf), "48 (N, phi) points, "
+					"%d LB > UB violations (tightest UB-LB gap "
+					"%.1f u)", bad, wgap);
+				check("LB <= certified UB sandwich", bad == 0,
+					buf);
+			}
+			// gate: bitwise witness replay of the D* argmax nodes
+			{
+				int n2 = 0, bad = 0;
+				for (int ph = 0; ph < 16; ph += 2) {
+					const int node = Sf.dsnode[60][
+						static_cast<size_t>(ph)];
+					if (node < 0)
+						continue;
+					n2++;
+					std::vector<signed char> ws;
+					std::vector<float> wc;
+					CapReach::WitnessR(Sf, 60, node, &ws, &wc);
+					PlayerState s;
+					s.pos = Vec3(0.f, 0.f, pp.z0);
+					s.vel = Vec3(pp.v0, 0.f, 0.f);
+					for (size_t k2 = 0; k2 < ws.size(); ++k2) {
+						s.vel.Z = 0.f;
+						CapAir::AirTick(&s, w, p, ws[k2],
+							wc[k2]);
+					}
+					const CapReach::RNode& nd = Sf.layers[60][
+						static_cast<size_t>(node)];
+					if (memcmp(&s.pos.X, &nd.x, 4) != 0
+						|| memcmp(&s.pos.Y, &nd.y, 4) != 0
+						|| memcmp(&s.vel.X, &nd.vx, 4) != 0
+						|| memcmp(&s.vel.Y, &nd.vy, 4) != 0)
+						bad++;
+				}
+				snprintf(buf, sizeof(buf), "%d D* witnesses "
+					"engine-replayed; %d BITWISE mismatches "
+					"(position AND velocity)", n2, bad);
+				check("bitwise witness replay", n2 >= 6
+					&& bad == 0, buf);
+			}
+			// falsifier: 30k random engine schedules - the
+			// certified UB is a HARD gate, the LB gap is measured
+			{
+				int ub_viol = 0, lb_beats = 0;
+				float worst_lb = 0.f;
+				const int kTrials = 30000;
+				for (int tr = 0; tr < kTrials; ++tr) {
+					const int N = 4 + static_cast<int>(
+						rnd() % 57);
+					PlayerState s;
+					s.pos = Vec3(0.f, 0.f, pp.z0);
+					s.vel = Vec3(pp.v0, 0.f, 0.f);
+					signed char side = pp.d0;
+					int age = pp.a0 > 6 ? 6 : pp.a0;
+					for (int k2 = 0; k2 < N; ++k2) {
+						signed char ds;
+						float ca;
+						const unsigned r2 = rnd();
+						if ((r2 & 7) == 0) {
+							ds = 0;
+							ca = 1.f;
+						} else {
+							ds = (r2 & 8) ? 1 : -1;
+							if (side != 0 && ds != side
+								&& age < min_gap)
+								ds = side;
+							ca = 1.f - 2.f * static_cast<float>(
+								(r2 >> 8) & 1023) / 1023.f;
+						}
+						s.vel.Z = 0.f;
+						CapAir::AirTick(&s, w, p, ds, ca);
+						if (ds != 0 && side != 0 && ds != side)
+							age = 1;
+						else
+							age = age < 6 ? age + 1 : 6;
+						if (ds != 0)
+							side = ds;
+					}
+					for (int ph = 0; ph < 16; ++ph) {
+						const float phi = static_cast<float>(ph)
+							* 0.39269908f;
+						const float pr = s.pos.X * cosf(phi)
+							+ s.pos.Y * sinf(phi);
+						const float ub = CapReach::DStarUB(pp,
+							p, N, phi);
+						if (pr > ub + 0.001f)
+							ub_viol++;
+						const float lb = Sf.dslb[
+							static_cast<size_t>(N)][
+							static_cast<size_t>(ph)];
+						if (pr > lb + 0.51f) {
+							lb_beats++;
+							if (pr - lb > worst_lb)
+								worst_lb = pr - lb;
+						}
+					}
+				}
+				snprintf(buf, sizeof(buf), "%d schedules x 16 "
+					"projections, %d certified-UB violations",
+					kTrials, ub_viol);
+				check("certified UB never beaten", ub_viol == 0,
+					buf);
+				printf("capreach: %-32s %s | %d LB beats (worst "
+					"+%.1f u) - measured D* LB gap (conjecture "
+					"R1: O(pitch))\n",
+					"LB gap falsifier (measured)",
+					lb_beats == 0 ? "CLEAN" : "GAP", lb_beats,
+					worst_lb);
+			}
+		}
+		printf("capreach: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "REACH FAMILY LB/UB CERTIFIED AT THE "
+				"MEASURED PITCH"
+				: "REACH FAMILY RED - a proof or the instrument "
+					"is wrong");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capair: CAPABILITY 1 - the N-tick air
 	// turn/gain function (Capability Library, session 22; advisor
 	// 2026-08-20f). Builds V*(v0, N, dpsi) = max terminal speed under
@@ -14780,6 +15574,13 @@ namespace {
 		};
 		const int min_gap = static_cast<int>(
 			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		// review finding (session 24): the lattices hard-cap dwell
+		// age at 6/7 while min_gap is param-derived - the two must
+		// agree or every reversal silently becomes illegal.
+		snprintf(buf, sizeof(buf), "min_gap %d from params (dt %.4f, "
+			"strafe_rate_max %.1f); lattice caps 6/7", min_gap,
+			p.dt, p.strafe_rate_max);
+		check("dwell law matches the lattice", min_gap == 6, buf);
 		unsigned rng = 0x5EED5EEDu;
 		auto rnd = [&]() {
 			rng ^= rng << 13;
@@ -14984,10 +15785,11 @@ namespace {
 					const int pb = CapAir::PsiBinOf(S, psi);
 					for (int nb = pb - 1; nb <= pb + 1;
 						++nb) {
-						if (nb < 0 || nb >= S.p.psi_bins)
-							continue;
+						// psi is circular: wrap the +/-pi seam
+						const int nbw = (nb + S.p.psi_bins)
+							% S.p.psi_bins;
 						const float c2 = CapAir::QueryVStar(
-							S, N, CapAir::BinPsi(S, nb));
+							S, N, CapAir::BinPsi(S, nbw));
 						if (c2 > cl)
 							cl = c2;
 					}
@@ -15009,146 +15811,380 @@ namespace {
 					"M-baseline falsifier (measured)",
 					beats == 0 ? "CLEAN" : "REFUTED", buf);
 			}
-			// ---- THE CORRECTED BUILD (v-stratified lattice;
-			// Conjecture M refuted above - speed joins the cell
-			// key). The residual conjecture: beat margins must
-			// shrink to O(stratum width).
-			if (pp.v0 == 400.f || pp.v0 == 800.f
-				|| pp.v0 == 1400.f) {
-				CapAir::VStarSurfaceS SS;
-				CapAir::BuildVStarStrat(pp, w, p, &SS);
-				printf("capair: ---- v0 %.0f STRAT: built in "
-					"%.1fs, %lld MoveTicks, peak cells %d%s "
-					"----\n", pp.v0, SS.build_ms / 1000.0,
-					SS.moveticks, SS.peak_cells,
-					SS.aborted ? " [ABORTED]" : "");
-				const int Ns2[5] = { 6, 12, 24, 48, 90 };
-				const float dps2[6] = { 0.f, 30.f, 60.f, 90.f,
-					135.f, 180.f };
-				printf("capair:   V*strat (rows N, cols dpsi "
-					"0/30/60/90/135/180):\n");
-				for (int ni = 0; ni < 5; ++ni) {
-					printf("capair:   N %2d |", Ns2[ni]);
-					for (int di = 0; di < 6; ++di) {
-						const float dp = dps2[di]
-							* 0.0174533f;
-						float b1 = CapAir::QueryVStarS(SS,
-							Ns2[ni], dp);
-						const float b2 = CapAir::QueryVStarS(
-							SS, Ns2[ni], -dp);
-						if (b2 > b1)
-							b1 = b2;
-						printf(" %6.0f", b1);
-					}
-					printf("\n");
-				}
-				if (csv)
-					for (int N = 2; N <= pp.n_max; N += 2)
-						for (int db = 0; db <= 180; db += 2) {
-							const float dp =
-								static_cast<float>(db)
-								* 0.0174533f;
-							float b1 = CapAir::QueryVStarS(
-								SS, N, dp);
-							const float b2 =
-								CapAir::QueryVStarS(SS, N,
-									-dp);
+			// ---- THE EXACT-BAND FLAT-LATTICE BUILD (session 24): the
+			// corrected representation on dense arrays, every
+			// transition one A4-prod KernelTick (bitwise-gated by
+			// capkern). Two falsifier passes SEPARATE the two error
+			// sources: continuous-action schedules (action-sampling
+			// gap + state collapse) vs build-action-sampled schedules
+			// (state collapse only). The LB-vs-band comparison is a
+			// MEASURED state-collapse witness count, not a theorem.
+			{
+				CapAir::AirKernelCtx kk = CapAir::MakeAirKernel(p);
+				static const float kCosa21[21] = {
+					1.f, 0.9995f, 0.998f, 0.995f, 0.99f, 0.98f,
+					0.96f, 0.93f, 0.9f, 0.85f, 0.8f, 0.7f, 0.6f,
+					0.45f, 0.3f, 0.15f, 0.f, -0.2f, -0.5f, -0.8f,
+					-1.f };
+				auto runX = [&](CapAir::VStarSurfaceX& SX,
+					const char* tag, bool write_csv) {
+					char nm[64];
+					CapAir::BuildVStarX(pp, p, kk, &SX);
+					printf("capair: ---- v0 %.0f %s (psi %d x vbin "
+						"%.0f): built in %.1fs, %lld kernel ticks, "
+						"peak layer %d, nodes %lld%s ----\n",
+						pp.v0, tag, SX.psi_bins, SX.v_bin,
+						SX.build_ms / 1000.0, SX.kernel_ticks,
+						SX.peak_layer_cells, SX.total_nodes,
+						SX.aborted ? " [ABORTED]" : "");
+					printf("capair:   V*%s (rows N, cols dpsi "
+						"0/30/60/90/135/180):\n", tag);
+					for (int ni = 0; ni < 5; ++ni) {
+						printf("capair:   N %2d |", Ns[ni]);
+						for (int di = 0; di < 6; ++di) {
+							const float dp = dps[di] * 0.0174533f;
+							float b1 = CapAir::QueryVStarX(SX,
+								Ns[ni], dp);
+							const float b2 = CapAir::QueryVStarX(
+								SX, Ns[ni], -dp);
 							if (b2 > b1)
 								b1 = b2;
-							fprintf(csv,
-								"%.0f,%d,%d,%.1f\n",
-								-pp.v0, N, db, b1);
+							printf(" %6.0f", b1);
 						}
-				rng = 0xC0FFEEu ^ static_cast<unsigned>(pp.v0);
-				int beats = 0;
-				float worst = 0.f;
-				const int kTrials = 30000;
-				for (int tr = 0; tr < kTrials; ++tr) {
-					const int N = 4 + static_cast<int>(
-						rnd() % 87);
-					PlayerState s;
-					s.pos = Vec3(0.f, 0.f, pp.z0);
-					s.vel = Vec3(pp.v0, 0.f, 0.f);
-					signed char side = pp.d0;
-					int age = pp.a0 > 7 ? 7 : pp.a0;
-					for (int k = 0; k < N; ++k) {
-						signed char ds;
-						float ca;
-						const unsigned r2 = rnd();
-						if ((r2 & 7) == 0) {
-							ds = 0;
-							ca = 1.f;
+						printf("\n");
+					}
+					if (csv && write_csv)
+						for (int N = 2; N <= pp.n_max; N += 2)
+							for (int db = 0; db <= 180; db += 2) {
+								const float dp =
+									static_cast<float>(db)
+									* 0.0174533f;
+								float b1 = CapAir::QueryVStarX(
+									SX, N, dp);
+								const float b2 =
+									CapAir::QueryVStarX(SX, N,
+										-dp);
+								if (b2 > b1)
+									b1 = b2;
+								fprintf(csv, "%.0f,%d,%d,%.1f\n",
+									-pp.v0, N, db, b1);
+							}
+					// band vs finer-psi scalar LB: points where the
+					// LB exceeds the band's wrapped +/-1-bin
+					// neighborhood are STATE-COLLAPSE WITNESSES
+					// (sub-cell dominance discarding real states) -
+					// a measured diagnostic, not a theorem gate.
+					{
+						// per-SIGN comparison (review finding: a
+						// both-signs max is blind to one-sided
+						// chirality loss)
+						int coll = 0, n2 = 0;
+						float wcoll = 0.f;
+						for (int ni = 0; ni < 5; ++ni)
+							for (int db = 0; db <= 180;
+								db += 15)
+								for (int sgn = 0; sgn < 2;
+									++sgn) {
+									const float dq =
+										(sgn ? -1.f : 1.f)
+										* static_cast<float>(
+											db) * 0.0174533f;
+									const float lb =
+										CapAir::QueryVStar(S,
+											Ns[ni], dq);
+									if (lb < 0.f)
+										continue;
+									n2++;
+									float xv = -1.f;
+									const int pb =
+										CapAir::PsiBinX(SX, dq);
+									for (int nb = pb - 1;
+										nb <= pb + 1; ++nb) {
+										const int nbw = (nb
+											+ SX.psi_bins)
+											% SX.psi_bins;
+										const float c2 =
+											CapAir::QueryVStarX(
+												SX, Ns[ni],
+												CapAir::BinPsiX(
+													SX, nbw));
+										if (c2 > xv)
+											xv = c2;
+									}
+									if (xv + 0.01f < lb) {
+										coll++;
+										if (lb - xv > wcoll)
+											wcoll = lb - xv;
+									}
+								}
+						printf("capair: %-34s %s | v0 %.0f %s: "
+							"%d/%d grid points where finer-psi LB "
+							"> band (worst +%.1f u/s) - measured "
+							"state-collapse witnesses\n",
+							"LB-vs-band collapse (measured)",
+							coll == 0 ? "CLEAN" : "PRESENT",
+							pp.v0, tag, coll, n2, wcoll);
+					}
+					// BITWISE witness replay: the kernel-built
+					// schedule, replayed through the REAL engine in
+					// the DP's exact per-tick domain (fresh vz = 0
+					// each tick), must reproduce the node's terminal
+					// velocity bit for bit.
+					{
+						int n2 = 0, bad = 0;
+						for (int ni = 0; ni < 5; ++ni) {
+							for (int di = 0; di < 6; ++di) {
+								if (n2 >= 12)
+									break;
+								int node = -1;
+								const float dp = dps[di]
+									* 0.0174533f;
+								const float vv =
+									CapAir::QueryVStarX(SX,
+										Ns[ni], dp, &node);
+								if (node < 0 || vv < 0.f)
+									continue;
+								n2++;
+								std::vector<signed char> ws;
+								std::vector<float> wc;
+								CapAir::WitnessX(SX, Ns[ni],
+									node, &ws, &wc);
+								PlayerState s;
+								s.pos = Vec3(0.f, 0.f, pp.z0);
+								s.vel = Vec3(pp.v0, 0.f, 0.f);
+								for (size_t k2 = 0;
+									k2 < ws.size(); ++k2) {
+									s.vel.Z = 0.f;
+									CapAir::AirTick(&s, w, p,
+										ws[k2], wc[k2]);
+								}
+								const CapAir::VNodeX& nd =
+									SX.layers[static_cast<
+										size_t>(Ns[ni])][
+									static_cast<size_t>(node)];
+								if (memcmp(&s.vel.X, &nd.vx, 4)
+									!= 0
+									|| memcmp(&s.vel.Y,
+										&nd.vy, 4) != 0)
+									bad++;
+							}
+						}
+						snprintf(buf, sizeof(buf), "v0 %.0f %s: "
+							"%d exact witnesses engine-replayed; "
+							"%d BITWISE mismatches", pp.v0, tag,
+							n2, bad);
+						snprintf(nm, sizeof(nm),
+							"bitwise witness replay [%s]", tag);
+						check(nm, n2 >= 5 && bad == 0, buf);
+					}
+					// THEOREM GATE (session 24): coast is always
+					// legal and preserves (v, psi) bitwise, so
+					// every reached (N, pb) stays reached at N+1
+					// with at least the same speed. A layer-local
+					// deflation bug cannot pass this.
+					{
+						int viol = 0;
+						for (int N2 = 0; N2 < pp.n_max; ++N2)
+							for (int pb = 0; pb < SX.psi_bins;
+								++pb) {
+								const float a = SX.pb_vmax[
+									static_cast<size_t>(N2)][
+									static_cast<size_t>(pb)];
+								const float b = SX.pb_vmax[
+									static_cast<size_t>(N2)
+									+ 1][
+									static_cast<size_t>(pb)];
+								if (a >= 0.f && b < a)
+									viol++;
+							}
+						snprintf(buf, sizeof(buf), "v0 %.0f %s: "
+							"%d (N, psi-bin) monotonicity "
+							"violations across %d layers", pp.v0,
+							tag, viol, pp.n_max);
+						snprintf(nm, sizeof(nm),
+							"coast monotonicity [%s]", tag);
+						check(nm, viol == 0, buf);
+					}
+					// CERTIFIED CLOSED-FORM SPEED UB (session 24,
+					// from the accel algebra - see CapReach::
+					// DStarUB's lemma): |v_N|^2 <= v0^2 + cap^2*N.
+					// The lemma is REAL arithmetic; the float
+					// engine accumulates rounding (measured worst
+					// +0.051 u/s over 90 ticks on the record
+					// surfaces), so the gate carries a 0.25 u/s
+					// float allowance - the formal per-tick ulp
+					// bound is part of the theorem step.
+					{
+						const float kFloatSlack = 0.25f;
+						const float cap2 = p.air_speed_cap
+							* p.air_speed_cap;
+						int viol = 0;
+						float vfree = -1.f;
+						for (int N2 = 0; N2 <= pp.n_max; ++N2) {
+							const float ub = sqrtf(pp.v0 * pp.v0
+								+ cap2
+								* static_cast<float>(N2));
+							for (int pb = 0; pb < SX.psi_bins;
+								++pb) {
+								const float vv = SX.pb_vmax[
+									static_cast<size_t>(N2)][
+									static_cast<size_t>(pb)];
+								if (vv > ub + kFloatSlack)
+									viol++;
+								if (N2 == pp.n_max
+									&& vv > vfree)
+									vfree = vv;
+							}
+						}
+						const float ubh = sqrtf(pp.v0 * pp.v0
+							+ cap2 * static_cast<float>(
+								pp.n_max));
+						snprintf(buf, sizeof(buf), "v0 %.0f %s: "
+							"%d cells above sqrt(v0^2 + cap^2 N); "
+							"tightness at N%d: UB %.1f vs best "
+							"V* %.1f", pp.v0, tag, viol,
+							pp.n_max, ubh, vfree);
+						snprintf(nm, sizeof(nm),
+							"closed-form speed UB [%s]", tag);
+						check(nm, viol == 0, buf);
+					}
+					// the build-completion gate
+					snprintf(buf, sizeof(buf), "v0 %.0f %s: %lld "
+						"nodes, peak layer %d, %.1fs", pp.v0, tag,
+						SX.total_nodes, SX.peak_layer_cells,
+						SX.build_ms / 1000.0);
+					snprintf(nm, sizeof(nm),
+						"capability-1 gate (build) [%s]", tag);
+					check(nm, !SX.aborted, buf);
+					// two falsifier passes, both MEASURED (the
+					// review showed the old worst <= v_bin*1.5+0.6
+					// threshold was an underived dial): pass 0
+					// continuous cosa (action-sampling gap + state
+					// collapse), pass 1 cosa snapped to the
+					// build's 21 samples (state collapse only).
+					for (int pass2 = 0; pass2 < 2 && !SX.aborted;
+						++pass2) {
+						rng = (pass2 ? 0xBADF00Du : 0xC0FFEEu)
+							^ static_cast<unsigned>(pp.v0);
+						int beats = 0;
+						float worst = 0.f;
+						const int kTrials = 30000;
+						for (int tr = 0; tr < kTrials; ++tr) {
+							const int N = 4 + static_cast<int>(
+								rnd() % 87);
+							PlayerState s;
+							s.pos = Vec3(0.f, 0.f, pp.z0);
+							s.vel = Vec3(pp.v0, 0.f, 0.f);
+							signed char side = pp.d0;
+							int age = pp.a0 > 6 ? 6 : pp.a0;
+							for (int k2 = 0; k2 < N; ++k2) {
+								signed char ds;
+								float ca;
+								const unsigned r2 = rnd();
+								if ((r2 & 7) == 0) {
+									ds = 0;
+									ca = 1.f;
+								} else {
+									ds = (r2 & 8) ? 1 : -1;
+									if (side != 0 && ds != side
+										&& age < min_gap)
+										ds = side;
+									if (pass2)
+										ca = kCosa21[(r2 >> 8)
+											% 21u];
+									else
+										ca = 1.f - 2.f
+											* static_cast<
+												float>((r2
+												>> 8) & 1023)
+											/ 1023.f;
+								}
+								s.vel.Z = 0.f;
+								CapAir::AirTick(&s, w, p, ds,
+									ca);
+								if (ds != 0 && side != 0
+									&& ds != side)
+									age = 1;
+								else
+									age = age < 6 ? age + 1
+										: 6;
+								if (ds != 0)
+									side = ds;
+							}
+							const float sp = Len2D(s.vel);
+							const float psi = sp > 1.f
+								? atan2f(s.vel.Y, s.vel.X)
+								: 0.f;
+							float cl = -1.f;
+							const int pb = CapAir::PsiBinX(SX,
+								psi);
+							for (int nb = pb - 1; nb <= pb + 1;
+								++nb) {
+								const int nbw = (nb
+									+ SX.psi_bins)
+									% SX.psi_bins;
+								const float c2 =
+									CapAir::QueryVStarX(SX, N,
+										CapAir::BinPsiX(SX,
+											nbw));
+								if (c2 > cl)
+									cl = c2;
+							}
+							if (sp > cl + 0.51f) {
+								beats++;
+								if (sp - cl > worst)
+									worst = sp - cl;
+							}
+						}
+						if (pass2 == 0) {
+							// continuous actions: MEASURED gap
+							// (contains the action-sampling
+							// error term by construction)
+							printf("capair: %-34s %s | v0 %.0f "
+								"%s: %d/%d continuous-action "
+								"schedules beat the band (worst "
+								"+%.1f u/s) - measured LB gap\n",
+								"continuous falsifier (measured)",
+								beats == 0 ? "CLEAN" : "GAP",
+								pp.v0, tag, beats, kTrials,
+								worst);
 						} else {
-							ds = (r2 & 8) ? 1 : -1;
-							if (side != 0 && ds != side
-								&& age < min_gap)
-								ds = side;
-							ca = 1.f - 2.f
-								* static_cast<float>(
-									(r2 >> 8) & 1023)
-								/ 1023.f;
+							// build-sampled actions: any beat
+							// here is pure sub-cell state collapse
+							printf("capair: %-34s %s | v0 %.0f "
+								"%s: %d/%d build-action schedules "
+								"beat the band (worst +%.1f u/s) "
+								"- measured state-collapse gap\n",
+								"sampled falsifier (measured)",
+								beats == 0 ? "CLEAN" : "GAP",
+								pp.v0, tag, beats, kTrials,
+								worst);
 						}
-						CapAir::AirTick(&s, w, p, ds, ca);
-						if (ds != 0 && side != 0
-							&& ds != side)
-							age = 1;
-						else
-							age = age < 7 ? age + 1 : 7;
-						if (ds != 0)
-							side = ds;
 					}
-					const float sp = Len2D(s.vel);
-					const float psi = sp > 1.f
-						? atan2f(s.vel.Y, s.vel.X) : 0.f;
-					float cl = -1.f;
-					const int pb = CapAir::PsiBinS(SS, psi);
-					for (int nb = pb - 1; nb <= pb + 1;
-						++nb) {
-						if (nb < 0 || nb >= SS.psi_bins)
-							continue;
-						const float c2 = CapAir::QueryVStarS(
-							SS, N, CapAir::BinPsiS(SS, nb));
-						if (c2 > cl)
-							cl = c2;
-					}
-					if (sp > cl + 0.51f) {
-						beats++;
-						if (sp - cl > worst)
-							worst = sp - cl;
-					}
+				};
+				{
+					CapAir::VStarSurfaceX SX;
+					runX(SX, "EXACT", true);
 				}
-				if (SS.aborted) {
-					// Beats against an aborted build compare
-					// with EMPTY layers - artifacts, not
-					// refutations. The honest verdict is the
-					// build explosion itself.
-					snprintf(buf, sizeof(buf), "v0 %.0f: "
-						"build ABORTED at the cell ceiling "
-						"(peak %d) - the exact (v,psi) band "
-						"needs a flat-lattice implementation; "
-						"%d falsifier beats NOT counted "
-						"(empty-layer artifacts)", pp.v0,
-						SS.peak_cells, beats);
-					check("capability-1 gate (strat build "
-						"completes)", false, buf);
-				} else {
-					snprintf(buf, sizeof(buf), "v0 %.0f STRAT "
-						"(v-bin %.0f): %d random schedules, "
-						"%d beats (worst +%.1f u/s; must be "
-						"O(stratum) or the representation is "
-						"still wrong)", pp.v0, SS.v_bin,
-						kTrials, beats, worst);
-					check("strat adversarial falsifier",
-						worst <= SS.v_bin * 1.5f + 0.6f, buf);
+				if (pp.v0 == 400.f) {
+					// the resolution-scaling experiment at the
+					// worst measured v0: 2x psi bins, 2x v strata -
+					// the collapse witnesses and falsifier gaps
+					// must SHRINK if the lattice is the cause.
+					CapAir::VStarSurfaceX SR;
+					SR.psi_bins = 1441;
+					SR.v_bin = 5.f;
+					SR.vb_max = 1024;
+					runX(SR, "FINE", false);
 				}
 			}
 		}
 		if (csv)
 			fclose(csv);
 		printf("capair: %d passed, %d failed | %s\n", pass, fail,
-			fail == 0 ? "CAPABILITY 1 SURFACES BUILT AND UNREFUTED"
-				: "CAPABILITY 1 RED - a conjecture or the "
-					"instrument is wrong");
+			fail == 0 ? "CAPABILITY 1 LB SURFACES CERTIFIED - the "
+				"falsifier gaps above are the measured tightness"
+				: "CAPABILITY 1 RED - a proof-backed gate failed");
 		fflush(stdout);
 		return fail == 0 ? 0 : 2;
 	}
@@ -19807,6 +20843,24 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, has_csv ? 3 : 2, o))
 			return 1;
 		return CmdCapAir(o, has_csv ? argv[2] : "");
+	}
+	if (cmd == "capkern") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapKern(o);
+	}
+	if (cmd == "capboard") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapBoard(o);
+	}
+	if (cmd == "capreach") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapReach(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;
