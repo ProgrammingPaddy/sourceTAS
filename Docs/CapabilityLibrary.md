@@ -1,10 +1,12 @@
 # The Capability Library
 
 **Program opened 2026-08-20 (session 22), user + advisor ruling
-2026-08-20f.** This is the design of record for the bottom-up
-capability program. The full-map solver is paused as a development
-target and retained as a regression consumer; G0R is no longer the
-next milestone.
+2026-08-20f. Registry adopted 2026-08-21 (session 23), user + advisor
+taxonomy 2026-08-21a.** This is the design of record for the bottom-up
+capability program and the SINGLE canonical registry of every atomic
+capability. The full-map solver is a requirements document and a
+regression harness; the product is this library. G0R is not a
+milestone.
 
 ## The governing principle
 
@@ -13,16 +15,65 @@ For every movement capability, answer:
 > Given an exact initial state and a small number of constraints,
 > what are the MINIMUM and MAXIMUM physically achievable outcomes?
 
-Not "can our optimizer find something good", and not (yet) "how does
-this solve the map". Each capability is a unit function
+Each capability is a unit function over an explicit domain, solved by
+exhaustive engine-exact enumeration of the reduced domain, then
+(where possible) collapsed to a proven law. Outputs may be scalar
+extrema, intervals, or small Pareto relations — but every capability
+gets a narrow, map-independent contract. Every proof permanently
+removes dimensions from every future search. The functions outlive
+any particular solver architecture.
 
-    C(D) = [C_min(D), C_max(D)]     (or its Pareto relation)
+## The three categories
 
-over an explicit domain D, solved by exhaustive engine-exact
-enumeration of the reduced domain, then (where possible) collapsed to
-a proven law. Every proof permanently removes dimensions from every
-future search. The functions outlive any particular solver
-architecture.
+- **A — engine prediction / physical capability.** "What can
+  physically happen?" Exact transforms, capability extrema/Pareto
+  surfaces, and their inversions.
+- **B — search-space reduction / certified impossibility.** "What can
+  we prove does not need searching?" Equations, table lookups,
+  interval intersections, support-function tests. Nothing is promoted
+  here without proof.
+- **C — scoring / selection / composition.** "Which physically valid
+  alternative is preferable for a stated objective?" Consumes proven
+  A/B outputs; NEVER invents physics scores.
+
+## Library-wide semantics (binding)
+
+1. **LB admits, UB culls.** A witnessed lower-bound surface certifies
+   POSSIBILITY (a real schedule exists). Only an exact or certified
+   upper-bound surface certifies IMPOSSIBILITY. **No B-category cull
+   may ever consume an LB.** (Matches the standing rule: only
+   certified bounds hard-prune, each with proof records.)
+2. **No capability may assume scalar dominance merely because its
+   requested output is scalar.** (The Conjecture M lesson: a slower
+   state can out-turn-then-accelerate a faster one.) Internal
+   representations preserve whatever Pareto dimensions affect future
+   attainment until a theorem removes them.
+3. **Reference vs production implementations, cross-falsifying
+   forever.** `X_Ref` is the slow full-`MoveTick` truth instrument;
+   `X_Fast` is the partially-evaluated exact kernel with the SAME
+   float semantics (same ops, same order, same compile flags),
+   parity-gated bitwise against `X_Ref` over dense fuzz + edge corpora
+   (the `wishparity` pattern). Partial evaluation of the exact engine
+   under a proven domain is NOT approximation; it is the standing
+   performance principle.
+4. **Tables canonicalize; witnesses stay world-frame.** Canonical
+   transforms (A0) are exact in the reals but rotation is not exact
+   in floats, so: capability TABLES live in the canonical frame;
+   every WITNESS is stored as an exact control schedule and
+   re-verified bitwise in the frame where it will be used (the
+   `ReplayEdge` practice — sessions 17–18 edges cold-replay bitwise
+   because we store schedules, not transformed states).
+5. **Domain stamps.** Every surface states its exclusions explicitly.
+   Current standing stamps: standing hull only (0x1C50 size; no
+   duck), no jump inside air capabilities, clean air (no water,
+   ladders, triggers), dwell-6 control legality. A stamp is a
+   documented boundary, not an assumption.
+6. **The exact simulator is NEVER approximated** (standing law,
+   session 20). Search/representation resolution is adaptive;
+   simulator accuracy is not.
+7. **No map geometry and no human data in capability derivation** —
+   synthetic/unit domains only. Map geometry enters only through
+   B/C-layer consumers after the map-independent function is solved.
 
 ## The standard deliverables (every capability, every time)
 
@@ -36,7 +87,9 @@ architecture.
 7. derivation / certified bounds;
 8. adversarial falsification against the exact engine;
 9. constructive witnesses for the extrema;
-10. a stable callable API, map-independent.
+10. a stable callable API, map-independent;
+11. **reference implementation AND production implementation with a
+    standing bitwise parity gate** (`X_Ref` / `X_Fast` / `xparity`).
 
 ## The method (experimental mathematics)
 
@@ -45,113 +98,250 @@ C) visualize -> D) propose the theorem -> E) prove from the movement
 equations -> F) falsify exhaustively/randomly -> G) freeze as a
 primitive and never search that dimension again.
 
-## Rules
+## Implementation types
 
-- The exact simulator is NEVER approximated (standing law, session
-  20). Search/representation resolution is adaptive; simulator
-  accuracy is not.
-- No map geometry and no human data in capability derivation -
-  synthetic/unit domains only. Map geometry enters only after the
-  relevant map-independent functions are solved.
-- Representational assumptions (dominance rules, bin pitches,
-  representative bases) are stated CONJECTURES and every surface
-  ships with an adversarial falsifier attacking them.
-- A visual surface report accompanies every capability session.
+Every registry row carries a type:
 
-## The registry
+- **T (closed transform):** direct O(1) exact function. No optimizer.
+- **S (capability surface):** extrema/Pareto surface — densely
+  enumerate, derive, prove, table, invert. The expensive builds.
+- **X (composition/query):** consumes already-solved capability
+  results; ideally does no simulation at all.
 
-| # | Capability | Status | Inputs | Output | Where |
-|---|------------|--------|--------|--------|-------|
-| 0a | Vertical state | SOLVED (closed form) | S0, N | z(N), vz(N) | deterministic per tick; used everywhere |
-| 0b | One-tick air turn/gain | SOLVED (exact law) | v, cos-alpha | v', d-theta | `Strafe::TickLaw`; wishparity is the standing gate |
-| 0c | Board clip | SOLVED (analytic) | v, n | v', loss | overbounce 1; the exitenv premise |
-| 0d | Face slice | SOLVED (geometry) | face, z | lambda interval | session 21 (T, lambda) cells |
-| 1 | N-tick air turn/gain V* | **IN PROGRESS: LB surfaces built; Conjecture M REFUTED; corrected build cost-measured** | v0, N, d-psi, d0, a0 | max v_N | `CapAir::BuildVStar` (LB) / `BuildVStarStrat` (exact band, needs flat lattice), `capair` |
-| 1d | Dual Psi* | same status as #1 | v0, N, V_min | max abs d-psi | `CapAir::QueryPsiStar`; cross-checks #1 |
-| 2 | Air directional reach D* | TBD (next) | S, N, phi (+ V_min) | max displacement support function | builds on #1 |
-| 3 | Plane interception | TBD | S, plane | T_min/T_max, reachable slice interval per T | #0a + #0d + #2 |
-| 4 | Board capability | TBD (mostly #0c) | v_in, vz, n, heading range | E_post min/max, theta_post range, min loss | freeze from existing clip laws |
-| 5 | Ride N-tick turn/gain | TBD | B, N, d-theta | max v_exit | the surf-contact analogue of #1 |
-| 6 | Ride directional reach | TBD | B, N, phi | max along-ramp displacement | analogue of #2 |
-| 7 | Board->exit Pareto | TBD | B_i, X_j | reachable? T_min, E_max, Pareto front | composition of #5/#6 |
-| 8 | Exit->board air transfer | TBD | X_i, B_j | valid? T_min, E_max, arrival state | composition of #1/#2/#3/#4 |
+---
 
-## Capability 1 - the N-tick air turn/gain function
+# REGISTRY A — engine prediction / physical capability
 
-    V*(v0, N, d-psi, d0, a0) = max over legal dwell-6 control
-    schedules of terminal speed, subject to net velocity-heading
-    change d-psi after exactly N clean-air ticks.
+Statuses: CERT (solved/certified) · PROD (fast kernel + parity gate
+live) · REF (truth instrument exists, no fast kernel) · LB (witnessed
+lower bound only) · PART (partial assets exist) · TBD.
 
-**Why first:** it appears inside reachability, air transfer, board
-approach, speed-sacrifice decisions, feasibility tests, upper bounds,
-and every sampled point-to-point transfer - and it is fully
-map-independent.
+| ID | Capability | Type | Status | Existing assets | Depends on |
+|----|------------|------|--------|-----------------|------------|
+| A0 | Canonical-frame transform | T | PART | implicit in clean-air builds (d0/a0, origin starts); formalize float semantics per rule 4 | — |
+| A1 | Vertical state z(N), vz(N) | T | CERT | closed form; deployed as the session-20 vertical-window cancellation | — |
+| A2 | Face slice z -> [λmin, λmax] | T | CERT | (T, λ) destination cells (session 21) | — |
+| A3 | Hull contact geometry | T | PART | standing hull 0x1C50; Minkowski END box computed (session 18) | — |
+| A4 | One-tick air turn/gain | T | CERT ref; **PROD kernel is the named next build** | `MoveTick` (ref), `Strafe::TickLaw` (law), `wishparity` (gate), `Air::WishInputs` (realization). Missing: the cartesian in-loop kernel (vx,vy,d,a,u)->(vx',vy',d',a') | — |
+| A5 | Dwell/reversal automaton | T | CERT | min_gap = 6 law; age dimension in every table | — |
+| A6 | N-tick air turn/gain V* | S | LB (exact band in progress) | `CapAir::BuildVStar` LB surfaces ×6 witnessed; Conjecture M REFUTED; `BuildVStarStrat` aborts at cell ceiling — flat lattice waits on A4-prod | A4, A5 |
+| A7 | Dual Ψ* | S | LB | `QueryPsiStar` reads A6 layers; duality green | A6 |
+| A8 | Air directional displacement D* | S | TBD (next after 1) | **merged into the reach family** — D* = support function of R_N (see below) | A0, A4, A5 |
+| A9 | Displacement with terminal constraint | X | TBD | Pareto layer of R_N | A8 |
+| A10 | Minimum air time N_min | X | TBD | membership query over N (A1 bounds the N range) | A8, A1 |
+| A11 | Fixed-time air point solver | X | TBD | witness query into R_N at Q | A8 |
+| A12 | Air point-to-point solver | X | TBD | A11 over feasible N; `RefSolve` stays demoted to oracle/polisher here | A8, A1 |
+| A13 | Air point-to-face solver | X | TBD | A12 over (T, λ) slices — 1-D per tick, never generic XYZ | A8, A2 |
+| A14 | First-contact air prediction | T | REF | world-first-contact sweep + `FlyZoneSchedule` (zone-tested-per-tick); prod = trace vs small local brush set. Map geometry enters HERE only | — |
+| A15 | Board clip | T | CERT | analytic, overbounce 1: v' = v − (v·n)n; loss = |v·n| | — |
+| A16 | Best/worst board capability | S | TBD (near-analytic) | max post-board speed = minimize |v·n| over admissible arrivals — closed form for fixed speed/vz | A15 |
+| A17 | Board feasibility (inverse) | X | TBD | inverse of A16 | A16 |
+| A18 | One-tick planar ride law | T | REF | `MoveTick`-on-plane (ref). Prod hypothesis: air kernel + single-plane clip + constant in-plane gravity, interior-of-face only; edges keep the general path | A4, A15 |
+| A19 | N-tick ride turn/gain V*_ride | S | TBD | V* machinery + one slope parameter (in-plane gravity vector vs heading) | A18 |
+| A20 | Ride directional displacement D*_ride | S | TBD | reach-family machinery on the plane (2-D positions: λ, along-slope) | A18 |
+| A21 | Minimum ride time between points | X | TBD | inverse A19/A20 | A19, A20 |
+| A22 | Board→exit Pareto solver | S | TBD | THE central sampled-ramp kernel. Regression seeds: exitfrontier/exitfit/efrefine suites; U_E is a standing cross-check | A18–A20 |
+| A23 | Ride edge interception | X | TBD | plane/edge geometry + A20 | A20 |
+| A24 | Direct contact transfer | T | PART | exact clip/contact transform exists; face adjacency composition later | A15 |
+| A25 | Ground/runoff acceleration | S | TBD | spawn/ground primitive incl. jump timing; map-independent | — |
+| A26 | Edge launch | T | PART | `LaunchWitness`/`ReplayLaunch` instruments (session 18) | — |
+| A27 | END-volume crossing | T | PART | Minkowski END box + zone-tested-per-tick exact event phase | A3 |
+| A28 | Obstacle/corridor traversal | X | TBD (last) | from A14 + reach functions | A8, A14 |
 
-**Build:** one forward DP per v0 (`CapAir::BuildVStar`); every
-transition is an authoritative `MoveTick` in a clean-air world (one
-inert brush far below the flight band). State cells =
-(heading bin 0.25 deg, carried side, dwell age capped 7), max-speed
-representative per cell, full parent chains for witnesses. All
-(N <= n_max, d-psi) answers come from the one build; the dual Psi*
-reads the same layers.
+## The reach family (A8–A13 collapse — adopted session 23)
 
-**Stated conjectures under falsification:**
-- CONJECTURE M (dominance): at equal (heading bin, side, dwell) and
-  tick, higher speed never has a worse reachable (v, psi) future.
-- The 0.25-deg bin pitch and 43-action control sample (coast + 2
-  sides x 21 cosa values spanning the full legal wish circle,
-  including braking-turns) suffice at the surface's resolution.
+The five air-solving rows are ONE object. Because vertical is
+deterministic (A1) and the frame canonicalizes (A0), the fixed-time
+reachable set
 
-**Falsifiers shipped in `capair`:** witness continuous replay
-(bitwise engine, real vertical evolution); duality cross-check
-V*(N, Psi*(N,V)) >= V on a grid; 30,000 random legal schedules per
-v0 that must never beat the surface in their own heading bin (a beat
-refutes Conjecture M or the pitch and prints RED).
+    R_N(v0, side0, age0)  ⊂  (x, y, vx, vy)   at tick N
 
-**Carried findings from session 21 that this capability subsumes:**
-the action-sampling/state-lattice co-design law (which cosa samples
-suffice is now a property of THIS function's structure, answered
-once), and the representative-basis question (what a state cell must
-remember is readable off V*'s branch structure).
+carries everything: **D\*** is its support function; **V\*/Ψ\*** are
+its velocity marginals; **N_min** is a membership scan over N;
+**A11/A12/A13** are witness queries into it (A13 through (T, λ)
+slices). One build, five capabilities — and one free falsifier: V*
+read from R_N must agree with capability 1's independent build.
 
-## Capability 1 — session-22 findings (the first full A-G loop)
+Two consumption modes, both exact:
 
-1. **Six v0 surfaces built** (250/400/600/800/1100/1400 u/s; N <= 90;
-   0.25-deg heading bins; ~48M engine MoveTicks / ~28 s each). Every
-   number is a witnessed, engine-replayed schedule => the scalar
-   surfaces are certified LOWER BOUNDS on V*.
-2. **CONJECTURE M (max-speed dominance per heading cell) is REFUTED**
-   — the adversarial falsifier found 74-186 random schedules per v0
-   beating the surface by +34 to +220 u/s, with witnesses replaying
-   clean and duality green (the instrument is sound; the conjecture
-   is what failed). The physics: turn rate scales ~ 1/v, so at equal
-   heading a slower state can out-turn-then-accelerate a faster one
-   when the remaining task is turn-heavy. Max-speed-per-heading-cell
-   is an unsound compression. THIS IS THE METHOD WORKING: stated
-   conjecture, adversarial attack, concrete refutation, physical
-   cause, corrected representation — in one session.
-3. **The corrected representation** (speed joins the lattice: cells =
-   (psi bin, v stratum, side, dwell), `BuildVStarStrat`) is
-   implemented and its cost MEASURED: the exact reachable (v, psi)
-   band holds 400k+ cells per layer and the std::map build hits the
-   honest abort ceiling. Falsifier beats against an aborted build are
-   empty-layer artifacts and are not counted; the capability gate
-   honestly reads "strat build completes: FAIL" until the flat-lattice
-   implementation lands.
-4. **Observed structure (from the LB surfaces):** V* is monotone in N
-   and decreasing in |d-psi| (bin noise aside); optimal witnesses use
-   1-3 reversals with cosa concentrated near 0.0-0.15 during the turn
-   phase (hard-turn regime) — consistent with turn-then-accelerate;
-   straight-line gain matches the known one-tick law compounding.
+- **On-demand per exact start** (production solve path): one forward
+  sweep with the A4-prod kernel per entrance state, memoized on the
+  session-19 K key — the measured 84–85% K-duplication says the memo
+  hits constantly; this IS the batched-witness-field lever (~6.3–6.7×)
+  in its correct form.
+- **Canonical sampled tables** (bounds/design path): R_N over sampled
+  v0 with interval semantics — LB from witnesses, UB from certified
+  envelopes; v0-interpolation is a stated conjecture with a held-out
+  falsifier.
 
-**Next for capability 1:** flat-lattice (v, psi) band build (arrays,
-not maps; the band is ~10^5-10^6 cells x 90 layers x 43 actions ~
-1.5-4B MoveTicks ~ 20-45 min/v0 single-thread — or the first
-legitimate parallelism target); rerun the falsifier; then the
-theorem step (branch family for the turn/accelerate phase boundary).
+Measured basis: the session-21 B@32 sweep held 474k lattice states
+over 90 ticks from one start for 2.97M MoveTicks (2.2 s); with the
+A4-prod kernel that is sub-second per start.
+
+## The ride reduction (A18–A23 structure hypothesis)
+
+Surf riding is airborne-against-a-plane: air acceleration + gravity,
+velocity clipped into the plane each tick. In the ramp's tangent
+frame that is the SAME TickLaw structure plus a constant in-plane
+gravity component — so A19/A20 are V*/D* with ONE extra parameter
+(the in-plane gravity vector relative to heading), positions are 2-D
+in-plane, and A22 becomes a compact kernel over (entry λ, entry
+state) × (exit edge point). Interior-of-face only; edge/multi-plane
+ticks keep the general engine path. The hypothesis is settled by
+extracting A18-prod and parity-gating it (deliverable 11), not by
+argument. U_E(B, M) (certified, session 15) already upper-bounds ride
+energy and stands as the cross-check.
+
+---
+
+# REGISTRY B — search-space reduction / certified impossibility
+
+Reminder (semantics rule 1): **LB admits, UB culls.** Rows below only
+hard-prune once fed by exact/UB surfaces, each cull with a proof
+record.
+
+| ID | Reducer | Status | Derived from | Existing assets |
+|----|---------|--------|--------------|-----------------|
+| B0 | Exact vertical tick window per face | CERT | A1 + A2 | deployed: collapsed a dead 48.7M-tick sweep to a 3-tick answer (session 20) |
+| B1 | Face-slice validity region | CERT | A2 | (T, λ) machinery |
+| B2 | Horizontal reach envelope | PART (outer) | A8 | certified 30/tick cone: coast point + 0.225k² slack disc (`FFReachable`/`FFReachAny`); exact envelope waits on R_N |
+| B3 | Earliest possible contact tick | PART | A1 + A8 | B0 × B2 intersection as deployed |
+| B4 | Latest useful contact tick | TBD | A1 + geometry | — |
+| B5 | Required heading-change feasibility | LB only | A6/A7 | V* LB can certify FEASIBLE today; culling waits on the exact band |
+| B6 | Required terminal-speed feasibility | LB only | A6 | same |
+| B7 | Combined point/region reachability | PART | A1 + A6 + A8 | B0 × B2 today; exact via R_N membership |
+| B8 | Boardability bound | TBD | A16/A17 | — |
+| B9 | Minimum unavoidable board loss | TBD | A16 | near-analytic: min |v·n| over admissible arrivals |
+| B10 | Ride point/edge reachability | TBD | A19 + A20 | — |
+| B11 | Minimum ride ticks to exit | TBD | A21 | — |
+| B12 | Finite-horizon ride energy ceiling | CERT | — | U_E(B, M), certified session 15 |
+| B13 | Minimum departure resource for an air gap | TBD | inverse A8/A12 | — |
+| B14 | Minimum incoming resource required by successor | TBD | backward A12/A16/A22 | the MOTIVATING measured fact: session-18 f3 block — 300–500 u/s f2 arrivals cannot bridge a ~300u gap needing ~600+ u/s. B14 is how the library explains speed compounding |
+| B15 | Guaranteed collision / corridor exclusion | TBD | A14 + A28 | — |
+| B16 | Conservative successor-face set | X of B0–B15 | — | — |
+| B17 | Heatmap-cell optimistic bound | INSTRUMENT | capability extrema over a cell | fpot (validated 1.000) / doom cull / exitgate exist as instruments; promotion requires proof records |
+| B18 | Boundary-label dominance theorem | OPEN THEOREM | future capability proofs | session-16 lesson: label dominance must be PROVEN, not assumed |
+| B19 | Exact duplicate-state dominance | CERT, measured weak | exact identity | 13 prunes / 1940 states on real geometry — kept because it is free, expected ~nothing |
+| B20 | Competitive horizon from incumbent | MECHANISM READY | global T* − g | `HorizonFor` + G13 boundary gate; never engaged yet (no incumbent ever) |
+| B21 | Minimum remaining ticks to END | TBD | compose lower-time capability bounds | h_cert = 0 stands until this row is real |
+
+---
+
+# REGISTRY C — scoring / selection / composition
+
+C0/C1 carry information; C2–C5 are projections. No row here invents a
+physics score, ever ("high energy" / "fast/flat/high" are banned as
+admission rules — measured history).
+
+| ID | Capability | Status | Notes / existing assets |
+|----|------------|--------|--------------------------|
+| C0 | Canonical transition label (dt, E, q, ψ, vz, d, a, …) | PART | edge records in the graph carry most of this; formalize the tuple |
+| C1 | Local Pareto comparison | TBD | retain alternatives that trade time/resource/heading; the anti-Conjecture-M rule at composition level |
+| C2 | Board-quality projection | TBD | projection only, never admission |
+| C3 | Ride-quality projection | TBD | same |
+| C4 | Air-transfer-quality projection | TBD | same |
+| C5 | Successor-requirement matching | TBD | value an exit against what the NEXT capability requires (the B14 consumer) |
+| C6 | Sampled board→exit kernel (matrix of A22) | TBD | the 10^6-pairs end-state table |
+| C7 | Sampled exit→board kernel (matrix of A12/A13) | TBD | same |
+| C8 | Transition composition without re-simulation | PART (measured) | the K-duplication result: 84–85% repeat-share, ~6.3–6.7× batching ceiling — memoized R_N is C8's correct form |
+| C9 | Min-plus path composition | TBD | trivial once C0 labels exist |
+| C10 | Route cost = ticks | CERT (by decree) | g = ticks; h_cert = 0 standing |
+| C11 | Search-order heuristic | QUARANTINED | deepen priors / service lanes / diversity buckets exist as instruments; "arbitrary useful ordering; never truth" |
+| C12 | Refinement priority | TBD | where uncertainty could alter the answer |
+| C13 | Bound-gap / value-of-information | TBD | the first-lost diagnostic (session 21) is the seed instrument |
+| C14 | Proof ledger | PART | proof records for certified bounds + suite gates; formalize per-cull records |
+| C15 | Global path reconstruction | PART | `RouteWitness`/`ReplayRouteWitness` — hierarchical, bitwise cold replays (G0) |
+
+---
+
+# Dependency structure and build order
+
+The core chains:
+
+    Air:    A4 -> A6/A7 -> A8(R_N) -> A10/A11 -> A12/A13
+    Board:  A15 -> A16/A17
+    Ride:   A18 -> A19/A20 -> A21/A22/A23
+    Two-ramp transfer = A22 -> A12/A13 -> A16   (then C compares)
+
+## Phases
+
+- **Phase 0 — the unlock (next session): A4-prod.**
+  `CapAir::KernelTick(vx, vy, side, cosα) -> (vx', vy')` extracted
+  from the engine's exact air path (same float ops, same order),
+  parity gate `airkparity` (~10^7 random states × all 43 actions +
+  edge corpus: v≈0, cosα=±1, speeds at caps). Expected order
+  30–100× MoveTick (estimate; MoveTick measured 1.35–1.5M/s). Every
+  S-type build downstream runs on this kernel.
+- **Phase 1 — finish capability 1 + the reach family.** Flat-lattice
+  exact (v, ψ) band on A4-prod (~1.5–4B transitions/v0 ≈ minutes on
+  the kernel; the 400k+ cells/layer are arrays, ~0.5–2 GB); falsifier
+  margins must go to zero/O(pitch); the turn-then-accelerate theorem
+  step. Then R_N (one sweep per canonical start) with D* + the query
+  modes A9–A13, cross-falsified against capability 1.
+- **Phase 2 — board + boundary events.** A16/A17 frozen from the clip
+  law (near-analytic); A26/A27 formalized from the existing
+  launch/END instruments.
+- **Phase 3 — ride.** A18-prod extraction + parity gate settles the
+  tangent-frame hypothesis; then A19/A20 (V*/D* + slope parameter),
+  then A21/A22/A23 with U_E and the exit suites as cross-checks.
+- **Phase 4 — the B battery.** Promote B5/B6/B7 to UB-certified culls
+  from the exact builds; B13/B14 successor-resource propagation (the
+  speed-compounding explainer); per-cull proof records (C14).
+- **Phase 5 — the C layer and the end-state test.** C0/C1 labels,
+  C6/C7 sampled kernels, C9 min-plus. The end-state acceptance test:
+  ~10^3 × 10^3 ramp-point pairs on basictest = 10^6 evaluations —
+  B-battery interval tests first, table queries for survivors — with
+  the full-map solve reappearing as composition + pathfinding over
+  certified tables. Performance north star: real maps < 10 min,
+  basictest seconds-to-sub-minute.
+
+---
+
+## Capability 1 — the N-tick air turn/gain function
+
+    V*(v0, N, dψ, d0, a0) = max over legal dwell-6 control schedules
+    of terminal speed, subject to net velocity-heading change dψ
+    after exactly N clean-air ticks.
+
+**Session-22 state (first full A–G loop):**
+
+1. Six v0 surfaces (250–1400 u/s; N ≤ 90; 0.25° bins; ~48M MoveTicks
+   / ~28 s each) — every value a witnessed, engine-replayed schedule
+   ⟹ certified LOWER BOUNDS. Dual Ψ* reads the same layers; duality
+   green ×6.
+2. **CONJECTURE M (max-speed dominance per heading cell) REFUTED** by
+   the 30k-random-schedule falsifier: beats +34…+242 u/s with
+   witnesses and duality green (instrument sound; conjecture wrong).
+   Physics: turn rate ∝ 1/v. Origin of semantics rule 2.
+3. The corrected v-stratified build is implemented and cost-measured:
+   the exact (v, ψ) band holds 400k+ cells/layer; the std::map build
+   aborts at the honest ceiling; falsifier beats vs aborted builds
+   are empty-layer artifacts, not counted. `capair` prints RED for
+   exactly this reason.
+4. Observed structure: V* monotone in N, decreasing in |dψ|; optimal
+   witnesses use 1–3 reversals with cosα ∈ [0, 0.15] in the turn
+   phase — turn-then-accelerate. At N = 90 heading is nearly free at
+   any surf speed; short horizons pay steeply.
+
+**Next for capability 1 (revised session 23):** A4-prod kernel FIRST
+(Phase 0), then the flat-lattice exact band on it, falsifier rerun
+(margins → 0), then the theorem step (the turn/accelerate branch
+family), then the LB surfaces retire into interval semantics.
 
 ## Change log
 
+- 2026-08-21a (session 23): **the registry adopted** — advisor A/B/C
+  taxonomy (A0–A28, B0–B21, C0–C15) is the canonical vocabulary;
+  every existing asset mapped to its ID; three amendments recorded:
+  (1) A8–A13 collapse into the reach family R_N with two exact
+  consumption modes (on-demand memoized / canonical tables), (2)
+  A4-prod partial-evaluation kernel promoted to Phase 0 as the
+  universal unlock, (3) the LB-admits/UB-culls rule + canonical-
+  tables/world-frame-witnesses rule + domain stamps made binding
+  library semantics. Deliverable 11 (ref vs prod + parity gate)
+  adopted. Build order phased 0–5. Organization session — no solver
+  code changed. Report:
+  `Docs/reports/session23-capability-registry.html`.
 - 2026-08-20f (session 22): program opened; registry seeded;
   Capability 1 LB surfaces + dual built and cross-checked
   (`SolverCapability.h`, `capair`); CONJECTURE M REFUTED by the

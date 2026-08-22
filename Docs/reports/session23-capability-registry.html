@@ -1,0 +1,378 @@
+<title>The Capability Registry</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --slate:#475569; --slate-soft:#e8ecf1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --slate:#a7b4c2; --slate-soft:#232c36;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --slate:#a7b4c2; --slate-soft:#232c36;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55;
+  }
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1; margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:66ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:48px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:15px; margin-right:10px; font-weight:600}
+  h3{font-size:16px; margin:26px 0 8px}
+  p{max-width:76ch}
+  .lede{color:var(--muted); max-width:76ch; margin:0 0 16px}
+  code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:.92em}
+  code{background:var(--code-bg); padding:1px 5px; border-radius:3px}
+  .thesis{
+    background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--teal);
+    padding:18px 22px; margin:26px 0; font-family:"IBM Plex Serif",Georgia,serif;
+    font-size:19px; font-style:italic; max-width:none;
+  }
+  .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; margin:18px 0}
+  .card{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .card .k{font-family:"IBM Plex Mono",ui-monospace,monospace; font-weight:600; color:var(--teal); font-size:13px; letter-spacing:.08em}
+  .card h3{margin:6px 0 6px; font-size:16px}
+  .card p{font-size:13.5px; color:var(--muted); margin:0}
+  .rules{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:6px 22px 14px; margin:18px 0}
+  .rules li{margin:9px 0; max-width:86ch}
+  .rules b{color:var(--ink)}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line); border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:760px; font-size:13.5px}
+  th{
+    text-align:left; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px;
+    letter-spacing:.1em; text-transform:uppercase; color:var(--faint);
+    padding:10px 12px; border-bottom:2px solid var(--line); white-space:nowrap;
+  }
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.id{font-family:"IBM Plex Mono",ui-monospace,monospace; font-weight:600; white-space:nowrap; color:var(--teal)}
+  td.nm{font-weight:600; min-width:150px}
+  td.ty{font-family:"IBM Plex Mono",ui-monospace,monospace; white-space:nowrap; color:var(--muted)}
+  td.dep{font-family:"IBM Plex Mono",ui-monospace,monospace; white-space:nowrap; color:var(--muted)}
+  td.note{color:var(--muted); min-width:240px}
+  td.num{font-family:"IBM Plex Mono",ui-monospace,monospace; white-space:nowrap}
+  .chip{
+    display:inline-block; font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px;
+    font-weight:600; letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap;
+    border:1px solid transparent;
+  }
+  .c-cert{background:var(--teal-soft); color:var(--teal)}
+  .c-lb{background:var(--amber-soft); color:var(--amber)}
+  .c-ref{background:var(--blue-soft); color:var(--blue)}
+  .c-part{background:var(--slate-soft); color:var(--slate)}
+  .c-tbd{background:transparent; color:var(--faint); border-color:var(--line)}
+  .c-warn{background:var(--red-soft); color:var(--red)}
+  .legend{display:flex; flex-wrap:wrap; gap:8px 14px; margin:10px 0 4px; font-size:12.5px; color:var(--muted); align-items:center}
+  .duo{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px; margin:16px 0}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 20px}
+  .panel h3{margin-top:2px}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  .svgwrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; margin:14px 0}
+  svg text{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; fill:var(--ink)}
+  svg .lbl{font-size:10.5px; fill:var(--faint); letter-spacing:.08em; text-transform:uppercase}
+  svg .box{fill:var(--surface2); stroke:var(--line); rx:5}
+  svg .box-cert{stroke:var(--teal); stroke-width:1.6}
+  svg .box-lb{stroke:var(--amber); stroke-width:1.6}
+  svg .box-next{stroke:var(--teal); stroke-width:1.6; stroke-dasharray:5 3}
+  svg .arrow{stroke:var(--muted); stroke-width:1.4; fill:none; marker-end:url(#ah)}
+  svg .grp{stroke:var(--line); fill:none; stroke-dasharray:3 4}
+  .phase{display:flex; gap:16px; margin:12px 0; align-items:flex-start}
+  .phase .n{
+    flex:none; width:34px; height:34px; border-radius:50%; background:var(--teal); color:var(--bg);
+    display:flex; align-items:center; justify-content:center; font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-weight:600; font-size:14px; margin-top:2px;
+  }
+  .phase .b{border-bottom:1px solid var(--line); padding-bottom:12px; flex:1}
+  .phase .b b{display:block; margin-bottom:3px}
+  .phase .b p{margin:0; color:var(--muted); font-size:13.5px; max-width:none}
+  .callout{
+    background:var(--amber-soft); border:1px solid var(--amber); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px;
+  }
+  .callout b{color:var(--amber)}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint); font-size:12.5px; font-family:"IBM Plex Mono",ui-monospace,monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Solver Lab · Session 23</div>
+  <h1>The Capability Registry</h1>
+  <p class="sub">The atomic-capability taxonomy for the surf solver, adopted as the canonical
+  vocabulary: 29 physical capabilities, 22 certified reducers, 16 composition functions —
+  with every existing certified asset mapped to its ID, the binding semantics that keep the
+  library honest, and the phased build order.</p>
+  <div class="meta">
+    <span>2026-08-21</span>
+    <span>design of record: Docs/CapabilityLibrary.md</span>
+    <span>organization session — no solver code changed</span>
+  </div>
+</header>
+
+<div class="thesis">Turn Source surf physics into the smallest possible set of extremely fast,
+reusable min-max functions — then whatever full-map architecture eventually wins is mostly
+table lookup, sparse composition, and pathfinding.</div>
+
+<h2><span class="idx">01</span>The three categories</h2>
+<div class="cards">
+  <div class="card"><div class="k">A · PHYSICAL</div>
+    <h3>What can physically happen?</h3>
+    <p>Exact transforms, capability extrema / Pareto surfaces, and their inversions. The physics
+    foundation — later functions become composition or inversion of these, not new optimizers.</p></div>
+  <div class="card"><div class="k">B · REDUCTION</div>
+    <h3>What provably needs no search?</h3>
+    <p>Equations, table lookups, interval intersections, support-function tests. Extremely cheap.
+    Nothing is promoted here without proof; dead-route culling lives here and nowhere else.</p></div>
+  <div class="card"><div class="k">C · COMPOSITION</div>
+    <h3>Which valid alternative is preferable?</h3>
+    <p>Consumes proven A/B outputs against a stated objective. Never invents a physics score —
+    C0/C1 carry information, C2–C5 are projections only.</p></div>
+</div>
+
+<h2><span class="idx">02</span>Binding library semantics</h2>
+<p class="lede">Five rules, each bought with a measured failure or a proof.</p>
+<div class="rules"><ol>
+  <li><b>LB admits, UB culls.</b> A witnessed lower bound certifies <i>possibility</i>; only an
+  exact or certified upper bound certifies <i>impossibility</i>. No B-row may ever hard-prune
+  from an LB surface.</li>
+  <li><b>No scalar-dominance assumptions.</b> No capability may compress its internal state just
+  because its requested output is scalar — Conjecture M was refuted at +34…+242 u/s because
+  turn rate ∝ 1/v lets slower states out-turn-then-accelerate faster ones.</li>
+  <li><b>Reference vs production, cross-falsifying forever.</b> <code>X_Ref</code> is full-MoveTick
+  truth; <code>X_Fast</code> is the partially-evaluated exact kernel with identical float
+  semantics, gated bitwise (the <code>wishparity</code> pattern). Partial evaluation under a
+  proven domain is not approximation.</li>
+  <li><b>Tables canonicalize; witnesses stay world-frame.</b> Frame rotation is exact in the
+  reals, not in floats — so tables live in the canonical frame while every witness is an exact
+  control schedule re-verified bitwise where it is used (the ReplayEdge practice).</li>
+  <li><b>Domain stamps on every surface.</b> Standing hull only, no duck, no jump, clean air,
+  dwell-6 legality — stated boundaries, never silent assumptions.</li>
+</ol></div>
+
+<h2><span class="idx">03</span>Registry A — engine prediction / physical capability</h2>
+<div class="legend">
+  <span class="chip c-cert">CERT</span> solved / certified
+  <span class="chip c-ref">REF</span> truth instrument only
+  <span class="chip c-lb">LB</span> witnessed lower bound only
+  <span class="chip c-part">PART</span> partial assets
+  <span class="chip c-tbd">TBD</span> not started
+</div>
+<div class="tablewrap"><table>
+<tr><th>ID</th><th>Capability</th><th>Type</th><th>Status</th><th>Assets / notes</th><th>Deps</th></tr>
+<tr><td class="id">A0</td><td class="nm">Canonical-frame transform</td><td class="ty">T</td><td><span class="chip c-part">PART</span></td><td class="note">Implicit in clean-air builds; formalize float semantics (rule 4)</td><td class="dep">—</td></tr>
+<tr><td class="id">A1</td><td class="nm">Vertical state</td><td class="ty">T</td><td><span class="chip c-cert">CERT</span></td><td class="note">Closed form; deployed as the vertical-window cancellation (48.7M-tick sweep → 3 ticks)</td><td class="dep">—</td></tr>
+<tr><td class="id">A2</td><td class="nm">Face slice</td><td class="ty">T</td><td><span class="chip c-cert">CERT</span></td><td class="note">(T, λ) destination cells, session 21</td><td class="dep">—</td></tr>
+<tr><td class="id">A3</td><td class="nm">Hull contact geometry</td><td class="ty">T</td><td><span class="chip c-part">PART</span></td><td class="note">Standing hull; Minkowski END box computed</td><td class="dep">—</td></tr>
+<tr><td class="id">A4</td><td class="nm">One-tick air turn/gain</td><td class="ty">T</td><td><span class="chip c-cert">CERT ref</span> <span class="chip c-lb">PROD next</span></td><td class="note">MoveTick + Strafe::TickLaw + wishparity. Missing: the cartesian in-loop kernel — <b>Phase 0, the universal unlock</b></td><td class="dep">—</td></tr>
+<tr><td class="id">A5</td><td class="nm">Dwell/reversal automaton</td><td class="ty">T</td><td><span class="chip c-cert">CERT</span></td><td class="note">min_gap = 6 law; the age axis of every table</td><td class="dep">—</td></tr>
+<tr><td class="id">A6</td><td class="nm">N-tick air turn/gain V*</td><td class="ty">S</td><td><span class="chip c-lb">LB</span></td><td class="note">Six witnessed surfaces; Conjecture M refuted; exact (v,ψ) band waits on A4-prod flat lattice</td><td class="dep">A4 A5</td></tr>
+<tr><td class="id">A7</td><td class="nm">Dual Ψ*</td><td class="ty">S</td><td><span class="chip c-lb">LB</span></td><td class="note">Reads A6 layers; duality green ×6</td><td class="dep">A6</td></tr>
+<tr><td class="id">A8</td><td class="nm">Air directional displacement D*</td><td class="ty">S</td><td><span class="chip c-tbd">TBD next</span></td><td class="note"><b>Merged: support function of the reach family R_N</b> (§05)</td><td class="dep">A0 A4 A5</td></tr>
+<tr><td class="id">A9</td><td class="nm">Displacement + terminal constraint</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Pareto layer of R_N</td><td class="dep">A8</td></tr>
+<tr><td class="id">A10</td><td class="nm">Minimum air time N_min</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Membership scan over N; A1 bounds the range</td><td class="dep">A8 A1</td></tr>
+<tr><td class="id">A11</td><td class="nm">Fixed-time point solver</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Witness query into R_N</td><td class="dep">A8</td></tr>
+<tr><td class="id">A12</td><td class="nm">Air point-to-point solver</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">A11 over feasible N; RefSolve stays oracle/polisher</td><td class="dep">A8 A1</td></tr>
+<tr><td class="id">A13</td><td class="nm">Air point-to-face solver</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">A12 over (T, λ) slices — 1-D per tick, never generic XYZ</td><td class="dep">A8 A2</td></tr>
+<tr><td class="id">A14</td><td class="nm">First-contact air prediction</td><td class="ty">T</td><td><span class="chip c-ref">REF</span></td><td class="note">World-first-contact sweep + FlyZoneSchedule; prod = local brush set. Map geometry enters here only</td><td class="dep">—</td></tr>
+<tr><td class="id">A15</td><td class="nm">Board clip</td><td class="ty">T</td><td><span class="chip c-cert">CERT</span></td><td class="note">Analytic, overbounce 1: v′ = v − (v·n)n; loss = |v·n|</td><td class="dep">—</td></tr>
+<tr><td class="id">A16</td><td class="nm">Best/worst board</td><td class="ty">S</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Near-analytic: minimize |v·n| over admissible arrivals</td><td class="dep">A15</td></tr>
+<tr><td class="id">A17</td><td class="nm">Board feasibility</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Inverse of A16</td><td class="dep">A16</td></tr>
+<tr><td class="id">A18</td><td class="nm">One-tick planar ride law</td><td class="ty">T</td><td><span class="chip c-ref">REF</span></td><td class="note">Prod hypothesis: air kernel + single-plane clip + in-plane gravity (interior only) — settled by extraction + parity, §06</td><td class="dep">A4 A15</td></tr>
+<tr><td class="id">A19</td><td class="nm">N-tick ride turn/gain</td><td class="ty">S</td><td><span class="chip c-tbd">TBD</span></td><td class="note">V* machinery + one slope parameter</td><td class="dep">A18</td></tr>
+<tr><td class="id">A20</td><td class="nm">Ride directional displacement</td><td class="ty">S</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Reach machinery on the plane; positions 2-D in-plane</td><td class="dep">A18</td></tr>
+<tr><td class="id">A21</td><td class="nm">Minimum ride time</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Inverse A19/A20</td><td class="dep">A19 A20</td></tr>
+<tr><td class="id">A22</td><td class="nm">Board→exit Pareto solver</td><td class="ty">S</td><td><span class="chip c-tbd">TBD</span></td><td class="note"><b>The central sampled-ramp kernel.</b> Regression seeds: exitfrontier / exitfit / efrefine; U_E cross-check</td><td class="dep">A18–A20</td></tr>
+<tr><td class="id">A23</td><td class="nm">Ride edge interception</td><td class="ty">X</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Plane/edge geometry + A20</td><td class="dep">A20</td></tr>
+<tr><td class="id">A24</td><td class="nm">Direct contact transfer</td><td class="ty">T</td><td><span class="chip c-part">PART</span></td><td class="note">Exact clip transform exists; adjacency composition later</td><td class="dep">A15</td></tr>
+<tr><td class="id">A25</td><td class="nm">Ground/runoff acceleration</td><td class="ty">S</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Spawn/ground primitive incl. jump timing; map-independent</td><td class="dep">—</td></tr>
+<tr><td class="id">A26</td><td class="nm">Edge launch</td><td class="ty">T</td><td><span class="chip c-part">PART</span></td><td class="note">LaunchWitness / ReplayLaunch instruments</td><td class="dep">—</td></tr>
+<tr><td class="id">A27</td><td class="nm">END-volume crossing</td><td class="ty">T</td><td><span class="chip c-part">PART</span></td><td class="note">Minkowski box + zone-tested-per-tick exact event phase</td><td class="dep">A3</td></tr>
+<tr><td class="id">A28</td><td class="nm">Obstacle/corridor traversal</td><td class="ty">X</td><td><span class="chip c-tbd">TBD last</span></td><td class="note">From A14 + reach functions</td><td class="dep">A8 A14</td></tr>
+</table></div>
+
+<h2><span class="idx">04</span>The dependency spine</h2>
+<div class="svgwrap">
+<svg viewBox="0 0 940 330" width="940" height="330" role="img" aria-label="Dependency chains: air, board, ride, and the two-ramp transfer">
+  <defs><marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+    <path d="M1,1 L7,4 L1,7" fill="none" stroke="var(--muted)" stroke-width="1.3"/></marker></defs>
+  <text x="12" y="26" class="lbl">AIR</text>
+  <rect x="60"  y="10" width="96"  height="34" class="box box-next"/><text x="108" y="31" text-anchor="middle">A4 kernel</text>
+  <rect x="196" y="10" width="96"  height="34" class="box box-lb"/><text x="244" y="31" text-anchor="middle">A6/A7 V*Ψ*</text>
+  <rect x="332" y="10" width="96"  height="34" class="box"/><text x="380" y="31" text-anchor="middle">A8 R_N/D*</text>
+  <rect x="468" y="10" width="110" height="34" class="box"/><text x="523" y="31" text-anchor="middle">A10/A11</text>
+  <rect x="618" y="10" width="110" height="34" class="box"/><text x="673" y="31" text-anchor="middle">A12/A13</text>
+  <path d="M156,27 L192,27" class="arrow"/><path d="M292,27 L328,27" class="arrow"/>
+  <path d="M428,27 L464,27" class="arrow"/><path d="M578,27 L614,27" class="arrow"/>
+  <text x="12" y="106" class="lbl">BOARD</text>
+  <rect x="60"  y="90" width="96"  height="34" class="box box-cert"/><text x="108" y="111" text-anchor="middle">A15 clip</text>
+  <rect x="196" y="90" width="110" height="34" class="box"/><text x="251" y="111" text-anchor="middle">A16/A17</text>
+  <path d="M156,107 L192,107" class="arrow"/>
+  <text x="12" y="186" class="lbl">RIDE</text>
+  <rect x="60"  y="170" width="96"  height="34" class="box"/><text x="108" y="191" text-anchor="middle">A18 kernel</text>
+  <rect x="196" y="170" width="110" height="34" class="box"/><text x="251" y="191" text-anchor="middle">A19/A20</text>
+  <rect x="346" y="170" width="150" height="34" class="box"/><text x="421" y="191" text-anchor="middle">A21/A22/A23</text>
+  <path d="M156,187 L192,187" class="arrow"/><path d="M306,187 L342,187" class="arrow"/>
+  <rect x="56" y="246" width="676" height="70" class="grp" rx="8"/>
+  <text x="72" y="270" class="lbl">A COMPLETE TWO-RAMP TRANSFER</text>
+  <rect x="72"  y="278" width="150" height="30" class="box"/><text x="147" y="297" text-anchor="middle">A22 ride→exit</text>
+  <rect x="272" y="278" width="170" height="30" class="box"/><text x="357" y="297" text-anchor="middle">A12/A13 air transfer</text>
+  <rect x="492" y="278" width="130" height="30" class="box"/><text x="557" y="297" text-anchor="middle">A16 board</text>
+  <path d="M222,293 L268,293" class="arrow"/><path d="M442,293 L488,293" class="arrow"/>
+  <text x="648" y="297" class="lbl">→ then C compares</text>
+</svg>
+</div>
+<p class="lede">Dashed = the Phase-0 kernel; amber = witnessed lower bounds standing; teal solid =
+certified. If the eight functions on the air and ride spines are solved efficiently, most of
+Registry B becomes trivial inversion and lookup.</p>
+
+<h2><span class="idx">05</span>One object, five capabilities — the reach family</h2>
+<div class="duo">
+  <div class="panel">
+    <h3>A8–A13 collapse into R<sub>N</sub></h3>
+    <p>Vertical is deterministic (A1) and the frame canonicalizes (A0), so the fixed-time
+    reachable set <span class="hl">R<sub>N</sub>(v₀, side₀, age₀) ⊂ (x, y, vx, vy)</span>
+    carries everything:</p>
+    <ul>
+      <li><span class="hl">D*</span> is its support function (A8)</li>
+      <li><span class="hl">V*/Ψ*</span> are its velocity marginals (A6/A7) — a free cross-falsifier
+      against capability 1's independent build</li>
+      <li><span class="hl">N_min</span> is a membership scan over N (A10)</li>
+      <li><span class="hl">point / face solvers</span> are witness queries, faces through
+      (T, λ) slices (A11–A13)</li>
+    </ul>
+  </div>
+  <div class="panel">
+    <h3>Two exact consumption modes</h3>
+    <p><span class="hl">On-demand per exact start</span> (production): one forward sweep per
+    entrance state with the A4-prod kernel, memoized on the session-19 K key. The measured
+    84–85% K-duplication says the memo hits constantly — this is the correct form of the
+    batching lever (~6.3–6.7×).</p>
+    <p><span class="hl">Canonical sampled tables</span> (bounds/design): R<sub>N</sub> over
+    sampled v₀ with interval semantics — LB from witnesses, UB from certified envelopes;
+    v₀-interpolation is a stated conjecture with a held-out falsifier.</p>
+    <p>Measured basis: the B@32 sweep held 474k lattice states over 90 ticks from one start in
+    2.2 s of MoveTicks — sub-second on the kernel.</p>
+  </div>
+</div>
+
+<h2><span class="idx">06</span>Why the A4-prod kernel is Phase 0</h2>
+<p class="lede">The engine is cheap; the generic path is not free. Partial evaluation under a
+proven domain — same float ops, same order, bitwise-gated — removes the world, position,
+gravity, hull, and trace from every clean-air transition.</p>
+<div class="tablewrap"><table>
+<tr><th>Quantity</th><th>Value</th><th>Basis</th></tr>
+<tr><td>Generic MoveTick throughput</td><td class="num">1.35–1.5M ticks/s</td><td class="note">measured, sessions 20–21</td></tr>
+<tr><td>One V* LB build (per v₀)</td><td class="num">~48M ticks ≈ 28 s</td><td class="note">measured, session 22</td></tr>
+<tr><td>Exact (v, ψ) band size</td><td class="num">400k+ cells/layer</td><td class="note">measured floor at abort (peaks 404k / 447k / 463k)</td></tr>
+<tr><td>Exact band build on MoveTick</td><td class="num">~1.5–4B transitions ≈ 20–45 min/v₀</td><td class="note">estimate, session 22</td></tr>
+<tr><td><b>Exact band build on A4-prod kernel</b></td><td class="num"><b>~15–80 s/v₀</b></td><td class="note">estimate at 30–100× MoveTick — to be measured by <code>airkparity</code>+bench</td></tr>
+<tr><td>One R_N sweep (B@32, one start)</td><td class="num">2.97M ticks / 2.2 s</td><td class="note">measured, session 21 → sub-second on kernel (estimate)</td></tr>
+<tr><td>RefSolve (retained as oracle)</td><td class="num">63 ticks/flight · 3.4–4.1k MT/cell</td><td class="note">measured — polisher and witness constructor, never the field engine</td></tr>
+<tr><td>K-duplication repeat-share</td><td class="num">84–85% · ~6.3–6.7× memo ceiling</td><td class="note">measured, session 19 — consumed by C8 as memoized R_N</td></tr>
+</table></div>
+<div class="callout"><b>The gate:</b> <code>X_Fast = X_Ref</code> bitwise, over ~10⁷ random
+states × all 43 actions plus an edge corpus (v≈0, cosα=±1, speeds at the caps), compiled with
+the same flags. A kernel that fails parity by one ulp does not ship. The same pattern then
+settles the ride-reduction hypothesis: extract A18-prod (air kernel + single-plane clip +
+in-plane gravity, interior of face only) and let parity decide.</div>
+
+<h2><span class="idx">07</span>Registry B — certified reduction</h2>
+<div class="legend"><span class="chip c-cert">CERT</span> proven &amp; deployed
+  <span class="chip c-part">PART</span> partial / outer bound
+  <span class="chip c-lb">LB ONLY</span> admits, cannot cull
+  <span class="chip c-warn">OPEN</span> theorem required
+  <span class="chip c-tbd">TBD</span></div>
+<div class="tablewrap"><table>
+<tr><th>ID</th><th>Reducer</th><th>Status</th><th>From</th><th>Notes</th></tr>
+<tr><td class="id">B0</td><td class="nm">Vertical tick window per face</td><td><span class="chip c-cert">CERT</span></td><td class="dep">A1+A2</td><td class="note">Collapsed a dead 48.7M-tick sweep to a 3-tick answer</td></tr>
+<tr><td class="id">B1</td><td class="nm">Face-slice validity region</td><td><span class="chip c-cert">CERT</span></td><td class="dep">A2</td><td class="note">(T, λ) machinery</td></tr>
+<tr><td class="id">B2</td><td class="nm">Horizontal reach envelope</td><td><span class="chip c-part">PART outer</span></td><td class="dep">A8</td><td class="note">Certified 30/tick cone (coast + 0.225k² disc); exact waits on R_N</td></tr>
+<tr><td class="id">B3</td><td class="nm">Earliest contact tick</td><td><span class="chip c-part">PART</span></td><td class="dep">A1+A8</td><td class="note">B0 × B2 as deployed</td></tr>
+<tr><td class="id">B4</td><td class="nm">Latest useful contact tick</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">A1+geom</td><td class="note">—</td></tr>
+<tr><td class="id">B5</td><td class="nm">Heading-change feasibility</td><td><span class="chip c-lb">LB ONLY</span></td><td class="dep">A6/A7</td><td class="note">Certifies FEASIBLE today; culling waits on the exact band</td></tr>
+<tr><td class="id">B6</td><td class="nm">Terminal-speed feasibility</td><td><span class="chip c-lb">LB ONLY</span></td><td class="dep">A6</td><td class="note">Same</td></tr>
+<tr><td class="id">B7</td><td class="nm">Point/region reachability</td><td><span class="chip c-part">PART</span></td><td class="dep">A1+A6+A8</td><td class="note">Exact via R_N membership</td></tr>
+<tr><td class="id">B8</td><td class="nm">Boardability bound</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">A16/A17</td><td class="note">—</td></tr>
+<tr><td class="id">B9</td><td class="nm">Minimum unavoidable board loss</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">A16</td><td class="note">Near-analytic: min |v·n|</td></tr>
+<tr><td class="id">B10</td><td class="nm">Ride point/edge reachability</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">A19+A20</td><td class="note">—</td></tr>
+<tr><td class="id">B11</td><td class="nm">Minimum ride ticks to exit</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">A21</td><td class="note">—</td></tr>
+<tr><td class="id">B12</td><td class="nm">Ride energy ceiling</td><td><span class="chip c-cert">CERT</span></td><td class="dep">—</td><td class="note">U_E(B, M), certified session 15</td></tr>
+<tr><td class="id">B13</td><td class="nm">Min departure resource for a gap</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">inv A8/A12</td><td class="note">—</td></tr>
+<tr><td class="id">B14</td><td class="nm">Min incoming resource for successor</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">bwd A12/A16/A22</td><td class="note">The speed-compounding explainer: f2 arrivals at 300–500 u/s cannot bridge a ~300u gap needing ~600+</td></tr>
+<tr><td class="id">B15</td><td class="nm">Collision / corridor exclusion</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">A14+A28</td><td class="note">—</td></tr>
+<tr><td class="id">B16</td><td class="nm">Conservative successor-face set</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">B0–B15</td><td class="note">Composition</td></tr>
+<tr><td class="id">B17</td><td class="nm">Heatmap-cell optimistic bound</td><td><span class="chip c-part">INSTRUMENT</span></td><td class="dep">cell extrema</td><td class="note">fpot (validated 1.000) / doom / exitgate exist; promotion requires proof records</td></tr>
+<tr><td class="id">B18</td><td class="nm">Boundary-label dominance</td><td><span class="chip c-warn">OPEN THEOREM</span></td><td class="dep">future proofs</td><td class="note">Must be proven, never assumed (session-16 lesson)</td></tr>
+<tr><td class="id">B19</td><td class="nm">Exact duplicate dominance</td><td><span class="chip c-cert">CERT · weak</span></td><td class="dep">identity</td><td class="note">13 prunes / 1940 states on real geometry — free, near-zero yield</td></tr>
+<tr><td class="id">B20</td><td class="nm">Competitive horizon</td><td><span class="chip c-part">READY</span></td><td class="dep">T*−g</td><td class="note">HorizonFor + G13 gate; never engaged (no incumbent yet)</td></tr>
+<tr><td class="id">B21</td><td class="nm">Min remaining ticks to END</td><td><span class="chip c-tbd">TBD</span></td><td class="dep">lower-time bounds</td><td class="note">h_cert = 0 stands until this row is real</td></tr>
+</table></div>
+
+<h2><span class="idx">08</span>Registry C — scoring / selection / composition</h2>
+<div class="tablewrap"><table>
+<tr><th>ID</th><th>Capability</th><th>Status</th><th>Notes</th></tr>
+<tr><td class="id">C0</td><td class="nm">Canonical transition label</td><td><span class="chip c-part">PART</span></td><td class="note">(dt, E, q, ψ, vz, d, a, …) — edge records carry most of it; formalize the tuple</td></tr>
+<tr><td class="id">C1</td><td class="nm">Local Pareto comparison</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Retain trades of time/resource/heading; the anti-Conjecture-M rule at composition level</td></tr>
+<tr><td class="id">C2–C5</td><td class="nm">Quality projections + successor matching</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Projections only, never admission rules; C5 consumes B14</td></tr>
+<tr><td class="id">C6/C7</td><td class="nm">Sampled board→exit / exit→board kernels</td><td><span class="chip c-tbd">TBD</span></td><td class="note">The 10⁶-pairs end-state tables (matrices of A22 and A12/A13)</td></tr>
+<tr><td class="id">C8</td><td class="nm">Composition without re-simulation</td><td><span class="chip c-part">PART measured</span></td><td class="note">K-dup 84–85%, ~6.3–6.7× ceiling — memoized R_N is its correct form</td></tr>
+<tr><td class="id">C9</td><td class="nm">Min-plus path composition</td><td><span class="chip c-tbd">TBD</span></td><td class="note">Trivial once C0 labels exist</td></tr>
+<tr><td class="id">C10</td><td class="nm">Route cost = ticks</td><td><span class="chip c-cert">CERT</span></td><td class="note">g = ticks; h_cert = 0 standing</td></tr>
+<tr><td class="id">C11</td><td class="nm">Search-order heuristic</td><td><span class="chip c-warn">QUARANTINED</span></td><td class="note">Deepen priors / service lanes / diversity buckets — "arbitrary useful ordering; never truth"</td></tr>
+<tr><td class="id">C12/C13</td><td class="nm">Refinement priority / value-of-information</td><td><span class="chip c-tbd">TBD</span></td><td class="note">The first-lost diagnostic is the seed instrument</td></tr>
+<tr><td class="id">C14</td><td class="nm">Proof ledger</td><td><span class="chip c-part">PART</span></td><td class="note">Proof records + suite gates; formalize per-cull records</td></tr>
+<tr><td class="id">C15</td><td class="nm">Global path reconstruction</td><td><span class="chip c-part">PART</span></td><td class="note">RouteWitness / ReplayRouteWitness — hierarchical, bitwise cold replays</td></tr>
+</table></div>
+
+<h2><span class="idx">09</span>The build order</h2>
+<div class="phase"><div class="n">0</div><div class="b"><b>The unlock: A4-prod kernel + airkparity</b>
+<p>Extract the exact cartesian air transition; bitwise gate vs MoveTick; measure the multiple.
+Every S-type build downstream runs on it.</p></div></div>
+<div class="phase"><div class="n">1</div><div class="b"><b>Finish capability 1 + the reach family</b>
+<p>Flat-lattice exact (v, ψ) band on the kernel; falsifier margins to zero; the
+turn-then-accelerate theorem. Then R_N with D* and the query modes A9–A13, cross-falsified
+against capability 1.</p></div></div>
+<div class="phase"><div class="n">2</div><div class="b"><b>Board + boundary events</b>
+<p>A16/A17 frozen from the clip law (near-analytic); A26/A27 formalized from the existing
+launch/END instruments.</p></div></div>
+<div class="phase"><div class="n">3</div><div class="b"><b>Ride</b>
+<p>A18-prod extraction settles the tangent-frame hypothesis by parity; then A19/A20, then the
+central A22 kernel with U_E and the exit suites as cross-checks.</p></div></div>
+<div class="phase"><div class="n">4</div><div class="b"><b>The B battery</b>
+<p>Promote B5/B6/B7 to UB-certified culls from the exact builds; B13/B14 successor-resource
+propagation; per-cull proof records.</p></div></div>
+<div class="phase"><div class="n">5</div><div class="b"><b>The C layer + the end-state test</b>
+<p>Labels, Pareto, sampled kernels, min-plus. Acceptance: ~10³ × 10³ ramp-point pairs on
+basictest — B-battery interval tests first, table queries for survivors. The full-map solve
+returns as composition + pathfinding. North star: real maps &lt; 10 min; basictest
+seconds-to-sub-minute.</p></div></div>
+
+<footer>SourceTAS Solver Lab · session 23 · 2026-08-21 · registry of record: Docs/CapabilityLibrary.md ·
+estimates are labeled; everything else is measured</footer>
+</div>

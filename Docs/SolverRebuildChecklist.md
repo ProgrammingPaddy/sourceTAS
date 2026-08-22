@@ -15,6 +15,35 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-21a (session 23): THE CAPABILITY REGISTRY IS
+ADOPTED — A/B/C IS THE CANONICAL VOCABULARY; A4-PROD IS PHASE 0.**
+User + advisor taxonomy 2026-08-21a: the full atomic-capability
+registry (A0–A28 physical, B0–B21 certified reduction, C0–C15
+scoring/composition) is adopted verbatim into
+`Docs/CapabilityLibrary.md` as the single canonical registry, with
+every existing asset mapped to its ID (TickLaw/wishparity = A4,
+clip = A15, U_E = B12, vertical window = B0, reach cone = B2-outer,
+(T,λ) = A2/A13, dwell-6 = A5, K-dup = C8, HorizonFor = B20,
+RouteWitness = C15, …). Three amendments recorded as binding
+semantics: (1) A8–A13 collapse into ONE reach family R_N(x,y,vx,vy)
+— D* is its support function, V*/Ψ* its marginals, N_min/point/face
+solvers its query modes, with two exact consumption modes (on-demand
+memoized per exact start = the correct form of the session-19
+batching lever; canonical sampled tables with LB/UB intervals); (2)
+the partial-evaluation principle (advisor) is Phase 0: extract
+A4-prod `KernelTick(vx,vy,side,cosα)` with identical float
+semantics, bitwise `airkparity` gate, est. 30–100× MoveTick — every
+S-type build downstream runs on it, turning capability 1's exact
+band from hours into minutes; (3) LB ADMITS, UB CULLS — no B-row may
+hard-prune from a witnessed LB; tables canonicalize, witnesses stay
+world-frame; domain stamps (standing hull, no duck/jump, clean air)
+on every surface. Deliverable 11 added (ref vs prod implementations
+cross-falsifying forever). Build order phased 0–5 (kernel →
+capability 1 + reach family → board/boundary → ride → B battery →
+C layer + the 10^6-pair end-state test). Organization session — no
+solver code changed; suites untouched. Report:
+`Docs/reports/session23-capability-registry.html`.
+
 **STATUS 2026-08-20f (session 22): THE CAPABILITY LIBRARY PROGRAM IS
 OPEN — BOTTOM-UP MIN-MAX UNIT FUNCTIONS; THE GLOBAL SOLVER IS A
 REGRESSION CONSUMER; G0R IS NOT THE NEXT MILESTONE.** User + advisor
