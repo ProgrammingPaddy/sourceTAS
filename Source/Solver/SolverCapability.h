@@ -5156,6 +5156,48 @@ namespace CapRide {
 } // namespace CapRide
 
 // ======================================================================
+// CAPTRIGGER - registry A31 (trigger interactions), session 37. The
+// engine mirror's trigger application (MoveTick's post-move block,
+// total-parity port 2026-08-15) packaged as ONE pure transform so
+// planners can apply a touch without running a tick. The three rules,
+// verbatim: gravity touch overwrites the persistent gravity scale;
+// a push accumulates onto base velocity (upward pushes unground and
+// nudge the origin 1u up); a teleport sets the origin and ALWAYS
+// zeroes velocity. The carried state then flows through the already-
+// certified pieces - the air kernel's ctx takes (basevel,
+// gravity_scale), and the basevel.Z integrate-and-clear is the
+// airborne chain's first act.
+namespace CapTrigger {
+
+	inline void ApplyHit(const World::TriggerHitS& th, Vec3* pos,
+	                     Vec3* vel, Vec3* basevel, bool* basevel_flag,
+	                     float* gravity_scale, bool* on_ground,
+	                     int* ground_brush, bool* teleported_out) {
+		if (th.grav_touched)
+			*gravity_scale = th.gravity;
+		if (th.pushed) {
+			Vec3 push = th.push_vec;
+			if (*basevel_flag)
+				push = push + *basevel;
+			if (push.Z > 0.f && *on_ground) {
+				*on_ground = false;
+				*ground_brush = -1;
+				pos->Z += 1.f;
+			}
+			*basevel = push;
+			*basevel_flag = true;
+		}
+		if (th.teleported) {
+			*pos = th.tp_origin;
+			*vel = Vec3();
+			if (teleported_out)
+				*teleported_out = true;
+		}
+	}
+
+} // namespace CapTrigger
+
+// ======================================================================
 // CAPRIDEREACH addition - registry A23 (ride edge interception),
 // session 35: the earliest ride tick at which each sample point
 // along an in-plane edge segment becomes reachable at the lattice

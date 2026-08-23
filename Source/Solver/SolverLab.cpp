@@ -16596,6 +16596,456 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= capdebt: the DEBT ROWS - registry A29 (duck)
+	// and A31 (triggers), session 37. Both machineries were decoded
+	// and vtable-pinned long ago (the Fn:: duck family; the trigger
+	// parity port); what the rows lacked were independent falsifiable
+	// LAW GATES and packaged consumers. A29: the duck laws gated
+	// against engine rollouts - the instant air press/unduck origin
+	// shifts (ONE constant, measured not assumed), the shared
+	// 1000 ms countdown timer's exact drain, the transient hull's
+	// trace consistency (A14 local clips at hull 1 vs engine ducked
+	// flights), and the grounded 0.34 crop terminal speed. A31: the
+	// CapTrigger::ApplyHit transform bitwise on touch ticks for all
+	// three trigger types, then the carried state flowing through
+	// the certified kernel (ctx basevel + gravity_scale): post-touch
+	// flights bitwise.
+	int CmdCapDebt(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capdebt: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		unsigned rng = 0xDEB70A29u;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		auto rndf = [&](float lo, float hi) {
+			return lo + (hi - lo)
+				* static_cast<float>(rnd() & 0xFFFFF) / 1048575.f;
+		};
+		// ======== A29: the duck laws ========
+		{
+			World w;
+			if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+				printf("capdebt: clean-air world failed\n");
+				return 1;
+			}
+			// ---- law 1+2: instant air press/unduck shifts - ONE
+			// constant each way, hull 1 then transient hull 2
+			int presses = 0, press_ok = 0;
+			int unducks = 0, unduck_ok = 0;
+			float press_dz = 0.f, unduck_dz = 0.f;
+			bool dz_consistent = true;
+			int timer_n = 0, timer_ok = 0;
+			for (int tr = 0; tr < 10; ++tr) {
+				PlayerState s;
+				s.pos = Vec3(rndf(-500.f, 500.f),
+					rndf(-500.f, 500.f), 8000.f);
+				s.vel = Vec3(rndf(300.f, 900.f),
+					rndf(-200.f, 200.f), rndf(-100.f, 50.f));
+				const int t_press = 8 + static_cast<int>(rnd() % 10);
+				const int t_rel = t_press + 12
+					+ static_cast<int>(rnd() % 10);
+				for (int t = 0; t < 60; ++t) {
+					const int btn = (t >= t_press && t < t_rel)
+						? IN_DUCK : 0;
+					const PlayerState pre = s;
+					TickEvents ev;
+					MoveTick(s, w, p, 0.f, 0.f, 0.f, 0.f, 0.f,
+						btn, &ev);
+					const float dz_move = s.pos.Z - pre.pos.Z
+						- s.vel.Z * 0.f;   // shift shows in pos
+					if (t == t_press) {
+						presses++;
+						const float dz = s.pos.Z - (pre.pos.Z
+							+ (pre.vel.Z - p.gravity * 0.5f
+								* p.dt) * p.dt);
+						if (presses == 1 && tr == 0) {
+							press_dz = dz;
+						} else if (fabsf(dz - press_dz)
+							> 1e-3f) {
+							dz_consistent = false;
+						}
+						if (s.ducked && s.hull_state == 1)
+							press_ok++;
+					}
+					if (t == t_rel) {
+						unducks++;
+						const float dz = s.pos.Z - (pre.pos.Z
+							+ (pre.vel.Z - p.gravity * 0.5f
+								* p.dt) * p.dt);
+						if (unducks == 1 && tr == 0) {
+							unduck_dz = dz;
+						} else if (fabsf(dz - unduck_dz)
+							> 1e-3f) {
+							dz_consistent = false;
+						}
+						if (!s.ducked && s.hull_state == 2)
+							unduck_ok++;
+					}
+					// ---- law 3: the shared timer's exact drain on
+					// steady ticks (press/release events reset it
+					// and are excluded)
+					if (t != t_press && t != t_rel
+						&& pre.duck_timer_ms > 0.f) {
+						timer_n++;
+						float expect = pre.duck_timer_ms
+							- p.dt * 1000.f;
+						if (expect < 0.f)
+							expect = 0.f;
+						if (fabsf(s.duck_timer_ms - expect)
+							< 1e-3f)
+							timer_ok++;
+					}
+					(void)dz_move;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d presses: ducked+hull1 "
+				"%d/%d, shift %.4f u each (one constant %s); %d "
+				"unducks: hull2 %d/%d, shift %.4f u", presses,
+				press_ok, presses, press_dz,
+				dz_consistent ? "yes" : "NO", unducks, unduck_ok,
+				unducks, unduck_dz);
+			check("A29 air press/unduck laws", presses >= 10
+				&& press_ok == presses && unduck_ok == unducks
+				&& dz_consistent, buf);
+			snprintf(buf, sizeof(buf), "%d/%d timer ticks drain "
+				"exactly dt*1000 (resets excluded)", timer_ok,
+				timer_n);
+			check("A29 timer drain law", timer_n >= 100
+				&& timer_ok == timer_n, buf);
+			// ---- law 4: ducked-flight contacts via the A14 local
+			// clip at HULL 1 (the ducked expansion) vs engine
+			{
+				World w2;
+				Vec3 n;
+				if (!CapBoard::MakeRampWorld(&w2, o.hulls, 55.f,
+					180.f, &n)) {
+					printf("capdebt: ramp world failed\n");
+					return 1;
+				}
+				CapContact::LocalSet S1;
+				CapContact::BuildLocalSet(w2, 1,
+					Vec3(-3000.f, -2000.f, -2000.f),
+					Vec3(3000.f, 2000.f, 2000.f), &S1);
+				int flights = 0, tick_ok = 0;
+				for (int fl = 0; fl < 15; ++fl) {
+					const Vec3 xpos(rndf(-550.f, -350.f),
+						rndf(-150.f, 150.f), rndf(80.f, 250.f));
+					const Vec3 xvel(rndf(600.f, 900.f),
+						rndf(-120.f, 120.f), rndf(-120.f, -20.f));
+					// engine: duck held the whole flight (ducked
+					// from tick 1, hull 1)
+					PlayerState s;
+					s.pos = xpos;
+					s.vel = xvel;
+					int t_contact = -1;
+					PlayerState pre_states[97];
+					pre_states[0] = s;
+					for (int t = 0; t < 96 && t_contact < 0;
+						++t) {
+						TickEvents ev;
+						MoveTick(s, w2, p, 0.f, 0.f, 0.f, 0.f,
+							0.f, IN_DUCK, &ev);
+						pre_states[t + 1] = s;
+						if (ev.ncontacts > 0)
+							t_contact = t + 1;
+					}
+					if (t_contact < 2)
+						continue;
+					flights++;
+					// prediction: the exact mixed roller at HULL 1
+					// from the post-press state - the first tick
+					// with a bump must be the engine's contact
+					// tick (clipping the engine's own truncated
+					// post-tick segments cannot work: the contact
+					// tick's segment stops 1/32 short by
+					// construction)
+					int pt = -1;
+					{
+						CapRide::MirrorState ms;
+						ms.pos = pre_states[1].pos;
+						ms.vel = pre_states[1].vel;
+						ms.sf = pre_states[1].surface_friction;
+						for (int i = 0; i < 95 && pt < 0; ++i) {
+							int nb = 0;
+							if (!CapRide::MirrorTick(S1, p, &ms,
+								0, 1.f, &nb))
+								break;
+							if (nb > 0)
+								pt = i + 2;
+						}
+					}
+					if (pt == t_contact)
+						tick_ok++;
+				}
+				snprintf(buf, sizeof(buf), "%d ducked flights: "
+					"first contact via the hull-1 local clip "
+					"matches the engine %d/%d", flights, tick_ok,
+					flights);
+				check("A29 ducked-hull contacts", flights >= 10
+					&& tick_ok == flights, buf);
+			}
+			// ---- law 5: the grounded 0.34 crop terminal speed
+			{
+				World wf;
+				{
+					std::vector<Vec3> ns;
+					std::vector<float> ds;
+					ns.push_back(Vec3(0.f, 0.f, 1.f));
+					ds.push_back(0.f);
+					ns.push_back(Vec3(0.f, 0.f, -1.f));
+					ds.push_back(2000.f);
+					ns.push_back(Vec3(1.f, 0.f, 0.f));
+					ds.push_back(20000.f);
+					ns.push_back(Vec3(-1.f, 0.f, 0.f));
+					ds.push_back(20000.f);
+					ns.push_back(Vec3(0.f, 1.f, 0.f));
+					ds.push_back(20000.f);
+					ns.push_back(Vec3(0.f, -1.f, 0.f));
+					ds.push_back(20000.f);
+					if (!wf.AddTestBrush(ns, ds, o.hulls)) {
+						printf("capdebt: floor failed\n");
+						return 1;
+					}
+					wf.FinalizeTestWorld();
+				}
+				PlayerState s;
+				s.pos = Vec3(0.f, 0.f, 10.f);
+				for (int t = 0; t < 30; ++t) {
+					TickEvents ev;
+					MoveTick(s, wf, p, 0.f, 0.f, 0.f, 0.f, 0.f, 0,
+						&ev);
+				}
+				// duck-walk forward to terminal speed
+				for (int t = 0; t < 300; ++t) {
+					TickEvents ev;
+					MoveTick(s, wf, p, 0.f, 0.f, 450.f, 0.f, 0.f,
+						IN_DUCK, &ev);
+				}
+				const float sp = Len2D(s.vel);
+				snprintf(buf, sizeof(buf), "duck-walk terminal "
+					"speed %.2f u/s (the 0.34 crop law: 0.34 x "
+					"250 = 85)", sp);
+				check("A29 ground crop law", fabsf(sp - 85.f)
+					< 2.f, buf);
+			}
+		}
+		// ======== A31: the trigger transforms ========
+		{
+			// a flight lane with one box trigger volume per trial
+			// type; brush world = one far floor (never touched)
+			auto makeWorld = [&](World* w, int kind) {
+				std::vector<Vec3> ns;
+				std::vector<float> ds;
+				ns.push_back(Vec3(0.f, 0.f, 1.f));
+				ds.push_back(-4000.f);
+				ns.push_back(Vec3(0.f, 0.f, -1.f));
+				ds.push_back(6000.f);
+				ns.push_back(Vec3(1.f, 0.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(-1.f, 0.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 1.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, -1.f, 0.f));
+				ds.push_back(20000.f);
+				if (!w->AddTestBrush(ns, ds, o.hulls))
+					return false;
+				// the trigger box: x [200, 400], y [-200, 200],
+				// z [-100, 400]
+				World::TrigBrush tb;
+				tb.n.push_back(Vec3(1.f, 0.f, 0.f));
+				tb.d.push_back(400.f);
+				tb.n.push_back(Vec3(-1.f, 0.f, 0.f));
+				tb.d.push_back(-200.f);
+				tb.n.push_back(Vec3(0.f, 1.f, 0.f));
+				tb.d.push_back(200.f);
+				tb.n.push_back(Vec3(0.f, -1.f, 0.f));
+				tb.d.push_back(200.f);
+				tb.n.push_back(Vec3(0.f, 0.f, 1.f));
+				tb.d.push_back(400.f);
+				tb.n.push_back(Vec3(0.f, 0.f, -1.f));
+				tb.d.push_back(100.f);
+				w->trig_brushes.push_back(tb);
+				World::TriggerVol tv;
+				tv.model = 1;
+				tv.spawnflags = 1;   // clients
+				tv.tb.push_back(0);
+				if (kind == 0) {
+					tv.push = true;
+					tv.push_dir = Vec3(0.f, 0.3f, 1.f);
+					tv.push_speed = 600.f;
+				} else if (kind == 1) {
+					tv.gravity = 0.4f;
+				} else {
+					tv.teleport = true;
+					tv.dest_ok = true;
+					tv.dest_origin = Vec3(-1200.f, 800.f,
+						1500.f);
+				}
+				w->triggers.push_back(tv);
+				w->FinalizeTestWorld();
+				return true;
+			};
+			const char* kinds[3] = { "push", "gravity", "teleport" };
+			for (int kind = 0; kind < 3; ++kind) {
+				World w;
+				if (!makeWorld(&w, kind)) {
+					printf("capdebt: trigger world failed\n");
+					return 1;
+				}
+				int touches = 0, xform_ok = 0, carry_ok = 0;
+				for (int tr = 0; tr < 8; ++tr) {
+					PlayerState s;
+					s.pos = Vec3(rndf(-200.f, 0.f),
+						rndf(-120.f, 120.f), rndf(60.f, 260.f));
+					s.vel = Vec3(rndf(400.f, 800.f),
+						rndf(-80.f, 80.f), rndf(-40.f, 40.f));
+					int t_touch = -1;
+					PlayerState pre;
+					for (int t = 0; t < 80 && t_touch < 0; ++t) {
+						pre = s;
+						TickEvents ev;
+						MoveTick(s, w, p, 0.f, 0.f, 0.f, 0.f,
+							0.f, 0, &ev);
+						const bool got = (kind == 2)
+							? ev.teleported
+							: (kind == 1
+								? s.gravity_scale != 1.f
+								: s.basevel_flag);
+						if (got)
+							t_touch = t + 1;
+					}
+					if (t_touch < 0)
+						continue;
+					touches++;
+					// the packaged transform from the engine's own
+					// touch answer at the post-move position: for
+					// the touch tick, re-derive the pre-trigger
+					// end state by rolling the certified mixed
+					// roller one tick (clean air), then ApplyHit
+					CapRide::MirrorState ms;
+					ms.pos = pre.pos;
+					ms.vel = pre.vel;
+					ms.sf = pre.surface_friction;
+					CapContact::LocalSet LS;
+					CapContact::BuildLocalSet(w, 0,
+						Vec3(-3000.f, -3000.f, -4500.f),
+						Vec3(3000.f, 3000.f, 6500.f), &LS);
+					CapRide::MirrorTick(LS, p, &ms, 0, 1.f);
+					World::TriggerHitS th;
+					Vec3 ppos = ms.pos, pvel = ms.vel;
+					Vec3 pbv = pre.basevel;
+					bool pbf = pre.basevel_flag;
+					float pgs = pre.gravity_scale;
+					bool pog = false;
+					int pgb = -1;
+					bool ptp = false;
+					if (w.CheckTriggers(ppos, 0, &th))
+						CapTrigger::ApplyHit(th, &ppos, &pvel,
+							&pbv, &pbf, &pgs, &pog, &pgb, &ptp);
+					const bool xf = memcmp(&ppos.X, &s.pos.X, 12)
+						== 0
+						&& memcmp(&pvel.X, &s.vel.X, 12) == 0
+						&& memcmp(&pbv.X, &s.basevel.X, 12) == 0
+						&& pbf == s.basevel_flag
+						&& memcmp(&pgs, &s.gravity_scale, 4)
+							== 0;
+					if (xf)
+						xform_ok++;
+					// the carried state flows through the certified
+					// pieces AS A FULL COMPOSITION: per tick, one
+					// kernel tick (ctx carries basevel + gravity
+					// scale; the engine clears basevel.Z after its
+					// one integrate), then the trigger check at
+					// the new position with ApplyHit - pushes
+					// ACCUMULATE while the flight stays inside the
+					// volume, exactly as the engine re-touches
+					float kx = s.pos.X, ky = s.pos.Y,
+						kz = s.pos.Z;
+					float kvx = s.vel.X, kvy = s.vel.Y,
+						kvz = s.vel.Z;
+					Vec3 cbv = s.basevel;
+					bool cbf = s.basevel_flag;
+					float cgs = s.gravity_scale;
+					PlayerState se = s;
+					bool cok = true;
+					const int carry_ticks = kind == 2 ? 5 : 15;
+					for (int t = 0; t < carry_ticks; ++t) {
+						TickEvents ev;
+						MoveTick(se, w, p, 0.f, 0.f, 0.f, 0.f,
+							0.f, 0, &ev);
+						CapAir::AirKernelCtx k2 =
+							CapAir::MakeAirKernel(p);
+						k2.basevel = cbv;
+						k2.gravity_scale = cgs;
+						float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+						CapAir::KernelTick(k2, kx, ky, kz, kvx,
+							kvy, kvz, 0, 1.f, &nx2, &ny2, &nz2,
+							&nvx2, &nvy2, &nvz2);
+						kx = nx2;
+						ky = ny2;
+						kz = nz2;
+						kvx = nvx2;
+						kvy = nvy2;
+						kvz = nvz2;
+						cbv.Z = 0.f;   // the engine's clear
+						World::TriggerHitS th2;
+						Vec3 cp(kx, ky, kz), cv(kvx, kvy, kvz);
+						bool cog = false;
+						int cgb = -1;
+						bool ctp = false;
+						if (w.CheckTriggers(cp, 0, &th2)) {
+							CapTrigger::ApplyHit(th2, &cp, &cv,
+								&cbv, &cbf, &cgs, &cog, &cgb,
+								&ctp);
+							kx = cp.X;
+							ky = cp.Y;
+							kz = cp.Z;
+							kvx = cv.X;
+							kvy = cv.Y;
+							kvz = cv.Z;
+						}
+						if (memcmp(&kx, &se.pos.X, 4) != 0
+							|| memcmp(&ky, &se.pos.Y, 4) != 0
+							|| memcmp(&kz, &se.pos.Z, 4) != 0
+							|| memcmp(&kvz, &se.vel.Z, 4) != 0
+							|| memcmp(&cbv.X, &se.basevel.X,
+								12) != 0) {
+							cok = false;
+							break;
+						}
+					}
+					if (cok)
+						carry_ok++;
+				}
+				char nm[64];
+				snprintf(nm, sizeof(nm), "A31 %s transform",
+					kinds[kind]);
+				snprintf(buf, sizeof(buf), "%d touches: ApplyHit "
+					"bitwise %d/%d, carried state through the "
+					"kernel %d/%d", touches, xform_ok, touches,
+					carry_ok, touches);
+				check(nm, touches >= 5 && xform_ok == touches
+					&& carry_ok == touches, buf);
+			}
+		}
+		printf("capdebt: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "A29/A31 DEBT ROWS CLOSED - DUCK LAWS AND "
+				"TRIGGER TRANSFORMS GATED"
+				: "A29/A31 RED - a gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capgap: THE EXACT CARRIED-GAP LAW (session
 	// 36) - registry A18's boundary sliver, A19/A20's named
 	// refinement, and A22 v3. The ride boundary - the carried 1/32
@@ -25263,6 +25713,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapGap(o);
+	}
+	if (cmd == "capdebt") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapDebt(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

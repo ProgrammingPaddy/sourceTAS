@@ -9,15 +9,32 @@ Legend: `[x]` done+validated Â· `[~]` in progress Â· `[ ]` not started Â·
 `(!)` blocked/depends Â· each milestone ends with its ACCEPTANCE GATE â€”
 a measurable pass/fail, never a vibe.
 
-**NOW -> FINISH CATEGORY A (user directive 2026-08-23, session 33):
-every A row closes before more composition work.** Remaining open
-after session 34, the march order: A22 exact-hit tail on the ride
-plane, A23 (ride edge interception), A24 (adjacent-face clip
-packaging), A28 (corridor traversal — A14 + A12 now both exist),
-the A19/A20 carried-gap exact law, A8 direction-aware refinements,
-A11 short-flight interior coverage, then the A29 duck and A31
-trigger debt rows. A32 stays excluded by decree. The change-log
-tail below is the session journal.
+**THE A CATEGORY IS COMPLETE (session 37, 2026-08-23): A0–A31 all
+closed, A32 excluded by decree** — the user directive "finish all A
+first" is delivered across sessions 33–37. Two named ambers remain
+on already-certified rows (A8 direction-aware UB + local
+refinement; A11 short-flight interior coverage) — refinements, not
+open rows. **NOW ->** those ambers if desired, then the composition
+resumption recorded in the library's next-spine (C9 min-plus over
+the C0 labels, B16 + C5 on certified B13/B14, cheaper A20 builds).
+The change-log tail below is the session journal.
+
+**STATUS 2026-08-23j (session 37): A29 AND A31 CLOSE — THE A
+CATEGORY STANDS COMPLETE.** capdebt 7/0 (new suite). A29: the duck
+laws gated on the vtable-pinned Fn:: family — the air press/unduck
+origin shift is EXACTLY ±8.5000u (one constant across all events),
+instant with hull 1 on press / transient hull 2 on unduck; the
+shared timer drains exactly dt·1000 per steady tick (162/162); the
+grounded 0.34 crop's terminal speed is exactly 85.00; the
+session-36 mixed roller at HULL 1 predicts ducked-flight contacts
+15/15 vs the engine (the roller generalizes across hulls). A31:
+`CapTrigger::ApplyHit` bitwise on all three trigger types (23/23
+touch ticks), and the FULL COMPOSITION — per-tick kernel with ctx
+(basevel, gravity_scale) + re-touch + ApplyHit, pushes accumulating
+inside the volume — bitwise for 15 post-touch ticks on every
+flight. Battery green: capdebt 7/0, capgap 6/0, capkern 5/5,
+capboard 5/5, capground 6/6, capwindow 6/6, capcontact 5/0, capmin
+8/0, capxfer 8/0.
 
 **STATUS 2026-08-23i (session 36): THE CARRIED-GAP LAW IS EXACT —
 A18 COMPLETES, A19/A20 CLOSE, A22 v3.** The ride boundary — the

@@ -287,16 +287,18 @@ const D = [
  "CapContact::FirstContactOnPath — the A12 + A14 composition: kernel-roll the schedule, clip every motion segment against the corridor set; clean / obstructed(tick, brush, fraction) / DECLINE",
  "swept-volume precomputation","4–5 µs/leg measured","capcontact 5/0",
  "CLOSED session 35: 24/24 solved paths agree with real engine replays — 16 clean tick-for-tick, 8 obstructed at the exact tick AND brush. Two lessons banked en route: the two-ramp test world needed FINITE segments (the first build's 2000-deep backing slab engulfed the spawn region — caught by the zero-clean falsifier), and the air kernel's sf domain law (see the sf term) now bounds every kernel-roll flight gate to falling flights with the stuck-guard predictor armed."],
-["A29","A","duck capability (gap row)","todo",["duck"],[],[],
- "package the decoded duck machine","—","~ns/tick law","—",
- "Currently domain-stamped OUT of every family — the stamp is the honest debt record. Real routes duck; the SET-path jump variant also waits on this."],
+["A29","A","duck capability","done",["duck","hoff"],["A3"],["A24"],
+ "the vtable-pinned Fn:: duck family IS the package (Duck/CanUnduck/FinishDuck/FinishUnDuck/HandleDuckingSpeedCrop/ReduceTimers) + the A3 hull switch; the LAWS gated independently",
+ "—","~ns/tick law","capdebt 7/0",
+ "CLOSED session 37. The laws, measured not assumed: the air press/unduck origin shift is EXACTLY ±8.5000u — one constant across all events — instant, with hull 1 on press and the transient hull 2 on unduck; the shared 1000ms timer drains exactly dt·1000 per steady tick (162/162); the grounded 0.34 crop's terminal duck-walk speed is exactly 85.00 u/s. And the session-36 exact mixed roller generalizes across hulls: at HULL 1 it predicts ducked-flight first contacts 15/15 against the engine."],
 ["A30","A","jump capability","done",["jump","stam"],["A25"],["A4"],
  "CapGround::JumpKernelTick (jump head + the A4 air chain)","—",
  "0 mismatches / 50k jump ticks","capground 6/6",
  "The decoded impulse law bitwise: double-precision constant, stamina tax, three gravity half-steps (vz 283.993 fresh → 210.839 full tax); release gate and autobunnyhop bypass verified. Ducked (SET-path) jumps park with the A29 debt."],
-["A31","A","trigger interactions (gap row)","todo",["trig"],[],[],
- "mirror the trigger application rules as transforms","—","~ns/event","—",
- "Teleport / push / gravity zones; the engine mirror carries the state, the capability and tests are unbuilt."],
+["A31","A","trigger interactions","done",["trig"],[],["A4"],
+ "CapTrigger::ApplyHit — the mirror's post-move application as ONE pure transform: gravity overwrites the persistent scale; pushes accumulate onto basevel (upward pushes unground + nudge 1u); teleports set origin and ALWAYS zero velocity",
+ "—","~ns/event","capdebt 7/0",
+ "CLOSED session 37: all three trigger types bitwise on their touch ticks (23/23 flights), and the carried state flows through the certified pieces as a FULL COMPOSITION — per-tick kernel (ctx basevel + gravity_scale, basevel.Z integrate-and-clear) + re-touch check + ApplyHit, with pushes ACCUMULATING while the flight stays inside the volume — bitwise against the engine for 15 post-touch ticks on every flight."],
 ["A32","A","water / ladders","excl",[],[],[],
  "—","—","—","—",
  "Explicitly excluded: the target maps have neither. Listed so no gap hides silently."],
@@ -566,7 +568,7 @@ document.body.addEventListener('click', e => {
 
 document.getElementById('foot').textContent =
   'SourceTAS Capability Library · living dashboard · canonical text: Docs/CapabilityChecklist.md · '
-  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 36 (2026-08-23) · the A march: A18 complete + A19/A20/A22 closed (the carried-gap law is EXACT); open: A8 refinements, A11 interior, A29, A31';
+  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 37 (2026-08-23) · THE A CATEGORY IS COMPLETE: A0–A31 closed, A32 excluded by decree; remaining named ambers on certified rows: A8 direction-aware UB + local refinement, A11 short-flight interior';
 render();
 renderTerms();
 </script>

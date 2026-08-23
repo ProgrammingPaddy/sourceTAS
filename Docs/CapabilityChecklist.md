@@ -55,9 +55,9 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A26 | edge launch | leave-ground event, launch state | route segments | `CapLaunch::Detector` — the unified leave-ground event detector fed by exact rollouts; captures both boundary states | the route-graph LaunchWitness/ReplayLaunch instruments remain the production launch pipeline | ~ns/tick fed | `[x]` s33 (capmin): threshold bracketed to ONE constant across speeds — (270.7, 272.4] ∋ 256+16, the A3 hull-overhang law measured, quadrant semantics not assumed; captures continue BITWISE; first clean air tick hands to A1 bitwise |
 | A27 | END-volume crossing | Minkowski box, z-window | finish timing | `CapEnd::EarliestBoxCrossing` — z-window-pruned exact scan | full per-tick scan (baseline) | **= naive on 10k (schedule, box) pairs; 12.1× fewer horizontal tests** | `[x]` capwindow (s28) |
 | A28 | obstacle/corridor traversal | first contact along family | route validation | `CapContact::FirstContactOnPath` — the A12 + A14 composition: kernel-roll the schedule, clip every motion segment against the corridor set; clean / obstructed(tick, brush, fraction) / DECLINE | swept-volume precomputation | 4–5 µs/leg measured | `[x]` s35 (capcontact 5/0): 24/24 solved paths agree with engine replays — 16 clean tick-for-tick, 8 obstructed at the exact tick AND brush; plus the flight gate 14/14 with the stuck-guard predictor armed |
-| A29 | duck capability (NEW, gap) | duck flag/hull/timer, 8.5u shift, 0.34 speed crop | duck-required routes, A3 hulls | package the decoded duck state machine as LAW + hull switch | — | ~ns/tick law | `[ ]` currently domain-stamped OUT of all air/ride families — the stamp is the gap record |
+| A29 | duck capability | duck flag/hull/timer, 8.5u shift, 0.34 speed crop | duck-required routes, A3 hulls | the vtable-pinned `Fn::` duck family IS the package (Duck/CanUnduck/FinishDuck/FinishUnDuck/HandleDuckingSpeedCrop/ReduceTimers) + the A3 hull switch; the LAWS gated independently | — | ~ns/tick law | `[x]` s37 (capdebt 7/0): air press/unduck shift = EXACTLY ±8.5000u, one constant across events, instant with hull 1 / transient hull 2; timer drains exactly dt·1000 on steady ticks (162/162); grounded crop terminal speed exactly 85.00 (0.34·250); AND the mixed roller at hull 1 predicts ducked-flight contacts 15/15 vs engine — the roller generalizes across hulls |
 | A30 | jump capability | jump impulse (double const), stamina scale, autobhop gate, three gravity half-steps | spawn runs, bhop segments, launches | `CapGround::JumpKernelTick` (jump head + the A4 air chain) | — | **50k jump ticks, 0 bitwise mismatches on all channels + stamina; vz law: stamina 0→283.993, 1315.8→210.839; release gate + autobhop bypass verified** | `[x]` capground (s27); SET path (ducked) = A29 debt |
-| A31 | trigger interactions (NEW, gap) | basevel, gravity_scale, teleport | maps with push/teleport/gravity | mirror the trigger application rules as transforms | — | ~ns/event | `[ ]` engine mirror carries state; capability + tests not built |
+| A31 | trigger interactions | basevel, gravity_scale, teleport | maps with push/teleport/gravity | `CapTrigger::ApplyHit` — the mirror's post-move application transcribed as ONE pure transform (gravity overwrites the scale; pushes accumulate onto basevel with the unground + 1u nudge; teleports set origin and zero velocity) | — | ~ns/event | `[x]` s37 (capdebt 7/0): all three types bitwise on touch ticks (23/23), AND the carried state flows through the certified kernel as a FULL COMPOSITION — per-tick kernel + re-touch + ApplyHit (pushes accumulate inside the volume) matches the engine bitwise for 15 post-touch ticks, 23/23 flights |
 | A32 | water / ladders (exclusion) | — | — | — | — | — | `[-]` excluded: surf maps in scope have neither; revisit only if a target map does |
 
 ## B — certified reducers (prune only with proof)
@@ -130,6 +130,29 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | trace clip fraction | f = (d1 − 1/32)/(d1 − d2); the end sits EXACTLY 1/32 above the expanded plane along n; clipped velocity slides the remaining (1−f)·dt | C7 contact prediction (verified to ≤1e-4 u), A18 boundary work |
 
 ## Change log
+- 2026-08-23j (session 37): **A29 AND A31 CLOSE — EVERY A ROW IS NOW
+  CLOSED.** The debt rows land on the machinery decoded long ago,
+  with the laws finally gated independently (capdebt 7/0, new
+  suite). A29: the air press/unduck origin shift measured at
+  EXACTLY ±8.5000u — one constant across all events — instant with
+  hull 1 on press and the transient hull 2 on unduck; the shared
+  timer drains exactly dt·1000 per steady tick (162/162); the
+  grounded 0.34 crop's terminal speed is exactly 85.00; and the
+  exact mixed roller at HULL 1 predicts ducked-flight first
+  contacts 15/15 against the engine — the session-36 roller
+  generalizes across hulls. A31: `CapTrigger::ApplyHit` (the
+  post-move application as one pure transform) bitwise on all three
+  trigger types' touch ticks, and the FULL COMPOSITION — per-tick
+  kernel (ctx basevel + gravity_scale) + re-touch + ApplyHit, with
+  pushes accumulating while the flight stays inside the volume —
+  matches the engine bitwise for 15 post-touch ticks on every
+  flight. **The A category stands complete: A0–A31 closed, A32
+  excluded by decree; the two remaining named ambers (A8
+  direction-aware UB + local refinement, A11 short-flight interior
+  coverage) live on rows already certified with measured lines.**
+  Battery green: capdebt 7/0, capgap 6/0, capkern 5/5, capboard
+  5/5, capground 6/6, capwindow 6/6, capcontact 5/0, capmin 8/0,
+  capxfer 8/0.
 - 2026-08-23i (session 36): **THE CARRIED-GAP LAW IS EXACT — A18
   completes, A19/A20's named refinement delivered, A22 v3.** The one
   regime only the full engine could walk — the ride boundary: the

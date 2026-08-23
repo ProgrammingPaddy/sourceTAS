@@ -408,6 +408,16 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23j (session 37): **A29 and A31 close — THE A CATEGORY IS
+  COMPLETE (A0–A31 closed, A32 excluded by decree; the sessions
+  33–37 march delivered the user directive).** capdebt 7/0: the
+  duck laws gated on the pinned Fn:: family (±8.5000u instant air
+  shifts, exact timer drain, the 85.00 crop terminal, hull-1
+  contacts via the mixed roller 15/15); `CapTrigger::ApplyHit`
+  bitwise on all three trigger types with the full
+  kernel+re-touch+apply composition bitwise for 15 post-touch
+  ticks. Remaining named ambers on certified rows: A8
+  direction-aware UB + local refinement; A11 short-flight interior.
 - 2026-08-23i (session 36): **the carried-gap law is EXACT — A18
   completes; A19/A20 close; A22 v3** (detail in the checklist
   change log). `CapRide::MirrorTick` (preamble under stateful sf +
