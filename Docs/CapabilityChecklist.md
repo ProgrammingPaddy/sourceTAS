@@ -37,7 +37,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A8 | directional reach D* | arc length L(N), projections | B2, B13, corridor checks | certified bounds (single query); on-demand sweep (batch) | parametric family endpoints (future, exact); finer local refinement | bounds O(N) ~µs; sweep 31.1M nodes / 101 s at pitch (96, 24), N=60 | `[x]` LB+UB at measured pitch; `[ ]` direction-aware UB, local refinement |
 | A9 | displacement with terminal constraint | endpoint + (ψ_N or V_N) | A22 pairing | `CapP2P::SolveTerminal` — endpoint-ranked family (reversals × brake placement × brake STRENGTH) → heading-feasible kernel rolls → scored coarse climb (both contracts judged per roll) → **the 3×3 finisher: (tail c1, tail c2, brake strength) against (endpoint x, y, heading) — a square Newton** → accept only when BOTH contracts hold, else DECLINE | Pareto layer of A8 sweep (future); richer heading family (second brake run) | ~24 ms/request | `[x]` v1 s34 (capsolve): contracts HARD 19/19 (endpoint ≤ 0.5u, heading ≤ tol, independently re-rolled), engine bitwise 8/8; acceptance 19/40 vs the adversarial generator (random braked schedules' exact terminal states) = the measured family-sufficiency line |
 | A10 | minimum air time N_min | N window, feasibility | route timing, B21 | `CapP2P::MinAirTime` — the A1 z-window intersected with the A12 scan, first feasible N wins | table lookup | 3.0 ms mean (window-restricted scan) | `[x]` s33 (capsolve: 24/24 == brute full scan) |
-| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 21/0): machinery 99–100/100; single-shot 0.6–3.3 ms; BATCH MODE (s30): organize 0.1–1.4 ms/start, then 34–135 µs/target with full-solver fallback — the 10–30 µs ambition met at short flights; 150/150 bitwise replays** | `[x]` machinery + batch; `[~]` short-flight interior coverage (measured line) |
+| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 21/0): machinery 99–100/100; single-shot 0.6–3.3 ms; BATCH MODE (s30): organize 0.1–1.4 ms/start, then 34–135 µs/target with full-solver fallback — the 10–30 µs ambition met at short flights; 150/150 bitwise replays** | `[x]` machinery + batch; interior amber SUBSTANTIALLY RESOLVED s38 — overall miss 14.1% → 4.9%, the hard cell (v0 1400, N 30) 48 → 83 of 100, via the A9-lesson transplant: brake STRENGTH as a per-candidate lever, BRAKE-FIRST + post-brake-reversal shapes (the measured missing class), K=8, and the **3-parameter least-norm rescue tail** ((c1, c2, brake strength) via Jᵀ(JJᵀ)⁻¹, firing only after the proven 2×2 starts leave a brake candidate unsolved — always-on measurably destabilized long-N solves, and post-brake tail-sizing measurably regressed here where it had fixed A9); remaining measured amber: multi-brake-phase deep interior (worst 48u at 800/N90) |
 | A12 | point-to-point air solver | all of A10/A11 | C7, gap feasibility (B13/B14), A22 pairing | `CapP2P::SolveFreeN` — A11 iterated over N with the certified B13 precull (a necessary condition can never hide a feasible N — gated) | shooting oracle (cross-check); R_N table (batch) | 9.7 ms mean free-N scan; 261 N-candidates culled / 36 targets | `[x]` s33 (capsolve: 36/36 preculled == brute, 10/10 engine bitwise); found+fixed the latent small-N stride hang in the brake probes |
 | A13 | point-to-face solve | (T, λ) targets | entrance/transfer (C7 consumes it) | `CapFaceSolve::SolveToFace` — A12 at 1-D λ targets per candidate tick on the HULL-EXPANDED plane + `PredictContact` (the exact clip-law prediction) | generic 2-D targeting (wasteful) | organize ~3.5 ms/start + ~100 µs/target (capxfer's measured chain) | `[x]` s33 — capxfer refactored to CONSUME the package (8/0 = its acceptance); rotated-azimuth scenario gates the general slice geometry (12/12 predictions exact) |
 | A14 | first-contact prediction | trace, local brush set | A28, event scans | `CapContact::BuildLocalSet` + `ClipSegment` — the engine's per-brush clip (enter-clamp tie-break, DIST_EPSILON pads, corner release, start-solid law) transcribed VERBATIM over a corridor-gathered set; out-of-corridor queries DECLINE | full-world trace (the engine's own, same answers) | 60–74 ns/query vs 113–166 ns full trace (1–2-brush worlds; the locality win scales with brush count) | `[x]` s34 (capcontact 4/0): 40,000/40,000 queries BITWISE identical to the full trace (fraction bits + brush + plane + startsolid), DECLINE law clean, 25/25 flight first-contacts (tick AND brush) vs engine replays |
@@ -130,6 +130,27 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | trace clip fraction | f = (d1 − 1/32)/(d1 − d2); the end sits EXACTLY 1/32 above the expanded plane along n; clipped velocity slides the remaining (1−f)·dt | C7 contact prediction (verified to ≤1e-4 u), A18 boundary work |
 
 ## Change log
+- 2026-08-23k (session 38): **THE A11 INTERIOR AMBER FALLS FROM
+  14.1% TO 4.9% MISS** — a measured-decision session end to end.
+  The transplants from A9: brake STRENGTH as a per-candidate
+  continuous lever (stage-1 seeds at 0.9 and 0.6, strength climbs
+  in refinement), the BRAKE-FIRST + post-brake-reversal shape class
+  (the deep-interior misses' anatomy: hard early brake into the
+  slow regime where turning is fast — a class the family never
+  enumerated), K widened 6→8, and the **3-parameter least-norm
+  rescue tail**: (tail c1, tail c2, brake strength) against the 2-D
+  endpoint via Jᵀ(JJᵀ)⁻¹ — as a RESCUE only, after the proven 2×2
+  starts fail on a brake candidate. Two negative results kept the
+  design honest and are recorded: post-brake tail-sizing (A9's fix)
+  REGRESSED here — the overlapping tail acts as a useful hybrid
+  shape in this solver's flow — and always-on 3-parameter stepping
+  destabilized long-N solves the 2×2 owned (400/N90 100→91) before
+  the rescue-only gating restored them. Sufficiency map (was →
+  now): 400: 88/99/100 → 96/100/100; 800: 67/97/93 → 88/99/95;
+  1400: 48/94/87 → 83/98/97. Downstream: capxfer's 65° transfers
+  29 → 35 solved of 49. All eleven suites green (capp2p 21/0
+  gates unchanged — the sufficiency lines are the measured
+  falsifiers they were designed to be).
 - 2026-08-23j (session 37): **A29 AND A31 CLOSE — EVERY A ROW IS NOW
   CLOSED.** The debt rows land on the machinery decoded long ago,
   with the laws finally gated independently (capdebt 7/0, new

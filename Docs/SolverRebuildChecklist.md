@@ -19,6 +19,24 @@ resumption recorded in the library's next-spine (C9 min-plus over
 the C0 labels, B16 + C5 on certified B13/B14, cheaper A20 builds).
 The change-log tail below is the session journal.
 
+**STATUS 2026-08-23k (session 38): THE A11 INTERIOR AMBER FALLS —
+14.1% → 4.9% MISS.** A measured-decision session: the A9 transplant
+(brake STRENGTH as a per-candidate lever; BRAKE-FIRST + post-brake-
+reversal shapes — the measured missing class: hard early brake into
+the slow regime where turning is fast; K 6→8) plus the
+**3-parameter least-norm rescue tail** — (tail c1, tail c2, brake
+strength) against the 2-D endpoint via Jᵀ(JJᵀ)⁻¹, firing ONLY after
+the proven 2×2 starts fail on a brake candidate. Two negative
+results recorded: post-brake tail-sizing (A9's own fix) REGRESSED
+in this solver's flow (the overlapping tail is a useful hybrid
+shape here) and always-on 3-parameter stepping destabilized long-N
+solves (400/N90 100→91) until rescue-only gating restored them.
+Sufficiency (was → now): 400: 88/99/100 → 96/100/100; 800:
+67/97/93 → 88/99/95; 1400: 48/94/87 → 83/98/97. Downstream:
+capxfer 65° transfers 29 → 35 of 49. All ELEVEN suites green.
+Remaining ambers: A8 direction-aware UB + local refinement; A11's
+smaller multi-brake-phase interior (worst 48u at 800/N90).
+
 **STATUS 2026-08-23j (session 37): A29 AND A31 CLOSE — THE A
 CATEGORY STANDS COMPLETE.** capdebt 7/0 (new suite). A29: the duck
 laws gated on the vtable-pinned Fn:: family — the air press/unduck

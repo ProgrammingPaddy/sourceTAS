@@ -1672,13 +1672,20 @@ namespace CapP2P {
 		int nrev = 0;
 		int revs[3] = { 0, 0, 0 };
 		int bs = 0, bl = 0;
+		float bcv = 0.9f;   // brake strength (stored cosa) - the
+		                    // continuous range lever (A9's lesson,
+		                    // transplanted session 38 for the
+		                    // short-flight interior amber)
 	};
 	inline void SolveFixedN(const CapAir::AirKernelCtx& k,
 	                        float v0, float tx, float ty, int N,
 	                        P2PResult* out) {
 		P2PResult best;
 		P2PSchedule s;
-		const float bc = 0.9f;   // brake strength (stored cosa)
+		// brake strength is MUTABLE (session 38): candidates carry
+		// their own bcv - the continuous range lever the A9 work
+		// proved out for interior targets
+		float bc = 0.9f;
 		auto eval = [&](int ss, const int* revs, int nrev, int bs2,
 			int bl2, int tail_m, float c1, float c2) {
 			BuildSchedule(N, ss, revs, nrev, bs2, bl2, bc, tail_m,
@@ -1708,9 +1715,10 @@ namespace CapP2P {
 			return r;
 		};
 		// ---- stage 1: coarse grid over both start sides, keeping
-		// the top-6 candidates for refinement
-		const int K = 6;
-		P2PCand top[6];
+		// the top-8 candidates for refinement (widened with the
+		// brake-first family, s38)
+		const int K = 8;
+		P2PCand top[8];
 		auto offer = [&](float r, int ss, const int* revs, int nrev,
 			int bs2, int bl2) {
 			int worst = 0;
@@ -1725,6 +1733,7 @@ namespace CapP2P {
 					top[worst].revs[i] = i < nrev ? revs[i] : 0;
 				top[worst].bs = bs2;
 				top[worst].bl = bl2;
+				top[worst].bcv = bc;
 			}
 		};
 		// segment tables for this (v0, N): the law endpoints of any
@@ -1770,21 +1779,51 @@ namespace CapP2P {
 			// stride clamped: N < 8 made N/8 = 0, an infinite loop
 			// (latent until A12's small-N scan, session 33)
 			const int blstep = N / 8 < 1 ? 1 : N / 8;
-			for (int bi = 0; bi < 3; ++bi)
-				for (int bl = blstep; bl <= (3 * N) / 4;
-					bl += blstep) {
-					if (bl < 2)
-						continue;
-					int rv0[3] = { 0, 0, 0 };
-					offer(eval(ss, rv0, 0, bss[bi], bl, 0, 0.f,
-						0.f), ss, rv0, 0, bss[bi], bl);
-					for (int r1 = 6; r1 < N; r1 += 12) {
-						rv0[0] = r1;
-						offer(eval(ss, rv0, 1, bss[bi], bl, 0,
-							0.f, 0.f), ss, rv0, 1, bss[bi],
-							bl);
+			// TWO brake strengths seed the interior family (s38):
+			// the strong 0.9 and a moderate 0.6 open different
+			// range/heading mixes
+			const float bcs[2] = { 0.9f, 0.6f };
+			for (int bci = 0; bci < 2; ++bci) {
+				bc = bcs[bci];
+				for (int bi = 0; bi < 3; ++bi)
+					for (int bl = blstep; bl <= (3 * N) / 4;
+						bl += blstep) {
+						if (bl < 2)
+							continue;
+						int rv0[3] = { 0, 0, 0 };
+						offer(eval(ss, rv0, 0, bss[bi], bl, 0,
+							0.f, 0.f), ss, rv0, 0, bss[bi], bl);
+						for (int r1 = 6; r1 < N; r1 += 12) {
+							rv0[0] = r1;
+							offer(eval(ss, rv0, 1, bss[bi], bl,
+								0, 0.f, 0.f), ss, rv0, 1,
+								bss[bi], bl);
+						}
 					}
+			}
+			// BRAKE-FIRST + POST-BRAKE reversal shapes (s38): the
+			// measured deep-interior misses need a hard early brake
+			// into the slow regime - where turning is fast - then
+			// one or two reversals. The existing probes never
+			// placed reversals AFTER the brake run.
+			bc = 0.9f;
+			for (int bl = N / 2; bl <= (3 * N) / 4;
+				bl += (N / 8 < 1 ? 1 : N / 8)) {
+				if (bl < 4)
+					continue;
+				for (int r1o = 1; r1o <= 7; r1o += 6) {
+					int rv2[3] = { 0, 0, 0 };
+					rv2[0] = 1 + bl + r1o;
+					if (rv2[0] >= N)
+						continue;
+					offer(eval(ss, rv2, 1, 1, bl, 0, 0.f, 0.f),
+						ss, rv2, 1, 1, bl);
+					rv2[1] = rv2[0] + 6;
+					if (rv2[1] < N)
+						offer(eval(ss, rv2, 2, 1, bl, 0, 0.f,
+							0.f), ss, rv2, 2, 1, bl);
 				}
+			}
 		}
 		// ---- stage 2: refine EACH top candidate (single reversal
 		// steps, PAIRED translation of the whole pattern - coupled
@@ -1794,6 +1833,7 @@ namespace CapP2P {
 			if (top[ci].res > 1e29f)
 				continue;
 			P2PCand c = top[ci];
+			bc = c.bcv;   // the candidate's own brake strength
 			// kernel-truth seed evaluation of the candidate's own
 			// shape (stage 1's law ranking is ~1u off the kernel;
 			// v3 also never kernel-evaluated an unimproved winner)
@@ -1880,6 +1920,26 @@ namespace CapP2P {
 							improved = true;
 						}
 					}
+					// the brake-STRENGTH climb (the continuous
+					// range lever, s38)
+					const float dbc[4] = { -0.15f, -0.05f, 0.05f,
+						0.15f };
+					for (int m = 0; m < 4; ++m) {
+						const float nbc = c.bcv + dbc[m];
+						if (nbc < 0.2f || nbc > 0.999f)
+							continue;
+						const float sv = bc;
+						bc = nbc;
+						const float r = eval(c.ss, c.revs,
+							c.nrev, c.bs, c.bl, 0, 0.f, 0.f);
+						if (r < cur - 1e-4f) {
+							cur = r;
+							c.bcv = nbc;
+							improved = true;
+						} else {
+							bc = sv;
+						}
+					}
 				}
 			}
 			top[ci] = c;
@@ -1913,16 +1973,35 @@ namespace CapP2P {
 				const int ss = top[sel].ss;
 				const int bs2 = top[sel].bs;
 				const int bl2 = top[sel].bl;
-				const float starts[3][2] = {
+				bc = top[sel].bcv;   // the candidate's strength
+				// NOTE (s38, measured): sizing the tail to the
+				// post-brake region NET-REGRESSED here - the
+				// overlapping tail acts as a useful hybrid shape
+				// dimension in this solver's flow, unlike A9's.
+				// Kept as-is; the brake STRENGTH joins the tail
+				// Newton as a third parameter instead.
+				const int bs3 = bs2, bl3 = bl2;
+				const int tl = tail_m;
+				// start 3 = the 3-parameter RESCUE (brake strength
+				// joins the Newton) - only after the proven 2x2
+				// starts have had their chance, and only on brake
+				// candidates (s38: running 3-param always
+				// destabilized long-N solves the 2x2 owned)
+				const float starts[4][2] = {
 					{ 0.f, 0.f }, { 0.35f, -0.35f },
-					{ -0.35f, 0.35f } };
-				for (int st = 0; st < 3
+					{ -0.35f, 0.35f }, { 0.f, 0.f } };
+				for (int st = 0; st < 4
 					&& best.residual > 0.25f; ++st) {
+					const bool use3 = st == 3 && bl3 > 0;
+					if (st == 3 && !use3)
+						break;
+					if (st == 3 && best.residual <= 0.5f)
+						break;
 					float c1 = starts[st][0];
 					float c2 = starts[st][1];
 					for (int it = 0; it < 8; ++it) {
-						BuildSchedule(N, ss, revs, nrev, bs2,
-							bl2, bc, tail_m, c1, c2, &s);
+						BuildSchedule(N, ss, revs, nrev, bs3,
+							bl3, bc, tl, c1, c2, &s);
 						float ex, ey, evx, evy;
 						Roll(k, v0, s, &ex, &ey, &evx, &evy);
 						best.rollouts++;
@@ -1935,6 +2014,9 @@ namespace CapP2P {
 							best.ey = ey;
 							best.evx = evx;
 							best.evy = evy;
+							best.brake_start = bs3;
+							best.brake_len = bl3;
+							best.brake_cosa = bc;
 							best.tail_c1 = c1;
 							best.tail_c2 = c2;
 							best.sched = s;
@@ -1943,31 +2025,78 @@ namespace CapP2P {
 							break;
 						const float h = 0.02f;
 						float ex1, ey1, ex2, ey2, dvx, dvy;
-						BuildSchedule(N, ss, revs, nrev, bs2,
-							bl2, bc, tail_m, c1 + h, c2, &s);
+						BuildSchedule(N, ss, revs, nrev, bs3,
+							bl3, bc, tl, c1 + h, c2, &s);
 						Roll(k, v0, s, &ex1, &ey1, &dvx, &dvy);
-						BuildSchedule(N, ss, revs, nrev, bs2,
-							bl2, bc, tail_m, c1, c2 + h, &s);
+						BuildSchedule(N, ss, revs, nrev, bs3,
+							bl3, bc, tl, c1, c2 + h, &s);
 						Roll(k, v0, s, &ex2, &ey2, &dvx, &dvy);
 						best.rollouts += 2;
 						const float j11 = (ex1 - ex) / h;
 						const float j21 = (ey1 - ey) / h;
 						const float j12 = (ex2 - ex) / h;
 						const float j22 = (ey2 - ey) / h;
-						const float det = j11 * j22
-							- j12 * j21;
-						if (fabsf(det) < 1e-6f)
-							break;
-						float d1 = (-fx * j22 + fy * j12)
-							/ det;
-						float d2 = (-j11 * fy + j21 * fx)
-							/ det;
-						if (d1 > 0.3f) d1 = 0.3f;
-						if (d1 < -0.3f) d1 = -0.3f;
-						if (d2 > 0.3f) d2 = 0.3f;
-						if (d2 < -0.3f) d2 = -0.3f;
-						c1 += d1;
-						c2 += d2;
+						if (use3) {
+							// THREE-PARAMETER least-norm step
+							// (s38): the brake STRENGTH joins
+							// (c1, c2) - 2 constraints, 3
+							// controls, minimum-norm solve via
+							// J^T (J J^T)^{-1} r
+							const float hb = bc + 0.02f
+								<= 0.999f ? 0.02f : -0.02f;
+							float ex3, ey3;
+							bc += hb;
+							BuildSchedule(N, ss, revs, nrev,
+								bs3, bl3, bc, tl, c1, c2, &s);
+							Roll(k, v0, s, &ex3, &ey3, &dvx,
+								&dvy);
+							bc -= hb;
+							best.rollouts++;
+							const float j13 = (ex3 - ex) / hb;
+							const float j23 = (ey3 - ey) / hb;
+							const float a = j11 * j11
+								+ j12 * j12 + j13 * j13;
+							const float b = j11 * j21
+								+ j12 * j22 + j13 * j23;
+							const float cq = j21 * j21
+								+ j22 * j22 + j23 * j23;
+							const float det = a * cq - b * b;
+							if (fabsf(det) < 1e-8f)
+								break;
+							const float y1 = (-fx * cq
+								+ fy * b) / det;
+							const float y2 = (-a * fy
+								+ b * fx) / det;
+							float d1 = j11 * y1 + j21 * y2;
+							float d2 = j12 * y1 + j22 * y2;
+							float d3 = j13 * y1 + j23 * y2;
+							if (d1 > 0.3f) d1 = 0.3f;
+							if (d1 < -0.3f) d1 = -0.3f;
+							if (d2 > 0.3f) d2 = 0.3f;
+							if (d2 < -0.3f) d2 = -0.3f;
+							if (d3 > 0.1f) d3 = 0.1f;
+							if (d3 < -0.1f) d3 = -0.1f;
+							c1 += d1;
+							c2 += d2;
+							bc += d3;
+							if (bc < 0.2f) bc = 0.2f;
+							if (bc > 0.999f) bc = 0.999f;
+						} else {
+							const float det = j11 * j22
+								- j12 * j21;
+							if (fabsf(det) < 1e-6f)
+								break;
+							float d1 = (-fx * j22 + fy * j12)
+								/ det;
+							float d2 = (-j11 * fy + j21 * fx)
+								/ det;
+							if (d1 > 0.3f) d1 = 0.3f;
+							if (d1 < -0.3f) d1 = -0.3f;
+							if (d2 > 0.3f) d2 = 0.3f;
+							if (d2 < -0.3f) d2 = -0.3f;
+							c1 += d1;
+							c2 += d2;
+						}
 						if (c1 > 0.95f) c1 = 0.95f;
 						if (c1 < -0.95f) c1 = -0.95f;
 						if (c2 > 0.95f) c2 = 0.95f;
@@ -2059,7 +2188,7 @@ namespace CapP2P {
 		const int N = B.N;
 		P2PResult best;
 		P2PSchedule s;
-		const float bc = 0.9f;
+		float bc = 0.9f;   // mutable brake strength (s38 range lever)
 		auto eval = [&](int ss, const int* revs, int nrev, int bs2,
 			int bl2, int tail_m, float c1, float c2) {
 			BuildSchedule(N, ss, revs, nrev, bs2, bl2, bc, tail_m,
@@ -2081,6 +2210,7 @@ namespace CapP2P {
 					best.revs[i] = i < nrev ? revs[i] : 0;
 				best.brake_start = bs2;
 				best.brake_len = bl2;
+				best.brake_cosa = bc;
 				best.tail_c1 = c1;
 				best.tail_c2 = c2;
 				best.sched = s;
@@ -2138,24 +2268,30 @@ namespace CapP2P {
 		// cannot reach the target
 		if (best.residual > 48.f) {
 			// stride clamped (the same small-N zero-stride hazard as
-			// the fixed-N brake probes)
+			// the fixed-N brake probes); TWO strengths (s38)
 			const int blstep2 = N / 8 < 1 ? 1 : N / 8;
-			for (int ss = -1; ss <= 1; ss += 2)
-				for (int bl = blstep2; bl <= (3 * N) / 4;
-					bl += blstep2) {
-					if (bl < 2)
-						continue;
-					int rv0[3] = { 0, 0, 0 };
-					eval(ss, rv0, 0, 1, bl, 0, 0.f, 0.f);
-					for (int r1 = 6; r1 < N; r1 += 12) {
-						rv0[0] = r1;
-						eval(ss, rv0, 1, 1, bl, 0, 0.f, 0.f);
+			const float bcs2[2] = { 0.9f, 0.6f };
+			for (int bci = 0; bci < 2; ++bci) {
+				bc = bcs2[bci];
+				for (int ss = -1; ss <= 1; ss += 2)
+					for (int bl = blstep2; bl <= (3 * N) / 4;
+						bl += blstep2) {
+						if (bl < 2)
+							continue;
+						int rv0[3] = { 0, 0, 0 };
+						eval(ss, rv0, 0, 1, bl, 0, 0.f, 0.f);
+						for (int r1 = 6; r1 < N; r1 += 12) {
+							rv0[0] = r1;
+							eval(ss, rv0, 1, 1, bl, 0, 0.f, 0.f);
+						}
 					}
-				}
+			}
+			bc = best.brake_cosa;
 		}
 		// climb the best shape (translation + per-reversal steps +
 		// brake steps)
 		{
+			bc = best.brake_cosa;
 			bool improved = true;
 			int guard = 0;
 			while (improved && guard++ < 10) {
@@ -2200,6 +2336,19 @@ namespace CapP2P {
 								best.nrev, best.brake_start,
 								nl, 0, 0.f, 0.f);
 					}
+					// the strength climb (s38)
+					const float dbc[4] = { -0.15f, -0.05f, 0.05f,
+						0.15f };
+					for (int m = 0; m < 4; ++m) {
+						float nbc = best.brake_cosa + dbc[m];
+						if (nbc < 0.2f || nbc > 0.999f)
+							continue;
+						bc = nbc;
+						eval(best.start_side, best.revs,
+							best.nrev, best.brake_start,
+							best.brake_len, 0, 0.f, 0.f);
+					}
+					bc = best.brake_cosa;
 				}
 				if (best.residual < prev - 1e-4f)
 					improved = true;
@@ -2207,6 +2356,7 @@ namespace CapP2P {
 		}
 		// the exact-hit tail (three starts)
 		{
+			bc = best.brake_cosa;
 			const int tail_m = N >= 48 ? 24
 				: (N >= 24 ? 12 : (N >= 12 ? 8 : 0));
 			if (tail_m > 0 && best.residual > 0.25f) {
@@ -2216,16 +2366,24 @@ namespace CapP2P {
 				const int ss = best.start_side;
 				const int bs2 = best.brake_start;
 				const int bl2 = best.brake_len;
-				const float starts[3][2] = {
+				const int tl = tail_m;
+				// start 3 = the 3-parameter rescue (see the fixed-N
+				// solver's note)
+				const float starts[4][2] = {
 					{ 0.f, 0.f }, { 0.35f, -0.35f },
-					{ -0.35f, 0.35f } };
-				for (int st = 0; st < 3
+					{ -0.35f, 0.35f }, { 0.f, 0.f } };
+				for (int st = 0; st < 4
 					&& best.residual > 0.25f; ++st) {
+					const bool use3 = st == 3 && bl2 > 0;
+					if (st == 3 && !use3)
+						break;
+					if (st == 3 && best.residual <= 0.5f)
+						break;
 					float c1 = starts[st][0];
 					float c2 = starts[st][1];
 					for (int it = 0; it < 8; ++it) {
 						BuildSchedule(N, ss, revs, nrev, bs2,
-							bl2, bc, tail_m, c1, c2, &s);
+							bl2, bc, tl, c1, c2, &s);
 						float ex, ey, evx, evy;
 						Roll(k, B.v0, s, &ex, &ey, &evx, &evy);
 						best.rollouts++;
@@ -2238,6 +2396,9 @@ namespace CapP2P {
 							best.ey = ey;
 							best.evx = evx;
 							best.evy = evy;
+							best.brake_start = bs2;
+							best.brake_len = bl2;
+							best.brake_cosa = bc;
 							best.tail_c1 = c1;
 							best.tail_c2 = c2;
 							best.sched = s;
@@ -2247,11 +2408,11 @@ namespace CapP2P {
 						const float h = 0.02f;
 						float ex1, ey1, ex2, ey2, dvx, dvy;
 						BuildSchedule(N, ss, revs, nrev, bs2,
-							bl2, bc, tail_m, c1 + h, c2, &s);
+							bl2, bc, tl, c1 + h, c2, &s);
 						Roll(k, B.v0, s, &ex1, &ey1, &dvx,
 							&dvy);
 						BuildSchedule(N, ss, revs, nrev, bs2,
-							bl2, bc, tail_m, c1, c2 + h, &s);
+							bl2, bc, tl, c1, c2 + h, &s);
 						Roll(k, B.v0, s, &ex2, &ey2, &dvx,
 							&dvy);
 						best.rollouts += 2;
@@ -2259,20 +2420,65 @@ namespace CapP2P {
 						const float j21 = (ey1 - ey) / h;
 						const float j12 = (ex2 - ex) / h;
 						const float j22 = (ey2 - ey) / h;
-						const float det = j11 * j22
-							- j12 * j21;
-						if (fabsf(det) < 1e-6f)
-							break;
-						float d1 = (-fx * j22 + fy * j12)
-							/ det;
-						float d2 = (-j11 * fy + j21 * fx)
-							/ det;
-						if (d1 > 0.3f) d1 = 0.3f;
-						if (d1 < -0.3f) d1 = -0.3f;
-						if (d2 > 0.3f) d2 = 0.3f;
-						if (d2 < -0.3f) d2 = -0.3f;
-						c1 += d1;
-						c2 += d2;
+						if (use3) {
+							// three-parameter least-norm step
+							// (s38): brake strength joins the
+							// tail
+							const float hb = bc + 0.02f
+								<= 0.999f ? 0.02f : -0.02f;
+							float ex3, ey3;
+							bc += hb;
+							BuildSchedule(N, ss, revs, nrev,
+								bs2, bl2, bc, tl, c1, c2, &s);
+							Roll(k, B.v0, s, &ex3, &ey3, &dvx,
+								&dvy);
+							bc -= hb;
+							best.rollouts++;
+							const float j13 = (ex3 - ex) / hb;
+							const float j23 = (ey3 - ey) / hb;
+							const float a = j11 * j11
+								+ j12 * j12 + j13 * j13;
+							const float b = j11 * j21
+								+ j12 * j22 + j13 * j23;
+							const float cq = j21 * j21
+								+ j22 * j22 + j23 * j23;
+							const float det = a * cq - b * b;
+							if (fabsf(det) < 1e-8f)
+								break;
+							const float y1 = (-fx * cq
+								+ fy * b) / det;
+							const float y2 = (-a * fy
+								+ b * fx) / det;
+							float d1 = j11 * y1 + j21 * y2;
+							float d2 = j12 * y1 + j22 * y2;
+							float d3 = j13 * y1 + j23 * y2;
+							if (d1 > 0.3f) d1 = 0.3f;
+							if (d1 < -0.3f) d1 = -0.3f;
+							if (d2 > 0.3f) d2 = 0.3f;
+							if (d2 < -0.3f) d2 = -0.3f;
+							if (d3 > 0.1f) d3 = 0.1f;
+							if (d3 < -0.1f) d3 = -0.1f;
+							c1 += d1;
+							c2 += d2;
+							bc += d3;
+							if (bc < 0.2f) bc = 0.2f;
+							if (bc > 0.999f) bc = 0.999f;
+						} else {
+							const float det = j11 * j22
+								- j12 * j21;
+							if (fabsf(det) < 1e-6f)
+								break;
+							float d1 = (-fx * j22 + fy * j12)
+								/ det;
+							float d2 = (-j11 * fy + j21 * fx)
+								/ det;
+							if (d1 > 0.3f) d1 = 0.3f;
+							if (d1 < -0.3f) d1 = -0.3f;
+							if (d2 > 0.3f) d2 = 0.3f;
+							if (d2 < -0.3f) d2 = -0.3f;
+							c1 += d1;
+							c2 += d2;
+						}
 						if (c1 > 0.95f) c1 = 0.95f;
 						if (c1 < -0.95f) c1 = -0.95f;
 						if (c2 > 0.95f) c2 = 0.95f;

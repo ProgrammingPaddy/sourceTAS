@@ -408,6 +408,14 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23k (session 38): **the A11 interior amber falls 14.1% →
+  4.9% miss** (detail in the checklist change log): the A9-lesson
+  transplant (per-candidate brake strength, brake-first shapes,
+  K=8) + the 3-parameter least-norm rescue tail; two negative
+  results recorded (tail-sizing regressed here; always-on 3-param
+  destabilized long-N). capxfer 65° transfers 29→35. Eleven suites
+  green. Last ambers: A8 refinements; A11 multi-brake-phase
+  interior.
 - 2026-08-23j (session 37): **A29 and A31 close — THE A CATEGORY IS
   COMPLETE (A0–A31 closed, A32 excluded by decree; the sessions
   33–37 march delivered the user directive).** capdebt 7/0: the
