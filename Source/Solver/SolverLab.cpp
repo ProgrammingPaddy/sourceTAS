@@ -16596,6 +16596,725 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= capsolve: registry A0 + A12 + A10 + A13
+	// (session 33) - the air point family's packaging tier. A0
+	// (CapFrame): the canonical-frame transform is BITWISE the
+	// inline math every solver used, round-trips within float
+	// algebra, and the rotation-commutation deviation of full
+	// rollouts is MEASURED (the reason witnesses stay world-frame -
+	// no theorem claims rotation exactness). A12 (SolveFreeN): A11
+	// iterated over N with the certified B13 precull - gated to
+	// agree EXACTLY with the same scan run without the precull (a
+	// necessary condition may never hide a feasible N). A10
+	// (MinAirTime): the A1 z-window intersected with that scan,
+	// stopping at the FIRST feasible N - gated against the brute
+	// scan. A13 second scenario: a rotated-azimuth ramp exercises
+	// the general slice-line geometry (n.Y != 0) that capxfer's
+	// axial world barely touches; contact predictions engine-
+	// verified. capxfer itself consumes the A13 package and remains
+	// its primary acceptance test.
+	int CmdCapSolve(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		World w;
+		if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+			printf("capsolve: clean-air world build failed\n");
+			return 1;
+		}
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capsolve: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		unsigned rng = 0xA05013A0u;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		auto rndf = [&](float lo, float hi) {
+			return lo + (hi - lo) * static_cast<float>(rnd() & 0xFFFFF)
+				/ 1048575.f;
+		};
+		// legal random schedule generator (braking included), the
+		// capp2p convention
+		auto randSched = [&](int N, CapP2P::P2PSchedule* s) {
+			s->n = N;
+			signed char side = 0;
+			int age = 6;
+			for (int t = 0; t < N; ++t) {
+				signed char ds;
+				float ca;
+				const unsigned r2 = rnd();
+				if ((r2 & 7) == 0) {
+					ds = 0;
+					ca = 1.f;
+				} else {
+					ds = (r2 & 8) ? 1 : -1;
+					if (side != 0 && ds != side && age < min_gap)
+						ds = side;
+					ca = 1.f - 2.f
+						* static_cast<float>((r2 >> 8) & 1023)
+						/ 1023.f;
+				}
+				s->side[t] = ds;
+				s->cosa[t] = ca;
+				if (ds != 0 && side != 0 && ds != side)
+					age = 1;
+				else
+					age = age < 6 ? age + 1 : 6;
+				if (ds != 0)
+					side = ds;
+			}
+		};
+		// ---- A0: bitwise identity with the inline expressions
+		{
+			int nb = 0, ok = 0;
+			for (int i = 0; i < 20000; ++i) {
+				const float psi0 = rndf(-3.14159f, 3.14159f);
+				const float ox = rndf(-4000.f, 4000.f);
+				const float oy = rndf(-4000.f, 4000.f);
+				const float wx = rndf(-4000.f, 4000.f);
+				const float wy = rndf(-4000.f, 4000.f);
+				const CapFrame::Frame2D F = CapFrame::MakeCanonical(
+					psi0, ox, oy);
+				float cx, cy;
+				CapFrame::ToCanonical(F, wx, wy, &cx, &cy);
+				const float ca = cosf(-psi0), sa = sinf(-psi0);
+				const float dx = wx - ox, dy = wy - oy;
+				const float rx = ca * dx - sa * dy;
+				const float ry = sa * dx + ca * dy;
+				nb += 2;
+				if (memcmp(&cx, &rx, 4) == 0)
+					ok++;
+				if (memcmp(&cy, &ry, 4) == 0)
+					ok++;
+			}
+			snprintf(buf, sizeof(buf), "%d/%d components bitwise vs "
+				"the inline rotation", ok, nb);
+			check("A0 bitwise vs inline math", ok == nb, buf);
+		}
+		// ---- A0: round trip within float algebra
+		{
+			float worst = 0.f;
+			for (int i = 0; i < 20000; ++i) {
+				const float psi0 = rndf(-3.14159f, 3.14159f);
+				const float ox = rndf(-4000.f, 4000.f);
+				const float oy = rndf(-4000.f, 4000.f);
+				const float wx = rndf(-4000.f, 4000.f);
+				const float wy = rndf(-4000.f, 4000.f);
+				const CapFrame::Frame2D F = CapFrame::MakeCanonical(
+					psi0, ox, oy);
+				float cx, cy, bx, by;
+				CapFrame::ToCanonical(F, wx, wy, &cx, &cy);
+				CapFrame::FromCanonical(F, cx, cy, &bx, &by);
+				const float dx = bx - wx, dy = by - wy;
+				const float d = sqrtf(dx * dx + dy * dy);
+				if (d > worst)
+					worst = d;
+			}
+			snprintf(buf, sizeof(buf), "worst round-trip deviation "
+				"%.6f u over 20k transforms (coords to 8000u)",
+				worst);
+			check("A0 round trip", worst <= 0.01f, buf);
+		}
+		// ---- A0: rotation-commutation MEASURED (why witnesses stay
+		// world-frame: schedules are frame-free, float rotation is
+		// not - this line quantifies the gap, no theorem gates it)
+		{
+			float worst = 0.f;
+			for (int i = 0; i < 200; ++i) {
+				const float psi0 = rndf(-3.14159f, 3.14159f);
+				const float v0 = rndf(500.f, 1300.f);
+				const int N = 20 + static_cast<int>(rnd() % 41);
+				CapP2P::P2PSchedule s;
+				randSched(N, &s);
+				float ex, ey, evx, evy;
+				CapP2P::Roll(k, v0, s, &ex, &ey, &evx, &evy);
+				// world-frame kernel rollout of the SAME schedule
+				const float cw = cosf(psi0), sw = sinf(psi0);
+				float kx = 0.f, ky = 0.f, kz = 8000.f;
+				float kvx = v0 * cw, kvy = v0 * sw, kvz = 0.f;
+				for (int t = 0; t < N; ++t) {
+					float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+					CapAir::KernelTick(k, kx, ky, kz, kvx, kvy,
+						0.f, s.side[t], s.cosa[t], &nx2, &ny2,
+						&nz2, &nvx2, &nvy2, &nvz2);
+					kx = nx2;
+					ky = ny2;
+					kz = nz2;
+					kvx = nvx2;
+					kvy = nvy2;
+					kvz = 0.f;
+					(void)nvz2;
+				}
+				const float wxp = cw * ex - sw * ey;
+				const float wyp = sw * ex + cw * ey;
+				const float dx = kx - wxp, dy = ky - wyp;
+				const float d = sqrtf(dx * dx + dy * dy);
+				if (d > worst)
+					worst = d;
+			}
+			printf("capsolve: A0 rotation-commutation deviation: "
+				"worst %.4f u over 200 rotated rollouts (N<=60, "
+				"v0<=1300) - MEASURED, witnesses stay "
+				"world-frame\n", worst);
+		}
+		// ---- A12: free-N solve == the same scan without the
+		// certified precull
+		{
+			int trials = 0, agree = 0, solved_n = 0;
+			long long culls = 0;
+			double ms_sum = 0.0;
+			int engine_ok = 0, engine_n = 0;
+			for (int i = 0; i < 36; ++i) {
+				const float v0 = (i % 3 == 0) ? 450.f
+					: (i % 3 == 1) ? 800.f : 1200.f;
+				const int Nt = 10 + static_cast<int>(rnd() % 51);
+				CapP2P::P2PSchedule gs;
+				randSched(Nt, &gs);
+				float tx, ty, evx, evy;
+				CapP2P::Roll(k, v0, gs, &tx, &ty, &evx, &evy);
+				trials++;
+				CapP2P::P2PResult ra;
+				int culled = 0;
+				const auto t0 = std::chrono::steady_clock::now();
+				const int Na = CapP2P::SolveFreeN(k, v0, tx, ty, 1,
+					70, &ra, &culled);
+				ms_sum += std::chrono::duration<double,
+					std::milli>(std::chrono::steady_clock::now()
+					- t0).count();
+				culls += culled;
+				// brute: identical scan, no precull
+				int Nb = -1;
+				CapP2P::P2PResult rb;
+				for (int N = 1; N <= 70 && Nb < 0; ++N) {
+					CapP2P::P2PResult r;
+					CapP2P::SolveFixedN(k, v0, tx, ty, N, &r);
+					if (r.solved) {
+						Nb = N;
+						rb = r;
+					}
+				}
+				if (Na == Nb)
+					agree++;
+				if (Na > 0) {
+					solved_n++;
+					// engine bitwise endpoint (sample)
+					if (engine_n < 10) {
+						engine_n++;
+						PlayerState s;
+						s.pos = Vec3(0.f, 0.f, 8000.f);
+						s.vel = Vec3(v0, 0.f, 0.f);
+						for (int t = 0; t < ra.sched.n; ++t) {
+							s.vel.Z = 0.f;
+							CapAir::AirTick(&s, w, p,
+								ra.sched.side[t],
+								ra.sched.cosa[t]);
+						}
+						if (memcmp(&s.pos.X, &ra.ex, 4) == 0
+							&& memcmp(&s.pos.Y, &ra.ey, 4) == 0)
+							engine_ok++;
+					}
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d/%d targets: preculled "
+				"scan == brute scan (%d solved; %lld N-candidates "
+				"culled; mean %.1f ms/solve)", agree, trials,
+				solved_n, culls, trials ? ms_sum / trials : 0.0);
+			check("A12 free-N vs brute", agree == trials
+				&& solved_n >= 25, buf);
+			snprintf(buf, sizeof(buf), "%d/%d sampled solutions "
+				"replay bitwise through the engine", engine_ok,
+				engine_n);
+			check("A12 engine bitwise", engine_n >= 8
+				&& engine_ok == engine_n, buf);
+		}
+		// ---- A10: minimum air time under the A1 z-window
+		{
+			int trials = 0, agree = 0, solved_n = 0;
+			double ms_sum = 0.0;
+			for (int i = 0; i < 24; ++i) {
+				const float v0 = (i & 1) ? 600.f : 1000.f;
+				const float z0 = 250.f, vz0 = 60.f;
+				const int Nt = 15 + static_cast<int>(rnd() % 46);
+				CapP2P::P2PSchedule gs;
+				randSched(Nt, &gs);
+				float tx, ty, evx, evy;
+				CapP2P::Roll(k, v0, gs, &tx, &ty, &evx, &evy);
+				// the window brackets the generating arrival
+				float z = z0, vz = vz0;
+				for (int t = 0; t < Nt; ++t)
+					CapWindow::VTick(p, &z, &vz);
+				const float z_lo = z - 30.f, z_hi = z + 30.f;
+				trials++;
+				CapP2P::P2PResult ra;
+				const auto t0 = std::chrono::steady_clock::now();
+				const int Na = CapP2P::MinAirTime(k, v0, tx, ty,
+					z0, vz0, z_lo, z_hi, 90, &ra);
+				ms_sum += std::chrono::duration<double,
+					std::milli>(std::chrono::steady_clock::now()
+					- t0).count();
+				// brute: full scan, no precull
+				int Nb = -1;
+				{
+					float bz = z0, bvz = vz0;
+					for (int N = 0; N <= 90 && Nb < 0; ++N) {
+						if (N >= 1 && bz >= z_lo && bz <= z_hi) {
+							CapP2P::P2PResult r;
+							CapP2P::SolveFixedN(k, v0, tx, ty, N,
+								&r);
+							if (r.solved)
+								Nb = N;
+						}
+						CapWindow::VTick(p, &bz, &bvz);
+					}
+				}
+				if (Na == Nb)
+					agree++;
+				if (Na > 0)
+					solved_n++;
+			}
+			snprintf(buf, sizeof(buf), "%d/%d windowed targets: "
+				"MinAirTime == brute scan (%d solved; mean %.1f "
+				"ms)", agree, trials, solved_n,
+				trials ? ms_sum / trials : 0.0);
+			check("A10 min air time vs brute", agree == trials
+				&& solved_n >= 15, buf);
+		}
+		// ---- A13 general-geometry scenario: rotated azimuth (the
+		// slice line with n.Y != 0), engine-verified predictions
+		{
+			World w2;
+			Vec3 n;
+			if (!CapBoard::MakeRampWorld(&w2, o.hulls, 60.f, 250.f,
+				&n)) {
+				printf("capsolve: rotated ramp world failed\n");
+				return 1;
+			}
+			const float off = CapHull::PlaneOffsetHull(o.hulls, n,
+				0);
+			// exit state flying INTO the face (normal points back
+			// toward the flight)
+			const Vec3 xpos(n.X * 600.f + 80.f, n.Y * 600.f - 40.f,
+				280.f);
+			const Vec3 xvel(-n.X * 820.f, -n.Y * 820.f, 40.f);
+			CapFaceSolve::FaceSolveCfg fc;
+			fc.n = n;
+			fc.d_exp = off;
+			fc.t_lo = 36;
+			fc.t_hi = 84;
+			fc.t_step = 4;
+			fc.z_lo = -650.f;
+			fc.z_hi = -30.f;
+			fc.lam_lo = -240.f;
+			fc.lam_hi = 240.f;
+			fc.lam_step = 120.f;
+			fc.horizon = 95;
+			std::vector<CapFaceSolve::FaceHit> hits;
+			int targets = 0, culled = 0;
+			double us_org = 0.0, us_sol = 0.0;
+			CapFaceSolve::SolveToFace(k, fc, xpos, xvel, &hits,
+				&targets, &culled, &us_org, &us_sol);
+			int with_pred = 0;
+			for (size_t i = 0; i < hits.size(); ++i)
+				if (hits[i].pred_tick > 0)
+					with_pred++;
+			snprintf(buf, sizeof(buf), "rotated ramp: %d targets, "
+				"%d culled, %d solved, %d with contact "
+				"predictions", targets, culled,
+				static_cast<int>(hits.size()), with_pred);
+			check("A13 rotated-face solve", targets >= 30
+				&& static_cast<int>(hits.size()) >= 12
+				&& with_pred == static_cast<int>(hits.size()),
+				buf);
+			// engine verification of a sample
+			int tried = 0, tick_ok = 0;
+			float worst_dev = 0.f;
+			for (size_t i = 0; i < hits.size() && tried < 12; ++i) {
+				const CapFaceSolve::FaceHit& h = hits[i];
+				tried++;
+				PlayerState s;
+				s.pos = xpos;
+				s.vel = xvel;
+				int t_contact = -1;
+				Vec3 cpos;
+				for (int t = 0; t < 95 && t_contact < 0; ++t) {
+					const signed char ds = t < h.res.sched.n
+						? h.res.sched.side[t] : 0;
+					const float cca = t < h.res.sched.n
+						? h.res.sched.cosa[t] : 1.f;
+					const float s2d = Len2D(s.vel);
+					const float hh = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					float yaw = hh * 57.2957795f;
+					float fmv = 0.f, smv = 0.f;
+					if (ds != 0 && s2d > 1.f)
+						Air::WishInputs(hh,
+							static_cast<int>(ds), cca, &yaw,
+							&fmv, &smv);
+					TickEvents ev;
+					MoveTick(s, w2, p, 0.f, yaw, fmv, smv, 0.f,
+						0, &ev);
+					if (ev.ncontacts > 0) {
+						t_contact = t + 1;
+						cpos = s.pos;
+					}
+				}
+				if (t_contact == h.pred_tick) {
+					tick_ok++;
+					const float dx = cpos.X - h.pred_end.X;
+					const float dy = cpos.Y - h.pred_end.Y;
+					const float dz = cpos.Z - h.pred_end.Z;
+					const float d = sqrtf(dx * dx + dy * dy
+						+ dz * dz);
+					if (d > worst_dev)
+						worst_dev = d;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d/%d sampled contacts on "
+				"the exact predicted tick, worst end-position dev "
+				"%.4f u", tick_ok, tried, worst_dev);
+			check("A13 rotated-face prediction", tried >= 10
+				&& tick_ok == tried && worst_dev <= 1.f, buf);
+		}
+		printf("capsolve: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "A0/A10/A12/A13 AIR POINT FAMILY PACKAGED "
+				"AND GATED"
+				: "A0/A10/A12/A13 RED - a gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= capmin: registry A21 + A26 (session 33). A21
+	// (minimum ride time): the inverse query of the A20 surface -
+	// the first layer answering an in-plane target within the
+	// lattice contract, indexed-first with exhaustive confirmation
+	// of every miss, gated EQUAL to the brute per-layer scan and
+	// witnessed as engine continuations. A26 (edge launch): the
+	// unified leave-ground detector fed by exact rollouts; gates are
+	// assumption-free laws - the launch threshold is one fixed
+	// geometric constant bracketed consistently across approach
+	// speeds (whatever the ground-check quadrant geometry makes it),
+	// the captured state continues BITWISE re-anchored, and the
+	// first clean airborne tick hands off to the A1 vertical
+	// recurrence bitwise.
+	int CmdCapMin(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capmin: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		unsigned rng = 0xA21A26EDu;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		// ======== A21: minimum ride time on one A20 surface ========
+		{
+			World w2;
+			Vec3 n;
+			if (!CapBoard::MakeRampWorld(&w2, o.hulls, 50.f, 0.f,
+				&n)) {
+				printf("capmin: ramp world failed\n");
+				return 1;
+			}
+			PlayerState s0;
+			{
+				Vec3 dsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+				const float dl = Len(dsl);
+				dsl = Scale(dsl, 1.f / dl);
+				PlayerState s;
+				s.pos = Vec3(n.X * 80.f, n.Y * 80.f, n.Z * 80.f);
+				s.vel = Vec3(dsl.X * 450.f - n.X * 40.f,
+					dsl.Y * 450.f - n.Y * 40.f,
+					dsl.Z * 450.f - n.Z * 40.f);
+				int contacts = 0;
+				for (int t = 0; t < 60 && contacts < 3; ++t) {
+					const float s2d = Len2D(s.vel);
+					const float h = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					TickEvents ev;
+					MoveTick(s, w2, p, 0.f, h * 57.2957795f, 0.f,
+						0.f, 0.f, 0, &ev);
+					if (ev.ncontacts > 0)
+						contacts++;
+				}
+				if (contacts < 3) {
+					check("A21 entry settles", false,
+						"never reached ride contact");
+					return 2;
+				}
+				s0 = s;
+			}
+			CapRideReach::RRParams pp;
+			pp.n_max = 48;
+			CapRideReach::RRSurface S;
+			CapRideReach::BuildRideReach(pp, p, n, s0.pos, s0.vel,
+				s0.surface_friction, &S);
+			snprintf(buf, sizeof(buf), "built %.1f s, %lld nodes, "
+				"peak layer %d", S.build_ms / 1000.0,
+				S.total_nodes, S.peak_layer);
+			check("A21 surface build", !S.aborted, buf);
+			// targets: in-plane positions of random nodes at random
+			// layers (guaranteed answerable at SOME layer)
+			int trials = 0, agree = 0, answered = 0;
+			double us_a21 = 0.0, us_brute = 0.0;
+			std::vector<int> found_n;
+			std::vector<float> found_u, found_v;
+			for (int it = 0; it < 50; ++it) {
+				const int Nt = 4 + static_cast<int>(rnd() % 45);
+				const std::vector<CapRideReach::RRNode>& L =
+					S.layers[static_cast<size_t>(Nt)];
+				if (L.empty())
+					continue;
+				const CapRideReach::RRNode& nd = L[rnd()
+					% static_cast<unsigned>(L.size())];
+				const float rx = nd.px - S.pos0.X;
+				const float ry = nd.py - S.pos0.Y;
+				const float rz = nd.pz - S.pos0.Z;
+				const float tu = rx * S.dsl.X + ry * S.dsl.Y
+					+ rz * S.dsl.Z;
+				const float tv = rx * S.csl.X + ry * S.csl.Y
+					+ rz * S.csl.Z;
+				trials++;
+				int node = -1;
+				float res = 1e30f;
+				const auto t0 = std::chrono::steady_clock::now();
+				const int Na = CapRideReach::MinRideTime(S, tu, tv,
+					96.f, &node, &res);
+				us_a21 += std::chrono::duration<double,
+					std::micro>(std::chrono::steady_clock::now()
+					- t0).count();
+				// brute: exhaustive per-layer scan
+				int Nb = -1;
+				const auto t1 = std::chrono::steady_clock::now();
+				for (int N = 1; N <= S.p.n_max && Nb < 0; ++N) {
+					float r2 = 1e30f;
+					const int n2 = CapRideReach::QueryTarget(S, N,
+						tu, tv, &r2);
+					if (n2 >= 0 && r2 <= 96.f)
+						Nb = N;
+				}
+				us_brute += std::chrono::duration<double,
+					std::micro>(std::chrono::steady_clock::now()
+					- t1).count();
+				if (Na == Nb)
+					agree++;
+				if (Na > 0) {
+					answered++;
+					found_n.push_back(Na);
+					found_u.push_back(tu);
+					found_v.push_back(tv);
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d/%d targets: indexed-"
+				"first MinRideTime == brute per-layer scan (%d "
+				"answered; %.0f vs %.0f us mean)", agree, trials,
+				answered, trials ? us_a21 / trials : 0.0,
+				trials ? us_brute / trials : 0.0);
+			check("A21 vs brute", trials >= 40 && agree == trials
+				&& answered >= 35, buf);
+			// witnesses: the found layer's node replays as an
+			// engine continuation (A20 DECLINE semantics: fringe
+			// counted)
+			if (found_n.empty()) {
+				check("A21 witnesses", false,
+					"no answered targets to witness");
+			} else {
+				int tried = 0, validated = 0, fringe = 0,
+					landed_off = 0;
+				for (int it = 0; it < 200 && tried < 12; ++it) {
+					const int pick = static_cast<int>(rnd()
+						% static_cast<unsigned>(found_n.size()));
+					const int Nm = found_n[
+						static_cast<size_t>(pick)];
+					int node = -1;
+					float res = 1e30f;
+					if (CapRideReach::MinRideTime(S,
+						found_u[static_cast<size_t>(pick)],
+						found_v[static_cast<size_t>(pick)], 96.f,
+						&node, &res) != Nm || node < 0)
+						continue;
+					tried++;
+					std::vector<signed char> ws;
+					std::vector<float> wc;
+					CapRideReach::WitnessRR(S, Nm, node, &ws,
+						&wc);
+					PlayerState s = s0;
+					bool left = false;
+					for (size_t k2 = 0; k2 < ws.size(); ++k2) {
+						const float s2d = Len2D(s.vel);
+						const float h = s2d > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : 0.f;
+						float yaw = h * 57.2957795f;
+						float fmv = 0.f, smv = 0.f;
+						if (ws[k2] != 0 && s2d > 1.f)
+							Air::WishInputs(h,
+								static_cast<int>(ws[k2]), wc[k2],
+								&yaw, &fmv, &smv);
+						TickEvents ev;
+						MoveTick(s, w2, p, 0.f, yaw, fmv, smv,
+							0.f, 0, &ev);
+						if (ev.ncontacts == 0) {
+							left = true;
+							break;
+						}
+					}
+					if (left) {
+						fringe++;
+						continue;
+					}
+					const std::vector<CapRideReach::RRNode>& L =
+						S.layers[static_cast<size_t>(Nm)];
+					const CapRideReach::RRNode& nd =
+						L[static_cast<size_t>(node)];
+					const float dx = s.pos.X - nd.px;
+					const float dy = s.pos.Y - nd.py;
+					const float dz = s.pos.Z - nd.pz;
+					const float dev = sqrtf(dx * dx + dy * dy
+						+ dz * dz);
+					if (dev <= 96.f)
+						validated++;
+					else
+						landed_off++;
+				}
+				snprintf(buf, sizeof(buf), "%d/%d minimum-time "
+					"witnesses engine-validated within 96u (%d "
+					"boundary fringe, %d landed off)", validated,
+					tried, fringe, landed_off);
+				check("A21 witnesses", tried >= 10
+					&& validated >= (tried * 2) / 3
+					&& landed_off == 0, buf);
+			}
+		}
+		// ======== A26: edge launch on a finite floor ========
+		{
+			World wf;
+			{
+				std::vector<Vec3> ns;
+				std::vector<float> ds;
+				ns.push_back(Vec3(0.f, 0.f, 1.f));
+				ds.push_back(0.f);        // floor top z = 0
+				ns.push_back(Vec3(0.f, 0.f, -1.f));
+				ds.push_back(2000.f);
+				ns.push_back(Vec3(1.f, 0.f, 0.f));
+				ds.push_back(256.f);      // THE EDGE at x = 256
+				ns.push_back(Vec3(-1.f, 0.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 1.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, -1.f, 0.f));
+				ds.push_back(20000.f);
+				if (!wf.AddTestBrush(ns, ds, o.hulls)) {
+					printf("capmin: floor world failed\n");
+					return 1;
+				}
+				wf.FinalizeTestWorld();
+			}
+			float bracket_lo = -1e30f, bracket_hi = 1e30f;
+			int fired_n = 0, cont_ok = 0, a1_ok = 0, trials = 0;
+			const float initvx[3] = { 0.f, 300.f, 600.f };
+			for (int tr = 0; tr < 3; ++tr) {
+				trials++;
+				// settle to rest on the floor
+				PlayerState s;
+				s.pos = Vec3(0.f, 0.f, 10.f);
+				for (int t = 0; t < 30; ++t) {
+					TickEvents ev;
+					MoveTick(s, wf, p, 0.f, 0.f, 0.f, 0.f, 0.f, 0,
+						&ev);
+				}
+				if (!s.on_ground)
+					continue;
+				s.vel.X = initvx[tr];
+				// walk +x toward the edge, detector fed post-tick
+				CapLaunch::Detector det;
+				det.Feed(-1, s);
+				for (int t = 0; t < 400 && !det.out.fired; ++t) {
+					TickEvents ev;
+					MoveTick(s, wf, p, 0.f, 0.f, 450.f, 0.f, 0.f,
+						0, &ev);
+					det.Feed(t, s);
+				}
+				if (!det.out.fired)
+					continue;
+				fired_n++;
+				// the launch threshold bracket (pre.x, post.x]
+				if (det.out.pre.pos.X > bracket_lo)
+					bracket_lo = det.out.pre.pos.X;
+				if (det.out.post.pos.X < bracket_hi)
+					bracket_hi = det.out.post.pos.X;
+				// bitwise re-anchored continuation, 30 ticks
+				{
+					PlayerState a = det.out.post;
+					PlayerState b = s;   // s IS post (just fired)
+					bool okc = true;
+					for (int t = 0; t < 30; ++t) {
+						TickEvents e1, e2;
+						MoveTick(a, wf, p, 0.f, 0.f, 0.f, 0.f,
+							0.f, 0, &e1);
+						MoveTick(b, wf, p, 0.f, 0.f, 0.f, 0.f,
+							0.f, 0, &e2);
+						if (memcmp(&a.pos.X, &b.pos.X, 12) != 0
+							|| memcmp(&a.vel.X, &b.vel.X, 12)
+								!= 0) {
+							okc = false;
+							break;
+						}
+					}
+					if (okc)
+						cont_ok++;
+					// A1 handoff: the tick AFTER the launch tick
+					// is clean air - the exact vertical recurrence
+					// must match the engine bitwise
+					float z = det.out.post.pos.Z;
+					float vz = det.out.post.vel.Z;
+					CapWindow::VTick(p, &z, &vz);
+					PlayerState c = det.out.post;
+					TickEvents e3;
+					MoveTick(c, wf, p, 0.f, 0.f, 0.f, 0.f, 0.f, 0,
+						&e3);
+					if (memcmp(&z, &c.pos.Z, 4) == 0
+						&& memcmp(&vz, &c.vel.Z, 4) == 0)
+						a1_ok++;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d/%d approach speeds "
+				"launch; threshold bracketed to (%.3f, %.3f] - "
+				"one geometric constant across speeds", fired_n,
+				trials, bracket_lo, bracket_hi);
+			check("A26 launch threshold law", fired_n == trials
+				&& bracket_lo < bracket_hi, buf);
+			snprintf(buf, sizeof(buf), "%d/%d captured states "
+				"continue bitwise 30 ticks re-anchored", cont_ok,
+				fired_n);
+			check("A26 capture complete", fired_n >= 3
+				&& cont_ok == fired_n, buf);
+			snprintf(buf, sizeof(buf), "%d/%d first clean airborne "
+				"ticks match the A1 recurrence bitwise (z and "
+				"vz)", a1_ok, fired_n);
+			check("A26 -> A1 handoff", fired_n >= 3
+				&& a1_ok == fired_n, buf);
+		}
+		printf("capmin: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "A21/A26 MINIMUM RIDE TIME + EDGE LAUNCH "
+				"PACKAGED AND GATED"
+				: "A21/A26 RED - a gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capmat: registry C6 v1 - the sampled
 	// board->exit PRODUCTION HARNESS (session 32): batch the A22 v2
 	// indexed target queries over a real matrix of (boarding state,
@@ -17057,251 +17776,142 @@ namespace {
 			// behind and above the face, flying toward it
 			const Vec3 xpos(-550.f, 0.f, 250.f);
 			const Vec3 xvel(750.f, 0.f, 60.f);
-			const float v0h = Len2D(xvel);
-			const float psi0 = atan2f(xvel.Y, xvel.X);
-			// vertical timetable (exact recurrence)
-			float zt[96], vzt;
-			{
-				float z = xpos.Z, vz = xvel.Z;
-				for (int t = 0; t <= 90; ++t) {
-					zt[t] = z;
-					CapWindow::VTick(p, &z, &vz);
-				}
-				vzt = vz;
-				(void)vzt;
-			}
-			// target grid: arrival ticks whose face slice sits in
-			// the boarding band, lateral offsets across the face
-			int targets = 0, culled = 0, solved = 0, contacts = 0;
+			// ---- the A13 package does the solving core (this suite
+			// is its acceptance test): vertical timetable -> expanded
+			// slice lines -> B13 culls -> batch A11 -> exact contact
+			// prediction
+			CapFaceSolve::FaceSolveCfg fc;
+			fc.n = n;
+			fc.d_exp = off;
+			fc.t_lo = 40;
+			fc.t_hi = 88;
+			fc.t_step = 4;
+			fc.z_lo = -700.f;
+			fc.z_hi = -40.f;
+			fc.lam_lo = -300.f;
+			fc.lam_hi = 300.f;
+			fc.lam_step = 100.f;
+			fc.horizon = 95;
+			std::vector<CapFaceSolve::FaceHit> hits;
+			int targets = 0, culled = 0;
+			double us_organize = 0.0, us_solve = 0.0;
+			CapFaceSolve::SolveToFace(k, fc, xpos, xvel, &hits,
+				&targets, &culled, &us_organize, &us_solve);
+			const int solved = static_cast<int>(hits.size());
+			int contacts = 0;
 			int law_ok = 0, law_n = 0;
 			int no_cross = 0, early_cross = 0, pred_tick_ok = 0;
 			int attained = 0;
-			double us_solve = 0.0, sum_pend = 0.0, sum_tdist = 0.0;
+			double sum_pend = 0.0, sum_tdist = 0.0;
 			float max_pend = 0.f, max_tdist = 0.f;
 			std::vector<CapLabel::Transition> labels;
 			// the face's in-plane basis (for C0 label positions)
 			Vec3 fdsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
 			fdsl = Scale(fdsl, 1.f / Len(fdsl));
 			const Vec3 fcsl = Cross(n, fdsl);
-			CapP2P::P2PBatch B;
-			int batchN = -1;
-			double us_organize = 0.0;
-			for (int T = 40; T <= 88; T += 4) {
-				const float zT = zt[T];
-				if (zT > -40.f || zT < -700.f)
-					continue;   // outside the boarding band
-				for (float y = -300.f; y <= 300.f; y += 100.f) {
-					targets++;
-					// the slice line ON THE EXPANDED PLANE (A2+A3):
-					// n.x xT + n.y y + n.z zT = off
-					const float xT = (off - n.Z * zT - n.Y * y)
-						/ n.X;
-					// constant-time culls first (B13 necessary
-					// departure speed vs the actual exit speed)
-					const float dx = xT - xpos.X;
-					const float dy = y - xpos.Y;
-					const float D = sqrtf(dx * dx + dy * dy);
-					const float vmin = CapBounds::MinDepartSpeed(p,
-						D, 0.f, T);
-					if (vmin > v0h) {
-						culled++;
-						continue;
-					}
-					// rotate the target into A11's canonical frame
-					const float ca = cosf(-psi0),
-						sa = sinf(-psi0);
-					const float tx = ca * dx - sa * dy;
-					const float ty = sa * dx + ca * dy;
-					// batch per arrival tick (reused across the
-					// lateral row)
-					if (batchN != T) {
-						const auto tb =
-							std::chrono::steady_clock::now();
-						CapP2P::BuildP2PBatch(k, v0h, T, &B);
-						us_organize += std::chrono::duration<
-							double, std::micro>(
-							std::chrono::steady_clock::now()
-							- tb).count();
-						batchN = T;
-					}
-					const auto ts =
-						std::chrono::steady_clock::now();
-					CapP2P::P2PResult res;
-					CapP2P::SolveTargetBatch(k, B, tx, ty, &res);
-					us_solve += std::chrono::duration<double,
-						std::micro>(
-						std::chrono::steady_clock::now()
-						- ts).count();
-					if (!res.solved)
-						continue;
-					solved++;
-					// ---- KERNEL PREDICTION (A4 + A3): roll the
-					// schedule through the certified air kernel and
-					// find the tick whose motion segment crosses
-					// the hull-expanded plane. The engine's own
-					// clip law then fixes the whole contact: the
-					// fraction (d1 - 1/32)/(d1 - d2) leaves the
-					// origin exactly 1/32 above the traced plane
-					// along the ray, and the clipped move velocity
-					// slides the remaining time. The move velocity
-					// IS the kernel position delta over dt (the
-					// position law), so no mid-chain state is
-					// re-derived.
-					int pred_tick = -1;
-					Vec3 pred_end;
-					{
-						float kx = xpos.X, ky = xpos.Y,
-							kz = xpos.Z;
-						float kvx = xvel.X, kvy = xvel.Y,
-							kvz = xvel.Z;
-						for (int t = 0; t < 95 && pred_tick < 0;
-							++t) {
-							const signed char ds = t < res.sched.n
-								? res.sched.side[t] : 0;
-							const float cca = t < res.sched.n
-								? res.sched.cosa[t] : 1.f;
-							float nx2, ny2, nz2, nvx2, nvy2, nvz2;
-							CapAir::KernelTick(k, kx, ky, kz, kvx,
-								kvy, kvz, ds, cca, &nx2, &ny2,
-								&nz2, &nvx2, &nvy2, &nvz2);
-							const float da = n.X * kx + n.Y * ky
-								+ n.Z * kz - off;
-							const float db = n.X * nx2 + n.Y * ny2
-								+ n.Z * nz2 - off;
-							if (db <= 0.f && da > 0.f) {
-								float fe = (da - 0.03125f)
-									/ (da - db);
-								if (fe < 0.f)
-									fe = 0.f;
-								const Vec3 C(
-									kx + (nx2 - kx) * fe,
-									ky + (ny2 - ky) * fe,
-									kz + (nz2 - kz) * fe);
-								const Vec3 vm(
-									(nx2 - kx) / p.dt,
-									(ny2 - ky) / p.dt,
-									(nz2 - kz) / p.dt);
-								Vec3 vc;
-								Fn::ClipVelocity(vm, n, &vc);
-								const float rem = (1.f - fe)
-									* p.dt;
-								pred_end = Vec3(C.X + vc.X * rem,
-									C.Y + vc.Y * rem,
-									C.Z + vc.Z * rem);
-								pred_tick = t + 1;
-							}
-							kx = nx2; ky = ny2; kz = nz2;
-							kvx = nvx2; kvy = nvy2; kvz = nvz2;
-						}
-					}
-					if (pred_tick < 0) {
-						no_cross++;
-						continue;
-					}
-					if (pred_tick < T)
-						early_cross++;
-					// ---- ENGINE VERIFICATION: replay from the
-					// exit state in the ramp world; first contact
-					// must land on the predicted tick at the
-					// predicted position, with the contact tick's
-					// velocity matching the proven A18 law bitwise
-					PlayerState s;
-					s.pos = xpos;
-					s.vel = xvel;
-					int t_contact = -1;
-					Vec3 cpos, cvel_pre;
-					float csf = 1.f;
-					for (int t = 0; t < 95 && t_contact < 0;
-						++t) {
-						const signed char ds = t < res.sched.n
-							? res.sched.side[t] : 0;
-						const float cca = t < res.sched.n
-							? res.sched.cosa[t] : 1.f;
-						cvel_pre = s.vel;
-						csf = s.surface_friction;
-						const float s2d = Len2D(s.vel);
-						const float h = s2d > 1.f
-							? atan2f(s.vel.Y, s.vel.X) : 0.f;
-						float yaw = h * 57.2957795f;
-						float fmv = 0.f, smv = 0.f;
-						if (ds != 0 && s2d > 1.f)
-							Air::WishInputs(h,
-								static_cast<int>(ds), cca,
-								&yaw, &fmv, &smv);
-						TickEvents ev;
-						MoveTick(s, w2, p, 0.f, yaw, fmv, smv,
-							0.f, 0, &ev);
-						if (ev.ncontacts > 0) {
-							t_contact = t + 1;
-							cpos = s.pos;
-						}
-					}
-					if (t_contact < 0)
-						continue;
-					contacts++;
-					if (t_contact == pred_tick)
-						pred_tick_ok++;
-					const float pex = cpos.X - pred_end.X;
-					const float pey = cpos.Y - pred_end.Y;
-					const float pez = cpos.Z - pred_end.Z;
-					const float pend = sqrtf(pex * pex + pey * pey
-						+ pez * pez);
-					sum_pend += pend;
-					if (pend > max_pend)
-						max_pend = pend;
-					// requested-target attainment (a curved braked
-					// path may legitimately board early; counted,
-					// not hidden)
-					if (pred_tick >= T && pred_tick <= T + 1) {
-						attained++;
-						const float tdx = cpos.X - xT;
-						const float tdy = cpos.Y - y;
-						const float td = sqrtf(tdx * tdx
-							+ tdy * tdy);
-						sum_tdist += td;
-						if (td > max_tdist)
-							max_tdist = td;
-					}
-					// the contact tick's velocity vs the proven
-					// A18 law (velocity is fraction-independent)
-					if (law_n < 40) {
-						law_n++;
-						Vec3 pred;
-						float vdn, vzc;
-						CapBoard::RideGrayTick(p, n, csf,
-							Vec3(), cvel_pre,
-							t_contact - 1 < res.sched.n
-								? res.sched.side[
-									t_contact - 1] : 0,
-							t_contact - 1 < res.sched.n
-								? res.sched.cosa[
-									t_contact - 1] : 1.f,
-							&pred, &vdn, &vzc);
-						if (memcmp(&pred.X, &s.vel.X, 4) == 0
-							&& memcmp(&pred.Y, &s.vel.Y, 4)
-								== 0
-							&& memcmp(&pred.Z, &s.vel.Z, 4)
-								== 0)
-							law_ok++;
-					}
-					// C0: every verified transfer emits the ONE
-					// canonical transition label
-					CapLabel::Transition L;
-					L.kind = 0;
-					L.sf_quarter = csf < 0.5f ? 1 : 0;
-					L.dt = t_contact;
-					L.u = cpos.X * fdsl.X + cpos.Y * fdsl.Y
-						+ cpos.Z * fdsl.Z;
-					L.v = cpos.X * fcsl.X + cpos.Y * fcsl.Y
-						+ cpos.Z * fcsl.Z;
-					L.psi = atan2f(s.vel.Y, s.vel.X);
-					L.vz = s.vel.Z;
-					L.s2 = s.vel.X * s.vel.X + s.vel.Y * s.vel.Y;
-					const float pre2 = cvel_pre.X * cvel_pre.X
-						+ cvel_pre.Y * cvel_pre.Y;
-					L.loss2 = pre2 > L.s2 ? pre2 - L.s2 : 0.f;
-					labels.push_back(L);
+			for (size_t hi2 = 0; hi2 < hits.size(); ++hi2) {
+				const CapFaceSolve::FaceHit& h = hits[hi2];
+				if (h.pred_tick < 0) {
+					no_cross++;
+					continue;
 				}
+				if (h.pred_tick < h.T)
+					early_cross++;
+				// ---- ENGINE VERIFICATION: replay from the exit
+				// state in the ramp world; first contact must land
+				// on the predicted tick at the predicted position,
+				// with the contact tick's velocity matching the
+				// proven A18 law bitwise
+				PlayerState s;
+				s.pos = xpos;
+				s.vel = xvel;
+				int t_contact = -1;
+				Vec3 cpos, cvel_pre;
+				float csf = 1.f;
+				for (int t = 0; t < 95 && t_contact < 0; ++t) {
+					const signed char ds = t < h.res.sched.n
+						? h.res.sched.side[t] : 0;
+					const float cca = t < h.res.sched.n
+						? h.res.sched.cosa[t] : 1.f;
+					cvel_pre = s.vel;
+					csf = s.surface_friction;
+					const float s2d = Len2D(s.vel);
+					const float hh = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					float yaw = hh * 57.2957795f;
+					float fmv = 0.f, smv = 0.f;
+					if (ds != 0 && s2d > 1.f)
+						Air::WishInputs(hh, static_cast<int>(ds),
+							cca, &yaw, &fmv, &smv);
+					TickEvents ev;
+					MoveTick(s, w2, p, 0.f, yaw, fmv, smv, 0.f, 0,
+						&ev);
+					if (ev.ncontacts > 0) {
+						t_contact = t + 1;
+						cpos = s.pos;
+					}
+				}
+				if (t_contact < 0)
+					continue;
+				contacts++;
+				if (t_contact == h.pred_tick)
+					pred_tick_ok++;
+				const float pex = cpos.X - h.pred_end.X;
+				const float pey = cpos.Y - h.pred_end.Y;
+				const float pez = cpos.Z - h.pred_end.Z;
+				const float pend = sqrtf(pex * pex + pey * pey
+					+ pez * pez);
+				sum_pend += pend;
+				if (pend > max_pend)
+					max_pend = pend;
+				// requested-target attainment (a curved braked path
+				// may legitimately board early; counted, not
+				// hidden)
+				if (h.pred_tick >= h.T && h.pred_tick <= h.T + 1) {
+					attained++;
+					const float tdx = cpos.X - h.wx;
+					const float tdy = cpos.Y - h.wy;
+					const float td = sqrtf(tdx * tdx + tdy * tdy);
+					sum_tdist += td;
+					if (td > max_tdist)
+						max_tdist = td;
+				}
+				// the contact tick's velocity vs the proven A18 law
+				// (velocity is fraction-independent)
+				if (law_n < 40) {
+					law_n++;
+					Vec3 pred;
+					float vdn, vzc;
+					CapBoard::RideGrayTick(p, n, csf, Vec3(),
+						cvel_pre,
+						t_contact - 1 < h.res.sched.n
+							? h.res.sched.side[t_contact - 1] : 0,
+						t_contact - 1 < h.res.sched.n
+							? h.res.sched.cosa[t_contact - 1]
+							: 1.f,
+						&pred, &vdn, &vzc);
+					if (memcmp(&pred.X, &s.vel.X, 4) == 0
+						&& memcmp(&pred.Y, &s.vel.Y, 4) == 0
+						&& memcmp(&pred.Z, &s.vel.Z, 4) == 0)
+						law_ok++;
+				}
+				// C0: every verified transfer emits the ONE
+				// canonical transition label
+				CapLabel::Transition L;
+				L.kind = 0;
+				L.sf_quarter = csf < 0.5f ? 1 : 0;
+				L.dt = t_contact;
+				L.u = cpos.X * fdsl.X + cpos.Y * fdsl.Y
+					+ cpos.Z * fdsl.Z;
+				L.v = cpos.X * fcsl.X + cpos.Y * fcsl.Y
+					+ cpos.Z * fcsl.Z;
+				L.psi = atan2f(s.vel.Y, s.vel.X);
+				L.vz = s.vel.Z;
+				L.s2 = s.vel.X * s.vel.X + s.vel.Y * s.vel.Y;
+				const float pre2 = cvel_pre.X * cvel_pre.X
+					+ cvel_pre.Y * cvel_pre.Y;
+				L.loss2 = pre2 > L.s2 ? pre2 - L.s2 : 0.f;
+				labels.push_back(L);
 			}
 			printf("capxfer: ---- ramp %.0f deg: %d targets = %d "
 				"culled (O(1)) + %d solved (organize %.1f ms "
@@ -23342,6 +23952,18 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapMat(o);
+	}
+	if (cmd == "capsolve") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapSolve(o);
+	}
+	if (cmd == "capmin") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapMin(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

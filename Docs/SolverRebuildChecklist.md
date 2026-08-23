@@ -9,11 +9,44 @@ Legend: `[x]` done+validated Â· `[~]` in progress Â· `[ ]` not started Â·
 `(!)` blocked/depends Â· each milestone ends with its ACCEPTANCE GATE â€”
 a measurable pass/fail, never a vibe.
 
-**NOW ->** STAGE A: EntranceField certification (the Air boundary
-operator). Resume from `Docs/AirRecSpec.md` - 13b is the advisor's
-ruling, 13c the measured answers to the nine Level-B gates, 13d the
-adversarial-review findings, 15 the standing ruling and the two Stage-A
-finish lines. The change-log tail below is the session journal.
+**NOW -> FINISH CATEGORY A (user directive 2026-08-23, session 33):
+every A row closes before more composition work.** Remaining open,
+the march order: A9 (terminal-constraint displacement), A14
+(local-set first-contact), A22 exact-hit tail, A23 (ride edge
+interception), A24 (adjacent-face clip packaging), A28 (corridor
+traversal), the A19/A20 carried-gap exact law, A8 direction-aware
+refinements, A11 short-flight interior coverage, then the A29 duck
+and A31 trigger debt rows. A32 stays excluded by decree. The
+change-log tail below is the session journal.
+
+**STATUS 2026-08-23f (session 33): THE A MARCH OPENS — SIX ROWS
+CLOSE (A0, A10, A12, A13, A21, A26).** User directive: finish ALL of
+category A before more composition. Two new suites. **capsolve 7/0**:
+A0 packaged (`CapFrame`, bitwise the inline rotation 40k/40k, round
+trip ≤ 0.0016u, rotation-commutation of full rollouts MEASURED at
+0.0002u worst — the world-frame witness rule stands on measurement);
+A12 (`CapP2P::SolveFreeN`, A11 over N with the certified B13
+precull) gated 36/36 against the same scan WITHOUT the precull, with
+10/10 engine-bitwise replays; A10 (`CapP2P::MinAirTime`, the A1
+z-window intersected with that scan) 24/24 == brute; A13
+(`CapFaceSolve::SolveToFace` + `PredictContact`) — capxfer
+REFACTORED to consume the package and stays 8/0 (one implementation,
+its gates the acceptance tests), plus a rotated-azimuth scenario
+exercising the general slice geometry: 12/12 exact contact
+predictions. **capmin 6/0**: A21 (`CapRideReach::MinRideTime`,
+indexed-first with exhaustive confirmation of every miss) 50/50 ==
+the brute per-layer scan, 12/12 minimum-time witnesses
+engine-validated with 0 boundary fringe; A26 (`CapLaunch::Detector`)
+— the launch threshold bracketed to ONE constant across approach
+speeds, (270.7, 272.4] ∋ 256+16 = the A3 hull-overhang law confirmed
+without assuming quadrant geometry; captures continue BITWISE 30
+re-anchored ticks; the first clean airborne tick matches the A1
+recurrence bitwise. **BUG FOUND AND FIXED by A12's small-N scan**:
+the brake-probe stride N/8 was 0 for N < 8 — an infinite loop latent
+in BOTH SolveFixedN and SolveTargetBatch since session 28 (no prior
+caller used small N); both sites clamped. Regression green after the
+fix: capxfer 8/0, capkern 5/5, capboard 5/5, capground 6/6,
+capwindow 6/6 (+ capp2p/capmat rerun).
 
 **STATUS 2026-08-23e (session 32): FIVE ROWS CLOSE — EXACT CONTACT
 PREDICTION AND THE PRODUCTION MATRIX.** A3 packaged

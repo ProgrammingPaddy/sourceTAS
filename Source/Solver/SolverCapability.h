@@ -1767,9 +1767,12 @@ namespace CapP2P {
 			// one-reversal shapes with a brake run at several
 			// start positions (short flights need the variety)
 			const int bss[3] = { 1, N / 4, N / 2 };
+			// stride clamped: N < 8 made N/8 = 0, an infinite loop
+			// (latent until A12's small-N scan, session 33)
+			const int blstep = N / 8 < 1 ? 1 : N / 8;
 			for (int bi = 0; bi < 3; ++bi)
-				for (int bl = N / 8; bl <= (3 * N) / 4;
-					bl += N / 8) {
+				for (int bl = blstep; bl <= (3 * N) / 4;
+					bl += blstep) {
 					if (bl < 2)
 						continue;
 					int rv0[3] = { 0, 0, 0 };
@@ -2134,9 +2137,12 @@ namespace CapP2P {
 		// interior fallback: the brake probes when the family shell
 		// cannot reach the target
 		if (best.residual > 48.f) {
+			// stride clamped (the same small-N zero-stride hazard as
+			// the fixed-N brake probes)
+			const int blstep2 = N / 8 < 1 ? 1 : N / 8;
 			for (int ss = -1; ss <= 1; ss += 2)
-				for (int bl = N / 8; bl <= (3 * N) / 4;
-					bl += N / 8) {
+				for (int bl = blstep2; bl <= (3 * N) / 4;
+					bl += blstep2) {
 					if (bl < 2)
 						continue;
 					int rv0[3] = { 0, 0, 0 };
@@ -3687,4 +3693,396 @@ namespace CapLabel {
 	}
 
 } // namespace CapLabel
+
+// ======================================================================
+// CAPFRAME - registry A0 (canonical frame transform), session 33.
+// The one rotation+translation every solver family uses: solves run
+// in the canonical frame (start at the origin, initial velocity
+// along +x), witnesses stay world-frame. The transform enters ONLY
+// through the target: schedules are side/cosa control laws that
+// re-derive wish inputs from the CURRENT velocity heading each tick,
+// so a schedule is frame-free by construction. Float rotation is NOT
+// exact - that is WHY witnesses are never rotated: the suite MEASURES
+// the rotation-commutation deviation instead of assuming it away.
+namespace CapFrame {
+
+	struct Frame2D {
+		float c = 1.f, s = 0.f;   // cos/sin of -psi0 (world->canon)
+		float ox = 0.f, oy = 0.f; // world origin of the frame
+	};
+
+	// The exact float expressions the solvers inline (same ops, same
+	// order): c = cosf(-psi0), s = sinf(-psi0).
+	inline Frame2D MakeCanonical(float psi0, float ox, float oy) {
+		Frame2D f;
+		f.c = cosf(-psi0);
+		f.s = sinf(-psi0);
+		f.ox = ox;
+		f.oy = oy;
+		return f;
+	}
+	inline void ToCanonical(const Frame2D& f, float wx, float wy,
+	                        float* cx, float* cy) {
+		const float dx = wx - f.ox;
+		const float dy = wy - f.oy;
+		*cx = f.c * dx - f.s * dy;
+		*cy = f.s * dx + f.c * dy;
+	}
+	inline void FromCanonical(const Frame2D& f, float cx, float cy,
+	                          float* wx, float* wy) {
+		// inverse rotation: transpose (angle +psi0)
+		*wx = f.ox + f.c * cx + f.s * cy;
+		*wy = f.oy - f.s * cx + f.c * cy;
+	}
+
+} // namespace CapFrame
+
+// ======================================================================
+// CAPP2P additions - registry A12 (free-N point-to-point) and A10
+// (minimum air time), session 33. A12 is A11 iterated over N with
+// the certified B13 precull (MinDepartSpeed > v0 is a NECESSARY-
+// condition skip - it can never hide a feasible N); A10 intersects
+// the A1 vertical timetable's z-window with that scan and stops at
+// the FIRST feasible N.
+namespace CapP2P {
+
+	// A12: smallest N in [n_lo, n_hi] whose fixed-N solve reaches
+	// (tx, ty) within the solver contract (residual <= 0.5). Returns
+	// the N, or -1. *culled counts B13 precull skips.
+	inline int SolveFreeN(const CapAir::AirKernelCtx& k, float v0,
+	                      float tx, float ty, int n_lo, int n_hi,
+	                      P2PResult* out, int* culled = nullptr) {
+		const float D = sqrtf(tx * tx + ty * ty);
+		if (culled)
+			*culled = 0;
+		for (int N = n_lo; N <= n_hi; ++N) {
+			if (N < 1)
+				continue;
+			const float vmin = CapBounds::MinDepartSpeed(k.p, D,
+				0.f, N);
+			if (vmin > v0) {
+				if (culled)
+					(*culled)++;
+				continue;
+			}
+			P2PResult r;
+			SolveFixedN(k, v0, tx, ty, N, &r);
+			if (r.solved) {
+				*out = r;
+				return N;
+			}
+		}
+		return -1;
+	}
+
+	// A10: minimum air time to a target whose arrival must land the
+	// A1 vertical state inside [z_lo, z_hi]. The vertical timetable
+	// is the exact recurrence from (z0, vz0); horizontal feasibility
+	// is the A12 scan restricted to vertically-legal N.
+	inline int MinAirTime(const CapAir::AirKernelCtx& k, float v0,
+	                      float tx, float ty, float z0, float vz0,
+	                      float z_lo, float z_hi, int n_hi,
+	                      P2PResult* out, int* culled = nullptr) {
+		const float D = sqrtf(tx * tx + ty * ty);
+		if (culled)
+			*culled = 0;
+		float z = z0, vz = vz0;
+		for (int N = 0; N <= n_hi; ++N) {
+			const bool zok = z >= z_lo && z <= z_hi;
+			if (N >= 1 && zok) {
+				const float vmin = CapBounds::MinDepartSpeed(k.p,
+					D, 0.f, N);
+				if (vmin > v0) {
+					if (culled)
+						(*culled)++;
+				} else {
+					P2PResult r;
+					SolveFixedN(k, v0, tx, ty, N, &r);
+					if (r.solved) {
+						*out = r;
+						return N;
+					}
+				}
+			}
+			CapWindow::VTick(k.p, &z, &vz);
+		}
+		return -1;
+	}
+
+} // namespace CapP2P
+
+// ======================================================================
+// CAPFACESOLVE - registry A13 (point-to-face solve), session 33.
+// The packaged form of the C7 composition's solving core: candidate
+// arrival ticks from the A1 vertical timetable, the face's 1-D slice
+// line per tick on the HULL-EXPANDED plane (A2 + A3), the certified
+// B13 cull, batch A11 per tick (A12 restricted to the slice), and
+// the EXACT contact prediction (A4 kernel roll + the engine's trace
+// clip law: fraction (d1 - 1/32)/(d1 - d2), end exactly 1/32 above
+// the traced plane, clipped move velocity slides the remaining
+// time). capxfer consumes THIS implementation - its gates are the
+// acceptance tests.
+namespace CapFaceSolve {
+
+	struct FaceSolveCfg {
+		Vec3 n;                     // face normal (unit, engine's)
+		float d_exp = 0.f;          // HULL-EXPANDED plane distance
+		int t_lo = 1, t_hi = 90, t_step = 1;
+		float z_lo = -1e30f, z_hi = 1e30f;  // boarding band (origin z)
+		float lam_lo = 0.f, lam_hi = 0.f, lam_step = 1.f;
+		int horizon = 95;           // kernel-roll limit
+	};
+	struct FaceHit {
+		int T = 0;                  // requested arrival tick
+		float lam = 0.f;            // slice-line coordinate
+		float wx = 0.f, wy = 0.f;   // world target on the line
+		float zT = 0.f;             // timetable z at T
+		int pred_tick = -1;         // EXACT predicted contact tick
+		Vec3 pred_end;              // EXACT predicted end position
+		CapP2P::P2PResult res;      // the A11 solution
+	};
+
+	// The exact contact prediction for one schedule against one
+	// expanded plane. Returns the predicted contact tick (engine
+	// tick index, first contact) or -1; *end_out = the engine's
+	// end-of-tick position under the clip law.
+	inline int PredictContact(const CapAir::AirKernelCtx& k,
+	                          const Vec3& n, float d_exp,
+	                          const Vec3& xpos, const Vec3& xvel,
+	                          const CapP2P::P2PSchedule& sched,
+	                          int horizon, Vec3* end_out) {
+		float kx = xpos.X, ky = xpos.Y, kz = xpos.Z;
+		float kvx = xvel.X, kvy = xvel.Y, kvz = xvel.Z;
+		for (int t = 0; t < horizon; ++t) {
+			const signed char ds = t < sched.n ? sched.side[t] : 0;
+			const float cca = t < sched.n ? sched.cosa[t] : 1.f;
+			float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+			CapAir::KernelTick(k, kx, ky, kz, kvx, kvy, kvz, ds,
+				cca, &nx2, &ny2, &nz2, &nvx2, &nvy2, &nvz2);
+			const float da = n.X * kx + n.Y * ky + n.Z * kz
+				- d_exp;
+			const float db = n.X * nx2 + n.Y * ny2 + n.Z * nz2
+				- d_exp;
+			if (db <= 0.f && da > 0.f) {
+				float fe = (da - 0.03125f) / (da - db);
+				if (fe < 0.f)
+					fe = 0.f;
+				const Vec3 C(kx + (nx2 - kx) * fe,
+					ky + (ny2 - ky) * fe,
+					kz + (nz2 - kz) * fe);
+				const Vec3 vm((nx2 - kx) / k.p.dt,
+					(ny2 - ky) / k.p.dt,
+					(nz2 - kz) / k.p.dt);
+				Vec3 vc;
+				Fn::ClipVelocity(vm, n, &vc);
+				const float rem = (1.f - fe) * k.p.dt;
+				if (end_out)
+					*end_out = Vec3(C.X + vc.X * rem,
+						C.Y + vc.Y * rem, C.Z + vc.Z * rem);
+				return t + 1;
+			}
+			kx = nx2;
+			ky = ny2;
+			kz = nz2;
+			kvx = nvx2;
+			kvy = nvy2;
+			kvz = nvz2;
+		}
+		return -1;
+	}
+
+	// A13: enumerate (T, lambda) targets on the face and solve each
+	// through batch A11, predicting every solved schedule's contact
+	// exactly. out receives one FaceHit per SOLVED target;
+	// *targets/*culled count the enumeration; *organize_us the batch
+	// builds; *solve_us the per-target solving.
+	inline void SolveToFace(const CapAir::AirKernelCtx& k,
+	                        const FaceSolveCfg& c, const Vec3& xpos,
+	                        const Vec3& xvel,
+	                        std::vector<FaceHit>* out, int* targets,
+	                        int* culled, double* organize_us,
+	                        double* solve_us) {
+		out->clear();
+		if (targets)
+			*targets = 0;
+		if (culled)
+			*culled = 0;
+		if (organize_us)
+			*organize_us = 0.0;
+		if (solve_us)
+			*solve_us = 0.0;
+		const float v0h = sqrtf(xvel.X * xvel.X + xvel.Y * xvel.Y);
+		const float psi0 = atan2f(xvel.Y, xvel.X);
+		const CapFrame::Frame2D F = CapFrame::MakeCanonical(psi0,
+			xpos.X, xpos.Y);
+		// the A1 vertical timetable (t range clamped to the table)
+		float zt[192];
+		const int t_hi_eff = c.t_hi < 191 ? c.t_hi : 191;
+		{
+			float z = xpos.Z, vz = xvel.Z;
+			for (int t = 0; t <= t_hi_eff; ++t) {
+				zt[t] = z;
+				CapWindow::VTick(k.p, &z, &vz);
+			}
+		}
+		// the slice line's horizontal geometry
+		const float nh2 = c.n.X * c.n.X + c.n.Y * c.n.Y;
+		if (nh2 <= 0.f)
+			return;   // horizontal face has no slice line
+		const float nhl = sqrtf(nh2);
+		const float ex = -c.n.Y / nhl, ey = c.n.X / nhl;
+		CapP2P::P2PBatch B;
+		int batchN = -1;
+		for (int T = c.t_lo; T <= t_hi_eff; T += c.t_step) {
+			const float zT = zt[T];
+			if (zT < c.z_lo || zT > c.z_hi)
+				continue;
+			// base point of the slice line: n_h . p = rhs
+			const float rhs = c.d_exp - c.n.Z * zT;
+			const float bx = c.n.X * rhs / nh2;
+			const float by = c.n.Y * rhs / nh2;
+			for (float lam = c.lam_lo; lam <= c.lam_hi;
+				lam += c.lam_step) {
+				if (targets)
+					(*targets)++;
+				const float wx = bx + ex * lam;
+				const float wy = by + ey * lam;
+				const float dx = wx - xpos.X;
+				const float dy = wy - xpos.Y;
+				const float D = sqrtf(dx * dx + dy * dy);
+				if (CapBounds::MinDepartSpeed(k.p, D, 0.f, T)
+					> v0h) {
+					if (culled)
+						(*culled)++;
+					continue;
+				}
+				float tx, ty;
+				CapFrame::ToCanonical(F, wx, wy, &tx, &ty);
+				if (batchN != T) {
+					const auto tb =
+						std::chrono::steady_clock::now();
+					CapP2P::BuildP2PBatch(k, v0h, T, &B);
+					if (organize_us)
+						*organize_us += std::chrono::duration<
+							double, std::micro>(
+							std::chrono::steady_clock::now()
+							- tb).count();
+					batchN = T;
+				}
+				const auto ts = std::chrono::steady_clock::now();
+				CapP2P::P2PResult res;
+				CapP2P::SolveTargetBatch(k, B, tx, ty, &res);
+				if (solve_us)
+					*solve_us += std::chrono::duration<double,
+						std::micro>(
+						std::chrono::steady_clock::now()
+						- ts).count();
+				if (!res.solved)
+					continue;
+				FaceHit h;
+				h.T = T;
+				h.lam = lam;
+				h.wx = wx;
+				h.wy = wy;
+				h.zT = zT;
+				h.res = res;
+				h.pred_tick = PredictContact(k, c.n, c.d_exp,
+					xpos, xvel, res.sched, c.horizon,
+					&h.pred_end);
+				out->push_back(h);
+			}
+		}
+	}
+
+} // namespace CapFaceSolve
+
+// ======================================================================
+// CAPRIDEREACH addition - registry A21 (minimum ride time), session
+// 33: the inverse query of the A20 surface. The first layer whose
+// reachable set answers an in-plane target within the lattice
+// contract IS the minimum ride time at that resolution; the layer's
+// witness (parent chain) is the constructive schedule.
+namespace CapRideReach {
+
+	// Smallest N in [1, S.p.n_max] whose layer answers (tu, tv)
+	// within `contract` units in-plane. Returns N (with *node_out /
+	// *res_out from that layer's query) or -1. The indexed query
+	// answers first; a layer is SKIPPED only after the exhaustive
+	// scan confirms the miss (the ring representative can sit
+	// farther than another cell's node), so the result equals the
+	// brute per-layer minimum exactly.
+	inline int MinRideTime(const RRSurface& S, float tu, float tv,
+	                       float contract, int* node_out = nullptr,
+	                       float* res_out = nullptr) {
+		for (int N = 1; N <= S.p.n_max; ++N) {
+			float res = 1e30f;
+			int node = QueryTargetFast(S, N, tu, tv, &res);
+			if (node >= 0 && res > contract) {
+				float rex = 1e30f;
+				const int nex = QueryTarget(S, N, tu, tv, &rex);
+				if (nex >= 0 && rex < res) {
+					node = nex;
+					res = rex;
+				}
+			}
+			if (node >= 0 && res <= contract) {
+				if (node_out)
+					*node_out = node;
+				if (res_out)
+					*res_out = res;
+				return N;
+			}
+		}
+		return -1;
+	}
+
+} // namespace CapRideReach
+
+// ======================================================================
+// CAPLAUNCH - registry A26 (edge launch), session 33. The unified
+// leave-ground event detector: feed the per-tick PlayerState stream
+// of ANY exact rollout; the detector reports the first grounded ->
+// airborne transition and captures both boundary states. The
+// capability owns no physics - the states come from the engine (or
+// a certified kernel), so the captured launch state is exact by
+// construction; the suite gates re-anchored bitwise continuation,
+// the A3 hull-overhang law at the edge, and the A1 handoff on the
+// first airborne tick.
+namespace CapLaunch {
+
+	struct Launch {
+		bool fired = false;
+		int tick = -1;            // tick index of the FIRST airborne
+		                          // state (post)
+		PlayerState pre;          // last grounded state
+		PlayerState post;         // first airborne state
+	};
+
+	struct Detector {
+		bool seen_ground = false;
+		bool prev_ground = false;
+		bool have_prev = false;
+		PlayerState prev;
+		Launch out;
+		// Feed the state AFTER tick `tick` executed.
+		void Feed(int tick, const PlayerState& s) {
+			if (out.fired) {
+				return;
+			}
+			const bool g = s.on_ground;
+			if (have_prev && seen_ground && prev_ground && !g) {
+				out.fired = true;
+				out.tick = tick;
+				out.pre = prev;
+				out.post = s;
+			}
+			if (g)
+				seen_ground = true;
+			prev = s;
+			prev_ground = g;
+			have_prev = true;
+		}
+	};
+
+} // namespace CapLaunch
 } // namespace Solver

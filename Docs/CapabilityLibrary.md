@@ -391,13 +391,15 @@ family), then the LB surfaces retire into interval semantics.
    an underived threshold; the LB-vs-band comparison is per-sign
    (chirality-aware) and seam-wrapped.
 
-**Next (spine order, updated session 32):** C0 label production
-plumbing into C9 min-plus composition (C6+C7 now emit the unified
-label); B16 successor-face sets and C5 requirement matching on the
-certified B13/B14 bounds; cheaper A20 builds (the C6 amortization
-lever, ~16 s/row today); the carried-gap exact law (ride boundary
-sliver); B22 heading-aware ceiling; direction-aware D* UB; A11
-analytic inversion + short-flight interior coverage; A29/A31 debts.
+**Next (user directive session 33): FINISH ALL OF CATEGORY A before
+more composition.** March order: A9 (terminal-constraint
+displacement), A14 (local-set first-contact), A22 exact-hit tail on
+the ride plane, A23 (ride edge interception), A24 (adjacent-face
+clip packaging), A28 (corridor traversal), the A19/A20 carried-gap
+exact law, A8 direction-aware refinements, A11 short-flight interior
+coverage, then the A29 duck and A31 trigger debt rows. A32 stays
+excluded by decree. Composition work (C9, B16, C5, cheaper A20
+builds) resumes after A closes.
 
 **Row-list note (session 27):** `Docs/CapabilityChecklist.md` is the
 CANONICAL complete row list (it extends the registry with A29–A32 and
@@ -406,6 +408,15 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23f (session 33): **the A march opens (user directive:
+  finish all of category A first) — A0, A10, A12, A13, A21, A26
+  close** (detail in the checklist change log). capsolve 7/0 +
+  capmin 6/0; capxfer refactored to consume the packaged A13
+  (`CapFaceSolve`) and stays 8/0. The A12 small-N scan found and
+  fixed a latent infinite loop (brake-probe stride N/8 = 0 for
+  N < 8) in both fixed-N solvers. A26's launch-threshold bracket
+  (270.7, 272.4] confirms the A3 hull-overhang constant 256+16 by
+  pure measurement.
 - 2026-08-23e (session 32): **the composition layer becomes real —
   A3, C0, C1, C6, C7 v2 all close** (full detail in the checklist
   change log, the per-session record since session 29). A3 packaged
