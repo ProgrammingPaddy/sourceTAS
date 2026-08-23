@@ -1,0 +1,161 @@
+<title>The Heading Laws</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .callout{background:var(--blue-soft); border:1px solid var(--blue); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout b{color:var(--blue)}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; margin:14px 0}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 39</div>
+  <h1>The Heading Laws</h1>
+  <p class="sub">The last A-side amber resolves as theorem, not tuning: two certified lemmas about
+  what a heading can do in one tick, and the direction-aware travel bound they gate. The physical
+  capability category is now complete with nothing left open.</p>
+  <div class="meta">
+    <span>2026-08-23</span>
+    <span>capreach 8/0 · twelve suites green</span>
+    <span>A8's direction-aware family: certified</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">Heading freedom</div><div class="v">s ≤ 562.5</div>
+    <p>below the accel budget, one tick reaches ANY heading — constructive reversal witnesses, arithmetic-exact</p></div>
+  <div class="tile"><div class="k">The turn bound</div><div class="v">93.3% tight</div>
+    <p>above the budget: one tick turns at most atan(B/(s−B)) — unbeaten by 200,000 adversarial actions</p></div>
+  <div class="tile"><div class="k">Direction-aware UB</div><div class="v">4 / 4 clean</div>
+    <p>the turn-gated travel bound, unbeaten by 20k adversarial schedules per (speed, direction) config</p></div>
+  <div class="tile"><div class="k">A-category ambers</div><div class="v">0</div>
+    <p>every physical-capability row certified, every named refinement resolved or scoped by law</p></div>
+</div>
+
+<h2><span class="idx">01</span>Lemma one — heading is free below the budget</h2>
+<p class="lede">The air-accelerate budget B = airaccelerate · maxspeed · dt · sf = 562.5·sf is
+the most velocity one tick can add. Below it, that's enough to erase the heading entirely.</p>
+<p>The full-brake wish applies a = min(30 + s, B); for s ≤ B − 30 that's 30 + s exactly, landing
+the velocity at precisely 30 u/s <i>backward</i> — and for s up to B the reversal still clears
+with whatever remains. The witnesses are arithmetic-exact: from s = 555, the backward speed
+measured <b>7.50 = 562.5 − 555</b>, the budget cap showing itself digit for digit. Intermediate
+wishes sweep every heading between. The consequence is the scoping result that shapes everything
+downstream: <b>direction-aware bounds can only improve on the blind travel integral above the
+budget — below it, heading costs speed but never time.</b></p>
+
+<h2><span class="idx">02</span>Lemma two — the turn bound above it</h2>
+<p>Above the budget, one tick's wish adds at most B perpendicular while at least s − B of forward
+speed survives: <b>tan|Δψ| ≤ B/(s − B)</b>. Sound by construction — and the falsifier says it's
+nearly the truth: across 200,000 adversarial one-tick actions spanning speeds to 3000, none
+exceeded it and the worst reached <b>93.3%</b> of it. At 1400 u/s that's a hard ceiling of ~34°
+per tick; at 2500, ~16°. Fast flights cannot turn around quickly without paying the brake.</p>
+
+<h2><span class="idx">03</span>The turn-gated travel bound</h2>
+<p class="lede">Displacement along a direction φ gains nothing while the heading points more than
+90° away — and rotating there takes provable time.</p>
+<div class="panel">
+  <p><span class="hl">The bound:</span> D*_φ(N) ≤ Σ from i = T_turn to N−1 of √(s0² + 900i)·dt —
+  the blind integrand with its first T_turn terms removed, where T_turn is the minimum
+  heading-rotation time under the turn bound evaluated on the certified minimum-speed path
+  (speed sheds at most B per tick). Sound for every φ; T_turn = 0 at |φ| ≤ 90° reproduces the
+  blind bound exactly.</p>
+  <p><span class="hl">The measurements:</span> at s0 1400, the backward bound is 801.7u against
+  the blind 843.7u — a certified 5% tightening. Twenty thousand adversarial braked-and-turning
+  schedules per configuration never beat it; their best reached only 13–39% of the bound, the
+  honest slack line that says the certified part is the floor of what direction-awareness could
+  someday claim, not the ceiling.</p>
+</div>
+<div class="callout"><b>Where this feeds:</b> the heading laws enter the terms table as
+first-class engine truths, gate the A8 row's direction-aware upper bound, and lay the foundation
+for B22's heading-aware speed ceiling when the composition layer wants it. The local-refinement
+alternative stays documented on-demand — no consumer has asked for it yet.</div>
+
+<h2><span class="idx">04</span>The board — and the category, finished for real</h2>
+<div class="tablewrap"><table>
+  <tr><th>Suite</th><th>Result</th></tr>
+  <tr><td class="nm">capreach (the subject)</td><td class="num"><span class="chip c-pass">8 / 0</span></td></tr>
+  <tr><td class="nm">capkern · capboard · capground · capwindow · capsolve · capp2p</td>
+    <td class="num"><span class="chip c-pass">5/5 · 5/5 · 6/6 · 6/6 · 10/0 · 21/0</span></td></tr>
+  <tr><td class="nm">capcontact · capmin · capgap · capdebt · capxfer</td>
+    <td class="num"><span class="chip c-pass">5/0 · 8/0 · 6/0 · 7/0 · 8/0</span></td></tr>
+</table></div>
+<p>A0–A31 certified, A32 excluded by decree, and now zero open ambers — sessions 33 through 39
+delivered the directive in full. The composition layer resumes where it paused: C9 min-plus over
+the C0 labels both transfer kernels emit, B16 and C5 on the certified bounds, and cheaper A20
+builds as the C6 amortization lever.</p>
+
+<footer>SourceTAS capability library · session 39 · 2026-08-23 ·
+docs: CapabilityChecklist.md + .html (the A8 row, the heading-laws term, the category-complete
+header), CapabilityLibrary.md, SolverRebuildChecklist.md</footer>
+</div>

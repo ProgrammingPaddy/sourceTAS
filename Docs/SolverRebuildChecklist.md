@@ -19,6 +19,23 @@ resumption recorded in the library's next-spine (C9 min-plus over
 the C0 labels, B16 + C5 on certified B13/B14, cheaper A20 builds).
 The change-log tail below is the session journal.
 
+**STATUS 2026-08-23l (session 39): THE LAST A AMBER RESOLVES — THE
+A CATEGORY IS COMPLETE WITH NO OPEN AMBERS.** A8's direction-aware
+family lands as certified law (capreach 8/0): the HEADING-FREEDOM
+LEMMA (one-tick reversal at s ≤ B = 562.5·sf — constructive 4/4,
+arithmetic-exact: backward speed from 555 is 7.50 = 562.5 − 555),
+the TURN-BOUND LEMMA (atan(B/(s−B)) per tick above the budget —
+unbeaten by 200k adversarial one-tick actions, measured 93.3%
+TIGHT), and the TURN-GATED TRAVEL UB (the blind integral with its
+first T_turn terms removed; sound for every φ; a certified 3–5%
+backward tightening; unbeaten by 20k adversarial schedules per
+config, adversaries reaching only 13–39% — the honest slack). The
+scoping result: direction-awareness can only bite above the accel
+budget — below it heading is provably one-tick free. The heading
+laws enter the terms table and feed B22. ALL TWELVE suites green.
+NOW -> composition resumes: C9 min-plus over the C0 labels, B16 +
+C5 on certified B13/B14, cheaper A20 builds.
+
 **STATUS 2026-08-23k (session 38): THE A11 INTERIOR AMBER FALLS —
 14.1% → 4.9% MISS.** A measured-decision session: the A9 transplant
 (brake STRENGTH as a per-candidate lever; BRAKE-FIRST + post-brake-

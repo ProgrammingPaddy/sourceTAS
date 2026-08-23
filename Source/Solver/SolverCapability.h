@@ -5404,6 +5404,77 @@ namespace CapTrigger {
 } // namespace CapTrigger
 
 // ======================================================================
+// CAPBOUNDS additions - registry A8's direction-aware family (B22-
+// adjacent), session 39. TWO CERTIFIED LEMMAS and the bound they
+// gate:
+//   HEADING-FREEDOM LEMMA: at or below the accel budget
+//   (s <= B = airaccelerate * maxspeed * dt * sf = 562.5 * sf) one
+//   tick reaches ANY heading - the full-brake wish applies
+//   a = min(30 + s, B) >= s and lands the velocity beyond reversal;
+//   intermediate wishes sweep every heading between. Constructive
+//   witnesses in capreach. Direction-aware bounds can therefore
+//   only improve on the blind travel integral in the ABOVE-budget
+//   regime - the scoping result.
+//   TURN-BOUND LEMMA: above the budget, one tick's heading change
+//   obeys tan|dpsi| <= B / (s - B): the wish adds at most B
+//   perpendicular while at least s - B forward survives. SOUND, not
+//   tight - the falsifier measures the gap.
+// THE TURN-GATED TRAVEL UB (direction-aware D*): displacement along
+// a direction phi from the initial heading gains nothing while the
+// heading is more than 90 degrees away; rotating |phi| - 90deg
+// takes at least T_turn ticks under the turn bound evaluated on the
+// certified minimum-speed path s_min(i) = max(0, s0 - B*i) (speed
+// sheds at most B per tick, |dv| <= a <= B). Therefore
+//   D*_phi(N) <= sum_{i = T_turn}^{N-1} sqrt(s0^2 + 900 i) * dt
+// - the blind integrand with its first T_turn terms REMOVED. Sound
+// for every phi (T_turn = 0 when |phi| <= 90deg reproduces the
+// blind bound exactly).
+namespace CapBounds {
+
+	inline float AccelBudget(const MoveParams& p, float sf) {
+		return p.airaccelerate * p.maxspeed * p.dt * sf;
+	}
+
+	// Certified per-tick turn UB at speed s (radians); pi at or
+	// below the budget (heading one-tick free).
+	inline float MaxTurnUB(const MoveParams& p, float s, float sf) {
+		const float B = AccelBudget(p, sf);
+		if (s <= B)
+			return 3.14159265f;
+		return atanf(B / (s - B));
+	}
+
+	// Minimum ticks to bring the heading within 90 degrees of phi.
+	inline int TurnGateTicks(const MoveParams& p, float s0,
+	                         float phi_abs, float sf) {
+		float need = phi_abs - 1.57079633f;
+		if (need <= 0.f)
+			return 0;
+		const float B = AccelBudget(p, sf);
+		int t = 0;
+		float smin = s0;
+		while (need > 0.f && t < 1024) {
+			need -= MaxTurnUB(p, smin, sf);
+			smin = smin - B > 0.f ? smin - B : 0.f;
+			++t;
+		}
+		return t;
+	}
+
+	// The direction-aware travel UB (units).
+	inline float TurnGatedTravelUB(const MoveParams& p, float s0,
+	                               float phi_abs, int N, float sf) {
+		const int tg = TurnGateTicks(p, s0, phi_abs, sf);
+		double sum = 0.0;
+		for (int i = tg; i < N; ++i)
+			sum += sqrt(static_cast<double>(s0)
+				* static_cast<double>(s0) + 900.0 * i) * p.dt;
+		return static_cast<float>(sum);
+	}
+
+} // namespace CapBounds
+
+// ======================================================================
 // CAPRIDEREACH addition - registry A23 (ride edge interception),
 // session 35: the earliest ride tick at which each sample point
 // along an in-plane edge segment becomes reachable at the lattice

@@ -20315,6 +20315,151 @@ namespace {
 					worst_lb);
 			}
 		}
+		// ---- A8 direction-aware family (session 39): the two
+		// certified lemmas and the turn-gated travel UB, each under
+		// adversarial fire.
+		// (1) HEADING FREEDOM below the accel budget: constructive
+		// one-tick reversal witnesses through the certified kernel.
+		{
+			const float svals[4] = { 100.f, 300.f, 500.f, 555.f };
+			int wn = 0, wok = 0;
+			float worst_back = 1e30f;
+			for (int i = 0; i < 4; ++i) {
+				const float s0 = svals[i];
+				float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+				// stored (side +1, cosa +1) = the true full-brake
+				// wish (the stored<->true bridge negates both)
+				CapAir::KernelTick(k, 0.f, 0.f, 8000.f, s0, 0.f,
+					0.f, 1, 1.f, &nx2, &ny2, &nz2, &nvx2, &nvy2,
+					&nvz2);
+				wn++;
+				const float s2d = sqrtf(nvx2 * nvx2 + nvy2 * nvy2);
+				if (nvx2 < 0.f && s2d > 1.f) {
+					wok++;
+					if (-nvx2 < worst_back)
+						worst_back = -nvx2;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d/%d speeds <= budget "
+				"reverse in ONE tick (slowest backward speed "
+				"%.2f u/s; the full-brake wish a = min(30+s, "
+				"562.5))", wok, wn, worst_back);
+			check("A8 heading-freedom lemma", wok == wn, buf);
+		}
+		// (2) the per-tick TURN BOUND above the budget: dense
+		// adversarial sweep - no one-tick action may beat
+		// tan|dpsi| <= B/(s-B)
+		{
+			const float B = CapBounds::AccelBudget(p, 1.f);
+			long long n = 0, bad = 0;
+			float tight = 0.f;
+			for (int it = 0; it < 200000; ++it) {
+				const float s0 = B + 1.f + static_cast<float>(
+					rnd() % 2400);
+				const signed char sd = (rnd() & 1) ? 1 : -1;
+				const float ca = 1.f - 2.f
+					* static_cast<float>(rnd() & 1023) / 1023.f;
+				float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+				CapAir::KernelTick(k, 0.f, 0.f, 8000.f, s0, 0.f,
+					0.f, sd, ca, &nx2, &ny2, &nz2, &nvx2, &nvy2,
+					&nvz2);
+				const float dpsi = fabsf(atan2f(nvy2, nvx2));
+				const float ub = CapBounds::MaxTurnUB(p, s0, 1.f);
+				n++;
+				if (dpsi > ub * (1.f + 1e-5f) + 1e-6f)
+					bad++;
+				else if (ub > 0.f && dpsi / ub > tight)
+					tight = dpsi / ub;
+			}
+			snprintf(buf, sizeof(buf), "%lld one-tick actions above "
+				"the budget: %lld beat tan|dpsi| <= B/(s-B) "
+				"(measured tightness: worst action reaches "
+				"%.1f%% of the bound)", n, bad, tight * 100.f);
+			check("A8 turn-bound lemma", n >= 100000 && bad == 0,
+				buf);
+		}
+		// (3) THE TURN-GATED TRAVEL UB: adversarial schedule search
+		// for backward directions - braked, turning schedules try to
+		// out-travel the certified bound along phi
+		{
+			int cfgs = 0, clean = 0;
+			float worst_frac = 0.f;
+			const float s0s[2] = { 800.f, 1400.f };
+			const float phis[2] = { 2.3561945f, 3.14159265f };
+			const int N = 40;
+			for (int si = 0; si < 2; ++si)
+				for (int pi = 0; pi < 2; ++pi) {
+					const float s0 = s0s[si];
+					const float phi = phis[pi];
+					const float ub = CapBounds::TurnGatedTravelUB(
+						p, s0, phi, N, 1.f);
+					const float cph = cosf(phi);
+					const float sph = sinf(phi);
+					float bestp = -1e30f;
+					long long viol = 0;
+					for (int tr = 0; tr < 20000; ++tr) {
+						CapP2P::P2PSchedule sc;
+						sc.n = N;
+						signed char side = 0;
+						int age = 6;
+						for (int t = 0; t < N; ++t) {
+							signed char ds;
+							float ca;
+							const unsigned r2 = rnd();
+							if ((r2 & 7) == 0) {
+								ds = 0;
+								ca = 1.f;
+							} else {
+								ds = (r2 & 8) ? 1 : -1;
+								if (side != 0 && ds != side
+									&& age < min_gap)
+									ds = side;
+								ca = 1.f - 2.f
+									* static_cast<float>(
+										(r2 >> 8) & 1023)
+									/ 1023.f;
+							}
+							sc.side[t] = ds;
+							sc.cosa[t] = ca;
+							if (ds != 0 && side != 0
+								&& ds != side)
+								age = 1;
+							else
+								age = age < 6 ? age + 1 : 6;
+							if (ds != 0)
+								side = ds;
+						}
+						float ex, ey, evx, evy;
+						CapP2P::Roll(k, s0, sc, &ex, &ey, &evx,
+							&evy);
+						const float proj = ex * cph + ey * sph;
+						if (proj > bestp)
+							bestp = proj;
+						if (proj > ub + 0.5f)
+							viol++;
+					}
+					cfgs++;
+					if (viol == 0)
+						clean++;
+					if (ub > 1.f && bestp > 0.f
+						&& bestp / ub > worst_frac)
+						worst_frac = bestp / ub;
+					printf("capreach:   [A8 dir-UB] s0 %.0f phi "
+						"%.0f deg: bound %.1f u, best adversarial "
+						"%.1f u (%.0f%%), blind bound %.1f u\n",
+						s0, phi * 57.2957795f, ub,
+						bestp, ub > 0.f ? 100.f * bestp / ub
+							: 0.f,
+						CapBounds::TurnGatedTravelUB(p, s0, 0.f,
+							N, 1.f));
+				}
+			snprintf(buf, sizeof(buf), "%d/%d (s0, phi) configs "
+				"unbeaten by 20k adversarial schedules each "
+				"(worst reaches %.0f%% of the bound)", clean,
+				cfgs, worst_frac * 100.f);
+			check("A8 turn-gated travel UB", cfgs == 4
+				&& clean == cfgs, buf);
+		}
 		printf("capreach: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "REACH FAMILY LB/UB CERTIFIED AT THE "
 				"MEASURED PITCH"

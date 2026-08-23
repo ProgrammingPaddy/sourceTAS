@@ -34,7 +34,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A5 | dwell automaton | dwell age, min_gap 6 | all schedule legality | counter + comparison | — | ~ns | `[x]` guarded by the lattice-agreement gate |
 | A6 | N-tick turn/gain max V* | s², ψ, reversal count | B5/B6, C5, transfer valuation | closed-form ceiling √(s0²+900N) for bounds; band table for full surfaces | parametric family (via A12 machinery, future); shooting oracle | ceiling O(1) ns; band build 48–276 s/v0, then O(1) query; gaps: sampled-action 0, continuous +20…+93 u/s measured | `[x]` as certified interval; `[ ]` heading-aware UB (B22) |
 | A7 | dual Ψ* (max turn at speed floor) | ψ, V_min | B5, approach planning | read A6 layers | — | O(bins) µs | `[x]` with A6 |
-| A8 | directional reach D* | arc length L(N), projections | B2, B13, corridor checks | certified bounds (single query); on-demand sweep (batch) | parametric family endpoints (future, exact); finer local refinement | bounds O(N) ~µs; sweep 31.1M nodes / 101 s at pitch (96, 24), N=60 | `[x]` LB+UB at measured pitch; `[ ]` direction-aware UB, local refinement |
+| A8 | directional reach D* | arc length L(N), projections, **the heading-freedom + turn-bound lemmas** | B2, B13, B22, corridor checks | certified bounds (single query); on-demand sweep (batch); **the TURN-GATED direction-aware UB (s39): D*_φ(N) ≤ Σ_{i≥T_turn} √(s0²+900i)·dt, gated by two certified lemmas — heading is ONE-TICK FREE at s ≤ B = 562.5·sf (full-brake reversal, constructive), and above B one tick turns at most atan(B/(s−B)) (measured 93.3% tight)** | parametric family endpoints (future, exact); local refinement on-demand (no consumer yet) | bounds O(N) ~µs; the direction-aware UB certifies a 3–5% tightening for backward φ at high speed | `[x]` s39 (capreach 8/0): reversal witnesses 4/4 exact (slowest backward 7.50 = 562.5−555, the arithmetic confirming the law); turn bound unbeaten by 200k adversarial one-tick actions; the travel UB unbeaten by 20k schedules × 4 (s0, φ) configs — the LAST A amber resolved |
 | A9 | displacement with terminal constraint | endpoint + (ψ_N or V_N) | A22 pairing | `CapP2P::SolveTerminal` — endpoint-ranked family (reversals × brake placement × brake STRENGTH) → heading-feasible kernel rolls → scored coarse climb (both contracts judged per roll) → **the 3×3 finisher: (tail c1, tail c2, brake strength) against (endpoint x, y, heading) — a square Newton** → accept only when BOTH contracts hold, else DECLINE | Pareto layer of A8 sweep (future); richer heading family (second brake run) | ~24 ms/request | `[x]` v1 s34 (capsolve): contracts HARD 19/19 (endpoint ≤ 0.5u, heading ≤ tol, independently re-rolled), engine bitwise 8/8; acceptance 19/40 vs the adversarial generator (random braked schedules' exact terminal states) = the measured family-sufficiency line |
 | A10 | minimum air time N_min | N window, feasibility | route timing, B21 | `CapP2P::MinAirTime` — the A1 z-window intersected with the A12 scan, first feasible N wins | table lookup | 3.0 ms mean (window-restricted scan) | `[x]` s33 (capsolve: 24/24 == brute full scan) |
 | A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 21/0): machinery 99–100/100; single-shot 0.6–3.3 ms; BATCH MODE (s30): organize 0.1–1.4 ms/start, then 34–135 µs/target with full-solver fallback — the 10–30 µs ambition met at short flights; 150/150 bitwise replays** | `[x]` machinery + batch; interior amber SUBSTANTIALLY RESOLVED s38 — overall miss 14.1% → 4.9%, the hard cell (v0 1400, N 30) 48 → 83 of 100, via the A9-lesson transplant: brake STRENGTH as a per-candidate lever, BRAKE-FIRST + post-brake-reversal shapes (the measured missing class), K=8, and the **3-parameter least-norm rescue tail** ((c1, c2, brake strength) via Jᵀ(JJᵀ)⁻¹, firing only after the proven 2×2 starts leave a brake candidate unsolved — always-on measurably destabilized long-N solves, and post-brake tail-sizing measurably regressed here where it had fixed A9); remaining measured amber: multi-brake-phase deep interior (worst 48u at 800/N90) |
@@ -123,6 +123,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | jump impulse | double-precision constant × stamina scale (decoded) | A30, A25 |
 | duck shift / crop | 8.5u air shift; 0.34 speed crop (decoded) | A29 |
 | basevel / gravity_scale | trigger-applied state (mirror carries it) | A31 |
+| the heading laws (s39) | heading is ONE-TICK FREE at s ≤ B = airaccelerate·maxspeed·dt·sf = 562.5·sf (the full-brake wish a = min(30+s, B) reverses; intermediate wishes sweep all headings); above B: one-tick turn ≤ atan(B/(s−B)) — certified sound, measured 93.3% tight; speed sheds at most B per tick | A8 direction-aware UB, B22, route heading feasibility |
 | the contact law (generalized, s36) | a tick contacts iff gap + (v_move·n)·dt ≤ 0 — the measured −1/32 epsilon is its gap = 1/32 special case; the carried gap = n·pos − d_exp of a bitwise-tracked position (no separate recurrence needed); certified 3600/3600 mixed ticks incl. hover + re-contacts (capgap) | A18–A20 boundary regime, A22 v3, exact ride simulation |
 | E = s² + vz² | conserved less loss at clips | B12, C0 |
 | END box | Minkowski intersection, feet-z window | A27 |
@@ -130,6 +131,27 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | trace clip fraction | f = (d1 − 1/32)/(d1 − d2); the end sits EXACTLY 1/32 above the expanded plane along n; clipped velocity slides the remaining (1−f)·dt | C7 contact prediction (verified to ≤1e-4 u), A18 boundary work |
 
 ## Change log
+- 2026-08-23l (session 39): **THE LAST A AMBER RESOLVES — A8's
+  direction-aware bound family lands as two certified lemmas and a
+  turn-gated UB (capreach 8/0).** The HEADING-FREEDOM LEMMA: at
+  s ≤ B = 562.5·sf, one tick reaches any heading — the full-brake
+  wish a = min(30+s, B) carries the velocity past reversal
+  (constructive witnesses 4/4, and the arithmetic confirms the law
+  exactly: from s=555 the backward speed is 7.50 = 562.5 − 555).
+  The TURN-BOUND LEMMA: above B, one tick turns at most
+  atan(B/(s−B)) — unbeaten by 200k adversarial one-tick actions and
+  measured 93.3% TIGHT. The TURN-GATED TRAVEL UB gates the blind
+  integral by the minimum heading-rotation time on the certified
+  minimum-speed path: sound for every φ, a strict 3–5% tightening
+  for backward directions at speed, unbeaten by 20k adversarial
+  schedules per config (best adversaries reach only 13–39% — the
+  honest slack line). The scoping result matters most: direction-
+  aware bounds can ONLY improve on the blind UB above the budget —
+  below it heading is provably free. The lemmas enter the terms
+  table (feeding B22's future heading-aware ceiling); local
+  refinement stays documented on-demand (no consumer). ALL TWELVE
+  suites green. **The A category now stands complete with no open
+  ambers beyond A11's minor multi-brake note.**
 - 2026-08-23k (session 38): **THE A11 INTERIOR AMBER FALLS FROM
   14.1% TO 4.9% MISS** — a measured-decision session end to end.
   The transplants from A9: brake STRENGTH as a per-candidate

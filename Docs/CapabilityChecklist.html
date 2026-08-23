@@ -168,7 +168,8 @@ const TERMS = [
  ["trig","trigger state (A31 debt)","basevel / gravity_scale / teleports — the engine mirror carries them; capability + tests not built"],
  ["end","END box & z-window","Minkowski-expanded finish volume; the exact vertical recurrence prunes crossing scans 12.1×"],
  ["hoff","hull offset off(n)","Minkowski support of the negated hull: −Σ nᵢ·(nᵢ>0 ? minᵢ : maxᵢ). The engine traces the ORIGIN against d + off(n) — every origin-space plane prediction must aim there. Packaged as CapHull::PlaneOffset, float-identical to the world loader (48/48 bitwise)"],
- ["clipf","trace clip fraction","f = (d1 − 1/32)/(d1 − d2): the trace ends EXACTLY 1/32 above the expanded plane along n, then the clipped move velocity slides the remaining (1−f)·dt. Verified to ≤1e-4 u at all 63 C7 contacts (session 32)"]
+ ["clipf","trace clip fraction","f = (d1 − 1/32)/(d1 − d2): the trace ends EXACTLY 1/32 above the expanded plane along n, then the clipped move velocity slides the remaining (1−f)·dt. Verified to ≤1e-4 u at all 63 C7 contacts (session 32)"],
+ ["hlaw","the heading laws (s39)","heading is ONE-TICK FREE at s ≤ B = airaccelerate·maxspeed·dt·sf = 562.5·sf — the full-brake wish a = min(30+s, B) reverses the velocity, and intermediate wishes sweep every heading (constructive, arithmetic-exact). Above B: one-tick turn ≤ atan(B/(s−B)) — certified sound, measured 93.3% tight by 200k adversarial actions; speed sheds at most B per tick. Gates the A8 direction-aware UB; feeds B22"]
 ];
 const D = [
 // id, cat, name, st, terms[], feeds[], deps[], method, alts, eff, suite, detail
@@ -202,11 +203,11 @@ const D = [
 ["A7","A","dual Ψ* (max turn at speed floor)","done",["turn"],["B5"],["A6"],
  "read the A6 layers","—","O(bins) µs","capair (duality gates)",
  "Max heading change subject to a terminal-speed floor, served from the same accelerator arrays; duality cross-checks green at every v0."],
-["A8","A","directional reach D*","done",["step","s2"],["B2","B13"],["A0","A4","A5"],
- "certified bounds (single query) / on-demand sweep (batch)",
- "parametric endpoints; local refinement",
- "bounds O(N)→O(1) · sweep 31M nodes/101 s","capreach 5/5",
- "The reach family: witnessed lower bounds from the position-tracking sweep + the max-speed-integral upper bound (which REPLACED the refuted session-20 cone — its falsifier found 61,513 violations; braking wishes break the 30/tick premise). Forward-tight to 1.0u; loose backward by construction (direction-aware tightening open)."],
+["A8","A","directional reach D*","done",["step","s2","hlaw"],["B2","B13","B22"],["A0","A4","A5"],
+ "certified bounds (single query) / on-demand sweep (batch) / the TURN-GATED direction-aware UB: D*_φ(N) ≤ Σ_{i≥T_turn} √(s0²+900i)·dt, gated by the two certified heading laws",
+ "parametric endpoints; local refinement on-demand (no consumer yet)",
+ "bounds O(N)→O(1) · direction-aware UB certifies a 3–5% backward tightening","capreach 8/0",
+ "The reach family: witnessed lower bounds from the sweep + the max-speed-integral UB (which replaced the refuted session-20 cone). Session 39 resolved the LAST A amber: the heading-freedom lemma (one-tick reversal at s ≤ 562.5·sf — constructive 4/4, the arithmetic exact: backward speed from 555 is 7.50 = 562.5 − 555), the turn-bound lemma (atan(B/(s−B)) per tick above the budget — unbeaten by 200k adversarial actions, measured 93.3% TIGHT), and the turn-gated travel UB (unbeaten by 20k schedules × 4 configs; adversaries reach 13–39% — the honest slack). The scoping result: direction-awareness can only bite above the budget; below it heading is provably free."],
 ["A9","A","reach + terminal constraint","done",["revs","c"],["A22"],["A11","A12"],
  "CapP2P::SolveTerminal — endpoint-ranked family (reversals × brake placement × brake STRENGTH) → scored coarse climb judging both contracts per kernel roll → the 3×3 finisher: (tail c1, tail c2, brake strength) against (endpoint x, y, heading), a square Newton → accept or DECLINE",
  "Pareto layer of A8 sweep; richer heading family (second brake run)","~24 ms/request","capsolve 10/0",
@@ -568,7 +569,7 @@ document.body.addEventListener('click', e => {
 
 document.getElementById('foot').textContent =
   'SourceTAS Capability Library · living dashboard · canonical text: Docs/CapabilityChecklist.md · '
-  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 38 (2026-08-23) · THE A CATEGORY IS COMPLETE; the A11 interior amber fell 14.1% → 4.9% miss this session — last amber: A8 direction-aware UB + local refinement';
+  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 39 (2026-08-23) · THE A CATEGORY IS COMPLETE WITH NO OPEN AMBERS (A8 direction-aware UB certified s39; A11 interior resolved to 4.9% s38) — composition resumes: C9, B16+C5, cheaper A20 builds';
 render();
 renderTerms();
 </script>

@@ -408,6 +408,15 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23l (session 39): **the last A amber resolves — A8's
+  direction-aware family as certified law** (capreach 8/0): the
+  heading-freedom lemma (one-tick reversal at s ≤ 562.5·sf,
+  arithmetic-exact), the turn-bound lemma (atan(B/(s−B)), 93.3%
+  measured tight, 200k adversarial actions clean), and the
+  turn-gated travel UB (3–5% certified backward tightening, 20k
+  schedules × 4 configs unbeaten). The A category is complete with
+  no open ambers. Twelve suites green. Composition resumes per the
+  next-spine.
 - 2026-08-23k (session 38): **the A11 interior amber falls 14.1% →
   4.9% miss** (detail in the checklist change log): the A9-lesson
   transplant (per-candidate brake strength, brake-first shapes,
