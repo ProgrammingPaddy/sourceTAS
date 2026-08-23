@@ -15272,6 +15272,65 @@ namespace {
 					hitB == kTrials ? "FULL" : "PARTIAL", v0, N,
 					hitB, kTrials);
 			}
+		// ---- BATCH MODE (session 30): organize the family once per
+		// start, then answer many targets each in near-constant time
+		// - the shape the transfer matrices (registry C7) consume.
+		for (int vi = 0; vi < 3; ++vi)
+			for (int ni = 0; ni < 3; ++ni) {
+				const float v0 = v0s[vi];
+				const int N = Ns[ni];
+				CapP2P::P2PBatch B;
+				CapP2P::BuildP2PBatch(k, v0, N, &B);
+				int hit = 0;
+				const int kT = 100;
+				double us = 0.0;
+				long long rolls = 0;
+				for (int tr = 0; tr < kT; ++tr) {
+					int revs[3];
+					int nrev = static_cast<int>(rnd() % 4u);
+					int last = -6, got = 0;
+					for (int i = 0; i < nrev; ++i) {
+						const int lo = last + 6 < 1 ? 1
+							: last + 6;
+						if (lo >= N)
+							break;
+						const int r2 = lo + static_cast<int>(
+							rnd() % static_cast<unsigned>(
+								N - lo));
+						revs[got++] = r2;
+						last = r2;
+					}
+					CapP2P::P2PSchedule hs;
+					CapP2P::BuildSchedule(N, (rnd() & 1) ? 1 : -1,
+						revs, got, 0, 0, 0.9f, 0, 0.f, 0.f, &hs);
+					float tx, ty, evx, evy;
+					CapP2P::Roll(k, v0, hs, &tx, &ty, &evx, &evy);
+					const auto tb0 =
+						std::chrono::steady_clock::now();
+					CapP2P::P2PResult res;
+					CapP2P::SolveTargetBatch(k, B, tx, ty, &res);
+					us += std::chrono::duration<double,
+						std::micro>(
+						std::chrono::steady_clock::now()
+						- tb0).count();
+					rolls += res.rollouts;
+					if (res.solved)
+						hit++;
+				}
+				printf("capp2p: ---- BATCH v0 %.0f N %d: organize "
+					"%.1f ms (%zu family endpoints), then %d/%d "
+					"hit at mean %.0f us/target (%.0f rollouts "
+					"avg) ----\n", v0, N, B.build_ms,
+					B.cands.size(), hit, kT, us / kT,
+					static_cast<double>(rolls) / kT);
+				char nm2[64];
+				snprintf(nm2, sizeof(nm2), "A11 batch v0=%.0f "
+					"N=%d", v0, N);
+				snprintf(buf, sizeof(buf), "%d/%d family targets "
+					"hit in batch mode (mean %.0f us/target)",
+					hit, kT, us / kT);
+				check(nm2, hit >= 99, buf);
+			}
 		snprintf(buf, sizeof(buf), "%lld dwell violations across all "
 			"emitted schedules", legal_bad);
 		check("emitted schedules dwell-legal", legal_bad == 0, buf);
@@ -15825,6 +15884,90 @@ namespace {
 					: 0.0);
 			check("A27 crossing = naive scan", mm == 0, buf);
 		}
+		// ---- B13: the certified minimum departure speed for an air
+		// gap (cover distance D within N ticks, arrive at speed >= V).
+		// The falsifier is the A11 SOLVER attacking from just below
+		// the bound at the cheapest target (straight ahead) - any
+		// found schedule REFUTES the proof.
+		{
+			int refuted = 0, attempts = 0;
+			for (int i = 0; i < 24; ++i) {
+				const int N = 24 + static_cast<int>(rnd() % 61u);
+				const float D = 300.f + static_cast<float>(
+					rnd() % 900u);
+				const float V = 200.f + static_cast<float>(
+					rnd() % 800u);
+				const float vmin = CapBounds::MinDepartSpeed(p, D,
+					V, N);
+				if (vmin <= 1.f || vmin > 3400.f)
+					continue;
+				attempts++;
+				CapP2P::P2PResult res;
+				CapP2P::SolveFixedN(k, vmin * 0.98f, D, 0.f, N,
+					&res);
+				const float vterm = sqrtf(res.evx * res.evx
+					+ res.evy * res.evy);
+				if (res.solved && vterm >= V)
+					refuted++;
+			}
+			snprintf(buf, sizeof(buf), "%d gap requirements "
+				"attacked by the A11 solver from 0.98x the "
+				"bound; %d refutations", attempts, refuted);
+			check("B13 departure bound never refuted",
+				attempts >= 10 && refuted == 0, buf);
+		}
+		// ---- B14: the certified minimum incoming speed at a face
+		// for a required post-board speed. Exact-clip sampling just
+		// below the bound across the arrival window must never meet
+		// the need.
+		{
+			int viol = 0, cfgs = 0;
+			for (int i = 0; i < 200; ++i) {
+				const float aa = (50.f + static_cast<float>(
+					rnd() % 30u)) * 0.0174533f;
+				const float bb = static_cast<float>(rnd() % 628u)
+					/ 100.f;
+				const Vec3 nrm(sinf(aa) * cosf(bb),
+					sinf(aa) * sinf(bb), cosf(aa));
+				const float vz = -static_cast<float>(rnd() % 600u);
+				const float t0a = static_cast<float>(rnd() % 628u)
+					/ 100.f - 3.14f;
+				const float t1a = t0a + 0.4f + static_cast<float>(
+					rnd() % 100u) / 100.f;
+				const float vneed = 300.f + static_cast<float>(
+					rnd() % 900u);
+				const float smin = CapBounds::MinIncomingSpeed(p,
+					vneed, vz, nrm, t0a, t1a);
+				if (smin > 3800.f)
+					continue;
+				const float s_in = smin * 0.98f;
+				const float sh2 = s_in * s_in - vz * vz;
+				if (sh2 <= 1.f)
+					continue;
+				cfgs++;
+				const float sh = sqrtf(sh2);
+				bool beaten = false;
+				for (int j = 0; j <= 400 && !beaten; ++j) {
+					const float th = t0a + (t1a - t0a)
+						* static_cast<float>(j) / 400.f;
+					const Vec3 v(sh * cosf(th), sh * sinf(th),
+						vz);
+					if (Dot(v, nrm) >= 0.f)
+						continue;   // does not board
+					Vec3 out2;
+					Fn::ClipVelocity(v, nrm, &out2);
+					if (Len(out2) >= vneed)
+						beaten = true;
+				}
+				if (beaten)
+					viol++;
+			}
+			snprintf(buf, sizeof(buf), "%d face requirements "
+				"sampled at 0.98x the bound (401 headings each, "
+				"exact clip); %d violations", cfgs, viol);
+			check("B14 incoming bound never beaten",
+				cfgs >= 50 && viol == 0, buf);
+		}
 		printf("capwindow: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "B0/B3/B4 + A27 WINDOWS CERTIFIED"
 				: "WINDOWS RED - a proof or the instrument is "
@@ -16339,10 +16482,13 @@ namespace {
 					ralphas[ia]);
 				check(nm, dirs_ok >= 6, buf);
 			}
-			// ---- A22 v1: held-out engine-reachable targets
+			// ---- A22 v2: held-out engine-reachable targets via
+			// the constant-time indexed query
 			{
 				int hits = 0, tried = 0;
 				double worst = 0.0, sum = 0.0;
+				double q_us = 0.0;
+				long long q_n = 0;
 				for (int tr = 0; tr < 100; ++tr) {
 					// a hidden in-domain engine schedule: random
 					// wishes leave the face >99% of the time, so
@@ -16416,8 +16562,15 @@ namespace {
 					const float tv = rx * S.csl.X + ry * S.csl.Y
 						+ rz * S.csl.Z;
 					float res = 1e30f;
-					CapRideReach::QueryTarget(S, N, tu, tv,
+					const auto tq0 =
+						std::chrono::steady_clock::now();
+					CapRideReach::QueryTargetFast(S, N, tu, tv,
 						&res);
+					q_us += std::chrono::duration<double,
+						std::micro>(
+						std::chrono::steady_clock::now()
+						- tq0).count();
+					q_n++;
 					sum += res;
 					if (res > worst)
 						worst = res;
@@ -16426,10 +16579,11 @@ namespace {
 				}
 				snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d "
 					"engine-reachable targets answered within "
-					"96u (lattice diag; mean %.1f, worst %.1f)",
-					ralphas[ia], hits, tried,
-					tried ? sum / tried : 0.0, worst);
-				snprintf(nm, sizeof(nm), "A22 v1 targets [%.0f "
+					"96u (mean res %.1f, worst %.1f; indexed "
+					"query mean %.1f us)", ralphas[ia], hits,
+					tried, tried ? sum / tried : 0.0, worst,
+					q_n ? q_us / q_n : 0.0);
+				snprintf(nm, sizeof(nm), "A22 v2 targets [%.0f "
 					"deg]", ralphas[ia]);
 				check(nm, tried >= 10 && hits == tried, buf);
 			}

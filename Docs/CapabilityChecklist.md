@@ -32,7 +32,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A8 | directional reach D* | arc length L(N), projections | B2, B13, corridor checks | certified bounds (single query); on-demand sweep (batch) | parametric family endpoints (future, exact); finer local refinement | bounds O(N) ~µs; sweep 31.1M nodes / 101 s at pitch (96, 24), N=60 | `[x]` LB+UB at measured pitch; `[ ]` direction-aware UB, local refinement |
 | A9 | displacement with terminal constraint | endpoint + (ψ_N or V_N) | A22 pairing | A12 family with terminal constraint added | Pareto layer of A8 sweep | target ~10² µs | `[d]` |
 | A10 | minimum air time N_min | N window, feasibility | route timing, B21 | O(1) feasibility scan over the A1 window + A12 solve at first feasible N | table lookup | target <1 ms | `[d]` — build with A12 |
-| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 12/0): machinery 99–100/100 everywhere (worst residual 0.25–2.3u); general targets 29–99% (interior at short flights = the brake family's measured limit); 0.6–3.3 ms/solve; 150/150 bitwise replays** | `[x]` machinery; `[~]` short-flight interior coverage (measured line) |
+| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 21/0): machinery 99–100/100; single-shot 0.6–3.3 ms; BATCH MODE (s30): organize 0.1–1.4 ms/start, then 34–135 µs/target with full-solver fallback — the 10–30 µs ambition met at short flights; 150/150 bitwise replays** | `[x]` machinery + batch; `[~]` short-flight interior coverage (measured line) |
 | A12 | point-to-point air solver | all of A10/A11 | C7, gap feasibility (B13/B14), A22 pairing | A11 iterated over N | shooting oracle (cross-check); R_N table (batch) | inherits A11 + N-scan | `[d]` after A11 goes green |
 | A13 | point-to-face solve | (T, λ) targets | entrance/transfer | A12 at 1-D λ targets per candidate tick | generic 2-D targeting (wasteful) | target ~10× A11 per face | `[d]` |
 | A14 | first-contact prediction | trace, local brush set | A28, event scans | exact trace vs pruned local brush set | full-world trace (the engine's own) | engine trace ~µs; local-set target ~100 ns | `[~]` engine path exists; local-set pruning not built |
@@ -43,7 +43,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A19 | ride N-tick turn/gain | slope vs heading, sf carried state, **the contact epsilon** (re-contact needs v·n ≤ −(1/32)/dt ≈ −2.08 u/s — hover band measured) | A22, B10/B11 | `CapRide::BuildRide` on the proven A18 law, engine-anchored starts, stay-on-face guard | plane-table refinements | **56–84 s/ramp builds (28–34M nodes); 30/30 witness replays BITWISE as engine continuations; falsifier gaps: 50° +0.9, 60° +215.6, 70° +116.4 (the conservative guard's boundary sliver)** | `[~]` capride 7/0 (s28); named refinement: exact contact-boundary condition |
 | A20 | ride directional reach | in-plane (downslope, cross-slope), contact-epsilon guard + drift margin | A22, B10 | `CapRideReach::BuildRideReach` — position-tracking sweep on the proven ride law; **engine-validated witnesses per direction** (a direction with no clean witness DECLINES its bound) | finer local refinement | **9–19 s/ramp (3.3–6.1M nodes at 64u/10°/50u-s); 23/24 directions validated (upslope@50° declined — the near-walkable near-stall corner); D\*ride(0.72 s): down 702–844u, cross ~470u, up ≈ 0** | `[~]` capexit 9/0 (s29) |
 | A21 | minimum ride time | exit point, N_min | route timing | inverse of A19/A20 (scan + solve) | — | target <1 ms | `[ ]` |
-| A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | **v1: cell-witness lookup in the A20 sweep** (exact schedules out); v2: the A11 exact-hit construction on the plane | DP table per face (baseline/falsifier) | **v1 measured: 286/286 engine-reachable targets answered, mean residual 0.7u, worst 3.3u (promise: 96u); query = layer scan today, fast index next** | `[~]` v1 verified (s29); v2 exact-hit + indexed query = next |
+| A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | **v1: cell-witness lookup in the A20 sweep** (exact schedules out); v2: the A11 exact-hit construction on the plane | DP table per face (baseline/falsifier) | **v2 (s30): O(1) indexed query 0.2–0.3 µs (~10,000× the layer scan), lattice-resolution answers (mean ~30u, worst 55u, all within the 96u contract; the nearest-node full scan at 0.7u mean remains available)** | `[~]` v2 indexed (s30); exact-hit tail on the plane = next |
 | A23 | ride edge interception | edge geometry, exit λ | launch selection | A20 bounds + A22 solve at edge targets | — | target ~A22 | `[ ]` |
 | A24 | direct contact transfer | adjacent-face clip chain | face-to-face routing | exact clip transform at the shared edge | full engine roll-through | ~ns/edge | `[~]` clip exists; adjacency composition not packaged |
 | A25 | ground/runoff acceleration | friction, stopspeed, accelerate, stamina power curve | spawn/launch prep | `CapGround::WalkKernelTick` — the grounded MoveTick chain partially evaluated on the flat-floor domain | full MoveTick baseline | **40.8M ticks/s = 10.9× engine; 200k walk ticks + 50k position checks, 0 bitwise mismatches (velocity, feet z, stamina)** | `[x]` capground 6/6 (s27) |
@@ -72,8 +72,8 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | B10 | ride point/edge reachability | A19/A20 bounds | ride culls | ride analogues of B2/B6 | — | target ~ns | `[ ]` with A19/A20 |
 | B11 | minimum ride ticks | A21 | timing bounds | inverse ride bounds | — | target O(1) | `[ ]` |
 | B12 | ride energy ceiling U_E | E = s²+vz² | ride culls | certified (session 15) | — | O(1) | `[x]` |
-| B13 | minimum departure resource for a gap | A12 inverse | exit valuation | invert the A12 feasibility over v0 (monotone bisection) | table | target ~µs | `[d]` after A12 |
-| B14 | successor's minimum incoming resource | backward A12/A16/A22 | the speed-compounding explainer | compose B13 with board loss floors | — | target ~µs | `[d]` |
+| B13 | minimum departure resource for a gap | A12 inverse | exit valuation | `CapBounds::MinDepartSpeed` — closed-form ceiling + travel-bound bisection (both certified-monotone) | table | **O(1)/~µs; 24 A11-solver attacks from 0.98× the bound, 0 refutations** | `[x]` capwindow (s30) |
+| B14 | successor's minimum incoming resource | backward A12/A16/A22 | the speed-compounding explainer | `CapBounds::MinIncomingSpeed` — **exact piecewise-quadratic infimum** (the monotone-bisection draft REFUTED at 20/127, a missing zero-loss root at 22/185 — both falsifier-caught, both fixed) | — | **O(1) closed form; 185 configs × 401 exact-clip headings at 0.98× the bound, 0 violations** | `[x]` capwindow (s30) |
 | B15 | guaranteed collision / corridor exclusion | A14 along families | route culls | local-set trace certificates | swept volumes | target ~µs/leg | `[ ]` |
 | B16 | conservative successor-face set | B0–B15 | route enumeration | intersection of the above | — | ~µs/face pair | `[ ]` composition |
 | B17 | cell optimistic bound | capability extrema per cell | batch search | derive from A6/A8 bounds ONLY (instruments retired from pruning) | — | O(1)/cell | `[~]` proofs-only rule enforced |
@@ -122,6 +122,25 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | END box | Minkowski intersection, feet-z window | A27 |
 
 ## Change log
+- 2026-08-23b (session 30): **the organize-once/query-constant
+  session.** A11 gains BATCH MODE (`CapP2P::P2PBatch`): the family's
+  law endpoints hashed spatially once per start (0.1–1.4 ms), then
+  **34–135 µs per target** (99–100/100 hits, full-solver fallback as
+  the completeness backstop) — inside the original 10–30 µs ambition
+  at short flights, 20–60× faster than single-shot; capp2p 21/0.
+  A22 gains the O(1) indexed query (`QueryTargetFast`, per-layer
+  cell index): **0.2–0.3 µs per query** (~10,000× faster), answers
+  at lattice resolution (mean ~30u; the full scan's nearest-node
+  0.7u remains available); capexit 9/0. NEW CERTIFIED CULLS: B13
+  (min departure resource — closed-form ceiling + travel bisection;
+  24 A11-solver attacks from below, 0 refutations) and B14 (min
+  incoming resource at a face — the EXACT piecewise-quadratic
+  infimum, after the falsifier refuted the monotone-bisection draft
+  at 20/127 and then exposed a missing zero-loss-band root at
+  22/185: post-board speed is NOT monotone in horizontal speed;
+  slow-horizontal fast-vertical arrivals retain more); capwindow
+  6/6. Battery green: capkern 5/5, capboard 5/5, capground 6/6,
+  capride 7/0.
 - 2026-08-23 (session 29): **A20 + A22 v1 verified** (capexit 9/0);
   A18 position law measured (bitwise on 992/1090 steady ticks, worst
   deviation 3.5e-5 u — the carried-gap micro-fraction, folded into

@@ -15,6 +15,29 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-23c (session 30): ORGANIZE ONCE, QUERY IN CONSTANT
+TIME — BATCH SOLVING, INDEXED TRANSFERS, AND TWO NEW CERTIFIED
+CULLS.** Per the user's directive (engine truths are organized, then
+terms solve in constant time): A11 batch mode (`CapP2P::P2PBatch` —
+all family law-endpoints spatially hashed once per start in 0.1–1.4
+ms, then each target seeds from its cell neighborhood and polishes:
+**34–135 µs per target at 99–100/100 hits**, full-solver fallback as
+the completeness backstop; capp2p 21/0). A22 indexed queries
+(`CapRideReach::QueryTargetFast`: per-layer in-plane cell index —
+**0.2–0.3 µs per query, ~10,000× faster than the layer scan**, at
+lattice resolution with the nearest-node full scan still available;
+capexit 9/0). B13 CERTIFIED (min departure resource for a gap:
+closed-form speed ceiling + travel-bound bisection; the falsifier IS
+the A11 solver attacking from 0.98× the bound — 24 attacks, 0
+refutations). B14 CERTIFIED the hard way: the monotone-bisection
+draft was REFUTED by its own falsifier (20/127 — post-board speed is
+NOT monotone in horizontal speed; a slow-horizontal fast-vertical
+arrival retains more), the second draft missed the zero-loss band's
+feasibility root (22/185) — the final version computes the EXACT
+piecewise-quadratic infimum in closed form, O(1), and survives 185
+configurations × 401 exact-clip headings; capwindow 6/6. Battery:
+capkern 5/5, capboard 5/5, capground 6/6, capride 7/0, capexit 9/0.
+
 **STATUS 2026-08-23b (session 29): A20 + A22 v1 VERIFIED — THE FIRST
 BOARD→EXIT ANSWERS EXIST; THE CONTACT EPSILON IS IN THE PERMANENT
 RECORDS.** The contact-epsilon law (session 28's discovery) is now

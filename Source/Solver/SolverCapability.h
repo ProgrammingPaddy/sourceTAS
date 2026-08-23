@@ -1977,6 +1977,319 @@ namespace CapP2P {
 		*out = best;
 	}
 
+	// ---- BATCH MODE (session 30): organize the family ONCE per
+	// start, answer many targets in near-constant time each. All
+	// enumerated law endpoints go into a spatial hash; a target seeds
+	// from its cell neighborhood, kernel-verifies the top seeds,
+	// climbs the best, and finishes with the exact-hit tail. This is
+	// the shape the transfer matrices (registry C7) consume: one
+	// start, many exit targets.
+	struct P2PBatchCand {
+		float ex = 0.f, ey = 0.f;
+		signed char ss = 1;
+		signed char nrev = 0;
+		int revs[3] = { 0, 0, 0 };
+	};
+	struct P2PBatch {
+		float v0 = 0.f;
+		int N = 0;
+		SegTables T;
+		std::vector<P2PBatchCand> cands;
+		std::unordered_map<long long, std::vector<int> > grid;
+		float cell = 64.f;
+		double build_ms = 0.0;
+	};
+	inline long long BCellOf(const P2PBatch& B, float x, float y) {
+		const long long ix = static_cast<long long>(
+			floorf(x / B.cell));
+		const long long iy = static_cast<long long>(
+			floorf(y / B.cell));
+		return ix * 1000003ll + iy;
+	}
+	inline void BuildP2PBatch(const CapAir::AirKernelCtx& k, float v0,
+	                          int N, P2PBatch* B) {
+		const auto t0 = std::chrono::steady_clock::now();
+		B->v0 = v0;
+		B->N = N;
+		BuildSegTables(k.p, v0, N, &B->T);
+		B->cands.clear();
+		B->grid.clear();
+		auto add = [&](int ss, const int* revs, int nrev) {
+			P2PBatchCand c;
+			EvalSegs(B->T, ss, revs, nrev, &c.ex, &c.ey);
+			c.ss = static_cast<signed char>(ss);
+			c.nrev = static_cast<signed char>(nrev);
+			for (int i = 0; i < 3; ++i)
+				c.revs[i] = i < nrev ? revs[i] : 0;
+			const int idx = static_cast<int>(B->cands.size());
+			B->cands.push_back(c);
+			B->grid[BCellOf(*B, c.ex, c.ey)].push_back(idx);
+		};
+		for (int ss = -1; ss <= 1; ss += 2) {
+			int revs[3] = { 0, 0, 0 };
+			add(ss, revs, 0);
+			for (int r1 = 1; r1 < N; ++r1) {
+				revs[0] = r1;
+				add(ss, revs, 1);
+				for (int r2 = r1 + 6; r2 < N; ++r2) {
+					revs[1] = r2;
+					add(ss, revs, 2);
+				}
+			}
+			for (int r1 = 1; r1 < N; r1 += 2) {
+				revs[0] = r1;
+				for (int r2 = r1 + 6; r2 < N; r2 += 2) {
+					revs[1] = r2;
+					for (int r3 = r2 + 6; r3 < N; r3 += 3) {
+						revs[2] = r3;
+						add(ss, revs, 3);
+					}
+				}
+			}
+		}
+		B->build_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+	}
+	inline void SolveTargetBatch(const CapAir::AirKernelCtx& k,
+	                             const P2PBatch& B, float tx, float ty,
+	                             P2PResult* out) {
+		const int N = B.N;
+		P2PResult best;
+		P2PSchedule s;
+		const float bc = 0.9f;
+		auto eval = [&](int ss, const int* revs, int nrev, int bs2,
+			int bl2, int tail_m, float c1, float c2) {
+			BuildSchedule(N, ss, revs, nrev, bs2, bl2, bc, tail_m,
+				c1, c2, &s);
+			float ex, ey, evx, evy;
+			Roll(k, B.v0, s, &ex, &ey, &evx, &evy);
+			best.rollouts++;
+			const float dx = ex - tx, dy = ey - ty;
+			const float r = sqrtf(dx * dx + dy * dy);
+			if (r < best.residual) {
+				best.residual = r;
+				best.ex = ex;
+				best.ey = ey;
+				best.evx = evx;
+				best.evy = evy;
+				best.start_side = ss;
+				best.nrev = nrev;
+				for (int i = 0; i < 3; ++i)
+					best.revs[i] = i < nrev ? revs[i] : 0;
+				best.brake_start = bs2;
+				best.brake_len = bl2;
+				best.tail_c1 = c1;
+				best.tail_c2 = c2;
+				best.sched = s;
+			}
+			return r;
+		};
+		// ---- seeds from the spatial hash (3x3, expand to 5x5)
+		int seed_idx[6] = { -1, -1, -1, -1, -1, -1 };
+		float seed_res[6];
+		for (int i = 0; i < 6; ++i)
+			seed_res[i] = 1e30f;
+		auto offer_seed = [&](int idx) {
+			const P2PBatchCand& c = B.cands[
+				static_cast<size_t>(idx)];
+			const float dx = c.ex - tx, dy = c.ey - ty;
+			const float r = sqrtf(dx * dx + dy * dy);
+			int worst = 0;
+			for (int i = 1; i < 6; ++i)
+				if (seed_res[i] > seed_res[worst])
+					worst = i;
+			if (r < seed_res[worst]) {
+				seed_res[worst] = r;
+				seed_idx[worst] = idx;
+			}
+		};
+		const long long cx = static_cast<long long>(
+			floorf(tx / B.cell));
+		const long long cy = static_cast<long long>(
+			floorf(ty / B.cell));
+		for (int ring = 1; ring <= 2; ++ring) {
+			for (long long da = -ring; da <= ring; ++da)
+				for (long long db = -ring; db <= ring; ++db) {
+					std::unordered_map<long long,
+						std::vector<int> >::const_iterator jt =
+						B.grid.find((cx + da) * 1000003ll
+							+ (cy + db));
+					if (jt == B.grid.end())
+						continue;
+					for (size_t q = 0; q < jt->second.size();
+						++q)
+						offer_seed(jt->second[q]);
+				}
+			if (seed_idx[0] >= 0 && ring == 1)
+				break;
+		}
+		// kernel-verify the seeds
+		for (int i = 0; i < 6; ++i) {
+			if (seed_idx[i] < 0)
+				continue;
+			const P2PBatchCand& c = B.cands[
+				static_cast<size_t>(seed_idx[i])];
+			eval(c.ss, c.revs, c.nrev, 0, 0, 0, 0.f, 0.f);
+		}
+		// interior fallback: the brake probes when the family shell
+		// cannot reach the target
+		if (best.residual > 48.f) {
+			for (int ss = -1; ss <= 1; ss += 2)
+				for (int bl = N / 8; bl <= (3 * N) / 4;
+					bl += N / 8) {
+					if (bl < 2)
+						continue;
+					int rv0[3] = { 0, 0, 0 };
+					eval(ss, rv0, 0, 1, bl, 0, 0.f, 0.f);
+					for (int r1 = 6; r1 < N; r1 += 12) {
+						rv0[0] = r1;
+						eval(ss, rv0, 1, 1, bl, 0, 0.f, 0.f);
+					}
+				}
+		}
+		// climb the best shape (translation + per-reversal steps +
+		// brake steps)
+		{
+			bool improved = true;
+			int guard = 0;
+			while (improved && guard++ < 10) {
+				improved = false;
+				const float prev = best.residual;
+				const int nrev = best.nrev;
+				for (int i = 0; i < nrev; ++i)
+					for (int d = -6; d <= 6; ++d) {
+						if (d == 0)
+							continue;
+						int revs[3] = { best.revs[0],
+							best.revs[1], best.revs[2] };
+						revs[i] += d;
+						bool ok = true;
+						for (int j = 0; j < nrev; ++j) {
+							if (revs[j] < 1 || revs[j] >= N)
+								ok = false;
+							if (j > 0 && revs[j] - revs[j - 1]
+								< 6)
+								ok = false;
+						}
+						if (ok)
+							eval(best.start_side, revs, nrev,
+								best.brake_start,
+								best.brake_len, 0, 0.f, 0.f);
+					}
+				if (best.brake_len > 0) {
+					const int dbs[4] = { -4, -2, 2, 4 };
+					for (int m = 0; m < 4; ++m) {
+						const int nb = best.brake_start + dbs[m];
+						if (nb >= 0 && nb < N)
+							eval(best.start_side, best.revs,
+								best.nrev, nb, best.brake_len,
+								0, 0.f, 0.f);
+					}
+					const int dbl[4] = { -6, -3, 3, 6 };
+					for (int m = 0; m < 4; ++m) {
+						const int nl = best.brake_len + dbl[m];
+						if (nl >= 0 && best.brake_start + nl
+							<= N)
+							eval(best.start_side, best.revs,
+								best.nrev, best.brake_start,
+								nl, 0, 0.f, 0.f);
+					}
+				}
+				if (best.residual < prev - 1e-4f)
+					improved = true;
+			}
+		}
+		// the exact-hit tail (three starts)
+		{
+			const int tail_m = N >= 48 ? 24
+				: (N >= 24 ? 12 : (N >= 12 ? 8 : 0));
+			if (tail_m > 0 && best.residual > 0.25f) {
+				int revs[3] = { best.revs[0], best.revs[1],
+					best.revs[2] };
+				const int nrev = best.nrev;
+				const int ss = best.start_side;
+				const int bs2 = best.brake_start;
+				const int bl2 = best.brake_len;
+				const float starts[3][2] = {
+					{ 0.f, 0.f }, { 0.35f, -0.35f },
+					{ -0.35f, 0.35f } };
+				for (int st = 0; st < 3
+					&& best.residual > 0.25f; ++st) {
+					float c1 = starts[st][0];
+					float c2 = starts[st][1];
+					for (int it = 0; it < 8; ++it) {
+						BuildSchedule(N, ss, revs, nrev, bs2,
+							bl2, bc, tail_m, c1, c2, &s);
+						float ex, ey, evx, evy;
+						Roll(k, B.v0, s, &ex, &ey, &evx, &evy);
+						best.rollouts++;
+						const float fx = ex - tx, fy = ey - ty;
+						const float r0 = sqrtf(fx * fx
+							+ fy * fy);
+						if (r0 < best.residual) {
+							best.residual = r0;
+							best.ex = ex;
+							best.ey = ey;
+							best.evx = evx;
+							best.evy = evy;
+							best.tail_c1 = c1;
+							best.tail_c2 = c2;
+							best.sched = s;
+						}
+						if (r0 <= 0.25f)
+							break;
+						const float h = 0.02f;
+						float ex1, ey1, ex2, ey2, dvx, dvy;
+						BuildSchedule(N, ss, revs, nrev, bs2,
+							bl2, bc, tail_m, c1 + h, c2, &s);
+						Roll(k, B.v0, s, &ex1, &ey1, &dvx,
+							&dvy);
+						BuildSchedule(N, ss, revs, nrev, bs2,
+							bl2, bc, tail_m, c1, c2 + h, &s);
+						Roll(k, B.v0, s, &ex2, &ey2, &dvx,
+							&dvy);
+						best.rollouts += 2;
+						const float j11 = (ex1 - ex) / h;
+						const float j21 = (ey1 - ey) / h;
+						const float j12 = (ex2 - ex) / h;
+						const float j22 = (ey2 - ey) / h;
+						const float det = j11 * j22
+							- j12 * j21;
+						if (fabsf(det) < 1e-6f)
+							break;
+						float d1 = (-fx * j22 + fy * j12)
+							/ det;
+						float d2 = (-j11 * fy + j21 * fx)
+							/ det;
+						if (d1 > 0.3f) d1 = 0.3f;
+						if (d1 < -0.3f) d1 = -0.3f;
+						if (d2 > 0.3f) d2 = 0.3f;
+						if (d2 < -0.3f) d2 = -0.3f;
+						c1 += d1;
+						c2 += d2;
+						if (c1 > 0.95f) c1 = 0.95f;
+						if (c1 < -0.95f) c1 = -0.95f;
+						if (c2 > 0.95f) c2 = 0.95f;
+						if (c2 < -0.95f) c2 = -0.95f;
+					}
+				}
+			}
+		}
+		best.solved = best.residual <= 0.5f;
+		// completeness backstop: the rare target whose basin the
+		// seed neighborhood misses falls back to the full solver
+		// (guaranteed not worse; keeps the batch average fast)
+		if (!best.solved) {
+			P2PResult full;
+			SolveFixedN(k, B.v0, tx, ty, B.N, &full);
+			full.rollouts += best.rollouts;
+			if (full.residual < best.residual)
+				best = full;
+			best.solved = best.residual <= 0.5f;
+		}
+		*out = best;
+	}
+
 } // namespace CapP2P
 
 // ======================================================================
@@ -2698,6 +3011,9 @@ namespace CapRideReach {
 		std::vector<std::vector<RRNode> > layers;
 		std::vector<std::vector<float> > dslb;    // [layer][8]
 		std::vector<std::vector<int> >   dsnode;  // [layer][8]
+		// the constant-time query index (session 30): per layer,
+		// in-plane cell -> node (max-speed representative)
+		std::vector<std::unordered_map<int, int> > cell_index;
 		long long ride_ticks = 0;
 		long long leave_transitions = 0;
 		long long total_nodes = 0;
@@ -2923,8 +3239,101 @@ namespace CapRideReach {
 				}
 			}
 		}
+		// the constant-time query index: in-plane cell -> max-speed
+		// node, per layer (organize once, query O(1))
+		S->cell_index.assign(S->layers.size(),
+			std::unordered_map<int, int>());
+		for (size_t t = 0; t < S->layers.size(); ++t) {
+			const std::vector<RRNode>& L = S->layers[t];
+			std::unordered_map<int, int>& ix = S->cell_index[t];
+			ix.reserve(L.size() * 2 + 16);
+			for (size_t ni = 0; ni < L.size(); ++ni) {
+				const float rx = L[ni].px - S->pos0.X;
+				const float ry = L[ni].py - S->pos0.Y;
+				const float rz = L[ni].pz - S->pos0.Z;
+				const float u = rx * S->dsl.X + ry * S->dsl.Y
+					+ rz * S->dsl.Z;
+				const float v = rx * S->csl.X + ry * S->csl.Y
+					+ rz * S->csl.Z;
+				int ia = static_cast<int>((u + 4800.f) / pp.hp);
+				int ib = static_cast<int>((v + 4800.f) / pp.hp);
+				if (ia < 0) ia = 0;
+				if (ia >= pp.pos_bins) ia = pp.pos_bins - 1;
+				if (ib < 0) ib = 0;
+				if (ib >= pp.pos_bins) ib = pp.pos_bins - 1;
+				const int cid = ia * pp.pos_bins + ib;
+				std::unordered_map<int, int>::iterator jt =
+					ix.find(cid);
+				if (jt == ix.end()) {
+					ix[cid] = static_cast<int>(ni);
+				} else {
+					const RRNode& a = L[static_cast<size_t>(
+						jt->second)];
+					const RRNode& b = L[ni];
+					const float sa = a.vx * a.vx + a.vy * a.vy
+						+ a.vz * a.vz;
+					const float sb = b.vx * b.vx + b.vy * b.vy
+						+ b.vz * b.vz;
+					if (sb > sa)
+						jt->second = static_cast<int>(ni);
+				}
+			}
+		}
 		S->build_ms = std::chrono::duration<double, std::milli>(
 			std::chrono::steady_clock::now() - t0).count();
+	}
+	inline int QueryTarget(const RRSurface& S, int N, float tu,
+	                       float tv, float* res_out);
+	// A22 v2: constant-time target query - the 3x3 cell neighborhood
+	// around the target (expanding to 5x5, then the full scan as the
+	// last resort). Returns the node index; res_out = in-plane
+	// residual.
+	inline int QueryTargetFast(const RRSurface& S, int N, float tu,
+	                           float tv, float* res_out) {
+		if (N < 0 || N > S.p.n_max)
+			return -1;
+		const std::vector<RRNode>& L = S.layers[
+			static_cast<size_t>(N)];
+		const std::unordered_map<int, int>& ix = S.cell_index[
+			static_cast<size_t>(N)];
+		int ia = static_cast<int>((tu + 4800.f) / S.p.hp);
+		int ib = static_cast<int>((tv + 4800.f) / S.p.hp);
+		int best = -1;
+		float bres = 1e30f;
+		for (int ring = 1; ring <= 2 && best < 0; ++ring) {
+			for (int da = -ring; da <= ring; ++da)
+				for (int db = -ring; db <= ring; ++db) {
+					const int ca = ia + da, cb = ib + db;
+					if (ca < 0 || ca >= S.p.pos_bins || cb < 0
+						|| cb >= S.p.pos_bins)
+						continue;
+					std::unordered_map<int, int>::const_iterator
+						jt = ix.find(ca * S.p.pos_bins + cb);
+					if (jt == ix.end())
+						continue;
+					const RRNode& nd = L[static_cast<size_t>(
+						jt->second)];
+					const float rx = nd.px - S.pos0.X;
+					const float ry = nd.py - S.pos0.Y;
+					const float rz = nd.pz - S.pos0.Z;
+					const float u = rx * S.dsl.X + ry * S.dsl.Y
+						+ rz * S.dsl.Z;
+					const float v = rx * S.csl.X + ry * S.csl.Y
+						+ rz * S.csl.Z;
+					const float du = u - tu, dv = v - tv;
+					const float r = sqrtf(du * du + dv * dv);
+					if (r < bres) {
+						bres = r;
+						best = jt->second;
+					}
+				}
+		}
+		if (best >= 0) {
+			if (res_out)
+				*res_out = bres;
+			return best;
+		}
+		return QueryTarget(S, N, tu, tv, res_out);
 	}
 	// A22 v1: the nearest swept node to an in-plane target at tick N
 	// (lattice-resolution point solve; witness by parent chain)
@@ -2975,4 +3384,203 @@ namespace CapRideReach {
 	}
 
 } // namespace CapRideReach
+
+// ======================================================================
+// CAPBOUNDS - registry B13 (minimum departure resource for an air
+// gap) and B14 (successor's minimum incoming resource), session 30.
+// Constant-time certified NECESSARY conditions built by inverting the
+// closed-form engine truths: the speed ceiling sqrt(v0^2 + cap^2 N)
+// (tight, session 24) and the max-speed travel integral (never
+// beaten, session 24), both monotone in the departure speed - so the
+// minimum resource is a closed form plus at most a short bisection.
+// Semantics: BELOW the bound the requirement is IMPOSSIBLE with a
+// proof; above it nothing is promised (these are culls, not
+// constructions). Falsifiers: the A11 solver attacking from just
+// below the bound (a found schedule would REFUTE the proof), and
+// exact-clip sampling for the board composition.
+// ======================================================================
+namespace CapBounds {
+
+	// travel bound after N ticks from speed v0 (B2's integral)
+	inline float TravelN(const MoveParams& p, float v0, int N) {
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		float s = 0.f;
+		for (int i = 1; i <= N; ++i)
+			s += sqrtf(v0 * v0 + cap2 * static_cast<float>(i))
+				* p.dt;
+		return s;
+	}
+	// B13: the minimum departure speed such that BOTH necessary
+	// conditions hold for "cover horizontal distance D within N ticks
+	// and arrive with speed >= V": the ceiling gives a closed form,
+	// the travel bound a bisection (monotone in v0). Returns 0 when
+	// nothing is required.
+	inline float MinDepartSpeed(const MoveParams& p, float D, float V,
+	                            int N) {
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		// ceiling: v0 >= sqrt(max(0, V^2 - cap^2 N))
+		float v_ceiling = 0.f;
+		const float q = V * V - cap2 * static_cast<float>(N);
+		if (q > 0.f)
+			v_ceiling = sqrtf(q);
+		// travel: smallest v0 with TravelN(v0) >= D
+		float v_travel = 0.f;
+		if (TravelN(p, 0.f, N) < D) {
+			float lo = 0.f, hi = 4000.f;
+			if (TravelN(p, hi, N) < D) {
+				v_travel = 1e30f;   // unreachable at any speed
+			} else {
+				for (int it = 0; it < 40; ++it) {
+					const float mid = 0.5f * (lo + hi);
+					if (TravelN(p, mid, N) >= D)
+						hi = mid;
+					else
+						lo = mid;
+				}
+				v_travel = hi;
+			}
+		}
+		return v_ceiling > v_travel ? v_ceiling : v_travel;
+	}
+	// B14: the minimum INCOMING speed at a face (normal n, fixed
+	// arrival vz, arrival heading restricted to [t0, t1]) such that
+	// the post-board speed can possibly reach v_need. Post-board
+	// speed^2 = s_in^2 + vz^2... the horizontal speed s_h relates by
+	// s_in^2 = s_h^2 + vz^2; post^2 = s_in^2 - (v.n)^2 with |v.n|
+	// minimized over the window (A16's closed form). Monotone in s_h
+	// on the physical range - bisection, with the monotonicity
+	// verified across the bracket by sampling (falls back to a scan
+	// if violated).
+	inline float BestPost2(const MoveParams& /*p*/, float s_h,
+	                       float vz, const Vec3& n, float t0,
+	                       float t1) {
+		CapBoard::BoardOpt bo, wo;
+		CapBoard::BestWorstBoard(s_h, vz, n, t0, t1, &bo, &wo);
+		if (!bo.boardable)
+			return -1.f;   // nothing in the window boards
+		const float s2 = s_h * s_h + vz * vz;
+		const float loss = bo.vdotn;   // <= 0, nearest zero
+		return s2 - loss * loss;
+	}
+	// The EXACT infimum (session 30, after the falsifier refuted the
+	// monotone-bisection version with 20/127 beats - the best
+	// post-board speed is NOT monotone in horizontal speed; a slow-
+	// horizontal fast-vertical arrival can retain more). On each
+	// branch of the window's minimum-loss formula the feasibility
+	// condition "s_h^2 + vz^2 - L(s_h)^2 >= need^2" is a QUADRATIC in
+	// s_h, so the infimum is closed-form: collect the branch
+	// boundaries and quadratic roots as candidates, classify the
+	// intervals exactly, take the first feasible point. Domain: vz <=
+	// 0 arrivals (the boarding case). The returned bound is shaved by
+	// 0.05 u/s - a smaller necessary bound is the SOUND direction.
+	inline float MinIncomingSpeed(const MoveParams& /*p*/,
+	                              float v_need, float vz,
+	                              const Vec3& n, float t0, float t1) {
+		const double need2 = static_cast<double>(v_need) * v_need;
+		const double vz2 = static_cast<double>(vz) * vz;
+		const double nh = sqrt(static_cast<double>(n.X) * n.X
+			+ static_cast<double>(n.Y) * n.Y);
+		const double B = static_cast<double>(vz) * n.Z;   // <= 0
+		const double phi = atan2(static_cast<double>(n.Y),
+			static_cast<double>(n.X));
+		// the window's cos(theta - phi) range [c_lo, c_hi]
+		double u0 = static_cast<double>(t0) - phi;
+		double u1 = static_cast<double>(t1) - phi;
+		// wrap the interval start into (-pi, pi]
+		const double kTau = 6.283185307179586;
+		while (u0 > 3.141592653589793) { u0 -= kTau; u1 -= kTau; }
+		while (u0 <= -3.141592653589793) { u0 += kTau; u1 += kTau; }
+		double c_hi, c_lo;
+		{
+			const double ca = cos(u0), cb = cos(u1);
+			c_hi = (u0 <= 0.0 && u1 >= 0.0) ? 1.0
+				: (ca > cb ? ca : cb);
+			const bool has_pi = (u0 <= 3.141592653589793
+				&& u1 >= 3.141592653589793)
+				|| (u0 <= -3.141592653589793);
+			c_lo = has_pi ? -1.0 : (ca < cb ? ca : cb);
+		}
+		// exact minimum loss at horizontal speed s (A = s*nh):
+		//   c* = clamp(-B/A, [c_lo, c_hi]); L = |A*c* + B|
+		auto feasible = [&](double s) {
+			const double A = s * nh;
+			double c = c_hi;
+			if (A > 1e-12) {
+				const double cz = -B / A;
+				c = cz < c_lo ? c_lo : (cz > c_hi ? c_hi : cz);
+			}
+			const double L = fabs(A * c + B);
+			return s * s + vz2 - L * L >= need2;
+		};
+		// candidate boundaries: 0, the zero-loss band edges, and the
+		// roots of the two edge quadratics
+		double cand[14];
+		int nc = 0;
+		cand[nc++] = 0.0;
+		// the zero-loss band's own feasibility crossing (the root
+		// the first version missed - the falsifier caught it)
+		if (need2 > vz2)
+			cand[nc++] = sqrt(need2 - vz2);
+		const double negB = -B;   // >= 0
+		if (nh > 1e-12) {
+			if (c_hi > 1e-12)
+				cand[nc++] = negB / (nh * c_hi);
+			if (c_lo > 1e-12)
+				cand[nc++] = negB / (nh * c_lo);
+		}
+		// edge quadratic for c in {c_lo, c_hi}:
+		//   s^2 (1 - nh^2 c^2) - 2 nh c B s + (vz^2 - B^2 - need2) = 0
+		const double edges[2] = { c_lo, c_hi };
+		for (int e = 0; e < 2; ++e) {
+			const double c = edges[e];
+			const double a2 = 1.0 - nh * nh * c * c;
+			const double a1 = -2.0 * nh * c * B;
+			const double a0 = vz2 - B * B - need2;
+			if (fabs(a2) < 1e-12) {
+				if (fabs(a1) > 1e-12)
+					cand[nc++] = -a0 / a1;
+			} else {
+				const double disc = a1 * a1 - 4.0 * a2 * a0;
+				if (disc >= 0.0) {
+					const double rd = sqrt(disc);
+					cand[nc++] = (-a1 - rd) / (2.0 * a2);
+					cand[nc++] = (-a1 + rd) / (2.0 * a2);
+				}
+			}
+		}
+		// sort the valid candidates and take the first feasible
+		// point (interval classification is exact: the condition is
+		// one fixed quadratic between adjacent candidates)
+		for (int i = 0; i < nc; ++i)
+			for (int j = i + 1; j < nc; ++j)
+				if (cand[j] < cand[i]) {
+					const double tmp = cand[i];
+					cand[i] = cand[j];
+					cand[j] = tmp;
+				}
+		// every boundary of the feasible set is now a candidate, so
+		// the infimum is the first candidate whose right side is
+		// feasible
+		double best_s = -1.0;
+		for (int i = 0; i < nc; ++i) {
+			const double s = cand[i];
+			if (s < 0.0 || s > 4000.0)
+				continue;
+			if (feasible(s + 1e-6)) {
+				best_s = s;
+				break;
+			}
+		}
+		if (best_s < 0.0) {
+			if (feasible(4000.0))
+				best_s = 4000.0;
+			else
+				return 1e30f;
+		}
+		const double s_in = sqrt(best_s * best_s + vz2);
+		const double shaved = s_in - 0.05;
+		return static_cast<float>(shaved > 0.0 ? shaved : 0.0);
+	}
+
+} // namespace CapBounds
 } // namespace Solver
