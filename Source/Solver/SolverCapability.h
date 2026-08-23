@@ -5065,6 +5065,97 @@ namespace CapEdge {
 } // namespace CapEdge
 
 // ======================================================================
+// CAPRIDE addition - THE EXACT CARRIED-GAP ROLLER (registry A19/A20's
+// named refinement + the A18 boundary sliver), session 36. The ride
+// family's conservative stay-on-face guards existed because the
+// contact boundary - the carried 1/32 standoff, its float drift, the
+// hover band, re-contact fractions - had no exact law outside the
+// engine. It does now, by COMPOSITION OF CERTIFIED PIECES: the
+// airborne MoveTick chain's preamble (gravity half, clamp, the wish
+// accel under the STATEFUL stale sf), the A24 local move mirror
+// (TryMoveLocal - every trace answered by the bitwise A14 clip, so
+// entry fractions, zero-frac steady ticks, hover misses, crease
+// chains, and the stuck guard all resolve exactly), and the sf state
+// law (0.25 when rising at categorize, applied stale). The carried
+// gap needs no separate recurrence: it IS n.pos - d_exp of a
+// bitwise-tracked position. This roller also lifts the air kernel's
+// sf domain limit - sf is CARRIED, so braking wishes on rising ticks
+// are exact here.
+// Domain: airborne throughout (no walkable plane in the local set -
+// surf-steep faces only), zero basevel, standing hull.
+namespace CapRide {
+
+	struct MirrorState {
+		Vec3 pos;
+		Vec3 vel;
+		float sf = 1.f;   // stale surface friction (LAST tick's)
+	};
+
+	// One full airborne tick against the local set. Mirrors the
+	// MoveTick airborne chain float-for-float (the kernel preamble's
+	// order, then TryMoveLocal, then the finish chain), with the sf
+	// state updated from vz at categorize.
+	inline bool MirrorTick(const CapContact::LocalSet& S,
+	                       const MoveParams& p, MirrorState* st,
+	                       signed char side, float cosa,
+	                       int* nbumps_out = nullptr) {
+		Vec3 vel = st->vel;
+		Vec3 pos = st->pos;
+		const float s2d = Len2D(vel);
+		const float h = s2d > 1.f ? atan2f(vel.Y, vel.X) : 0.f;
+		float yaw = h * 57.2957795f;
+		float fm = 0.f, sm = 0.f;
+		if (side != 0 && s2d > 1.f)
+			Air::WishInputs(h, static_cast<int>(side), cosa, &yaw,
+				&fm, &sm);
+		// StartGravity half (gravity_scale 1, basevel zero domain)
+		vel.Z -= p.gravity * 0.5f * p.dt;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		// AirMove accel under the CARRIED sf
+		float wx, wy;
+		Fn::WishFromInput(yaw, fm, sm, &wx, &wy);
+		float wishspeed = sqrtf(wx * wx + wy * wy);
+		Vec3 wishdir(0.f, 0.f, 0.f);
+		if (wishspeed > 1e-6f)
+			wishdir = Vec3(wx / wishspeed, wy / wishspeed, 0.f);
+		const float effmax = p.maxspeed;
+		if (wishspeed > effmax)
+			wishspeed = effmax;
+		const float wishspd = (wishspeed > p.air_speed_cap)
+			? p.air_speed_cap : wishspeed;
+		const float cur = Dot(vel, wishdir);
+		const float add = wishspd - cur;
+		if (add > 0.f) {
+			float accelspeed = p.airaccelerate * wishspeed * p.dt
+				* st->sf;
+			if (accelspeed > add)
+				accelspeed = add;
+			vel = vel + Scale(wishdir, accelspeed);
+		}
+		// TryPlayerMove via the certified local mirror
+		if (!CapEdge::TryMoveLocal(S, p, false, &pos, &vel,
+			nbumps_out))
+			return false;   // corridor DECLINE
+		// CategorizePosition: state-only in this domain; vz HERE
+		// decides next tick's stale sf. The EXACT rule
+		// (SolverMove.cpp 178-229): every categorize RESETS sf to 1;
+		// the down-probe runs only when vz <= non_jump_velocity; a
+		// probe with no walkable plane under a RISING player sets
+		// sf = air_friction_up.
+		const float vz_cat = vel.Z;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		vel.Z -= p.gravity * 0.5f * p.dt;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		st->pos = pos;
+		st->vel = vel;
+		st->sf = (vz_cat <= p.non_jump_velocity && vz_cat > 0.f)
+			? p.air_friction_up : 1.f;
+		return true;
+	}
+
+} // namespace CapRide
+
+// ======================================================================
 // CAPRIDEREACH addition - registry A23 (ride edge interception),
 // session 35: the earliest ride tick at which each sample point
 // along an in-plane edge segment becomes reachable at the lattice

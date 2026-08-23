@@ -408,6 +408,16 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23i (session 36): **the carried-gap law is EXACT — A18
+  completes; A19/A20 close; A22 v3** (detail in the checklist
+  change log). `CapRide::MirrorTick` (preamble under stateful sf +
+  the A24 mirror + the exact categorize sf rule) rolls mixed
+  contact/hover/re-contact rides BITWISE (capgap 6/0: 3600/3600
+  ticks, 842 hovers, 327 re-contacts); the generalized contact law
+  (contact iff gap + (v_move·n)·dt ≤ 0) verified on every tick;
+  A22's exact-hit tail recovers in-authority ride-plane targets to
+  0.097u mean (lattice ~30u) with 8/8 engine-bitwise. Remaining A:
+  A8 refinements, A11 interior, A29, A31.
 - 2026-08-23h (session 35): **A23, A24, A28 close** (detail in the
   checklist change log). The headline is structural: A24 =
   `CapEdge::TryMoveLocal`, the verified TryPlayerMove as a pure

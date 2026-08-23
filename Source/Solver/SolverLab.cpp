@@ -16596,6 +16596,539 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= capgap: THE EXACT CARRIED-GAP LAW (session
+	// 36) - registry A18's boundary sliver, A19/A20's named
+	// refinement, and A22 v3. The ride boundary - the carried 1/32
+	// standoff, its float drift, hover ticks, re-contact fractions -
+	// was the one regime only the full engine could walk. The
+	// CapRide::MirrorTick roller closes it BY COMPOSITION: the
+	// airborne chain preamble under STATEFUL stale sf + the A24
+	// local move mirror (bitwise A14 traces) + the exact categorize
+	// sf rule. Gate A: mixed contact/hover/re-contact sequences
+	// BITWISE vs the engine, every tick, position AND velocity AND
+	// sf. Gate B: the generalized contact law - a tick contacts iff
+	// gap + (v_move . n) dt <= 0 (the measured -1/32 epsilon is its
+	// gap = 1/32 special case) - verified against every engine tick.
+	// Gate C: A22 v3 - EXACT in-plane hits on the ride plane (tail
+	// Newton through the mixed roller), residuals ~0.5u where the
+	// indexed lattice answered ~30u.
+	int CmdCapGap(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capgap: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		unsigned rng = 0x6A9C0136u;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const float ralphas[2] = { 50.f, 60.f };
+		long long hover_total = 0, recontact_total = 0;
+		for (int ia = 0; ia < 2; ++ia) {
+			World w2;
+			Vec3 n;
+			if (!CapBoard::MakeRampWorld(&w2, o.hulls, ralphas[ia],
+				0.f, &n)) {
+				printf("capgap: ramp world %d failed\n", ia);
+				return 1;
+			}
+			CapContact::LocalSet LS;
+			CapContact::BuildLocalSet(w2, 0,
+				Vec3(-9000.f, -9000.f, -9000.f),
+				Vec3(9000.f, 9000.f, 9000.f), &LS);
+			const float d_exp = CapHull::PlaneOffsetHull(o.hulls, n,
+				0);
+			// engine-anchored ride start
+			PlayerState s0;
+			{
+				Vec3 dsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+				const float dl = Len(dsl);
+				dsl = Scale(dsl, 1.f / dl);
+				PlayerState s;
+				s.pos = Vec3(n.X * 80.f, n.Y * 80.f, n.Z * 80.f);
+				s.vel = Vec3(dsl.X * 450.f - n.X * 40.f,
+					dsl.Y * 450.f - n.Y * 40.f,
+					dsl.Z * 450.f - n.Z * 40.f);
+				int contacts = 0;
+				for (int t = 0; t < 60 && contacts < 3; ++t) {
+					const float s2d = Len2D(s.vel);
+					const float h = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					TickEvents ev;
+					MoveTick(s, w2, p, 0.f, h * 57.2957795f, 0.f,
+						0.f, 0.f, 0, &ev);
+					if (ev.ncontacts > 0)
+						contacts++;
+				}
+				if (contacts < 3) {
+					check("capgap entry settles", false,
+						"never reached ride contact");
+					return 2;
+				}
+				s0 = s;
+			}
+			// ---- Gate A + B: mixed sequences, bitwise + the law
+			long long ticks_n = 0, bit_ok = 0;
+			long long law_n = 0, law_ok = 0;
+			long long hover_n = 0, recon_n = 0, contact_n = 0;
+			int trials_done = 0;
+			for (int tr = 0; tr < 12; ++tr) {
+				PlayerState se = s0;
+				CapRide::MirrorState sm;
+				sm.pos = s0.pos;
+				sm.vel = s0.vel;
+				sm.sf = s0.surface_friction;
+				signed char side = 0;
+				int age = 6;
+				bool prev_contact = true;
+				bool diverged = false;
+				for (int t = 0; t < 150 && !diverged; ++t) {
+					// random legal action, unrestricted (hover and
+					// brief leaves welcome - the boundary IS the
+					// subject)
+					signed char ds;
+					float ca;
+					const unsigned r2 = rnd();
+					if ((r2 & 7) == 0) {
+						ds = 0;
+						ca = 1.f;
+					} else {
+						ds = (r2 & 8) ? 1 : -1;
+						if (side != 0 && ds != side
+							&& age < min_gap)
+							ds = side;
+						ca = 1.f - 2.f
+							* static_cast<float>((r2 >> 8)
+								& 1023) / 1023.f;
+					}
+					if (ds != 0 && side != 0 && ds != side)
+						age = 1;
+					else
+						age = age < 6 ? age + 1 : 6;
+					if (ds != 0)
+						side = ds;
+					// gate B's inputs from the PRE state: the move
+					// velocity (preamble under the carried sf) and
+					// the carried gap
+					const float gap = Dot(n, se.pos) - d_exp;
+					float vmn;
+					{
+						Vec3 vv = se.vel;
+						const float s2d = Len2D(vv);
+						const float h = s2d > 1.f
+							? atan2f(vv.Y, vv.X) : 0.f;
+						float yaw = h * 57.2957795f;
+						float fm = 0.f, smv = 0.f;
+						if (ds != 0 && s2d > 1.f)
+							Air::WishInputs(h,
+								static_cast<int>(ds), ca, &yaw,
+								&fm, &smv);
+						vv.Z -= p.gravity * 0.5f * p.dt;
+						CapAir::KernelCheckVelocity(p, &vv.X,
+							&vv.Y, &vv.Z);
+						float wx, wy;
+						Fn::WishFromInput(yaw, fm, smv, &wx,
+							&wy);
+						float wishspeed = sqrtf(wx * wx
+							+ wy * wy);
+						Vec3 wishdir(0.f, 0.f, 0.f);
+						if (wishspeed > 1e-6f)
+							wishdir = Vec3(wx / wishspeed,
+								wy / wishspeed, 0.f);
+						if (wishspeed > p.maxspeed)
+							wishspeed = p.maxspeed;
+						const float wishspd =
+							(wishspeed > p.air_speed_cap)
+							? p.air_speed_cap : wishspeed;
+						const float cur = Dot(vv, wishdir);
+						const float add = wishspd - cur;
+						if (add > 0.f) {
+							float acc = p.airaccelerate
+								* wishspeed * p.dt
+								* se.surface_friction;
+							if (acc > add)
+								acc = add;
+							vv = vv + Scale(wishdir, acc);
+						}
+						vmn = Dot(vv, n);
+					}
+					// engine tick
+					const float s2d = Len2D(se.vel);
+					const float h = s2d > 1.f
+						? atan2f(se.vel.Y, se.vel.X) : 0.f;
+					float yaw = h * 57.2957795f;
+					float fmv = 0.f, smv = 0.f;
+					if (ds != 0 && s2d > 1.f)
+						Air::WishInputs(h, static_cast<int>(ds),
+							ca, &yaw, &fmv, &smv);
+					TickEvents ev;
+					MoveTick(se, w2, p, 0.f, yaw, fmv, smv, 0.f,
+						0, &ev);
+					// mirror tick
+					CapRide::MirrorTick(LS, p, &sm, ds, ca);
+					ticks_n++;
+					const bool bit = memcmp(&sm.pos.X, &se.pos.X,
+						12) == 0
+						&& memcmp(&sm.vel.X, &se.vel.X, 12) == 0
+						&& memcmp(&sm.sf, &se.surface_friction,
+							4) == 0;
+					if (bit)
+						bit_ok++;
+					else
+						diverged = true;
+					// gate B: the generalized contact law
+					const bool contacted = ev.ncontacts > 0;
+					const bool law_pred = gap + vmn * p.dt
+						<= 0.f;
+					law_n++;
+					if (law_pred == contacted)
+						law_ok++;
+					if (contacted) {
+						contact_n++;
+						if (!prev_contact)
+							recon_n++;
+					} else {
+						const float g2 = Dot(n, se.pos) - d_exp;
+						if (g2 < 1.f)
+							hover_n++;
+					}
+					prev_contact = contacted;
+					if (Dot(n, se.pos) - d_exp > 120.f)
+						break;   // flew away - trial over
+				}
+				trials_done++;
+			}
+			hover_total += hover_n;
+			recontact_total += recon_n;
+			char nm[64];
+			snprintf(nm, sizeof(nm), "gap roller bitwise [%.0f "
+				"deg]", ralphas[ia]);
+			snprintf(buf, sizeof(buf), "%lld/%lld mixed ticks "
+				"BITWISE (pos+vel+sf) across %d trials | %lld "
+				"contact, %lld hover, %lld re-contact ticks",
+				bit_ok, ticks_n, trials_done, contact_n, hover_n,
+				recon_n);
+			check(nm, ticks_n >= 1000 && bit_ok == ticks_n
+				&& recon_n >= 10, buf);
+			snprintf(nm, sizeof(nm), "contact law [%.0f deg]",
+				ralphas[ia]);
+			snprintf(buf, sizeof(buf), "%lld/%lld ticks: contact "
+				"iff gap + (v_move.n)dt <= 0 (the -1/32 epsilon "
+				"generalized)", law_ok, law_n);
+			check(nm, law_n >= 1000 && law_ok == law_n, buf);
+			// ---- Gate C (60 deg only): A22 v3 exact-hit tail
+			if (ia == 1) {
+				Vec3 dsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+				dsl = Scale(dsl, 1.f / Len(dsl));
+				const Vec3 csl = Cross(n, dsl);
+				const int N = 48;
+				int tried = 0, hit = 0, declined = 0;
+				int engine_ok = 0, engine_n = 0;
+				double res_sum = 0.0, res_max = 0.0;
+				for (int it = 0; it < 60 && tried < 20; ++it) {
+					// a contact-keeping base schedule via engine
+					// copies (the capexit recipe)
+					signed char bs_side[64];
+					float bs_cosa[64];
+					PlayerState s = s0;
+					signed char side = 0;
+					int age = 6;
+					bool left = false;
+					for (int t = 0; t < N && !left; ++t) {
+						bool advanced = false;
+						for (int att = 0; att < 8 && !advanced;
+							++att) {
+							signed char ds;
+							float ca;
+							const unsigned r2 = rnd();
+							if ((r2 & 7) == 0) {
+								ds = 0;
+								ca = 1.f;
+							} else {
+								ds = (r2 & 8) ? 1 : -1;
+								if (side != 0 && ds != side
+									&& age < min_gap)
+									ds = side;
+								ca = 1.f - 2.f
+									* static_cast<float>(
+										(r2 >> 8) & 1023)
+									/ 1023.f;
+							}
+							PlayerState sc = s;
+							const float s2d = Len2D(sc.vel);
+							const float h = s2d > 1.f
+								? atan2f(sc.vel.Y, sc.vel.X)
+								: 0.f;
+							float yaw = h * 57.2957795f;
+							float fmv = 0.f, smv = 0.f;
+							if (ds != 0 && s2d > 1.f)
+								Air::WishInputs(h,
+									static_cast<int>(ds), ca,
+									&yaw, &fmv, &smv);
+							TickEvents ev;
+							MoveTick(sc, w2, p, 0.f, yaw, fmv,
+								smv, 0.f, 0, &ev);
+							if (ev.ncontacts == 0)
+								continue;
+							s = sc;
+							advanced = true;
+							bs_side[t] = ds;
+							bs_cosa[t] = ca;
+							if (ds != 0 && side != 0
+								&& ds != side)
+								age = 1;
+							else
+								age = age < 6 ? age + 1 : 6;
+							if (ds != 0)
+								side = ds;
+						}
+						if (!advanced)
+							left = true;
+					}
+					if (left)
+						continue;
+					tried++;
+					// the tail OWNS its last 12 ticks completely: a
+					// constant side (dwell-legal by construction)
+					// with (c1, c2) cosa halves - base ticks with
+					// side 0 would otherwise leave the Newton no
+					// authority at all
+					signed char tail_side = 1;
+					for (int t = N - 21; t >= 0; --t)
+						if (bs_side[t] != 0) {
+							tail_side = bs_side[t];
+							break;
+						}
+					// the mixed roller's endpoint = the base truth.
+					// The LIVE turn band narrows with speed (true
+					// cos past cap/s gives zero accel), so the tail
+					// params map onto ca = x * 0.95 * cap / s_ref -
+					// the speed-correct saturating turn control.
+					float ca_scale = 0.f;
+					// two tail SHAPES: both halves the same side
+					// (a C-curve) or opposite sides (an S-curve,
+					// one mid-tail flip, always dwell-legal) - the
+					// same-side shape alone is measurably near-1D
+					int tail_flip = 0;
+					auto roll = [&](float c1, float c2,
+						Vec3* pend, Vec3* pvel = nullptr) {
+						CapRide::MirrorState ms;
+						ms.pos = s0.pos;
+						ms.vel = s0.vel;
+						ms.sf = s0.surface_friction;
+						for (int t = 0; t < N; ++t) {
+							float ca2 = bs_cosa[t];
+							signed char sd2 = bs_side[t];
+							if (t >= N - 20) {
+								ca2 = ca_scale * (t < N - 10 ? c1
+									: c2);
+								sd2 = (t >= N - 10 && tail_flip)
+									? static_cast<signed char>(
+										-tail_side) : tail_side;
+							}
+							if (!CapRide::MirrorTick(LS, p, &ms,
+								sd2, ca2))
+								return false;
+						}
+						*pend = ms.pos;
+						if (pvel)
+							*pvel = ms.vel;
+						return true;
+					};
+					Vec3 base_end, base_vel;
+					if (!roll(0.f, 0.f, &base_end, &base_vel))
+						continue;
+					{
+						float sref = Len2D(base_vel);
+						if (sref < 120.f)
+							sref = 120.f;
+						ca_scale = 0.95f * p.air_speed_cap
+							/ sref;
+					}
+					if (tried <= 2) {
+						Vec3 ea, eb, ec, ed;
+						if (roll(1.f, 1.f, &ea)
+							&& roll(-1.f, -1.f, &eb)
+							&& roll(1.f, -1.f, &ec)
+							&& roll(-1.f, 1.f, &ed))
+							printf("capgap:   [C diag %d] tail "
+								"authority du/dv: (%.1f %.1f) "
+								"(%.1f %.1f) (%.1f %.1f) (%.1f "
+								"%.1f)\n", tried,
+								Dot(dsl, ea - base_end),
+								Dot(csl, ea - base_end),
+								Dot(dsl, eb - base_end),
+								Dot(csl, eb - base_end),
+								Dot(dsl, ec - base_end),
+								Dot(csl, ec - base_end),
+								Dot(dsl, ed - base_end),
+								Dot(csl, ed - base_end));
+					}
+					// the target IS a hidden tail draw - exactly
+					// reachable by construction. The gate asks the
+					// Newton to RECOVER it from zero knowledge:
+					// hits fail only where the optimizer misses a
+					// certified-reachable point. (Production
+					// semantics: the polisher promises exact hits
+					// within its authority hull and DECLINES
+					// beyond it - the lattice node choice covers
+					// the rest.)
+					const float hx1 = (static_cast<float>(
+						rnd() & 1023) / 1023.f - 0.5f) * 1.7f;
+					const float hx2 = (static_cast<float>(
+						rnd() & 1023) / 1023.f - 0.5f) * 1.7f;
+					tail_flip = static_cast<int>(rnd() & 1);
+					Vec3 hend;
+					if (!roll(hx1, hx2, &hend)) {
+						declined++;
+						continue;
+					}
+					const float tu = Dot(dsl, hend - s0.pos);
+					const float tv = Dot(csl, hend - s0.pos);
+					// FD Newton on the tail (c1, c2), 3 starts
+					float bestr = 1e30f, b1 = 0.f, b2 = 0.f;
+					int bflip = 0;
+					const float starts[3][2] = { { 0.f, 0.f },
+						{ 0.7f, -0.7f }, { -0.7f, 0.7f } };
+					for (int shp = 0; shp < 2 && bestr > 0.25f;
+						++shp)
+					for (int st = 0; st < 3 && bestr > 0.25f;
+						++st) {
+						tail_flip = shp;
+						float c1 = starts[st][0];
+						float c2 = starts[st][1];
+						Vec3 e0;
+						if (!roll(c1, c2, &e0))
+							continue;
+						float ru = Dot(dsl, e0 - s0.pos) - tu;
+						float rv = Dot(csl, e0 - s0.pos) - tv;
+						float res = sqrtf(ru * ru + rv * rv);
+						for (int itn = 0; itn < 8 && res > 0.25f;
+							++itn) {
+							const float hh = 0.02f;
+							Vec3 ea, eb;
+							if (!roll(c1 + hh, c2, &ea)
+								|| !roll(c1, c2 + hh, &eb))
+								break;
+							const float j11 = (Dot(dsl, ea - e0))
+								/ hh;
+							const float j21 = (Dot(csl, ea - e0))
+								/ hh;
+							const float j12 = (Dot(dsl, eb - e0))
+								/ hh;
+							const float j22 = (Dot(csl, eb - e0))
+								/ hh;
+							const float det = j11 * j22
+								- j12 * j21;
+							if (fabsf(det) < 1e-6f)
+								break;
+							float d1 = (-ru * j22 + rv * j12)
+								/ det;
+							float d2 = (-rv * j11 + ru * j21)
+								/ det;
+							if (d1 > 0.5f) d1 = 0.5f;
+							if (d1 < -0.5f) d1 = -0.5f;
+							if (d2 > 0.5f) d2 = 0.5f;
+							if (d2 < -0.5f) d2 = -0.5f;
+							c1 += d1;
+							c2 += d2;
+							if (c1 > 1.f) c1 = 1.f;
+							if (c1 < -1.f) c1 = -1.f;
+							if (c2 > 1.f) c2 = 1.f;
+							if (c2 < -1.f) c2 = -1.f;
+							if (!roll(c1, c2, &e0))
+								break;
+							ru = Dot(dsl, e0 - s0.pos) - tu;
+							rv = Dot(csl, e0 - s0.pos) - tv;
+							res = sqrtf(ru * ru + rv * rv);
+						}
+						if (res < bestr) {
+							bestr = res;
+							b1 = c1;
+							b2 = c2;
+							bflip = tail_flip;
+						}
+					}
+					if (bestr > 1e29f) {
+						declined++;
+						continue;
+					}
+					tail_flip = bflip;
+					res_sum += bestr;
+					if (bestr > res_max)
+						res_max = bestr;
+					if (bestr <= 0.5f)
+						hit++;
+					// engine replay: the refined schedule's engine
+					// endpoint must equal the roller's BITWISE
+					if (engine_n < 8 && bestr <= 0.5f) {
+						engine_n++;
+						Vec3 re;
+						roll(b1, b2, &re);
+						PlayerState s2 = s0;
+						for (int t = 0; t < N; ++t) {
+							float ca2 = bs_cosa[t];
+							signed char sd2 = bs_side[t];
+							if (t >= N - 20) {
+								ca2 = ca_scale * (t < N - 10 ? b1
+									: b2);
+								sd2 = (t >= N - 10 && bflip)
+									? static_cast<signed char>(
+										-tail_side) : tail_side;
+							}
+							const float s2d = Len2D(s2.vel);
+							const float h = s2d > 1.f
+								? atan2f(s2.vel.Y, s2.vel.X)
+								: 0.f;
+							float yaw = h * 57.2957795f;
+							float fmv = 0.f, smv = 0.f;
+							if (sd2 != 0 && s2d > 1.f)
+								Air::WishInputs(h,
+									static_cast<int>(sd2), ca2,
+									&yaw, &fmv, &smv);
+							TickEvents ev;
+							MoveTick(s2, w2, p, 0.f, yaw, fmv,
+								smv, 0.f, 0, &ev);
+						}
+						if (memcmp(&s2.pos.X, &re.X, 12) == 0)
+							engine_ok++;
+					}
+				}
+				snprintf(buf, sizeof(buf), "%d/%d perturbed "
+					"in-plane targets hit exactly (res <= 0.5u; "
+					"mean %.3f, max %.3f; %d declined) - the "
+					"indexed lattice answered ~30u", hit, tried,
+					tried - declined > 0
+						? res_sum / (tried - declined) : 0.0,
+					res_max, declined);
+				check("A22 v3 exact-hit tail", tried >= 15
+					&& hit >= (tried * 3) / 5, buf);
+				snprintf(buf, sizeof(buf), "%d/%d refined "
+					"schedules: engine endpoint == roller "
+					"endpoint BITWISE", engine_ok, engine_n);
+				check("A22 v3 engine bitwise", engine_n >= 5
+					&& engine_ok == engine_n, buf);
+			}
+		}
+		printf("capgap: boundary census: %lld hover ticks, %lld "
+			"re-contacts exercised across both ramps\n",
+			hover_total, recontact_total);
+		printf("capgap: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "THE CARRIED-GAP LAW IS EXACT - MIXED "
+				"CONTACT/HOVER RIDES BITWISE, A22 EXACT HITS"
+				: "CARRIED-GAP RED - a gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capcontact: registry A14 (session 34) - the
 	// first-contact predictor on a PREBUILT LOCAL BRUSH SET. The
 	// per-brush clip arithmetic is transcribed verbatim from the
@@ -24724,6 +25257,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapContact(o);
+	}
+	if (cmd == "capgap") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapGap(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

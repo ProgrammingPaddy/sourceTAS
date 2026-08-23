@@ -1,0 +1,170 @@
+<title>The Carried-Gap Law</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .callout{background:var(--blue-soft); border:1px solid var(--blue); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout b{color:var(--blue)}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; margin:14px 0}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 36</div>
+  <h1>The Carried-Gap Law</h1>
+  <p class="sub">The ride boundary — the one regime only the full engine could walk — closes by
+  composition of already-certified pieces. A18 is complete, the contact epsilon generalizes to a
+  law that holds on every tick, A19/A20's named refinement is delivered, and A22 gains its
+  exact-hit tail: 0.097u where the lattice answered 30.</p>
+  <div class="meta">
+    <span>2026-08-23</span>
+    <span>new suite: capgap 6/0</span>
+    <span>rows: A18 complete · A19 · A20 · A22 v3</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">Mixed ticks bitwise</div><div class="v">3600 / 3600</div>
+    <p>position, velocity, AND surface friction — through 842 hover ticks and 327 re-contacts</p></div>
+  <div class="tile"><div class="k">The generalized law</div><div class="v">gap + v·n·dt ≤ 0</div>
+    <p>contact iff this holds — verified on every one of 3600 ticks; the −1/32 epsilon is its gap = 1/32 case</p></div>
+  <div class="tile"><div class="k">A22 exact hits</div><div class="v">0.097 u</div>
+    <p>mean recovery residual on in-authority ride-plane targets — the indexed lattice answered ~30u</p></div>
+  <div class="tile"><div class="k">Engine bitwise</div><div class="v">8 / 8</div>
+    <p>refined exact-hit schedules replay through the engine to the roller's endpoint, bit for bit</p></div>
+</div>
+
+<h2><span class="idx">01</span>The boundary was a composition, not a mystery</h2>
+<p class="lede">Since session 28 the ride family carried one honest asterisk: the contact
+boundary. The carried 1/32 standoff and its float drift, the hover band, re-contact fractions —
+the conservative guards excluded it, the falsifiers measured what that excluded (beats up to
++215.6 u/s), and the refinement stayed named but open.</p>
+<p>The close is structural. <code>CapRide::MirrorTick</code> composes three certified pieces:
+the airborne chain's preamble (gravity half, clamp, the wish accel under a <b>stateful</b> stale
+surface friction — the exact categorize rule transcribed: reset to 1 every tick, probe only at
+vz ≤ non-jump velocity, quarter budget on rising with no walkable below), the A24 local move
+mirror (every trace answered by the bitwise A14 clip — entry fractions, zero-fraction steady
+ticks, hover misses, crease chains, the stuck guard), and nothing else. The carried gap never
+needed its own recurrence: <b>it is n·pos − d_exp of a position the roller tracks bitwise.</b></p>
+<p>capgap's verdict: <b>3600/3600 mixed contact/hover/re-contact ticks bitwise against the
+engine in position, velocity, and surface friction</b>, across two ramp angles, with the
+boundary genuinely exercised — 842 hover ticks, 327 re-contacts. And on every tick, the
+generalized contact law held: <b>a tick contacts if and only if gap + (v_move·n)·dt ≤ 0.</b> The
+session-28 epsilon (re-contact needs v·n ≤ −2.083 u/s) drops out as the gap = 1/32 special
+case.</p>
+<div class="callout"><b>What this changes:</b> boundary-surfing trajectories — the hover-mixing
+lines the falsifiers kept finding above the conservative bounds — are now exactly simulable
+without the engine. A19/A20 close: their surfaces' guards remain a build-time choice with a
+measured price, not an unknown; the declined upslope direction has an exact-simulation path when
+it matters.</p></div>
+
+<h2><span class="idx">02</span>A22 v3 — exact hits on the ride plane, and two control laws learned</h2>
+<p class="lede">The indexed board→exit query answers in a third of a microsecond at ~30u lattice
+resolution. The exact-hit tail closes the rest — once the control parameterization respected two
+measured facts.</p>
+<div class="panel">
+  <p><span class="hl">Measured fact one — the live band narrows with speed.</span> A wish with
+  true-cos beyond cap/s (~0.027 at 1100 u/s) requests more than the 30-cap allows: zero
+  acceleration, dead control. A flat cosa parameterization wastes most of its range in that dead
+  zone (the first Newton moved nothing: residuals ~25u, gradient ~0). The tail now maps its
+  parameters onto ca = 0.95·(cap/s)·x — the speed-correct saturating turn control.</p>
+  <p><span class="hl">Measured fact two — same-side tails are nearly one-dimensional.</span> The
+  authority ellipse printed almost as a line: both halves turning the same way move the endpoint
+  along one dominant direction. The S-curve shape (second half on the opposite side — one
+  mid-tail flip, always dwell-legal) spans the second dimension.</p>
+</div>
+<p>With both laws in the parameterization, a 20-tick tail driven by a three-start
+finite-difference Newton <i>through the exact mixed roller</i> recovers hidden in-authority
+targets — reachable by construction, unknown to the solver — at <b>20/20 with mean residual
+0.097u and max 0.242u</b>, and 8/8 refined schedules replay through the engine to the roller's
+endpoint bitwise. Targets beyond the tail's measured authority hull DECLINE to the lattice node
+and arrival-tick choice — the same honesty every other bound in the library keeps.</p>
+
+<h2><span class="idx">03</span>The board and the march</h2>
+<div class="tablewrap"><table>
+  <tr><th>Suite</th><th>Result</th><th>Covers</th></tr>
+  <tr><td class="nm">capgap (new)</td><td class="num"><span class="chip c-pass">6 / 0</span></td>
+    <td class="note">the mixed roller bitwise × 2 ramps · the generalized contact law × 3600 ticks · A22 v3 exact hits + engine bitwise</td></tr>
+  <tr><td class="nm">capcontact · capmin · capxfer</td><td class="num"><span class="chip c-pass">5/0 · 8/0 · 8/0</span></td>
+    <td class="note">A14/A28 · A21/A23/A24/A26 · the C7 composition</td></tr>
+  <tr><td class="nm">capkern · capboard · capground · capwindow</td>
+    <td class="num"><span class="chip c-pass">5/5 · 5/5 · 6/6 · 6/6</span></td>
+    <td class="note">regression green</td></tr>
+</table></div>
+<p>The A march now has four names left: the A8 direction-aware bound refinements, A11's
+short-flight interior coverage, and the A29 duck / A31 trigger debt rows.</p>
+
+<footer>SourceTAS capability library · session 36 · 2026-08-23 · new suite: capgap ·
+docs: CapabilityChecklist.md + .html (A18 complete, A19, A20, A22 v3; the ceps and gap terms
+upgraded), CapabilityLibrary.md, SolverRebuildChecklist.md</footer>
+</div>

@@ -19,6 +19,33 @@ A11 short-flight interior coverage, then the A29 duck and A31
 trigger debt rows. A32 stays excluded by decree. The change-log
 tail below is the session journal.
 
+**STATUS 2026-08-23i (session 36): THE CARRIED-GAP LAW IS EXACT —
+A18 COMPLETES, A19/A20 CLOSE, A22 v3.** The ride boundary — the
+carried 1/32 standoff and its drift, hover ticks, re-contact
+fractions, the one regime only the full engine could walk — closes
+BY COMPOSITION: `CapRide::MirrorTick` = the airborne chain preamble
+under STATEFUL stale sf (the exact categorize rule transcribed:
+reset to 1, probe only at vz ≤ non_jump_velocity, air_friction_up
+on rising no-walkable) + the A24 local move mirror. capgap 6/0
+(new suite): **3600/3600 mixed contact/hover/re-contact ticks
+BITWISE (position, velocity, sf) — 842 hovers, 327 re-contacts —
+and the GENERALIZED CONTACT LAW on every tick: contact iff gap +
+(v_move·n)·dt ≤ 0** (the −1/32 epsilon = its gap = 1/32 case; the
+carried gap IS n·pos − d_exp of a bitwise position — no separate
+recurrence). A22 v3: the exact-hit tail on the ride plane — 20-tick
+C-/S-curve tail with the SPEED-CORRECT live-band mapping (true-cos
+past cap/s is dead control; the flat mapping measurably wasted half
+its range; same-side shapes are measurably near-1D), Newton through
+the mixed roller: 20/20 in-authority targets recovered to mean
+0.097u / max 0.242u (the lattice answered ~30u), 8/8
+engine-BITWISE; beyond-authority DECLINES to the lattice+N choice.
+A19/A20 close: the named refinement delivered; the conservative
+build guards remain the surfaces' measured price (rebuilds with the
+exact roller = optional tightening). Battery green: capgap 6/0,
+capkern 5/5, capboard 5/5, capground 6/6, capwindow 6/6, capcontact
+5/0, capmin 8/0, capxfer 8/0. Remaining A: A8 direction-aware
+refinements, A11 short-flight interior, A29 duck, A31 triggers.
+
 **STATUS 2026-08-23h (session 35): A23, A24, A28 CLOSE — THE LOCAL
 MOVE MIRROR.** A24's first design (two analytical transfer laws)
 was refuted by its own census — valley-crease crossings produce

@@ -44,11 +44,11 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A15 | board clip | v·n, loss, post² | A16/A17, C2 | exported engine clip + closed post-speed law | — | ~ns; law dev ≤ 0.0034 u/s over 33k arrivals | `[x]` |
 | A16 | best/worst board | v·n extrema over heading | C2, B8/B9 | closed-form candidates (endpoints, cos extrema, zero crossings) | dense enumeration (baseline only) | ~ns (few trig); verified to 1e-4 over 640 configs | `[x]` |
 | A17 | board feasibility arcs | loss ≤ L heading arcs | B8, approach windows | closed-form arccos arcs (≤2 per period) | enumeration | ~ns; 0 mismatches / 24×7200 | `[x]` |
-| A18 | one-tick ride law | in-plane gravity, sf state | A19–A22 | proven composition: gravity-half → clamp → accel(sf) → one clip → clamp → gravity-half → clamp | full MoveTick (edges/multi-plane keep it) | same order as A4 kernel + clip; 1246/1246 bitwise | `[x]` interior; `[ ]` edge/multi-plane ticks stay full-engine |
-| A19 | ride N-tick turn/gain | slope vs heading, sf carried state, **the contact epsilon** (re-contact needs v·n ≤ −(1/32)/dt ≈ −2.08 u/s — hover band measured) | A22, B10/B11 | `CapRide::BuildRide` on the proven A18 law, engine-anchored starts, stay-on-face guard | plane-table refinements | **56–84 s/ramp builds (28–34M nodes); 30/30 witness replays BITWISE as engine continuations; falsifier gaps: 50° +0.9, 60° +215.6, 70° +116.4 (the conservative guard's boundary sliver)** | `[~]` capride 7/0 (s28); named refinement: exact contact-boundary condition |
-| A20 | ride directional reach | in-plane (downslope, cross-slope), contact-epsilon guard + drift margin | A22, B10 | `CapRideReach::BuildRideReach` — position-tracking sweep on the proven ride law; **engine-validated witnesses per direction** (a direction with no clean witness DECLINES its bound) | finer local refinement | **9–19 s/ramp (3.3–6.1M nodes at 64u/10°/50u-s); 23/24 directions validated (upslope@50° declined — the near-walkable near-stall corner); D\*ride(0.72 s): down 702–844u, cross ~470u, up ≈ 0** | `[~]` capexit 9/0 (s29) |
+| A18 | one-tick ride law | in-plane gravity, sf state, **the carried gap** | A19–A22 | interior: the proven composition (gravity-half → clamp → accel(sf) → one clip → clamp → gravity-half → clamp); **boundary/hover/multi-plane: `CapRide::MirrorTick` — the exact mixed roller** (airborne preamble under STATEFUL sf + the A24 local move mirror + the exact categorize sf rule) | full MoveTick (same answers) | interior ~A4-kernel cost; mirror ~200 ns/tick | `[x]` COMPLETE s36: interior 1246/1246 bitwise (s24) + the boundary regime EXACT — capgap 3600/3600 mixed ticks bitwise (pos+vel+sf) including 842 hover ticks and 327 re-contacts; the carried gap needs no separate recurrence (it IS n·pos − d_exp of a bitwise position) |
+| A19 | ride N-tick turn/gain | slope vs heading, sf carried state, **the contact epsilon** (re-contact needs v·n ≤ −(1/32)/dt ≈ −2.08 u/s — hover band measured) | A22, B10/B11 | `CapRide::BuildRide` on the proven A18 law, engine-anchored starts, stay-on-face guard | plane-table refinements | **56–84 s/ramp builds (28–34M nodes); 30/30 witness replays BITWISE as engine continuations; falsifier gaps: 50° +0.9, 60° +215.6, 70° +116.4 (the conservative guard's boundary sliver)** | `[x]` s36 — the named refinement is DELIVERED: the exact contact-boundary condition exists (`CapRide::MirrorTick` + the generalized contact law, capgap 6/0); the conservative guard stays in the BUILD (rebuilding surfaces with the exact roller = optional tightening; the falsifier gaps remain its measured price) |
+| A20 | ride directional reach | in-plane (downslope, cross-slope), contact-epsilon guard + drift margin | A22, B10 | `CapRideReach::BuildRideReach` — position-tracking sweep on the proven ride law; **engine-validated witnesses per direction** (a direction with no clean witness DECLINES its bound) | finer local refinement | **9–19 s/ramp (3.3–6.1M nodes at 64u/10°/50u-s); 23/24 directions validated (upslope@50° declined — the near-walkable near-stall corner); D\*ride(0.72 s): down 702–844u, cross ~470u, up ≈ 0** | `[x]` s36 — same resolution as A19: the boundary regime is exactly simulable (capgap); the surface's conservative guard + drift margin remain its build-time choice, and the declined upslope@50° direction is now REACHABLE BY EXACT SIMULATION when needed |
 | A21 | minimum ride time | exit point, N_min | route timing | `CapRideReach::MinRideTime` — first A20 layer answering within the lattice contract; indexed-first, every miss confirmed by the exhaustive scan (result EQUALS brute by construction) | pure brute per-layer scan (same answers, measured 696 µs vs 857 µs — the confirm pass eats the index's edge on miss-heavy scans) | ~0.86 ms/query | `[x]` s33 (capmin: 50/50 == brute; 12/12 minimum-time witnesses engine-validated, 0 fringe) |
-| A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | **v1: cell-witness lookup in the A20 sweep** (exact schedules out); v2: the A11 exact-hit construction on the plane | DP table per face (baseline/falsifier) | **v2 (s30): O(1) indexed query 0.2–0.3 µs (~10,000× the layer scan), lattice-resolution answers (mean ~30u, worst 55u, all within the 96u contract; the nearest-node full scan at 0.7u mean remains available)** | `[~]` v2 indexed (s30); exact-hit tail on the plane = next |
+| A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | **v1: cell-witness lookup in the A20 sweep** (exact schedules out); v2: the A11 exact-hit construction on the plane | DP table per face (baseline/falsifier) | **v2 (s30): O(1) indexed query 0.2–0.3 µs (~10,000× the layer scan), lattice-resolution answers (mean ~30u, worst 55u, all within the 96u contract; the nearest-node full scan at 0.7u mean remains available)** | `[x]` v3 s36 (capgap): **the exact-hit tail on the ride plane** — a 20-tick tail (C- or S-curve shape, speed-correct live-band mapping ca = 0.95·cap/s·x) Newton-driven through the exact mixed roller: 20/20 in-authority targets recovered to mean 0.097u / max 0.242u (the lattice answered ~30u), 8/8 refined schedules engine-BITWISE; targets beyond the tail's authority hull DECLINE to the lattice+N choice |
 | A23 | ride edge interception | edge geometry, exit λ | launch selection | `CapRideReach::EdgeIntercept` — the A21 minimum-time query batched along an in-plane edge segment | — | ~0.86 ms/sample (A21's cost) | `[x]` s35 (capmin 8/0): 25/25 samples equal the brute per-layer scan; 8/8 interception witnesses engine-validated, 0 fringe |
 | A24 | direct contact transfer | adjacent-face clip chain, crease law | face-to-face routing | **`CapEdge::TryMoveLocal` — the verified TryPlayerMove as a PURE LOCAL FUNCTION** (every trace = the bitwise A14 clip): partial-move rebases, two-plane crease resolution, stop-dead guard, allsolid zeroing, the unswept stuck guard; `EdgeTickFull` wraps the whole crossing tick | the analytical two-plane laws (`ResolveTwoPlanes`/`SequentialTransfer`, kept as the decomposition); full engine roll-through | ~ns/edge chain | `[x]` s35 (capmin 8/0): 36/36 valley-crease crossing ticks BITWISE in position AND velocity — including 17 three-plus-bump chains no two-plane law covers (the census that forced the full mirror) |
 | A25 | ground/runoff acceleration | friction, stopspeed, accelerate, stamina power curve | spawn/launch prep | `CapGround::WalkKernelTick` — the grounded MoveTick chain partially evaluated on the flat-floor domain | full MoveTick baseline | **40.8M ticks/s = 10.9× engine; 200k walk ticks + 50k position checks, 0 bitwise mismatches (velocity, feet z, stamina)** | `[x]` capground 6/6 (s27) |
@@ -123,12 +123,39 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | jump impulse | double-precision constant × stamina scale (decoded) | A30, A25 |
 | duck shift / crop | 8.5u air shift; 0.34 speed crop (decoded) | A29 |
 | basevel / gravity_scale | trigger-applied state (mirror carries it) | A31 |
+| the contact law (generalized, s36) | a tick contacts iff gap + (v_move·n)·dt ≤ 0 — the measured −1/32 epsilon is its gap = 1/32 special case; the carried gap = n·pos − d_exp of a bitwise-tracked position (no separate recurrence needed); certified 3600/3600 mixed ticks incl. hover + re-contacts (capgap) | A18–A20 boundary regime, A22 v3, exact ride simulation |
 | E = s² + vz² | conserved less loss at clips | B12, C0 |
 | END box | Minkowski intersection, feet-z window | A27 |
 | hull offset off(n) | Minkowski support of the negated hull: −Σ nᵢ·(nᵢ>0 ? minᵢ : maxᵢ); traces run on d + off(n) | A3, C7 targeting, every origin-space plane prediction |
 | trace clip fraction | f = (d1 − 1/32)/(d1 − d2); the end sits EXACTLY 1/32 above the expanded plane along n; clipped velocity slides the remaining (1−f)·dt | C7 contact prediction (verified to ≤1e-4 u), A18 boundary work |
 
 ## Change log
+- 2026-08-23i (session 36): **THE CARRIED-GAP LAW IS EXACT — A18
+  completes, A19/A20's named refinement delivered, A22 v3.** The one
+  regime only the full engine could walk — the ride boundary: the
+  carried 1/32 standoff and its float drift, hover ticks,
+  re-contact fractions — closes BY COMPOSITION of certified pieces:
+  `CapRide::MirrorTick` = the airborne chain preamble under
+  STATEFUL stale sf (the exact categorize rule: reset to 1, probe
+  only at vz ≤ non_jump_velocity, air_friction_up on rising
+  no-walkable) + the A24 local move mirror. **capgap 6/0: 3600/3600
+  mixed contact/hover/re-contact ticks BITWISE (position, velocity,
+  AND sf) across two ramps — 842 hover ticks, 327 re-contacts —
+  and the GENERALIZED CONTACT LAW verified on every tick: a tick
+  contacts iff gap + (v_move·n)·dt ≤ 0** (the measured −1/32
+  epsilon is its gap = 1/32 special case; the carried gap needs no
+  separate recurrence — it IS n·pos − d_exp of a bitwise position).
+  A22 v3: the exact-hit tail on the ride plane — a 20-tick C- or
+  S-curve tail with the SPEED-CORRECT live-band mapping (true-cos
+  beyond cap/s is dead control authority — measured, the flat
+  mapping wasted half its range), Newton through the mixed roller:
+  20/20 in-authority targets recovered to mean 0.097u (the lattice
+  answered ~30u), 8/8 engine-bitwise, beyond-authority targets
+  DECLINE to the lattice+N choice. The tail-authority ellipse was
+  measured en route (same-side shapes are near-1D — the S-curve
+  spans 2D). Battery green: capgap 6/0 (new), capkern 5/5,
+  capboard 5/5, capground 6/6, capwindow 6/6, capcontact 5/0,
+  capmin 8/0, capxfer 8/0.
 - 2026-08-23h (session 35): **A23, A24, A28 close — and the LOCAL
   MOVE MIRROR arrives.** A24's first design (two analytical transfer
   laws) was REFUTED by its own census: valley-crease crossings
