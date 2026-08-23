@@ -1,5 +1,10 @@
 # The Capability Checklist — master table
 
+**Interactive companion:** `Docs/CapabilityChecklist.html` — the same
+rows searchable, sortable, and cross-linked (terms ↔ capabilities ↔
+dependencies), with the expansive detail in click-open drawers.
+Update BOTH files every session; this file remains canonical.
+
 **Opened 2026-08-22 (session 25), user directive.** One table, every
 capability: its terms, what it feeds, the selected method, the
 alternatives, an efficiency figure, and a checklist status. This is
@@ -92,7 +97,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | C2–C4 | quality projections (board/ride/air) | label views | pure projections of C0 | — | ~ns | `[ ]` after C0 |
 | C5 | successor-requirement matching | B14 vs exit label | interval test | — | ~ns | `[d]` after B14 |
 | C6 | sampled board→exit kernel | A22 matrix | batch A22 over sampled pairs | on-demand + memo | target: 10⁶ pairs in minutes | `[ ]` the end-state test's left half |
-| C7 | sampled exit→board kernel | A12/A13 matrix | batch A12 over sampled pairs | on-demand + memo | target: 10⁶ pairs in minutes | `[ ]` right half |
+| C7 | sampled exit→board kernel | A12/A13 matrix | **the capxfer composition: vertical timetable → face slices → O(1) culls → batch A11 → engine verification** | reach-table per start (measured 4–5 orders slower to first answer); shooting | **v1 VERIFIED (capxfer 4/0, s31): transfers land within 1.8–3.7 ticks and 13–24u; A18 law bitwise at all 62 contacts; organize ~3.5 ms/start, fast path ~100 µs/target, fallback-heavy ~5 ms** | `[~]` v1 (s31); hull-offset anticipation + matrix production = v2 |
 | C8 | composition without re-simulation | memo keys | memoized exact results (repeat-share measured 84–85%) | — | hit ~ns | `[~]` measured; production memo not built |
 | C9 | min-plus path composition | tick costs | standard shortest-path over labels | — | ~µs/graph | `[ ]` trivial once C0 exists |
 | C10 | route cost = ticks | g | by decree | — | — | `[x]` |
@@ -122,6 +127,21 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | END box | Minkowski intersection, feet-z window | A27 |
 
 ## Change log
+- 2026-08-23c (session 31): **C7 v1 VERIFIED (capxfer 4/0) — the
+  first true composition**: an air exit state answering boarding
+  targets on a destination ramp through the full chain (A1 vertical
+  timetable → A2 face slices → B13 constant-time culls → batch A11 →
+  engine verification). Transfers land within 1.8–3.7 ticks and
+  13–24u of prediction (the hull's leading-edge early contact is the
+  measured systematic — A3's offset, the v2 anticipation);
+  **the A18 ride law held bitwise at all 62 contact ticks on
+  arbitrary incoming flights**. Method tested, not assumed: the
+  reach-table alternative costs 4–5 orders of magnitude more per
+  start to its first answer (measured s29 vs s30 numbers). ALSO: the
+  interactive dashboard `Docs/CapabilityChecklist.html` opened — the
+  same rows searchable/sortable with cross-linked terms,
+  dependencies, and click-open detail drawers (72 rows, 16 terms,
+  update alongside this file).
 - 2026-08-23b (session 30): **the organize-once/query-constant
   session.** A11 gains BATCH MODE (`CapP2P::P2PBatch`): the family's
   law endpoints hashed spatially once per start (0.1–1.4 ms), then

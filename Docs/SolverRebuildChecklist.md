@@ -15,6 +15,27 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-23d (session 31): C7 v1 — THE FIRST TRUE
+COMPOSITION VERIFIED; THE INTERACTIVE DASHBOARD OPENED.** capxfer
+4/0: one air exit state answers boarding targets on a destination
+ramp through the full capability chain — the exact vertical
+recurrence (A1) picks each target's arrival tick, the face slice
+(A2) gives the target line, the certified departure bound (B13)
+culls in constant time, batch A11 solves the horizontal problem
+(certified vz-decoupling makes the horizontal schedule valid under
+the real vertical), and the ENGINE verifies: transfers first-contact
+the ramp within 1.8–3.7 ticks and 13–24u of prediction, with the
+PROVEN A18 ride law bitwise at all 62 contact ticks on arbitrary
+incoming flights. The hull's leading-edge early contact (the A3
+Minkowski offset) is the measured systematic; anticipating it is the
+v2 refinement, alongside the matrix production harness. Method
+choice tested against alternatives with measured numbers (reach
+table: 4–5 orders slower to first answer per start). NEW ARTIFACT:
+`Docs/CapabilityChecklist.html` — the living interactive dashboard
+(searchable, sortable, term↔capability↔dependency cross-links,
+click-open detail drawers; 72 rows, 16 terms; DOM-verified). Update
+it alongside the .md every session.
+
 **STATUS 2026-08-23c (session 30): ORGANIZE ONCE, QUERY IN CONSTANT
 TIME — BATCH SOLVING, INDEXED TRANSFERS, AND TWO NEW CERTIFIED
 CULLS.** Per the user's directive (engine truths are organized, then

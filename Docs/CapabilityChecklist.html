@@ -1,0 +1,566 @@
+<!-- The interactive companion to Docs/CapabilityChecklist.md (the
+     canonical row list). Self-contained; update DATA alongside the
+     .md every session. Opened session 31 (2026-08-23). -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The Capability Checklist</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@600&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --violet:#6d28d9; --violet-soft:#ece6fa;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --violet:#b79df5; --violet-soft:#261b3d;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:14px; line-height:1.5}
+  .wrap{max-width:1280px; margin:0 auto; padding:28px 20px 80px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:14px; margin-bottom:14px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:30px; margin:6px 0 4px}
+  .sub{color:var(--muted); margin:0; max-width:90ch; font-size:13px}
+  .bar{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:14px 0 10px}
+  #q{flex:1 1 260px; max-width:420px; padding:8px 12px; border:1px solid var(--line);
+    border-radius:6px; background:var(--surface); color:var(--ink); font-size:14px;
+    font-family:inherit}
+  #q:focus{outline:2px solid var(--teal); outline-offset:1px}
+  .chips{display:flex; flex-wrap:wrap; gap:6px}
+  .chip{font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600; padding:4px 10px;
+    border-radius:20px; border:1px solid var(--line); background:var(--surface); color:var(--muted);
+    cursor:pointer; user-select:none}
+  .chip.on{background:var(--ink); color:var(--bg); border-color:var(--ink)}
+  .counts{font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint); margin-left:auto}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px}
+  table{border-collapse:collapse; width:100%; min-width:980px; font-size:13px}
+  th{position:sticky; top:0; background:var(--surface2); text-align:left;
+    font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--faint); padding:9px 10px;
+    border-bottom:2px solid var(--line); cursor:pointer; white-space:nowrap}
+  th .arr{opacity:.6}
+  td{padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr.cap{cursor:pointer}
+  tr.cap:hover td{background:var(--surface2)}
+  tr.hl td{background:var(--amber-soft)!important}
+  td.id{font-family:"IBM Plex Mono",monospace; font-weight:600; color:var(--teal); white-space:nowrap}
+  td.nm{font-weight:600; min-width:150px}
+  td.eff{font-family:"IBM Plex Mono",monospace; font-size:11.5px; color:var(--muted); min-width:170px}
+  td.mut{color:var(--muted); font-size:12.5px}
+  .st{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10.5px; font-weight:600;
+    padding:2px 8px; border-radius:20px; white-space:nowrap; border:1px solid transparent}
+  .s-done{background:var(--teal-soft); color:var(--teal)}
+  .s-part{background:var(--amber-soft); color:var(--amber)}
+  .s-red{background:var(--red-soft); color:var(--red)}
+  .s-des{background:var(--blue-soft); color:var(--blue)}
+  .s-todo{background:transparent; color:var(--faint); border-color:var(--line)}
+  .s-excl{background:var(--surface2); color:var(--faint)}
+  .term{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10.5px;
+    padding:1px 7px; border-radius:12px; background:var(--violet-soft); color:var(--violet);
+    cursor:pointer; margin:1px 2px 1px 0; white-space:nowrap}
+  .term:hover{outline:1px solid var(--violet)}
+  .ref{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--blue); cursor:pointer;
+    margin-right:6px; white-space:nowrap}
+  .ref:hover{text-decoration:underline}
+  tr.detail td{background:var(--surface2); border-left:3px solid var(--teal); padding:14px 16px}
+  .detail-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px 24px; max-width:1100px}
+  .detail-grid .full{grid-column:1 / -1}
+  .dk{font-family:"IBM Plex Mono",monospace; font-size:10px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--faint); margin-bottom:2px}
+  .dv{font-size:13px; color:var(--ink)}
+  .dv.mut{color:var(--muted)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:20px; margin:28px 0 8px}
+  footer{margin-top:40px; padding-top:12px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:11.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:700px){ .detail-grid{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · living dashboard</div>
+  <h1>The Capability Checklist</h1>
+  <p class="sub">Every capability, reducer, and composition function — searchable, sortable, and
+  cross-linked. Click a row for the full record; click a term chip anywhere to see everything
+  that uses it; click an ID reference to jump to that row. Canonical text:
+  <code style="font-family:'IBM Plex Mono',monospace">Docs/CapabilityChecklist.md</code>. Hover any
+  cell for its tooltip.</p>
+</header>
+
+<div class="bar">
+  <input id="q" type="search" placeholder="search everything — ids, names, terms, methods, suites…" aria-label="search">
+  <div class="chips" id="catchips">
+    <span class="chip on" data-cat="all">ALL</span>
+    <span class="chip" data-cat="A">A · PHYSICAL</span>
+    <span class="chip" data-cat="B">B · REDUCERS</span>
+    <span class="chip" data-cat="C">C · COMPOSITION</span>
+  </div>
+  <div class="chips" id="stchips">
+    <span class="chip" data-st="done">DONE</span>
+    <span class="chip" data-st="part">PARTIAL</span>
+    <span class="chip" data-st="des">DESIGNED</span>
+    <span class="chip" data-st="todo">TODO</span>
+  </div>
+  <span class="counts" id="counts"></span>
+</div>
+
+<div class="tablewrap">
+<table id="tbl">
+  <thead><tr>
+    <th data-k="id">ID <span class="arr"></span></th>
+    <th data-k="name">Capability <span class="arr"></span></th>
+    <th data-k="st">Status <span class="arr"></span></th>
+    <th data-k="terms">Terms</th>
+    <th data-k="eff">Efficiency <span class="arr"></span></th>
+    <th data-k="suite">Suite <span class="arr"></span></th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+</div>
+
+<h2>The terms catalog</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Term</th><th>Exact law / source</th><th>Used by</th></tr></thead>
+  <tbody id="termrows"></tbody>
+</table>
+</div>
+
+<footer id="foot"></footer>
+</div>
+
+<script>
+"use strict";
+// ============ THE DATA (mirror of CapabilityChecklist.md; update both) ============
+const ST = {done:["DONE","s-done"], part:["PARTIAL","s-part"], red:["RED","s-red"],
+            des:["DESIGNED","s-des"], todo:["TODO","s-todo"], excl:["EXCLUDED","s-excl"]};
+const TERMS = [
+ ["s2","squared speed","Δ(s²) = 900 − c² per cap-limited tick — affine in the control; tables stratify in s², not s"],
+ ["c","c = s·cosα (true wish)","THE control scalar: one number per tick sets accel and turn; stored↔true basis bridge = negation (measured 98/98)"],
+ ["turn","turn magnitude atan(30/s)","the free turn at maximum gain; the 1/speed turning tax"],
+ ["step","step & arc length","step = post-update speed × dt exactly; max-gain arc length is schedule-independent"],
+ ["revs","reversal times","strafe-side flips ≥6 ticks apart (dwell law); ≤3 at measured optima; the point-to-point family's coordinates"],
+ ["vert","z, vz closed form","gravity halves ±6/tick with the ±3500 clamp; position uses the mid velocity — certified bitwise vs engine"],
+ ["sf","surface friction state","1 falling / 0.25 rising (no-walkable rule); scales only the accel budget; STALE — this tick uses last tick's value"],
+ ["vdn","v·n at a face","boarding needs v·n < 0; loss = |v·n|; post² = s² + vz² − (v·n)² (dev ≤ 0.0034 u/s vs engine clip)"],
+ ["ceps","the contact epsilon (STANDING LAW, s28)","a ridden plane re-contacts only when v·n·dt ≤ −1/32 (v·n ≤ −2.083 u/s at 66.67 tps); the band (−2.083, 0) = legal airborne HOVER ticks"],
+ ["gap","the carried hover gap","the clip's adjust pass drifts the 1/32 offset by ~3.5e-5 u/tick, making rare micro-fraction bumps; the exact carried-gap law is the ride family's open refinement"],
+ ["gt","in-plane gravity","constant per face; makes the ride tick the air tick + one clip"],
+ ["jump","jump impulse law","double-precision constant 301.99337741082996 × (1 − stamina·0.00019), three gravity half-steps per jump tick (measured chain −6 +302 −6 −6)"],
+ ["stam","stamina","drains 15/tick; scales walk xy by pow(1−st·0.00019, 1.05) and the jump impulse; landing arms nothing"],
+ ["duck","duck state (A29 debt)","flag/hull/timer machine, 8.5u air shift, 0.34 speed crop — decoded, domain-stamped OUT of all current families"],
+ ["trig","trigger state (A31 debt)","basevel / gravity_scale / teleports — the engine mirror carries them; capability + tests not built"],
+ ["end","END box & z-window","Minkowski-expanded finish volume; the exact vertical recurrence prunes crossing scans 12.1×"]
+];
+const D = [
+// id, cat, name, st, terms[], feeds[], deps[], method, alts, eff, suite, detail
+["A0","A","canonical frame transform","part",["step"],["A6","A8","A11"],[],
+ "O(1) rotate+translate; tables canonical, witnesses world-frame",
+ "—","~ns","—",
+ "Implicit in every build (clean-air worlds, d0/a0 frames). Float rotation is not exact, so TABLES live in the canonical frame while WITNESSES stay exact world-frame control schedules re-verified where used. A formal helper API is still unpackaged."],
+["A1","A","vertical state","done",["vert"],["B0","A13","A27"],[],
+ "closed form / exact 2-op recurrence",
+ "per-tick engine (pointless)","~ns O(1)","capwindow 6/6",
+ "z and vz evolve by the gravity halves with the per-component clamp; certified bitwise against 200k engine coast ticks. The closed form brackets, the exact recurrence decides."],
+["A2","A","face slice λ(z)","done",[],["A13","B1"],[],
+ "plane algebra","—","~ns","—",
+ "A tilted face at fixed height is a 1-D interval — the (T, λ) target parameterization that keeps face-targeting one-dimensional per tick."],
+["A3","A","hull contact geometry","part",[],["A14","A26","A27"],[],
+ "Minkowski plane offsets (the engine's own d_stand/d_duck)","analytic contact regions",
+ "~ns/plane","—",
+ "The world stores hull-expanded plane distances. The C7 transfer measurement shows the practical consequence: the hull's leading edge contacts 1.8–3.7 ticks before the feet-point crossing. A packaged face contact-region API remains open."],
+["A4","A","one-tick air law","done",["s2","c","turn"],["A6","A8","A11","A18","A30"],[],
+ "closed law (Strafe::TickLaw) + bitwise kernel (CapAir::KernelTick)",
+ "full engine tick (9× slower)","62 ns/tick · 16.0M/s","capkern 5/5",
+ "Partial evaluation of the airborne MoveTick chain under the fresh-state clean-air domain, every elision citing its engine line. 3M+ parity pairs with 0 bitwise mismatches on all six channels; vz-decoupling of the horizontal channels certified (1M pairs); the closed-form law matches the kernel across 1M states to Δs² ≤ 5.0 (float scale) and Δψ ≤ 1.7e-5 rad."],
+["A5","A","dwell automaton","done",["revs"],[],[],
+ "6-tick counter","—","~ns","guarded in every suite",
+ "min_gap = ceil((1/dt)/strafe_rate_max) = 6 at surf params. Every lattice hard-caps age at 6/7, so a params drift would silently forbid reversals — the 'dwell law matches the lattice' gate guards the agreement in capair, capreach, capride, capp2p."],
+["A6","A","N-tick turn/gain max V*","done",["s2","c","revs","turn"],["B5","B6","C5"],["A4","A5"],
+ "closed-form ceiling √(s0²+900N) + exact-band table for surfaces",
+ "parametric family (the A11 machinery); shooting oracle",
+ "ceiling O(1) · band 48–276 s/v0 then O(1)","capair 41/0",
+ "The certified interval: witnessed lower bounds (bitwise engine replays) + the closed-form ceiling, TIGHT at free heading (measured exact attainment at every v0: 378.8/490.9/664.1/849.1/1136.2/1428.6). Falsifier gaps are pure ACTION-SAMPLING error (build-sampled falsifier CLEAN 0/30000 everywhere; 2× lattice moved nothing). Physics: heading free at N=90 up to v0 800; the 1/v turning tax reappears at speed."],
+["A7","A","dual Ψ* (max turn at speed floor)","done",["turn"],["B5"],["A6"],
+ "read the A6 layers","—","O(bins) µs","capair (duality gates)",
+ "Max heading change subject to a terminal-speed floor, served from the same accelerator arrays; duality cross-checks green at every v0."],
+["A8","A","directional reach D*","done",["step","s2"],["B2","B13"],["A0","A4","A5"],
+ "certified bounds (single query) / on-demand sweep (batch)",
+ "parametric endpoints; local refinement",
+ "bounds O(N)→O(1) · sweep 31M nodes/101 s","capreach 5/5",
+ "The reach family: witnessed lower bounds from the position-tracking sweep + the max-speed-integral upper bound (which REPLACED the refuted session-20 cone — its falsifier found 61,513 violations; braking wishes break the 30/tick premise). Forward-tight to 1.0u; loose backward by construction (direction-aware tightening open)."],
+["A9","A","reach + terminal constraint","des",["revs"],["A22"],["A11"],
+ "A11 family + terminal constraint","Pareto layer of A8","target ~10² µs","—",
+ "Terminal heading/speed constraints select among validated family candidates; builds directly on the A11 machinery."],
+["A10","A","minimum air time","des",["vert"],["C9"],["A11","B13"],
+ "O(1) feasibility scan over the vertical window + A11 at the first feasible tick",
+ "table lookup","target <1 ms","—",
+ "The B13 cull answers 'impossible before tick T' in constant time; the first feasible tick then gets one exact solve."],
+["A11","A","fixed-time point solve","done",["revs","c","step"],["A12","C7","B13"],["A4","A5"],
+ "EXACT SEGMENT COMPOSITION (all-plus spiral prefixes give any reversal schedule's endpoint in O(k), no trig; exhaustive k≤2) + brake-run range control + kernel refinement + exact-hit tail; BATCH: endpoints spatially hashed once per start",
+ "analytic inversion (open, the last speed refinement); shooting oracle; reach-table batch",
+ "single 0.6–3.3 ms · BATCH 34–135 µs/target after 0.1–1.4 ms organize","capp2p 21/0",
+ "The point-to-point core. Machinery 99–100/100 on its own family with 150/150 bitwise engine replays and every schedule dwell-legal. The research transfer that fixed it: this is the Dubins bounded-curvature problem with speed-varying turn radius, and the robotics motion-primitive concatenation trick makes candidate enumeration exhaustive at ~50 ns each. Batch mode (the transfer-matrix shape) meets the 10–30 µs ambition at short flights, with a full-solver fallback as the completeness backstop. Ambers: interior coverage at short flights 29–88% (the brake family's measured limit)."],
+["A12","A","point-to-point solver","des",["revs","vert"],["C7","B13","B14"],["A11"],
+ "A11 over candidate ticks","oracle; batch table","inherits A11","—",
+ "Minimum-time mode: scan candidate tick counts from the constant-time feasibility bound upward, first feasible tick solved exactly."],
+["A13","A","point-to-face solve","part",["vert","end"],["C7"],["A11","A2"],
+ "A11 at (T, λ) slice targets — 1-D per tick, never generic 3-D",
+ "generic targeting","~A11 per face row","capxfer (as the C7 core)",
+ "Exercised for real inside the C7 transfer kernel: the vertical timetable picks each target's arrival tick, the face slice gives the target line, batch A11 solves the horizontal problem. The standalone wrapper with hull-offset anticipation is the remaining packaging."],
+["A14","A","first-contact prediction","part",[],["A28","B15"],[],
+ "exact trace vs pruned local brush set","full-world trace",
+ "~µs now · ~100 ns target","—",
+ "The engine's trace is exact; the capability work is the local-set pruning that makes corridor checks cheap. Not yet packaged."],
+["A15","A","board clip","done",["vdn"],["A16","A17","C2"],[],
+ "exported engine clip + closed post-speed law","—",
+ "~ns · law dev ≤ 0.0034 u/s","capboard 5/5",
+ "v′ = v − n(v·n) at overbounce 1 with one adjust pass; the post-speed law verified against the exact clip over 33k boardable arrivals."],
+["A16","A","best/worst board","done",["vdn"],["B8","B9","B14","C2"],["A15"],
+ "closed-form candidates (endpoints, cos extrema, zero crossings)",
+ "dense enumeration (baseline)","~ns · 1e-4 over 640 configs","capboard 5/5",
+ "The 1-D trig optimization over arrival headings, exact. Feeds the B14 bound and the exit-valuation projections."],
+["A17","A","board feasibility arcs","done",["vdn"],["B8"],["A16"],
+ "closed-form arccos arcs (≤2 per period)","enumeration","~ns · 0/172,800 mismatches","capboard 5/5",
+ "The heading arcs where boarding keeps loss ≤ L — the inverse of A16, exact."],
+["A18","A","one-tick ride law","done",["ceps","gap","sf","gt","vdn"],["A19","A20","A22","C7"],["A4","A15"],
+ "proven composition: gravity-half → clamp → accel(stale sf) → ONE clip → clamp → gravity-half → clamp",
+ "full engine (edges/multi-plane keep it)","~kernel+clip cost","capboard 5/5 · capxfer",
+ "PROVEN on face interiors: 1246/1246 contact ticks bitwise (velocity), and the position law measured (bitwise on 992/1090 steady ticks, worst 3.5e-5 u — the carried-gap micro-fraction). THE CONTACT EPSILON is this row's standing law: re-contact needs v·n ≤ −2.083 u/s; the hover band is real surf technique. The C7 kernel re-verified the law bitwise at 62 arbitrary-incoming contact ticks."],
+["A19","A","ride N-tick turn/gain","part",["ceps","sf","gt","s2"],["A22","B10","B11"],["A18"],
+ "CapRide::BuildRide on the proven law, engine-anchored starts, stay-on-face guard",
+ "plane-table refinements","56–84 s/ramp (28–34M nodes)","capride 7/0",
+ "Surfaces from exact engine-reached boarding states; 30/30 witnesses replay bitwise as engine continuations. Measured physics: 450 u/s boarding → 1322 u/s after 0.9 s of 50° downslope; ±30° steering nearly free. Ambers: falsifier beats up to +215.6 from boundary-surfing (hover-mixing) trajectories the conservative guard excludes — the carried-gap exact law is the refinement."],
+["A20","A","ride directional reach","part",["ceps","gap","gt"],["A22","B10"],["A18"],
+ "position-tracking sweep at the RIDE pitch (64u/10°/50u-s) with ENGINE-VALIDATED witnesses per direction",
+ "finer local refinement","9–19 s/ramp (3.3–6.1M nodes)","capexit 9/0",
+ "The air pitch exploded (4.2M cells/layer, honest abort) — ride speeds fan positions faster. Upgraded semantics: a direction publishes its bound only with a clean engine-replayed witness, else it DECLINES (measured: upslope at 50°, the near-walkable near-stall corner, declines). Reach at 0.72 s: downslope 702–844u, cross ~470u, upslope ≈ 0 — the anisotropy routes must respect."],
+["A21","A","minimum ride time","todo",[],["B11"],["A19","A20"],
+ "inverse of the ride bounds","—","target <1 ms","—",
+ "Scan-and-solve over the ride reach bounds, exactly as A10 does for air."],
+["A22","A","board→exit solver","part",["ceps","gt"],["C6"],["A18","A20"],
+ "v2: O(1) indexed cell query in the A20 sweep (exact schedules out)",
+ "exact-hit tail on the plane (next); face table baseline",
+ "0.2–0.3 µs/query (~10,000× the scan) · lattice resolution","capexit 9/0",
+ "286/286 engine-reachable exit targets answered; indexed answers at lattice resolution (mean ~30u within the 96u contract), the nearest-node full scan (0.7u mean) available when precision beats speed. Every answer is an exact replayable schedule."],
+["A23","A","ride edge interception","todo",["ceps"],["A26"],["A20"],
+ "A20 bounds + A22 at edge targets","—","~A22","—",
+ "Earliest/latest reachable points on a face edge — the exit-event selector."],
+["A24","A","direct contact transfer","part",["vdn"],[],["A15"],
+ "exact clip at the shared edge","engine roll-through","~ns/edge","—",
+ "Face-to-face adjacency transfer; the clip transform exists, the adjacency composition is unpackaged."],
+["A25","A","ground/runoff acceleration","done",["stam"],["A30","A26"],[],
+ "CapGround::WalkKernelTick — the grounded chain partially evaluated on the flat-floor domain",
+ "full engine baseline","40.8M ticks/s = 10.9× engine","capground 6/6",
+ "Friction → stamina power curve → ground accelerate (NO 30-unit cap) → flat trace → ground snap: 200k walk ticks + 50k position checks, 0 bitwise mismatches across velocity, feet height, and stamina. The settled hull rests exactly one trace epsilon above the hull-expanded floor plane."],
+["A26","A","edge launch","part",[],["C9"],["A23","A25"],
+ "event detector on exact rollouts","—","~engine tick/scan tick","—",
+ "Leave-ground and leave-face events; instruments exist (launch witnesses/replays), the unified API is open."],
+["A27","A","END-volume crossing","done",["end","vert"],["B21"],["A1","A3"],
+ "z-window-pruned exact scan (CapEnd::EarliestBoxCrossing)","full per-tick scan",
+ "= naive on 10k pairs · 12.1× fewer tests","capwindow 6/6",
+ "The finish predicate: the exact vertical recurrence prunes the scan to the ticks that can matter."],
+["A28","A","corridor traversal","todo",[],["B15"],["A11","A14"],
+ "local-set first-contact checks along A11 candidate paths","swept volumes","target ~µs/leg","—",
+ "The last air-chain row: certify a transfer flight clean against nearby geometry."],
+["A29","A","duck capability (gap row)","todo",["duck"],[],[],
+ "package the decoded duck machine","—","~ns/tick law","—",
+ "Currently domain-stamped OUT of every family — the stamp is the honest debt record. Real routes duck; the SET-path jump variant also waits on this."],
+["A30","A","jump capability","done",["jump","stam"],["A25"],["A4"],
+ "CapGround::JumpKernelTick (jump head + the A4 air chain)","—",
+ "0 mismatches / 50k jump ticks","capground 6/6",
+ "The decoded impulse law bitwise: double-precision constant, stamina tax, three gravity half-steps (vz 283.993 fresh → 210.839 full tax); release gate and autobunnyhop bypass verified. Ducked (SET-path) jumps park with the A29 debt."],
+["A31","A","trigger interactions (gap row)","todo",["trig"],[],[],
+ "mirror the trigger application rules as transforms","—","~ns/event","—",
+ "Teleport / push / gravity zones; the engine mirror carries the state, the capability and tests are unbuilt."],
+["A32","A","water / ladders","excl",[],[],[],
+ "—","—","—","—",
+ "Explicitly excluded: the target maps have neither. Listed so no gap hides silently."],
+["B0","B","vertical tick window","done",["vert"],["B3","A27"],["A1","A2"],
+ "exact recurrence with early exit","naive scan","~µs","capwindow 6/6",
+ "The window where a flight's height sits in a face's band; early exit proven equal to naive scans on 100k cases."],
+["B1","B","face-slice validity","done",[],[],["A2"],
+ "closed form","—","~ns","—","The λ interval's existence test."],
+["B2","B","travel bound","done",["step"],["B3","B13"],["A8"],
+ "max-speed integral (REPLACED the refuted cone)","direction-aware version (open)",
+ "O(N)→O(1) w/ prefix sums · forward-tight to 1.0u","capreach 5/5",
+ "The certified displacement bound. Its predecessor (the session-20 cone) was refuted by the falsifier — the standing reminder that 'certified' claims stay under attack."],
+["B3","B","earliest contact tick","done",["vert","step"],[],["B0","B2"],
+ "CapWindow::ContactWindow (exact vertical × certified travel)","—",
+ "~µs · 0/915 schedules beat it","capwindow 6/6",
+ "The first tick a face at distance D with a z-band can possibly be touched."],
+["B4","B","latest useful contact tick","done",["vert"],[],["B0"],
+ "the z-window closure (below the band falling ⟹ never returns)","—","~µs","capwindow 6/6",
+ "Certified by the same recurrence; ends every face scan."],
+["B5","B","heading feasibility","part",["turn"],[],["A6","A7"],
+ "lower bounds ADMIT only","the heading-aware ceiling (B22) would enable culls","O(1)","—",
+ "Witnessed bounds certify FEASIBLE; rejecting needs the open B22 theorem."],
+["B6","B","terminal-speed feasibility","done",["s2"],["B13"],["A6"],
+ "required V > √(s0²+900N) ⟹ impossible","—","O(1) ~ns","capair (ceiling gates)",
+ "The library's first certified air cull, from the tight closed-form ceiling."],
+["B7","B","point/region reachability","part",["vert","step"],[],["B0","B2","A8"],
+ "interval tests then exact solves","reach-table membership","~ns then µs","—",
+ "The compositional pattern: constant-time culls first, exact answers behind them — now demonstrated end-to-end in the C7 kernel."],
+["B8","B","boardability bound","done",["vdn"],[],["A17"],
+ "closed arcs","—","~ns","capboard 5/5","Which arrivals board at all."],
+["B9","B","minimum board loss","done",["vdn"],[],["A16"],
+ "closed form","—","~ns","capboard 5/5","The unavoidable clip tax for a window."],
+["B10","B","ride reachability","todo",["gt"],[],["A19","A20"],
+ "ride analogues of B2/B6","—","target ~ns","—","Certified ride culls; wait on the ride ceiling analogue."],
+["B11","B","minimum ride ticks","todo",[],[],["A21"],
+ "inverse bounds","—","target O(1)","—","—"],
+["B12","B","ride energy ceiling U_E","done",["s2"],[],[],
+ "certified (session 15)","—","O(1)","legacy suite",
+ "The finite-horizon ride energy ceiling — certified before the library era; the ride family's standing upper cross-check."],
+["B13","B","min departure resource","done",["s2","step"],["C5","A10"],["B2","B6"],
+ "closed-form ceiling + travel-bound bisection (both certified-monotone)","table",
+ "O(1)/~µs · 0/24 solver attacks","capwindow 6/6",
+ "'Cover distance D in N ticks and arrive at speed V' — below the bound, impossible with a proof. The falsifier is the A11 solver itself attacking from 0.98× the bound."],
+["B14","B","successor's min incoming","done",["vdn","s2"],["C5"],["B13","A16"],
+ "the EXACT piecewise-quadratic infimum","—",
+ "O(1) closed form · 0/185×401 exact-clip samples","capwindow 6/6",
+ "Earned the hard way: the monotone-bisection draft was REFUTED (20/127 — post-board speed is NOT monotone in horizontal speed; slow-horizontal fast-vertical arrivals retain more), the second draft missed the zero-loss band's feasibility root (22/185). The final version enumerates every branch boundary and quadratic root of the window's minimum-loss law and takes the true infimum in closed form."],
+["B15","B","corridor exclusion","todo",[],[],["A14","A28"],
+ "local-set trace certificates","swept volumes","target ~µs/leg","—","—"],
+["B16","B","successor-face set","todo",[],[],[],
+ "intersection of B0–B15","—","~µs/pair","—",
+ "The conservative 'which faces can follow this exit' filter — next in the composition layer."],
+["B17","B","cell optimistic bound","part",[],[],["A6","A8"],
+ "derived from certified bounds ONLY","—","O(1)/cell","—",
+ "The proofs-only rule stands: legacy instruments (fpot/doom/exitgate) may inform, never prune."],
+["B18","B","boundary-label dominance","todo",[],[],[],
+ "OPEN THEOREM — prune only if proven","—","—","—",
+ "The frontier-compression theorem that has never been proven; nothing prunes on it."],
+["B19","B","exact duplicate dominance","done",[],[],[],
+ "hash compare","—","~ns · near-zero yield measured","—",
+ "Kept because it is free; measured to almost never fire on real geometry."],
+["B20","B","competitive horizon","done",[],[],[],
+ "incumbent T*−g cutoff","—","O(1)","groute (mechanism)",
+ "Ready and gated; never yet engaged (no incumbent in the current era)."],
+["B21","B","min remaining ticks to END","todo",["end"],[],["B2","B11"],
+ "certified leg-minimum sums","—","target O(path)","—",
+ "The admissible heuristic stays at zero until this row is real."],
+["B22","B","heading-aware speed ceiling (gap row)","todo",["turn","s2"],["B5"],["A6"],
+ "the braking-time analysis (the recorded theorem step)","empirical margins (never prune)","target O(1)","—",
+ "Closes A6's 180°-at-speed corner and turns heading feasibility into a cull."],
+["C0","C","canonical transition label","part",[],["C1","C9"],[],
+ "one fixed exact tuple","—","~ns","—",
+ "(dt, E, ψ, vz, loss, …) — the fields exist across the code; the unified struct is the composition layer's first packaging task."],
+["C1","C","local Pareto comparison","todo",[],[],["C0"],
+ "dominance over the tuple","scalarization (banned as truth)","~ns/pair","—",
+ "Retain alternatives that trade time/resource/heading — the anti-collapse rule at composition level."],
+["C2","C","board-quality projection","todo",["vdn"],[],["C0","A16"],
+ "projection of the label","—","~ns","—","Projections inform ordering; they never admit or prune."],
+["C3","C","ride-quality projection","todo",[],[],["C0"],
+ "projection","—","~ns","—","—"],
+["C4","C","air-transfer projection","todo",[],[],["C0"],
+ "projection","—","~ns","—","—"],
+["C5","C","successor-requirement match","des",["s2","vdn"],[],["B13","B14"],
+ "interval test against the certified minimums","—","~ns","—",
+ "Value an exit by what the NEXT capability requires — the speed-compounding explainer, now buildable on certified B13/B14."],
+["C6","C","sampled board→exit kernel","part",["ceps"],[],["A22"],
+ "batch the A22 indexed queries over sampled pairs","on-demand + memo",
+ "0.2–0.3 µs/query measured; matrix production run pending","capexit (machinery)",
+ "The left half of the two-ramp transfer table; the query engine exists and is measured — the matrix production harness is the remaining step."],
+["C7","C","sampled exit→board kernel","part",["vert","revs"],[],["A11","A13","B13"],
+ "the capxfer composition: vertical timetable → face slices → O(1) culls → batch A11 → engine verification",
+ "reach-table per start (measured 4–5 orders slower to first answer); shooting",
+ "organize ~3.5 ms/start · fast path ~100 µs/target · fallback-heavy targets ~5 ms","capxfer 4/0",
+ "VERIFIED v1 (session 31): transfers from an air exit state onto a destination ramp land within 1.8–3.7 ticks and 13–24u of prediction, with the A18 ride law bitwise at all 62 contact ticks. The hull's early-contact offset (A3) is the measured systematic; anticipating it is the v2 refinement."],
+["C8","C","composition without re-simulation","part",[],[],[],
+ "memoized exact results (repeat-share measured 84–85%)","—","hit ~ns","—",
+ "The batch/organize-once pattern IS this row's production form; a shared memo store remains open."],
+["C9","C","min-plus path composition","todo",[],[],["C0"],
+ "shortest path over labels","—","~µs/graph","—","Trivial once the label exists."],
+["C10","C","route cost = ticks","done",[],[],[],
+ "by decree","—","—","—","Ticks are the objective; the certified-bounds rule keeps the heuristic honest."],
+["C11","C","search-order heuristics","done",[],[],[],
+ "quarantined: order only, never truth","—","—","—","The standing rule since the field-era corrections."],
+["C12","C","refinement priority","todo",[],[],[],
+ "largest certified gap first","—","~ns/candidate","—","—"],
+["C13","C","value of information","todo",[],[],[],
+ "bound-gap driven","—","~ns","—","—"],
+["C14","C","proof ledger","part",[],[],[],
+ "record per hard prune + version stamps","—","~ns/record","—",
+ "Engine/law/collision version stamps exist; unified per-cull records are open."],
+["C15","C","route reconstruction","done",[],[],[],
+ "concatenate exact schedules, replay bitwise","—","~ms/route","groute 11/11",
+ "The mechanism is proven: hierarchical witnesses cold-replay bit-identically."]
+];
+
+// ============ RENDERING ============
+const rowsEl = document.getElementById('rows');
+const termsById = {};
+TERMS.forEach(t => termsById[t[0]] = t);
+let sortK = 'id', sortDir = 1, catF = 'all', stF = null, q = '';
+const stOrder = {done:0, part:1, red:2, des:3, todo:4, excl:5};
+
+function termChip(id){
+  const t = termsById[id];
+  return '<span class="term" data-term="'+id+'" title="'+esc(t?t[2]:'')+'">'+(t?t[1].split(' (')[0].split(',')[0]:id)+'</span>';
+}
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+function ref(id){ return '<span class="ref" data-ref="'+id+'">'+id+'</span>'; }
+
+// tuple layout: 0 id, 1 cat, 2 name, 3 status, 4 terms[], 5 feeds[],
+// 6 deps[], 7 method, 8 alternatives, 9 efficiency, 10 suite, 11 detail
+function matches(r){
+  if (catF !== 'all' && r[1] !== catF) return false;
+  if (stF && r[3] !== stF) return false;
+  if (!q) return true;
+  const hay = (r[0]+' '+r[2]+' '+r[7]+' '+r[8]+' '+r[9]+' '+r[10]+' '+r[11]+' '
+    + r[4].map(t => (termsById[t]||[t,t])[1]).join(' ')
+    + ' ' + r[5].join(' ') + ' ' + r[6].join(' ') + ' ' + r[3]).toLowerCase();
+  return q.toLowerCase().split(/\s+/).every(w => hay.includes(w));
+}
+function render(){
+  const list = D.filter(matches).slice().sort((a,b) => {
+    let va, vb;
+    if (sortK === 'st'){ va = stOrder[a[3]]; vb = stOrder[b[3]]; }
+    else if (sortK === 'name'){ va = a[2]; vb = b[2]; }
+    else if (sortK === 'eff'){ va = a[9]; vb = b[9]; }
+    else if (sortK === 'suite'){ va = a[10]; vb = b[10]; }
+    else { va = a[0]; vb = b[0];
+      const pa = va.match(/([ABC])(\d+)/), pb = vb.match(/([ABC])(\d+)/);
+      if (pa && pb){ va = pa[1] + String(100 + +pa[2]); vb = pb[1] + String(100 + +pb[2]); } }
+    return (va < vb ? -1 : va > vb ? 1 : 0) * sortDir;
+  });
+  let html = '';
+  for (const r of list){
+    const st = ST[r[3]];
+    html += '<tr class="cap" data-id="'+r[0]+'" title="'+esc(r[11].slice(0,220))+'">'
+      + '<td class="id">'+r[0]+'</td>'
+      + '<td class="nm">'+esc(r[2])+'</td>'
+      + '<td><span class="st '+st[1]+'">'+st[0]+'</span></td>'
+      + '<td>'+r[4].map(termChip).join('')+'</td>'
+      + '<td class="eff" title="'+esc(r[9])+'">'+esc(r[9])+'</td>'
+      + '<td class="eff">'+esc(r[10])+'</td>'
+      + '</tr>';
+  }
+  rowsEl.innerHTML = html;
+  document.getElementById('counts').textContent =
+    list.length + '/' + D.length + ' rows · ' +
+    D.filter(r=>r[3]==='done').length + ' done · ' +
+    D.filter(r=>r[3]==='part').length + ' partial';
+}
+function openDetail(id){
+  document.querySelectorAll('tr.detail').forEach(e => e.remove());
+  document.querySelectorAll('tr.hl').forEach(e => e.classList.remove('hl'));
+  const row = rowsEl.querySelector('tr.cap[data-id="'+id+'"]');
+  if (!row) return;
+  row.classList.add('hl');
+  const r = D.find(x => x[0] === id);
+  const tr = document.createElement('tr');
+  tr.className = 'detail';
+  tr.innerHTML = '<td colspan="6"><div class="detail-grid">'
+    + '<div class="full"><div class="dk">'+r[0]+' — '+esc(r[2])+'</div><div class="dv">'+esc(r[11])+'</div></div>'
+    + '<div><div class="dk">Primary method</div><div class="dv">'+esc(r[7])+'</div></div>'
+    + '<div><div class="dk">Other methods</div><div class="dv mut">'+esc(r[8])+'</div></div>'
+    + '<div><div class="dk">Efficiency</div><div class="dv">'+esc(r[9])+'</div></div>'
+    + '<div><div class="dk">Suite</div><div class="dv">'+esc(r[10])+'</div></div>'
+    + '<div><div class="dk">Feeds</div><div class="dv">'+(r[5].length ? r[5].map(ref).join('') : '—')+'</div></div>'
+    + '<div><div class="dk">Depends on</div><div class="dv">'+(r[6].length ? r[6].map(ref).join('') : '—')+'</div></div>'
+    + '<div class="full"><div class="dk">Terms</div><div class="dv">'+(r[4].length ? r[4].map(termChip).join('') : '—')+'</div></div>'
+    + '</div></td>';
+  row.after(tr);
+  row.scrollIntoView({block:'center', behavior:'smooth'});
+}
+function renderTerms(){
+  let html = '';
+  for (const t of TERMS){
+    const used = D.filter(r => r[4].includes(t[0])).map(r => ref(r[0])).join('');
+    html += '<tr><td class="nm">'+termChip(t[0])+' '+esc(t[1])+'</td>'
+      + '<td class="mut">'+esc(t[2])+'</td><td>'+(used || '—')+'</td></tr>';
+  }
+  document.getElementById('termrows').innerHTML = html;
+}
+
+document.getElementById('q').addEventListener('input', e => { q = e.target.value; render(); });
+document.getElementById('catchips').addEventListener('click', e => {
+  const c = e.target.closest('.chip'); if (!c) return;
+  document.querySelectorAll('#catchips .chip').forEach(x => x.classList.remove('on'));
+  c.classList.add('on'); catF = c.dataset.cat; render();
+});
+document.getElementById('stchips').addEventListener('click', e => {
+  const c = e.target.closest('.chip'); if (!c) return;
+  const was = c.classList.contains('on');
+  document.querySelectorAll('#stchips .chip').forEach(x => x.classList.remove('on'));
+  stF = was ? null : c.dataset.st;
+  if (!was) c.classList.add('on');
+  render();
+});
+document.querySelector('#tbl thead').addEventListener('click', e => {
+  const th = e.target.closest('th'); if (!th) return;
+  const k = th.dataset.k; if (!k || k === 'terms') return;
+  if (sortK === k) sortDir = -sortDir; else { sortK = k; sortDir = 1; }
+  document.querySelectorAll('#tbl th .arr').forEach(a => a.textContent = '');
+  th.querySelector('.arr').textContent = sortDir > 0 ? '▲' : '▼';
+  render();
+});
+document.body.addEventListener('click', e => {
+  const term = e.target.closest('.term');
+  if (term){
+    // filter to the rows that carry this term
+    const tid = term.dataset.term;
+    catF = 'all'; stF = null; q = '';
+    document.getElementById('q').value = '';
+    document.querySelectorAll('#catchips .chip').forEach(x =>
+      x.classList.toggle('on', x.dataset.cat === 'all'));
+    document.querySelectorAll('#stchips .chip').forEach(x =>
+      x.classList.remove('on'));
+    const keep = D.filter(r => r[4].includes(tid));
+    let html = '';
+    for (const r of keep){
+      const st = ST[r[3]];
+      html += '<tr class="cap" data-id="'+r[0]+'" title="'+esc(r[11].slice(0,220))+'">'
+        + '<td class="id">'+r[0]+'</td><td class="nm">'+esc(r[2])+'</td>'
+        + '<td><span class="st '+st[1]+'">'+st[0]+'</span></td>'
+        + '<td>'+r[4].map(termChip).join('')+'</td>'
+        + '<td class="eff">'+esc(r[9])+'</td><td class="eff">'+esc(r[10])+'</td></tr>';
+    }
+    rowsEl.innerHTML = html;
+    document.getElementById('counts').textContent =
+      keep.length + '/' + D.length + ' rows using term: '
+      + (termsById[tid]||[tid,tid])[1];
+    e.stopPropagation();
+    return;
+  }
+  const rf = e.target.closest('.ref');
+  if (rf){ catF = 'all'; stF = null; q = '';
+    document.getElementById('q').value = '';
+    document.querySelectorAll('#catchips .chip').forEach(x => x.classList.toggle('on', x.dataset.cat === 'all'));
+    document.querySelectorAll('#stchips .chip').forEach(x => x.classList.remove('on'));
+    render(); openDetail(rf.dataset.ref); e.stopPropagation(); return; }
+  const row = e.target.closest('tr.cap');
+  if (row){
+    const open = row.nextElementSibling && row.nextElementSibling.classList.contains('detail')
+      && row.classList.contains('hl');
+    if (open){ row.classList.remove('hl'); row.nextElementSibling.remove(); }
+    else openDetail(row.dataset.id);
+  }
+});
+
+document.getElementById('foot').textContent =
+  'SourceTAS Capability Library · living dashboard · canonical text: Docs/CapabilityChecklist.md · '
+  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 31 (2026-08-23)';
+render();
+renderTerms();
+</script>
+</body>
+</html>

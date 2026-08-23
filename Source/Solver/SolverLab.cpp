@@ -16596,6 +16596,223 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= capxfer: registry C7 v1 - the exit->board
+	// TRANSFER KERNEL (session 31): one air exit state -> many
+	// boarding targets on a destination ramp. The composition under
+	// test: A1 (deterministic vertical) picks each target's arrival
+	// tick, A2 gives the face's slice line at that tick, B13/B2 culls
+	// prune infeasible targets in constant time, batch A11 solves the
+	// horizontal problem in ~100 us per target (the certified
+	// vz-decoupling makes the horizontal schedule valid under the
+	// real vertical), and the ENGINE verifies: the replay must
+	// first-contact the ramp near the target near the predicted tick,
+	// with the contact tick's velocity matching the proven A18 law
+	// bitwise. Method choice tested, not assumed: the reach-table
+	// alternative costs 30-100+ s per start before its first answer
+	// (measured, session 29); batch A11 organizes in ~1 ms.
+	int CmdCapXfer(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capxfer: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+		const float ralphas[2] = { 55.f, 65.f };
+		for (int ia = 0; ia < 2; ++ia) {
+			// the destination ramp: face through the origin, facing
+			// the incoming flight (azimuth 180)
+			World w2;
+			Vec3 n;
+			if (!CapBoard::MakeRampWorld(&w2, o.hulls, ralphas[ia],
+				180.f, &n)) {
+				printf("capxfer: ramp world %d failed\n", ia);
+				return 1;
+			}
+			const float cot_a = n.Z / (-n.X);   // cos/sin, n.X < 0
+			// the exit state (the previous ramp's departure): well
+			// behind and above the face, flying toward it
+			const Vec3 xpos(-550.f, 0.f, 250.f);
+			const Vec3 xvel(750.f, 0.f, 60.f);
+			const float v0h = Len2D(xvel);
+			const float psi0 = atan2f(xvel.Y, xvel.X);
+			// vertical timetable (exact recurrence)
+			float zt[96], vzt;
+			{
+				float z = xpos.Z, vz = xvel.Z;
+				for (int t = 0; t <= 90; ++t) {
+					zt[t] = z;
+					CapWindow::VTick(p, &z, &vz);
+				}
+				vzt = vz;
+				(void)vzt;
+			}
+			// target grid: arrival ticks whose face slice sits in
+			// the boarding band, lateral offsets across the face
+			int targets = 0, culled = 0, solved = 0, contacts = 0;
+			int tick_ok = 0, pos_ok = 0, law_ok = 0, law_n = 0;
+			double us_solve = 0.0, sum_terr = 0.0, sum_perr = 0.0;
+			CapP2P::P2PBatch B;
+			int batchN = -1;
+			double us_organize = 0.0;
+			for (int T = 40; T <= 88; T += 4) {
+				const float zT = zt[T];
+				if (zT > -40.f || zT < -700.f)
+					continue;   // outside the boarding band
+				const float xT = zT * cot_a;   // the slice line
+				for (float y = -300.f; y <= 300.f; y += 100.f) {
+					targets++;
+					// constant-time culls first (B13 necessary
+					// departure speed vs the actual exit speed)
+					const float dx = xT - xpos.X;
+					const float dy = y - xpos.Y;
+					const float D = sqrtf(dx * dx + dy * dy);
+					const float vmin = CapBounds::MinDepartSpeed(p,
+						D, 0.f, T);
+					if (vmin > v0h) {
+						culled++;
+						continue;
+					}
+					// rotate the target into A11's canonical frame
+					const float ca = cosf(-psi0),
+						sa = sinf(-psi0);
+					const float tx = ca * dx - sa * dy;
+					const float ty = sa * dx + ca * dy;
+					// batch per arrival tick (reused across the
+					// lateral row)
+					if (batchN != T) {
+						const auto tb =
+							std::chrono::steady_clock::now();
+						CapP2P::BuildP2PBatch(k, v0h, T, &B);
+						us_organize += std::chrono::duration<
+							double, std::micro>(
+							std::chrono::steady_clock::now()
+							- tb).count();
+						batchN = T;
+					}
+					const auto ts =
+						std::chrono::steady_clock::now();
+					CapP2P::P2PResult res;
+					CapP2P::SolveTargetBatch(k, B, tx, ty, &res);
+					us_solve += std::chrono::duration<double,
+						std::micro>(
+						std::chrono::steady_clock::now()
+						- ts).count();
+					if (!res.solved)
+						continue;
+					solved++;
+					// ---- ENGINE VERIFICATION: replay from the
+					// exit state in the ramp world; the flight
+					// must first-contact near the target near T,
+					// and the contact tick's velocity must match
+					// the proven ride law bitwise
+					PlayerState s;
+					s.pos = xpos;
+					s.vel = xvel;
+					int t_contact = -1;
+					Vec3 cpos, cvel_pre;
+					float csf = 1.f;
+					for (int t = 0; t < 95 && t_contact < 0;
+						++t) {
+						const signed char ds = t < res.sched.n
+							? res.sched.side[t] : 0;
+						const float cca = t < res.sched.n
+							? res.sched.cosa[t] : 1.f;
+						cvel_pre = s.vel;
+						csf = s.surface_friction;
+						const float s2d = Len2D(s.vel);
+						const float h = s2d > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : 0.f;
+						float yaw = h * 57.2957795f;
+						float fmv = 0.f, smv = 0.f;
+						if (ds != 0 && s2d > 1.f)
+							Air::WishInputs(h,
+								static_cast<int>(ds), cca,
+								&yaw, &fmv, &smv);
+						TickEvents ev;
+						MoveTick(s, w2, p, 0.f, yaw, fmv, smv,
+							0.f, 0, &ev);
+						if (ev.ncontacts > 0) {
+							t_contact = t + 1;
+							cpos = s.pos;
+						}
+					}
+					if (t_contact < 0)
+						continue;
+					contacts++;
+					const float terr = fabsf(
+						static_cast<float>(t_contact - T));
+					sum_terr += terr;
+					if (terr <= 3.f)
+						tick_ok++;
+					const float pdx = cpos.X - xT;
+					const float pdy = cpos.Y - y;
+					const float perr = sqrtf(pdx * pdx
+						+ pdy * pdy);
+					sum_perr += perr;
+					if (perr <= 96.f)
+						pos_ok++;
+					// the contact tick's velocity vs the proven
+					// A18 law (velocity is fraction-independent)
+					if (law_n < 40) {
+						law_n++;
+						Vec3 pred;
+						float vdn, vzc;
+						CapBoard::RideGrayTick(p, n, csf,
+							Vec3(), cvel_pre,
+							t_contact - 1 < res.sched.n
+								? res.sched.side[
+									t_contact - 1] : 0,
+							t_contact - 1 < res.sched.n
+								? res.sched.cosa[
+									t_contact - 1] : 1.f,
+							&pred, &vdn, &vzc);
+						if (memcmp(&pred.X, &s.vel.X, 4) == 0
+							&& memcmp(&pred.Y, &s.vel.Y, 4)
+								== 0
+							&& memcmp(&pred.Z, &s.vel.Z, 4)
+								== 0)
+							law_ok++;
+					}
+				}
+			}
+			printf("capxfer: ---- ramp %.0f deg: %d targets = %d "
+				"culled (O(1)) + %d solved (organize %.1f ms "
+				"total, mean %.0f us/solve); %d engine contacts "
+				"----\n", ralphas[ia], targets, culled, solved,
+				us_organize / 1000.0,
+				solved ? us_solve / solved : 0.0, contacts);
+			printf("capxfer:   contact tick err mean %.1f (within 3 "
+				"ticks: %d/%d) | contact pos err mean %.1f u "
+				"(within 96u: %d/%d) | A18 law bitwise at "
+				"contact: %d/%d\n",
+				contacts ? sum_terr / contacts : 0.0, tick_ok,
+				contacts, contacts ? sum_perr / contacts : 0.0,
+				pos_ok, contacts, law_ok, law_n);
+			char nm[64];
+			snprintf(nm, sizeof(nm), "C7 transfers land [%.0f deg]",
+				ralphas[ia]);
+			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d contacts "
+				"within 3 ticks and %d/%d within 96u of target",
+				ralphas[ia], tick_ok, contacts, pos_ok, contacts);
+			check(nm, contacts >= 20 && tick_ok >= (contacts * 9)
+				/ 10 && pos_ok >= (contacts * 9) / 10, buf);
+			snprintf(nm, sizeof(nm), "A18 law at contact [%.0f "
+				"deg]", ralphas[ia]);
+			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d contact "
+				"ticks bitwise", ralphas[ia], law_ok, law_n);
+			check(nm, law_n >= 10 && law_ok == law_n, buf);
+		}
+		printf("capxfer: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "C7 v1 EXIT->BOARD TRANSFER KERNEL "
+				"VERIFIED"
+				: "C7 RED - a composition gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capboard: registry A15/A16/A17
 	// + the A18 one-tick ride law harness (session 24). The clip
 	// itself is the engine's exported Fn::ClipVelocity (A15, solved) -
@@ -22560,6 +22777,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapExit(o);
+	}
+	if (cmd == "capxfer") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapXfer(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;
