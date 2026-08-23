@@ -1138,7 +1138,9 @@ namespace CapBoard {
 	                         float sf, const Vec3& basevel, Vec3 vel,
 	                         signed char side, float cosa, Vec3* out,
 	                         float* pre_clip_vdotn = nullptr,
-	                         float* vz_at_categorize = nullptr) {
+	                         float* vz_at_categorize = nullptr,
+	                         const Vec3* pos_in = nullptr,
+	                         Vec3* pos_out = nullptr) {
 		const float s2d = Len2D(vel);
 		const float h = s2d > 1.f ? atan2f(vel.Y, vel.X) : 0.f;
 		float yaw = h * 57.2957795f;
@@ -1178,6 +1180,16 @@ namespace CapBoard {
 		Vec3 clipped;
 		Fn::ClipVelocity(vel, n, &clipped);
 		vel = clipped;
+		// THE POSITION LAW on a zero-fraction contact tick: the bump
+		// at the plane advances nothing (frac 0 keeps time_left), the
+		// clipped velocity (still carrying basevel) slides the FULL
+		// tick, and the engine re-derives the delta (TryPlayerMove
+		// 96/106). Computed HERE, before the basevel subtraction,
+		// from the exact slide velocity.
+		if (pos_in && pos_out) {
+			const Vec3 end = *pos_in + Scale(vel, p.dt);
+			*pos_out = *pos_in + Scale(end - *pos_in, 1.f);
+		}
 		vel = vel - bv;
 		// CategorizePosition reads vz HERE (before CheckVelocity 950
 		// and the finish-gravity half): rising with no walkable plane
@@ -2642,4 +2654,325 @@ namespace CapRide {
 	}
 
 } // namespace CapRide
+
+// ======================================================================
+// CAPRIDEREACH - registry A20 (ride directional reach) and the v1 of
+// A22 (board->exit target queries), session 29. A forward sweep on
+// the proven A18 ride law with POSITIONS (the position law measured
+// bitwise-or-3.5e-5u on steady ticks - far below lattice pitch),
+// from an exact engine-reached start, with the contact-epsilon
+// stay-on-face guard and composed surface friction. Positions are
+// binned in the ramp's in-plane basis (downslope, cross-slope).
+// D*_ride is served as a witnessed lower bound at 8 in-plane
+// directions; A22 v1 answers a target point at tick N by cell-witness
+// lookup at lattice resolution (the exact-hit refinement inherits the
+// A11 tail machinery later).
+// ======================================================================
+namespace CapRideReach {
+
+	struct RRParams {
+		// the ride-appropriate pitch (session 29: the air-derived
+		// pitch of 32u/5deg/25u-s hit 4.2M cells per layer and
+		// aborted by layer ~14 - ride speeds fan positions much
+		// faster than the air sweep's targeted flights)
+		int n_max = 48;
+		float hp = 64.f;         // in-plane position pitch
+		int   pos_bins = 150;    // +/-4800 over hp
+		int   psi_bins = 36;     // horizontal-heading bins (10 deg)
+		int   vb_max = 128;      // 50 u/s strata (3-D speed)
+		float v_bin = 50.f;
+	};
+	struct RRNode {
+		float px = 0.f, py = 0.f, pz = 0.f;
+		float vx = 0.f, vy = 0.f, vz = 0.f;
+		int parent = -1;
+		short action = -1;
+		unsigned char sa = 0;    // side_idx * 8 + age
+		unsigned char sf = 0;    // 1 = quarter-strength (rising)
+	};
+	struct RRSurface {
+		RRParams p;
+		Vec3 n, dsl, csl;        // normal, downslope, cross-slope
+		Vec3 pos0, v0;
+		float sf0 = 1.f;
+		std::vector<std::vector<RRNode> > layers;
+		std::vector<std::vector<float> > dslb;    // [layer][8]
+		std::vector<std::vector<int> >   dsnode;  // [layer][8]
+		long long ride_ticks = 0;
+		long long leave_transitions = 0;
+		long long total_nodes = 0;
+		long long node_budget = 40000000;
+		int peak_layer = 0;
+		bool aborted = false;
+		double build_ms = 0.0;
+		std::vector<signed char> act_side;
+		std::vector<float> act_cosa;
+	};
+	inline long long RRKey(const RRParams& pp, float u, float v,
+	                       float psi, float sp, int sidx, int age,
+	                       int sfbit) {
+		int ia = static_cast<int>((u + 4800.f) / pp.hp);
+		int ib = static_cast<int>((v + 4800.f) / pp.hp);
+		if (ia < 0) ia = 0;
+		if (ia >= pp.pos_bins) ia = pp.pos_bins - 1;
+		if (ib < 0) ib = 0;
+		if (ib >= pp.pos_bins) ib = pp.pos_bins - 1;
+		const float uu = (psi + 3.14159265f) / 6.2831853f;
+		int ip = static_cast<int>(uu * static_cast<float>(
+			pp.psi_bins));
+		if (ip < 0) ip = 0;
+		if (ip >= pp.psi_bins) ip = pp.psi_bins - 1;
+		int iv = static_cast<int>(sp / pp.v_bin);
+		if (iv >= pp.vb_max) iv = pp.vb_max - 1;
+		const int a = age < 1 ? 1 : (age > 6 ? 6 : age);
+		return ((((((static_cast<long long>(ia) * pp.pos_bins + ib)
+			* pp.psi_bins + ip) * pp.vb_max + iv) * 3 + sidx) * 6
+			+ (a - 1)) * 2) + sfbit;
+	}
+	inline void BuildRideReach(const RRParams& pp, const MoveParams& p,
+	                           const Vec3& n, const Vec3& pos0,
+	                           const Vec3& v0, float sf0,
+	                           RRSurface* S) {
+		S->p = pp;
+		S->n = n;
+		S->pos0 = pos0;
+		S->v0 = v0;
+		S->sf0 = sf0;
+		// the in-plane basis
+		Vec3 dsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+		const float dl = Len(dsl);
+		S->dsl = Scale(dsl, 1.f / dl);
+		S->csl = Cross(n, S->dsl);
+		S->layers.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<RRNode>());
+		S->dslb.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<float>());
+		S->dsnode.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<int>());
+		static const float kCosa[21] = {
+			1.f, 0.9995f, 0.998f, 0.995f, 0.99f, 0.98f, 0.96f,
+			0.93f, 0.9f, 0.85f, 0.8f, 0.7f, 0.6f, 0.45f, 0.3f,
+			0.15f, 0.f, -0.2f, -0.5f, -0.8f, -1.f };
+		S->act_side.clear();
+		S->act_cosa.clear();
+		S->act_side.push_back(0);
+		S->act_cosa.push_back(1.f);
+		for (int sd = 0; sd < 2; ++sd)
+			for (int ci = 0; ci < 21; ++ci) {
+				S->act_side.push_back(sd == 0
+					? static_cast<signed char>(1)
+					: static_cast<signed char>(-1));
+				S->act_cosa.push_back(kCosa[ci]);
+			}
+		const int n_act = static_cast<int>(S->act_side.size());
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const auto t0 = std::chrono::steady_clock::now();
+		{
+			RRNode c;
+			c.px = pos0.X;
+			c.py = pos0.Y;
+			c.pz = pos0.Z;
+			c.vx = v0.X;
+			c.vy = v0.Y;
+			c.vz = v0.Z;
+			c.sa = static_cast<unsigned char>(1 * 8 + 6);
+			c.sf = sf0 < 0.5f ? 1 : 0;
+			S->layers[0].push_back(c);
+			S->total_nodes = 1;
+		}
+		const Vec3 bv0;
+		std::unordered_map<long long, int> slot;
+		for (int t = 0; t < pp.n_max; ++t) {
+			const std::vector<RRNode>& curL = S->layers[
+				static_cast<size_t>(t)];
+			std::vector<RRNode>& nxtL = S->layers[
+				static_cast<size_t>(t) + 1];
+			slot.clear();
+			slot.reserve(curL.size() * 8 + 64);
+			for (size_t ni = 0; ni < curL.size(); ++ni) {
+				const RRNode cell = curL[ni];
+				const int sidx = cell.sa / 8;
+				const signed char cside = sidx == 0
+					? static_cast<signed char>(-1)
+					: (sidx == 1 ? static_cast<signed char>(0)
+						: static_cast<signed char>(1));
+				const int cage = cell.sa % 8;
+				const float sf = cell.sf ? p.air_friction_up
+					: 1.f;
+				for (int ai = 0; ai < n_act; ++ai) {
+					const signed char ds = S->act_side[
+						static_cast<size_t>(ai)];
+					const float ca = S->act_cosa[
+						static_cast<size_t>(ai)];
+					if (ds != 0 && cside != 0 && ds != cside
+						&& cage < min_gap)
+						continue;
+					Vec3 out, npos;
+					float vdn = 0.f, vzc = 0.f;
+					const Vec3 pin(cell.px, cell.py, cell.pz);
+					CapBoard::RideGrayTick(p, n, sf, bv0,
+						Vec3(cell.vx, cell.vy, cell.vz), ds, ca,
+						&out, &vdn, &vzc, &pin, &npos);
+					++S->ride_ticks;
+					// the contact-epsilon guard with a drift
+					// margin: reach extremals press on every
+					// boundary, and the carried-gap micro-drift
+					// (measured 3.5e-5 u/tick) makes exact-
+					// boundary transitions hover in the engine -
+					// the margin trades a hair of lower bound for
+					// a sound domain (the exact carried-gap law
+					// is the recorded refinement)
+					if (vdn * p.dt > -0.03525f) {
+						++S->leave_transitions;
+						continue;
+					}
+					const float rx = npos.X - pos0.X;
+					const float ry = npos.Y - pos0.Y;
+					const float rz = npos.Z - pos0.Z;
+					const float u = rx * S->dsl.X + ry * S->dsl.Y
+						+ rz * S->dsl.Z;
+					const float v = rx * S->csl.X + ry * S->csl.Y
+						+ rz * S->csl.Z;
+					const float sp2d = Len2D(out);
+					const float npsi = sp2d > 1.f
+						? atan2f(out.Y, out.X) : 0.f;
+					const float nsp = Len(out);
+					const signed char nside = ds != 0 ? ds
+						: cside;
+					const int nage = (ds != 0 && cside != 0
+						&& ds != cside) ? 1
+						: (cage < 6 ? cage + 1 : 6);
+					const int nsidx = nside < 0 ? 0
+						: (nside == 0 ? 1 : 2);
+					const int nsf = vzc > 0.f ? 1 : 0;
+					const long long nk = RRKey(pp, u, v, npsi,
+						nsp, nsidx, nage, nsf);
+					std::unordered_map<long long, int>::iterator
+						jt = slot.find(nk);
+					if (jt == slot.end()) {
+						RRNode nc;
+						nc.px = npos.X;
+						nc.py = npos.Y;
+						nc.pz = npos.Z;
+						nc.vx = out.X;
+						nc.vy = out.Y;
+						nc.vz = out.Z;
+						nc.parent = static_cast<int>(ni);
+						nc.action = static_cast<short>(ai);
+						nc.sa = static_cast<unsigned char>(
+							nsidx * 8 + nage);
+						nc.sf = static_cast<unsigned char>(nsf);
+						slot[nk] = static_cast<int>(nxtL.size());
+						nxtL.push_back(nc);
+					} else {
+						RRNode& dst = nxtL[static_cast<size_t>(
+							jt->second)];
+						const float dsp = sqrtf(dst.vx * dst.vx
+							+ dst.vy * dst.vy
+							+ dst.vz * dst.vz);
+						if (nsp > dsp) {
+							dst.px = npos.X;
+							dst.py = npos.Y;
+							dst.pz = npos.Z;
+							dst.vx = out.X;
+							dst.vy = out.Y;
+							dst.vz = out.Z;
+							dst.parent = static_cast<int>(ni);
+							dst.action = static_cast<short>(ai);
+							dst.sa = static_cast<unsigned char>(
+								nsidx * 8 + nage);
+							dst.sf = static_cast<unsigned char>(
+								nsf);
+						}
+					}
+				}
+			}
+			if (static_cast<int>(nxtL.size()) > S->peak_layer)
+				S->peak_layer = static_cast<int>(nxtL.size());
+			S->total_nodes += static_cast<long long>(nxtL.size());
+			if (S->total_nodes > S->node_budget) {
+				S->aborted = true;
+				break;
+			}
+		}
+		// D*_ride lower bounds at 8 in-plane directions
+		for (size_t t = 0; t < S->layers.size(); ++t) {
+			S->dslb[t].assign(8, -1e30f);
+			S->dsnode[t].assign(8, -1);
+			const std::vector<RRNode>& L = S->layers[t];
+			for (size_t ni = 0; ni < L.size(); ++ni) {
+				const float rx = L[ni].px - S->pos0.X;
+				const float ry = L[ni].py - S->pos0.Y;
+				const float rz = L[ni].pz - S->pos0.Z;
+				const float u = rx * S->dsl.X + ry * S->dsl.Y
+					+ rz * S->dsl.Z;
+				const float v = rx * S->csl.X + ry * S->csl.Y
+					+ rz * S->csl.Z;
+				for (int ph = 0; ph < 8; ++ph) {
+					const float phi = static_cast<float>(ph)
+						* 0.78539816f;
+					const float pr = u * cosf(phi)
+						+ v * sinf(phi);
+					if (pr > S->dslb[t][static_cast<size_t>(
+						ph)]) {
+						S->dslb[t][static_cast<size_t>(ph)] = pr;
+						S->dsnode[t][static_cast<size_t>(ph)] =
+							static_cast<int>(ni);
+					}
+				}
+			}
+		}
+		S->build_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+	}
+	// A22 v1: the nearest swept node to an in-plane target at tick N
+	// (lattice-resolution point solve; witness by parent chain)
+	inline int QueryTarget(const RRSurface& S, int N, float tu,
+	                       float tv, float* res_out) {
+		if (N < 0 || N > S.p.n_max)
+			return -1;
+		const std::vector<RRNode>& L = S.layers[
+			static_cast<size_t>(N)];
+		int best = -1;
+		float bres = 1e30f;
+		for (size_t ni = 0; ni < L.size(); ++ni) {
+			const float rx = L[ni].px - S.pos0.X;
+			const float ry = L[ni].py - S.pos0.Y;
+			const float rz = L[ni].pz - S.pos0.Z;
+			const float u = rx * S.dsl.X + ry * S.dsl.Y
+				+ rz * S.dsl.Z;
+			const float v = rx * S.csl.X + ry * S.csl.Y
+				+ rz * S.csl.Z;
+			const float du = u - tu, dv = v - tv;
+			const float r = sqrtf(du * du + dv * dv);
+			if (r < bres) {
+				bres = r;
+				best = static_cast<int>(ni);
+			}
+		}
+		if (res_out)
+			*res_out = bres;
+		return best;
+	}
+	inline void WitnessRR(const RRSurface& S, int N, int node,
+	                      std::vector<signed char>* side,
+	                      std::vector<float>* cosa) {
+		side->assign(static_cast<size_t>(N), 0);
+		cosa->assign(static_cast<size_t>(N), 1.f);
+		int ni = node;
+		for (int t = N; t >= 1; --t) {
+			const RRNode& c = S.layers[static_cast<size_t>(t)][
+				static_cast<size_t>(ni)];
+			(*side)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_side[static_cast<size_t>(c.action)] : 0;
+			(*cosa)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_cosa[static_cast<size_t>(c.action)] : 1.f;
+			ni = c.parent;
+			if (ni < 0)
+				break;
+		}
+	}
+
+} // namespace CapRideReach
 } // namespace Solver

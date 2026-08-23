@@ -41,9 +41,9 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A17 | board feasibility arcs | loss ≤ L heading arcs | B8, approach windows | closed-form arccos arcs (≤2 per period) | enumeration | ~ns; 0 mismatches / 24×7200 | `[x]` |
 | A18 | one-tick ride law | in-plane gravity, sf state | A19–A22 | proven composition: gravity-half → clamp → accel(sf) → one clip → clamp → gravity-half → clamp | full MoveTick (edges/multi-plane keep it) | same order as A4 kernel + clip; 1246/1246 bitwise | `[x]` interior; `[ ]` edge/multi-plane ticks stay full-engine |
 | A19 | ride N-tick turn/gain | slope vs heading, sf carried state, **the contact epsilon** (re-contact needs v·n ≤ −(1/32)/dt ≈ −2.08 u/s — hover band measured) | A22, B10/B11 | `CapRide::BuildRide` on the proven A18 law, engine-anchored starts, stay-on-face guard | plane-table refinements | **56–84 s/ramp builds (28–34M nodes); 30/30 witness replays BITWISE as engine continuations; falsifier gaps: 50° +0.9, 60° +215.6, 70° +116.4 (the conservative guard's boundary sliver)** | `[~]` capride 7/0 (s28); named refinement: exact contact-boundary condition |
-| A20 | ride directional reach | in-plane (λ, downslope) | A22, B10 | A8 treatment on the plane (2-D positions) | — | target: bounds O(N); sweep ≪ air (2-D) | `[ ]` |
+| A20 | ride directional reach | in-plane (downslope, cross-slope), contact-epsilon guard + drift margin | A22, B10 | `CapRideReach::BuildRideReach` — position-tracking sweep on the proven ride law; **engine-validated witnesses per direction** (a direction with no clean witness DECLINES its bound) | finer local refinement | **9–19 s/ramp (3.3–6.1M nodes at 64u/10°/50u-s); 23/24 directions validated (upslope@50° declined — the near-walkable near-stall corner); D\*ride(0.72 s): down 702–844u, cross ~470u, up ≈ 0** | `[~]` capexit 9/0 (s29) |
 | A21 | minimum ride time | exit point, N_min | route timing | inverse of A19/A20 (scan + solve) | — | target <1 ms | `[ ]` |
-| A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | ride point-to-point: the A12 construction on the plane with in-plane gravity | DP table per face (baseline/falsifier) | target 10–100 µs/pair | `[d]` — the ride's A12 |
+| A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | **v1: cell-witness lookup in the A20 sweep** (exact schedules out); v2: the A11 exact-hit construction on the plane | DP table per face (baseline/falsifier) | **v1 measured: 286/286 engine-reachable targets answered, mean residual 0.7u, worst 3.3u (promise: 96u); query = layer scan today, fast index next** | `[~]` v1 verified (s29); v2 exact-hit + indexed query = next |
 | A23 | ride edge interception | edge geometry, exit λ | launch selection | A20 bounds + A22 solve at edge targets | — | target ~A22 | `[ ]` |
 | A24 | direct contact transfer | adjacent-face clip chain | face-to-face routing | exact clip transform at the shared edge | full engine roll-through | ~ns/edge | `[~]` clip exists; adjacency composition not packaged |
 | A25 | ground/runoff acceleration | friction, stopspeed, accelerate, stamina power curve | spawn/launch prep | `CapGround::WalkKernelTick` — the grounded MoveTick chain partially evaluated on the flat-floor domain | full MoveTick baseline | **40.8M ticks/s = 10.9× engine; 200k walk ticks + 50k position checks, 0 bitwise mismatches (velocity, feet z, stamina)** | `[x]` capground 6/6 (s27) |
@@ -122,6 +122,20 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | END box | Minkowski intersection, feet-z window | A27 |
 
 ## Change log
+- 2026-08-23 (session 29): **A20 + A22 v1 verified** (capexit 9/0);
+  A18 position law measured (bitwise on 992/1090 steady ticks, worst
+  deviation 3.5e-5 u — the carried-gap micro-fraction, folded into
+  capboard as a fifth gate); the contact-epsilon discovery written
+  into the PERMANENT records (CapabilityLibrary A18 row as a
+  standing law + the CapabilityMethods terms catalog). The ride
+  reach sweep needed its own pitch (the air pitch hit 4.2M
+  cells/layer and aborted — ride speeds fan positions faster);
+  witnessed-bound semantics upgraded: each reach direction's bound
+  is ENGINE-VALIDATED or explicitly declined (upslope at 50° — the
+  near-walkable near-stall corner — declines; 60°/70° validate 8/8
+  with zero fringe). A22 v1 answers engine-reachable targets from
+  the sweep at sub-3.3u residual. No drift: capboard 5/5 (now with
+  the position gate), capride 7/0.
 - 2026-08-22/23 (session 28): **A19 built on the proven ride law**
   (capride 7/0): engine-anchored starts (along-downslope boarding —
   head-on entries lose everything to the clip, measured), composed

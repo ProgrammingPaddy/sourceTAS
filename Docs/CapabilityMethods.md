@@ -59,6 +59,7 @@ per-component clamp 3500; dt = 0.015; gravity 800.)
 | post² | post-board squared speed | s² + vz² − (v·n)² (**CLOSED**, dev ≤ 0.0034 u/s vs engine clip) | exit→board valuation |
 | λ | position along a face's fixed-z slice | **CLOSED** geometry (A2) | plane interception (A13), (T, λ) targets |
 | g_t | in-plane gravity on a ramp | constant vector per face; enters the PROVEN A18 tick | ride family (A19–A22) |
+| **contact epsilon** | the rider hovers 1/32 u off a ridden plane; a tick re-contacts iff v·n·dt ≤ −1/32 (v·n ≤ −2.083 u/s at 66.67 tps); the band (−2.083, 0) = HOVER ticks (airborne, un-clipped) — **standing law, s28** | ride domain membership (A19–A22), the hover/contact mixed-motion refinement, A23 exit detection |
 | E | s² + vz² | derived; conserved under clip only up to loss | exit valuation; U_E ceiling (B12) |
 | kernel ticks | count of exact tick evaluations | measured throughput: engine 1.79M/s, A4 kernel 16.0M/s | every cost model in this document |
 

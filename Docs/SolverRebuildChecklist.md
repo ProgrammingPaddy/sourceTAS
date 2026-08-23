@@ -15,6 +15,36 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-23b (session 29): A20 + A22 v1 VERIFIED — THE FIRST
+BOARD→EXIT ANSWERS EXIST; THE CONTACT EPSILON IS IN THE PERMANENT
+RECORDS.** The contact-epsilon law (session 28's discovery) is now
+recorded as a standing law on the A18 row of `Docs/CapabilityLibrary.md`
+and as a term in `Docs/CapabilityMethods.md` (user directive). The
+A18 POSITION law was measured en route (capboard's new fifth gate):
+bitwise on 992/1090 steady contact ticks, worst deviation 3.5e-5 u —
+the carried-gap micro-fraction (the clip's adjust pass drifts the
+1/32 hover offset by microns per tick, occasionally producing a
+micro-fraction bump; the exact carried-gap law remains the recorded
+refinement). A20 (`CapRideReach::BuildRideReach` + capexit 9/0): the
+ride reach sweep at its OWN pitch (64u positions / 10° headings /
+50 u/s strata — the air-derived pitch hit 4.2M cells per layer and
+aborted honestly), 3.3–6.1M nodes in 9–19 s per ramp, with UPGRADED
+witnessed-bound semantics: each direction's reach bound is the best
+node whose witness REPLAYS CLEANLY through the engine (velocity
+bitwise, position ≤ 0.01u, never leaving the face), and a direction
+with no validated witness DECLINES its bound — 23/24 directions
+validated (upslope at 50°, the near-walkable near-stall corner,
+declines with 16 boundary-fringe rejects; 60°/70° validate 8/8 with
+zero fringe). Measured reach at 0.72 s: downslope 702/770/844 u at
+50/60/70°, cross-slope ~470 u, upslope ≈ 0 — the anisotropy that
+routes must respect. A22 v1 (board→exit): cell-witness lookup in the
+A20 sweep answered 286/286 held-out engine-reachable targets
+(rejection-sampled contact-keeping schedules) with mean residual
+0.7 u, worst 3.3 u against the 96 u lattice promise. No drift:
+capboard 5/5, capride 7/0. Next: the A22 v2 exact-hit tail +
+indexed queries; the carried-gap exact law; then the composition
+layer (C6/C7 sampled kernels).
+
 **STATUS 2026-08-23 (session 28): A19 BUILT ON THE PROVEN RIDE LAW;
 A27 + B3/B4 CERTIFIED — THE RIDE FAMILY IS OPEN.** capwindow 4/4:
 the exact vertical recurrence proven bitwise against the engine

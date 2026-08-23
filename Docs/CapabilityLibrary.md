@@ -136,7 +136,7 @@ lower bound only) · PART (partial assets exist) · TBD.
 | A15 | Board clip | T | CERT | analytic, overbounce 1: v' = v − (v·n)n; loss = |v·n|; post-speed law verified vs `Fn::ClipVelocity` to **0.0034 u/s worst** over 33k arrivals (s24) | — |
 | A16 | Best/worst board capability | S | **SOLVED (s24)** | `CapBoard::BestWorstBoard` closed form (candidates: endpoints, cos extrema, zero crossings); 640 configs vs 7200-step enumeration, 0 disagreements, worst dev 1e-4 | A15 |
 | A17 | Board feasibility (inverse) | X | **SOLVED (s24)** | `CapBoard::LossFeasibleArcs` (≤2 arcs per period); 24 configs × 7200 headings, 0 mismatches | A16 |
-| A18 | One-tick planar ride law | T | **PROVEN interior (s24)** | `CapBoard::RideGrayTick`: start-gravity → clamp → air-accel(stale sf) → ONE `Fn::ClipVelocity` → clamp → finish-gravity → clamp; **1246/1246 contact ticks bitwise** across 3 ramps × 12 runs; 0 multi-plane, 0 engine-zeroed in the ride domain; velocity is frac-independent on single-plane ticks | A4, A15 |
+| A18 | One-tick planar ride law | T | **PROVEN interior (s24)** | `CapBoard::RideGrayTick`: start-gravity → clamp → air-accel(stale sf) → ONE `Fn::ClipVelocity` → clamp → finish-gravity → clamp; **1246/1246 contact ticks bitwise** across 3 ramps × 12 runs; 0 multi-plane, 0 engine-zeroed in the ride domain; velocity is frac-independent on single-plane ticks. **THE CONTACT EPSILON (s28, standing law):** the rider hovers one trace epsilon (1/32 u) off the plane, so a tick RE-CONTACTS only when the inward motion closes that gap within dt — v·n ≤ −(1/32)/dt ≈ −2.083 u/s at 66.67 tps. Inward velocities in (−2.083, 0) are HOVER ticks: legal, airborne, un-clipped (measured separation at v·n = −1.80; the exact-condition guard turned 10/10 witness divergences into 30/30 bitwise). Mixed hover/contact motion is real surf technique and richer than the pure-contact domain | A4, A15 |
 | A19 | N-tick ride turn/gain V*_ride | S | TBD — **unblocked by A18** | V* machinery + one slope parameter (in-plane gravity vector vs heading); surface_friction is carried state (0.25 when rising) | A18 |
 | A20 | Ride directional displacement D*_ride | S | TBD — unblocked | reach-family machinery on the plane (2-D positions: λ, along-slope) | A18 |
 | A21 | Minimum ride time between points | X | TBD | inverse A19/A20 | A19, A20 |
@@ -404,6 +404,17 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23 (session 28): A19 (ride N-tick turn/gain) built on the
+  proven A18 law — capride 7/0, 30/30 witnesses bitwise as engine
+  continuations; **THE CONTACT EPSILON discovered and recorded as a
+  standing law on the A18 row** (re-contact needs v·n ≤ −(1/32)/dt;
+  the hover band explains both the initial witness failures and the
+  falsifier's boundary-surfing ambers up to +215.6 u/s — the exact
+  contact-boundary condition with carried gap state is the named
+  refinement). Boarding must arrive along-downslope (head-on entries
+  measured to lose nearly all speed to the clip). A27 + B3/B4
+  certified (capwindow 4/4; END predicate = naive with 12.1× fewer
+  tests). Ride physics: 450 → 1322 u/s over 0.9 s at 50°.
 - 2026-08-22c (session 27): A11 (fixed-tick point-to-point) VERIFIED
   — capp2p 12/0 via exact segment composition (exhaustive k≤2
   reversal enumeration); A25 (flat-ground walk law) and A30 (jump

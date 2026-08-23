@@ -1,0 +1,171 @@
+<title>First Board-to-Exit Answers</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .c-meas{background:var(--amber-soft); color:var(--amber)}
+  .law{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--teal);
+    padding:16px 22px; margin:18px 0; font-family:"IBM Plex Mono",monospace; font-size:14px}
+  .law .why{font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--muted); margin-top:8px; max-width:none}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; margin:14px 0}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 29</div>
+  <h1>First Board-to-Exit Answers</h1>
+  <p class="sub">A20 — the ride reach surface — verified with engine-validated witnesses per
+  direction, and the first working version of A22: given where you board a ramp, an exact input
+  schedule reaching a chosen exit point, answered for 286 of 286 test targets within 3.3 units.
+  The contact-epsilon law is now in the permanent records.</p>
+  <div class="meta">
+    <span>2026-08-23</span>
+    <span>suites: capexit 9/0 · capboard 5/5 (new position gate) · capride 7/0</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">A22 v1 target queries</div><div class="v">286 / 286</div>
+    <p>engine-reachable exit targets answered; mean residual 0.7 units, worst 3.3 — against a 96-unit lattice promise</p></div>
+  <div class="tile"><div class="k">A20 validated bounds</div><div class="v">23 / 24</div>
+    <p>reach directions with engine-validated witnesses; the one exception declines its bound honestly</p></div>
+  <div class="tile"><div class="k">A18 position law</div><div class="v">3.5e-5 u</div>
+    <p>worst deviation on steady contact ticks (992 of 1090 bitwise) — the carried-gap micro-fraction, now a measured gate</p></div>
+  <div class="tile"><div class="k">Reach anisotropy</div><div class="v">844 vs ≈0</div>
+    <p>downslope vs upslope reach in units after 0.72 s at 70° — the asymmetry every route must respect</p></div>
+</div>
+
+<h2><span class="idx">01</span>The permanent record, first</h2>
+<p class="lede">Per directive, the contact-epsilon law is written where laws live: as a standing
+law on the A18 row of the registry (<code>Docs/CapabilityLibrary.md</code>) and as a term in the
+catalog (<code>Docs/CapabilityMethods.md</code>) — a ridden plane re-contacts only when the
+inward velocity closes the 1/32-unit hover gap within one tick (velocity·normal ≤ −2.083 u/s at
+this tick rate); gentler inward motion produces legal airborne hover ticks.</p>
+
+<h2><span class="idx">02</span>The ride position law, measured on the way</h2>
+<div class="law">steady contact ticks advance position by the clipped slide over the full tick —
+bitwise on 992 of 1090 ticks, worst deviation 0.000035 units on the rest
+  <div class="why">The residue is the carried-gap micro-fraction: the clip's adjust pass leaves a
+  microscopic outward velocity, drifting the hover gap until a bump lands at a tiny partial
+  fraction. Entry ticks and post-hover re-contacts split their advance at real fractions and are
+  boarding-event material (A24/A26), excluded from the steady law's claim. The exact carried-gap
+  law remains the ride family's recorded refinement. <b>capboard now carries this as its fifth
+  gate.</b></div></div>
+
+<h2><span class="idx">03</span>A20 — reach surfaces with a stronger witness standard</h2>
+<p class="lede">The sweep needed its own pitch: at the air-derived lattice it hit 4.2 million
+cells per layer and aborted honestly by layer 14 (ride speeds fan positions far faster than the
+air family's flights). At the ride pitch (64-unit positions, 10° headings, 50 u/s speed strata)
+it completes in 9–19 seconds per ramp. The semantics also grew stronger this session:</p>
+<div class="panel"><p><span class="hl">A reach bound is only published with an engine-validated
+witness.</span> For each direction, the suite walks candidates from the top projection down until
+one replays cleanly through the engine (velocity bit-identical, position within the composed
+bound, never leaving the face). A direction where no candidate validates — measured: the upslope
+direction at 50°, whose whole extremal family consists of near-stall states hugging the contact
+boundary — <span class="hl">declines its bound</span> rather than publishing an unwitnessed
+number. 60° and 70° validated all eight directions with zero rejected candidates.</p></div>
+<div class="tablewrap"><table>
+<tr><th>Ramp tilt</th><th class="num">Build</th><th class="num">Nodes</th><th class="num">Downslope reach (0.72 s)</th><th class="num">Cross-slope</th><th class="num">Upslope</th><th class="num">Validated directions</th></tr>
+<tr><td class="nm">50°</td><td class="num">19 s</td><td class="num">6.1M</td><td class="num">702</td><td class="num">472</td><td class="num">100 → <span class="chip c-meas">declined</span></td><td class="num">7/8</td></tr>
+<tr><td class="nm">60°</td><td class="num">16 s</td><td class="num">5.4M</td><td class="num">770</td><td class="num">468</td><td class="num">8</td><td class="num"><span class="chip c-pass">8/8</span></td></tr>
+<tr><td class="nm">70°</td><td class="num">9 s</td><td class="num">3.3M</td><td class="num">844</td><td class="num">446</td><td class="num">−124 (never)</td><td class="num"><span class="chip c-pass">8/8</span></td></tr>
+</table></div>
+
+<h2><span class="idx">04</span>A22 version one — the transfer kernel's first answers</h2>
+<p class="lede">Board→exit, the function every two-ramp transfer needs: from an exact boarding
+state, produce an exact input schedule arriving at a chosen exit point at a chosen tick. Version
+one answers by witness lookup in the A20 sweep. The test population is honest by construction —
+targets are endpoints of hidden engine runs whose actions were rejection-sampled to keep contact
+(random wishes leave a face more than 99% of the time):</p>
+<div class="tablewrap"><table>
+<tr><th>Ramp tilt</th><th class="num">Targets answered</th><th class="num">Mean residual</th><th class="num">Worst residual</th></tr>
+<tr><td class="nm">50°</td><td class="num">89 / 89</td><td class="num">0.8 u</td><td class="num">3.3 u</td></tr>
+<tr><td class="nm">60°</td><td class="num">97 / 97</td><td class="num">0.7 u</td><td class="num">3.3 u</td></tr>
+<tr><td class="nm">70°</td><td class="num">100 / 100</td><td class="num">0.7 u</td><td class="num">2.3 u</td></tr>
+</table></div>
+<p class="lede">Every answer is an exact, replayable schedule. The promise was lattice
+resolution (96 units); the measured answers land within 3.3. Version two adds the exact-hit tail
+(the A11 machinery on the plane) and an indexed query in place of the layer scan.</p>
+
+<h2><span class="idx">05</span>The board after session 29</h2>
+<div class="panel"><p>
+<span class="hl">Moved this session:</span> A20 (verified, one direction honestly declined),
+A22 (v1 verified), A18 (position law measured and gated).<br>
+<span class="hl">The battery:</span> capkern 5/5 · capboard 5/5 · capground 6/6 · capp2p 12/0 ·
+capwindow 4/4 · capride 7/0 · capexit 9/0 · groute 11/11.<br>
+<span class="hl">Next:</span> A22 v2 (exact-hit + indexed queries); the carried-gap exact law
+(closes the ride family's boundary sliver everywhere it appears); then the composition layer —
+C6/C7 sampled transfer kernels, the step that turns these functions into route answers.</p></div>
+
+<footer>SourceTAS Capability Library · session 29 · 2026-08-23 · checklist: Docs/CapabilityChecklist.md ·
+all numbers measured this session</footer>
+</div>
