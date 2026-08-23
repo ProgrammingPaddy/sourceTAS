@@ -10,14 +10,40 @@ Legend: `[x]` done+validated Â· `[~]` in progress Â· `[ ]` not started Â·
 a measurable pass/fail, never a vibe.
 
 **NOW -> FINISH CATEGORY A (user directive 2026-08-23, session 33):
-every A row closes before more composition work.** Remaining open,
-the march order: A9 (terminal-constraint displacement), A14
-(local-set first-contact), A22 exact-hit tail, A23 (ride edge
-interception), A24 (adjacent-face clip packaging), A28 (corridor
-traversal), the A19/A20 carried-gap exact law, A8 direction-aware
-refinements, A11 short-flight interior coverage, then the A29 duck
-and A31 trigger debt rows. A32 stays excluded by decree. The
-change-log tail below is the session journal.
+every A row closes before more composition work.** Remaining open
+after session 34, the march order: A22 exact-hit tail on the ride
+plane, A23 (ride edge interception), A24 (adjacent-face clip
+packaging), A28 (corridor traversal — A14 + A12 now both exist),
+the A19/A20 carried-gap exact law, A8 direction-aware refinements,
+A11 short-flight interior coverage, then the A29 duck and A31
+trigger debt rows. A32 stays excluded by decree. The change-log
+tail below is the session journal.
+
+**STATUS 2026-08-23g (session 34): A9 AND A14 CLOSE.** A14
+(capcontact 4/0, new suite): `CapContact` — the engine's per-brush
+clip transcribed VERBATIM over a corridor-gathered local set:
+40,000/40,000 queries BITWISE identical to the full trace (fraction
+bits + brush + plane + startsolid) across one- and two-ramp worlds;
+the corridor DECLINE law refused 6,742 out-of-domain segments while
+every answer stayed bitwise; 25/25 kernel-flight first contacts
+(tick AND brush) matched real engine replays; 60–74 ns/query. A9
+(capsolve 10/0): `CapP2P::SolveTerminal` — (endpoint, arrival tick,
+terminal heading) requests through falsifier-driven design: brake
+placement AND strength as the heading/range levers, a scored coarse
+climb judging BOTH contracts on every kernel roll (heading-blind
+climbing measurably walked into far basins; heading-only judging
+measurably stranded candidates 50u out), the recorded
+paired-translation lesson, multi-start exact-hit tails, and the
+3×3 FINISHER — (tail c1, tail c2, brake strength) against
+(endpoint x, y, heading), a square Newton — which took acceptance
+2 → 19 of 40 against the most adversarial generator possible
+(random braked schedules' exact terminal states). Contracts HARD:
+19/19 accepts independently re-rolled (endpoint ≤ 0.5u, heading
+≤ 5°, mean 0.49°), 8/8 engine-bitwise; the 21 DECLINEs are the
+honest family-sufficiency measure (named refinement: second brake
+run / A8 Pareto layer). Battery green: capsolve 10/0, capcontact
+4/0, capmin 6/0, capxfer 8/0, capkern 5/5, capboard 5/5, capground
+6/6, capwindow 6/6.
 
 **STATUS 2026-08-23f (session 33): THE A MARCH OPENS — SIX ROWS
 CLOSE (A0, A10, A12, A13, A21, A26).** User directive: finish ALL of

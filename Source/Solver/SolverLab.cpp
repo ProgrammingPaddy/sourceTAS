@@ -16596,6 +16596,338 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= capcontact: registry A14 (session 34) - the
+	// first-contact predictor on a PREBUILT LOCAL BRUSH SET. The
+	// per-brush clip arithmetic is transcribed verbatim from the
+	// verified full trace (TraceHull3), so the gate is BITWISE
+	// identity on every query: same fraction bits, same brush, same
+	// plane, same start-solid flag - across a single-ramp world and
+	// a two-ramp world, plus DECLINE honesty (a segment leaving the
+	// corridor is refused, never answered from an incomplete set),
+	// flight-level first-contact agreement against real engine
+	// replays, and the measured locality speedup.
+	int CmdCapContact(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capcontact: %-30s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		unsigned rng = 0xA14A14A1u;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		auto rndf = [&](float lo, float hi) {
+			return lo + (hi - lo)
+				* static_cast<float>(rnd() & 0xFFFFF) / 1048575.f;
+		};
+		const CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		// ---- world A: one ramp; world B: two ramps (the transfer
+		// shape)
+		World wA;
+		Vec3 nA;
+		if (!CapBoard::MakeRampWorld(&wA, o.hulls, 55.f, 180.f,
+			&nA)) {
+			printf("capcontact: world A failed\n");
+			return 1;
+		}
+		World wB;
+		Vec3 nB1, nB2;
+		{
+			const float a = 55.f * 0.0174533f;
+			// brush 1: face through the origin, azimuth 180
+			{
+				const float b = 180.f * 0.0174533f;
+				const Vec3 n(sinf(a) * cosf(b), sinf(a) * sinf(b),
+					cosf(a));
+				nB1 = n;
+				std::vector<Vec3> ns;
+				std::vector<float> ds;
+				ns.push_back(n);
+				ds.push_back(0.f);
+				ns.push_back(Vec3(-n.X, -n.Y, -n.Z));
+				ds.push_back(2000.f);
+				ns.push_back(Vec3(1.f, 0.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(-1.f, 0.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 1.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, -1.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 0.f, 1.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 0.f, -1.f));
+				ds.push_back(20000.f);
+				if (!wB.AddTestBrush(ns, ds, o.hulls)) {
+					printf("capcontact: world B brush 1 failed\n");
+					return 1;
+				}
+			}
+			// brush 2: opposing face through (1300, 0, -200)
+			{
+				const Vec3 n(sinf(a), 0.f, cosf(a));
+				nB2 = n;
+				const float d2 = n.X * 1300.f + n.Z * -200.f;
+				std::vector<Vec3> ns;
+				std::vector<float> ds;
+				ns.push_back(n);
+				ds.push_back(d2);
+				ns.push_back(Vec3(-n.X, -n.Y, -n.Z));
+				ds.push_back(2000.f - d2);
+				ns.push_back(Vec3(1.f, 0.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(-1.f, 0.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 1.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, -1.f, 0.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 0.f, 1.f));
+				ds.push_back(20000.f);
+				ns.push_back(Vec3(0.f, 0.f, -1.f));
+				ds.push_back(20000.f);
+				if (!wB.AddTestBrush(ns, ds, o.hulls)) {
+					printf("capcontact: world B brush 2 failed\n");
+					return 1;
+				}
+			}
+			wB.FinalizeTestWorld();
+		}
+		// ---- gate 1: bitwise identity vs the full trace, both
+		// worlds, wide corridor
+		{
+			const World* ws[2] = { &wA, &wB };
+			const char* wn[2] = { "one ramp", "two ramps" };
+			for (int wi = 0; wi < 2; ++wi) {
+				const World& w = *ws[wi];
+				CapContact::LocalSet S;
+				CapContact::BuildLocalSet(w, 0,
+					Vec3(-2500.f, -1500.f, -1500.f),
+					Vec3(2500.f, 1500.f, 1500.f), &S);
+				int nq = 0, okq = 0, hits = 0;
+				double ns_local = 0.0, ns_full = 0.0;
+				for (int i = 0; i < 20000; ++i) {
+					const Vec3 a(rndf(-1200.f, 2200.f),
+						rndf(-1000.f, 1000.f),
+						rndf(-1200.f, 800.f));
+					const float ang = rndf(-3.14159f, 3.14159f);
+					const float el = rndf(-1.2f, 1.2f);
+					const float ln = rndf(10.f, 300.f);
+					const Vec3 b(
+						a.X + cosf(ang) * cosf(el) * ln,
+						a.Y + sinf(ang) * cosf(el) * ln,
+						a.Z + sinf(el) * ln);
+					int lb, lp;
+					bool lss;
+					const auto t0 =
+						std::chrono::steady_clock::now();
+					const float lf = CapContact::ClipSegment(S, a,
+						b, &lb, &lp, &lss);
+					ns_local += std::chrono::duration<double,
+						std::nano>(
+						std::chrono::steady_clock::now()
+						- t0).count();
+					if (lf < 0.f)
+						continue;   // outside corridor (rare here)
+					TraceResult tr;
+					const auto t1 =
+						std::chrono::steady_clock::now();
+					w.TraceHull3(a, b, 0, &tr);
+					ns_full += std::chrono::duration<double,
+						std::nano>(
+						std::chrono::steady_clock::now()
+						- t1).count();
+					nq++;
+					const bool same = memcmp(&lf, &tr.frac, 4)
+						== 0 && lb == tr.brush
+						&& lp == tr.plane
+						&& lss == tr.startsolid;
+					if (same)
+						okq++;
+					if (tr.frac < 1.f)
+						hits++;
+				}
+				char nm[64];
+				snprintf(nm, sizeof(nm), "A14 bitwise [%s]",
+					wn[wi]);
+				snprintf(buf, sizeof(buf), "%d/%d queries "
+					"identical to the full trace (frac bits + "
+					"brush + plane + startsolid; %d hits) | "
+					"local %.0f ns vs full %.0f ns", okq, nq,
+					hits, nq ? ns_local / nq : 0.0,
+					nq ? ns_full / nq : 0.0);
+				check(nm, nq >= 19000 && okq == nq && hits > 500,
+					buf);
+			}
+		}
+		// ---- gate 2: DECLINE honesty on a narrow corridor
+		{
+			CapContact::LocalSet S;
+			CapContact::BuildLocalSet(wB, 0,
+				Vec3(-200.f, -300.f, -600.f),
+				Vec3(600.f, 300.f, 300.f), &S);
+			int declines = 0, answered = 0, okq = 0;
+			for (int i = 0; i < 8000; ++i) {
+				const Vec3 a(rndf(-600.f, 1000.f),
+					rndf(-500.f, 500.f), rndf(-800.f, 500.f));
+				const float ang = rndf(-3.14159f, 3.14159f);
+				const float ln = rndf(10.f, 250.f);
+				const Vec3 b(a.X + cosf(ang) * ln,
+					a.Y + sinf(ang) * ln,
+					a.Z + rndf(-120.f, 120.f));
+				int lb, lp;
+				bool lss;
+				const float lf = CapContact::ClipSegment(S, a, b,
+					&lb, &lp, &lss);
+				if (lf < 0.f) {
+					declines++;
+					continue;
+				}
+				answered++;
+				TraceResult tr;
+				wB.TraceHull3(a, b, 0, &tr);
+				if (memcmp(&lf, &tr.frac, 4) == 0
+					&& lb == tr.brush && lp == tr.plane
+					&& lss == tr.startsolid)
+					okq++;
+			}
+			snprintf(buf, sizeof(buf), "%d declined (outside the "
+				"corridor), %d answered, %d/%d answers bitwise",
+				declines, answered, okq, answered);
+			check("A14 corridor DECLINE law", declines > 500
+				&& answered > 500 && okq == answered, buf);
+		}
+		// ---- gate 3: flight-level first contact vs real engine
+		// replays (two-ramp world)
+		{
+			CapContact::LocalSet S;
+			CapContact::BuildLocalSet(wB, 0,
+				Vec3(-2500.f, -1500.f, -1500.f),
+				Vec3(2500.f, 1500.f, 1500.f), &S);
+			int flights = 0, tick_ok = 0, brush_ok = 0;
+			for (int fl = 0; fl < 25; ++fl) {
+				const Vec3 xpos(rndf(-500.f, -100.f),
+					rndf(-150.f, 150.f), rndf(120.f, 320.f));
+				const float sp = rndf(600.f, 1000.f);
+				const float hd = rndf(-0.35f, 0.35f);
+				const Vec3 xvel(cosf(hd) * sp, sinf(hd) * sp,
+					rndf(-40.f, 80.f));
+				// random legal schedule
+				signed char sides[96];
+				float cosas[96];
+				{
+					signed char side = 0;
+					int age = 6;
+					for (int t = 0; t < 96; ++t) {
+						signed char ds;
+						float ca;
+						const unsigned r2 = rnd();
+						if ((r2 & 7) == 0) {
+							ds = 0;
+							ca = 1.f;
+						} else {
+							ds = (r2 & 8) ? 1 : -1;
+							if (side != 0 && ds != side
+								&& age < min_gap)
+								ds = side;
+							ca = 1.f - 2.f * static_cast<float>(
+								(r2 >> 8) & 1023) / 1023.f;
+						}
+						sides[t] = ds;
+						cosas[t] = ca;
+						if (ds != 0 && side != 0 && ds != side)
+							age = 1;
+						else
+							age = age < 6 ? age + 1 : 6;
+						if (ds != 0)
+							side = ds;
+					}
+				}
+				// kernel path + local-set first contact
+				int pred_tick = -1, pred_brush = -1;
+				{
+					float kx = xpos.X, ky = xpos.Y, kz = xpos.Z;
+					float kvx = xvel.X, kvy = xvel.Y,
+						kvz = xvel.Z;
+					for (int t = 0; t < 96 && pred_tick < 0;
+						++t) {
+						float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+						CapAir::KernelTick(k, kx, ky, kz, kvx,
+							kvy, kvz, sides[t], cosas[t], &nx2,
+							&ny2, &nz2, &nvx2, &nvy2, &nvz2);
+						int lb, lp;
+						bool lss;
+						const float lf = CapContact::ClipSegment(
+							S, Vec3(kx, ky, kz),
+							Vec3(nx2, ny2, nz2), &lb, &lp,
+							&lss);
+						if (lf >= 0.f && lf < 1.f) {
+							pred_tick = t + 1;
+							pred_brush = lb;
+						}
+						kx = nx2;
+						ky = ny2;
+						kz = nz2;
+						kvx = nvx2;
+						kvy = nvy2;
+						kvz = nvz2;
+					}
+				}
+				if (pred_tick < 0)
+					continue;
+				flights++;
+				// engine replay
+				PlayerState s;
+				s.pos = xpos;
+				s.vel = xvel;
+				int t_contact = -1, e_brush = -1;
+				for (int t = 0; t < 96 && t_contact < 0; ++t) {
+					const float s2d = Len2D(s.vel);
+					const float h = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					float yaw = h * 57.2957795f;
+					float fmv = 0.f, smv = 0.f;
+					if (sides[t] != 0 && s2d > 1.f)
+						Air::WishInputs(h,
+							static_cast<int>(sides[t]),
+							cosas[t], &yaw, &fmv, &smv);
+					TickEvents ev;
+					MoveTick(s, wB, p, 0.f, yaw, fmv, smv, 0.f,
+						0, &ev);
+					if (ev.ncontacts > 0) {
+						t_contact = t + 1;
+						e_brush = ev.contact_brush[0];
+					}
+				}
+				if (t_contact == pred_tick)
+					tick_ok++;
+				if (e_brush == pred_brush)
+					brush_ok++;
+			}
+			snprintf(buf, sizeof(buf), "%d flights: first-contact "
+				"tick %d/%d, contacted brush %d/%d vs engine "
+				"replays", flights, tick_ok, flights, brush_ok,
+				flights);
+			check("A14 flight first contact", flights >= 15
+				&& tick_ok == flights && brush_ok == flights,
+				buf);
+		}
+		printf("capcontact: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "A14 LOCAL-SET FIRST CONTACT BITWISE VS "
+				"THE FULL TRACE"
+				: "A14 RED - a gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capsolve: registry A0 + A12 + A10 + A13
 	// (session 33) - the air point family's packaging tier. A0
 	// (CapFrame): the canonical-frame transform is BITWISE the
@@ -16983,10 +17315,93 @@ namespace {
 			check("A13 rotated-face prediction", tried >= 10
 				&& tick_ok == tried && worst_dev <= 1.f, buf);
 		}
+		// ---- A9: displacement with a terminal-heading constraint.
+		// Requests are generated FROM REALITY (a rolled legal
+		// schedule's own endpoint + terminal heading, so every
+		// request is certainly achievable by SOME schedule); the
+		// solver may still DECLINE when the reversal+brake family
+		// cannot meet both contracts - acceptance is the measured
+		// family-sufficiency line, while accepted answers are gated
+		// HARD: endpoint and heading contracts re-verified by an
+		// independent kernel roll, and a sample replayed bitwise
+		// through the engine.
+		{
+			int trials = 0, accepts = 0, contract_ok = 0;
+			int engine_ok = 0, engine_n = 0;
+			double perr_sum = 0.0;
+			double ms_sum = 0.0;
+			const float tol = 0.0873f;   // 5 degrees
+			for (int i = 0; i < 40; ++i) {
+				const float v0 = (i & 1) ? 500.f : 900.f;
+				const int N = (i % 3 == 0) ? 24
+					: (i % 3 == 1) ? 40 : 56;
+				CapP2P::P2PSchedule gs;
+				randSched(N, &gs);
+				float tx, ty, gvx, gvy;
+				CapP2P::Roll(k, v0, gs, &tx, &ty, &gvx, &gvy);
+				const float psi_req = atan2f(gvy, gvx);
+				trials++;
+				CapP2P::P2PResult r;
+				float perr = 0.f;
+				const auto t0 = std::chrono::steady_clock::now();
+				const bool ok = CapP2P::SolveTerminal(k, v0, tx,
+					ty, N, psi_req, tol, &r, &perr);
+				ms_sum += std::chrono::duration<double,
+					std::milli>(std::chrono::steady_clock::now()
+					- t0).count();
+				if (!ok)
+					continue;
+				accepts++;
+				perr_sum += perr;
+				// independent contract verification
+				float ex, ey, evx, evy;
+				CapP2P::Roll(k, v0, r.sched, &ex, &ey, &evx,
+					&evy);
+				const float res = sqrtf((ex - tx) * (ex - tx)
+					+ (ey - ty) * (ey - ty));
+				const float pe = fabsf(CapP2P::WrapAngle(
+					atan2f(evy, evx) - psi_req));
+				if (res <= 0.5f && pe <= tol)
+					contract_ok++;
+				if (engine_n < 8) {
+					engine_n++;
+					PlayerState s;
+					s.pos = Vec3(0.f, 0.f, 8000.f);
+					s.vel = Vec3(v0, 0.f, 0.f);
+					for (int t = 0; t < r.sched.n; ++t) {
+						s.vel.Z = 0.f;
+						CapAir::AirTick(&s, w, p,
+							r.sched.side[t], r.sched.cosa[t]);
+					}
+					if (memcmp(&s.pos.X, &ex, 4) == 0
+						&& memcmp(&s.pos.Y, &ey, 4) == 0)
+						engine_ok++;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d/%d achievable requests "
+				"accepted at 5 deg tol (mean heading err %.2f "
+				"deg; mean %.0f ms) - acceptance is the family-"
+				"sufficiency measure", accepts, trials,
+				accepts ? perr_sum / accepts * 57.2957795
+					: 0.0, trials ? ms_sum / trials : 0.0);
+			check("A9 acceptance (measured)", accepts
+				>= (trials * 2) / 5, buf);
+			snprintf(buf, sizeof(buf), "%d/%d accepted answers "
+				"meet BOTH contracts on independent re-roll "
+				"(endpoint <= 0.5u, heading <= tol)", contract_ok,
+				accepts);
+			check("A9 contract hard gate", accepts > 0
+				&& contract_ok == accepts, buf);
+			snprintf(buf, sizeof(buf), "%d/%d sampled accepts "
+				"replay bitwise through the engine", engine_ok,
+				engine_n);
+			check("A9 engine bitwise", engine_n >= 6
+				&& engine_ok == engine_n, buf);
+		}
 		printf("capsolve: %d passed, %d failed | %s\n", pass, fail,
-			fail == 0 ? "A0/A10/A12/A13 AIR POINT FAMILY PACKAGED "
+			fail == 0 ? "A0/A9/A10/A12/A13 AIR POINT FAMILY PACKAGED "
 				"AND GATED"
-				: "A0/A10/A12/A13 RED - a gate failed");
+				: "A0/A9/A10/A12/A13 RED - a gate failed");
 		fflush(stdout);
 		return fail == 0 ? 0 : 2;
 	}
@@ -23964,6 +24379,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapMin(o);
+	}
+	if (cmd == "capcontact") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapContact(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

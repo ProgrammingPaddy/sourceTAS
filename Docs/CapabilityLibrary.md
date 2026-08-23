@@ -408,6 +408,16 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23g (session 34): **A9 and A14 close** (detail in the
+  checklist change log). A14: `CapContact` — the verified trace's
+  per-brush clip verbatim on corridor local sets, 40k/40k bitwise,
+  DECLINE outside domain, 25/25 flight contacts vs engine. A9:
+  `CapP2P::SolveTerminal` — the 3×3 finisher (tail c1/c2 + brake
+  strength vs endpoint x/y + heading) closed the last units;
+  contracts hard 19/19, acceptance 19/40 on the adversarial
+  generator = the measured family-sufficiency line. Remaining A:
+  A22 tail, A23, A24, A28, A19/A20 carried-gap, A8 refinements,
+  A11 interior, A29, A31.
 - 2026-08-23f (session 33): **the A march opens (user directive:
   finish all of category A first) — A0, A10, A12, A13, A21, A26
   close** (detail in the checklist change log). capsolve 7/0 +

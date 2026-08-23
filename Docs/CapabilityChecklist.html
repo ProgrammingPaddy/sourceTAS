@@ -207,9 +207,10 @@ const D = [
  "parametric endpoints; local refinement",
  "bounds O(N)→O(1) · sweep 31M nodes/101 s","capreach 5/5",
  "The reach family: witnessed lower bounds from the position-tracking sweep + the max-speed-integral upper bound (which REPLACED the refuted session-20 cone — its falsifier found 61,513 violations; braking wishes break the 30/tick premise). Forward-tight to 1.0u; loose backward by construction (direction-aware tightening open)."],
-["A9","A","reach + terminal constraint","des",["revs"],["A22"],["A11"],
- "A11 family + terminal constraint","Pareto layer of A8","target ~10² µs","—",
- "Terminal heading/speed constraints select among validated family candidates; builds directly on the A11 machinery."],
+["A9","A","reach + terminal constraint","done",["revs","c"],["A22"],["A11","A12"],
+ "CapP2P::SolveTerminal — endpoint-ranked family (reversals × brake placement × brake STRENGTH) → scored coarse climb judging both contracts per kernel roll → the 3×3 finisher: (tail c1, tail c2, brake strength) against (endpoint x, y, heading), a square Newton → accept or DECLINE",
+ "Pareto layer of A8 sweep; richer heading family (second brake run)","~24 ms/request","capsolve 10/0",
+ "CLOSED v1 session 34 through falsifier-driven iteration: heading-blind climbing measurably walked candidates into far basins (endpoint 0, heading 30° off); heading-only judging stranded them 50u out; the scored middle plus the square 3×3 Newton took acceptance 2→19 of 40 against the most adversarial generator possible (random braked schedules' exact terminal states — deep-interior endpoints, arbitrary headings). Contracts are HARD: 19/19 accepts independently re-rolled (endpoint ≤ 0.5u, heading ≤ 5° tol, mean 0.49°), 8/8 engine-bitwise. The 21 DECLINEs are the honest family-sufficiency measure — the named refinement."],
 ["A10","A","minimum air time","done",["vert"],["C9"],["A11","B13"],
  "CapP2P::MinAirTime — the A1 z-window intersected with the A12 scan, first feasible N wins",
  "table lookup","3.0 ms mean (window-restricted scan)","capsolve 7/0",
@@ -227,10 +228,10 @@ const D = [
  "CapFaceSolve::SolveToFace — A12 at 1-D λ targets per candidate tick on the HULL-EXPANDED plane, plus PredictContact (the exact clip-law prediction)",
  "generic targeting","organize ~3.5 ms/start + ~100 µs/target (capxfer's measured chain)","capxfer 8/0 (acceptance) + capsolve 7/0",
  "PACKAGED session 33 and consumed by capxfer itself — one implementation, the C7 gates its acceptance tests (still 8/0 after the refactor). A rotated-azimuth scenario in capsolve exercises the general slice-line geometry (n.Y ≠ 0) the axial world barely touches: 12/12 sampled contacts on the exact predicted tick, worst end-position deviation 0.0000u."],
-["A14","A","first-contact prediction","part",[],["A28","B15"],[],
- "exact trace vs pruned local brush set","full-world trace",
- "~µs now · ~100 ns target","—",
- "The engine's trace is exact; the capability work is the local-set pruning that makes corridor checks cheap. Not yet packaged."],
+["A14","A","first-contact prediction","done",["clipf"],["A28","B15"],[],
+ "CapContact::BuildLocalSet + ClipSegment — the engine's per-brush clip (enter-clamp tie-break, DIST_EPSILON pads, corner release, start-solid law) transcribed VERBATIM over a corridor-gathered set; out-of-corridor queries DECLINE",
+ "full-world trace (the engine's own, same answers)","60–74 ns/query vs 113–166 ns full trace","capcontact 4/0",
+ "CLOSED session 34: 40,000/40,000 queries BITWISE identical to the full trace across one- and two-ramp worlds — fraction bits, hit brush, hit plane, and the start-solid flag all equal. The corridor DECLINE law refused 6,742 out-of-domain segments honestly while every answered one stayed bitwise; 25/25 kernel-flight first contacts (tick AND brush) matched real engine replays. The locality win scales with world brush count — test worlds hold only 1–2 brushes, so 60-vs-113 ns is the floor, not the ceiling."],
 ["A15","A","board clip","done",["vdn"],["A16","A17","C2"],[],
  "exported engine clip + closed post-speed law","—",
  "~ns · law dev ≤ 0.0034 u/s","capboard 5/5",
@@ -563,7 +564,7 @@ document.body.addEventListener('click', e => {
 
 document.getElementById('foot').textContent =
   'SourceTAS Capability Library · living dashboard · canonical text: Docs/CapabilityChecklist.md · '
-  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 33 (2026-08-23) · the A march: 6 closed this session, open: A9, A14, A22 tail, A23, A24, A28, A19/A20 carried-gap, A8 refinements, A11 interior, A29, A31';
+  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 34 (2026-08-23) · the A march: A9 + A14 closed this session; open: A22 tail, A23, A24, A28, A19/A20 carried-gap, A8 refinements, A11 interior, A29, A31';
 render();
 renderTerms();
 </script>

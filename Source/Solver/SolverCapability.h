@@ -4085,4 +4085,738 @@ namespace CapLaunch {
 	};
 
 } // namespace CapLaunch
+
+// ======================================================================
+// CAPCONTACT - registry A14 (first-contact prediction), session 34.
+// The engine's own per-brush clip (TraceHull3's verified loop: the
+// enter-clamp tie-break, DIST_EPSILON padding, real-side corner
+// release, the start-solid law) run against a PREBUILT LOCAL BRUSH
+// SET instead of the whole world - the shape route legs consume: one
+// corridor gather, then per-tick segment queries over the 1-3
+// brushes that matter. Arithmetic is transcribed from
+// SolverWorld.cpp VERBATIM so answers are BITWISE the full trace's;
+// the suite gates that identity on every query. A query whose
+// segment leaves the corridor box DECLINES (returns -1) rather than
+// answering from an incomplete set. Ordering note: the engine's
+// processing order is observable only through mid-loop allsolid
+// zeroing; a first-contact flight query never starts inside a brush,
+// and the bitwise gate would catch any ordering divergence.
+namespace CapContact {
+
+	struct LocalSet {
+		const World* w = nullptr;
+		int hull = 0;
+		Vec3 lo, hi;               // the corridor box (origin space)
+		std::vector<int> brushes;  // indices into w->brushes
+	};
+
+	// Gather every brush whose hull-expanded AABB gate touches the
+	// corridor box.
+	inline void BuildLocalSet(const World& w, int hull,
+	                          const Vec3& lo, const Vec3& hi,
+	                          LocalSet* out) {
+		out->w = &w;
+		out->hull = hull;
+		out->lo = lo;
+		out->hi = hi;
+		out->brushes.clear();
+		for (size_t bi = 0; bi < w.brushes.size(); ++bi) {
+			const WorldBrush& bc = w.brushes[bi];
+			const Vec3& gmn = hull == 1 ? bc.gmin_duck
+				: hull == 2 ? bc.gmin_unduck : bc.gmin_stand;
+			const Vec3& gmx = hull == 1 ? bc.gmax_duck
+				: hull == 2 ? bc.gmax_unduck : bc.gmax_stand;
+			if (hi.X < gmn.X || lo.X > gmx.X || hi.Y < gmn.Y
+				|| lo.Y > gmx.Y || hi.Z < gmn.Z || lo.Z > gmx.Z)
+				continue;
+			out->brushes.push_back(static_cast<int>(bi));
+		}
+	}
+
+	// Exact clip of the origin segment a->b against the local set.
+	// Mirrors TraceHull3's per-brush loop bitwise. Returns the
+	// fraction (1 = clean), or -1 DECLINE when the segment leaves
+	// the corridor. brush/plane/startsolid report as the full trace
+	// would.
+	inline float ClipSegment(const LocalSet& S, const Vec3& a,
+	                         const Vec3& b, int* brush_out = nullptr,
+	                         int* plane_out = nullptr,
+	                         bool* startsolid_out = nullptr) {
+		const Vec3 lo(fminf(a.X, b.X), fminf(a.Y, b.Y),
+			fminf(a.Z, b.Z));
+		const Vec3 hi(fmaxf(a.X, b.X), fmaxf(a.Y, b.Y),
+			fmaxf(a.Z, b.Z));
+		if (lo.X < S.lo.X || hi.X > S.hi.X || lo.Y < S.lo.Y
+			|| hi.Y > S.hi.Y || lo.Z < S.lo.Z || hi.Z > S.hi.Z)
+			return -1.f;   // DECLINE: outside the gathered corridor
+		const World& w = *S.w;
+		const int hull = S.hull;
+		float best = 1.f;
+		int best_brush = -1, best_plane = -1;
+		bool l_ss = false;
+		for (size_t oi = 0; oi < S.brushes.size(); ++oi) {
+			const int bi = S.brushes[oi];
+			const WorldBrush& bc = w.brushes[static_cast<size_t>(
+				bi)];
+			const Vec3& gmn = hull == 1 ? bc.gmin_duck
+				: hull == 2 ? bc.gmin_unduck : bc.gmin_stand;
+			const Vec3& gmx = hull == 1 ? bc.gmax_duck
+				: hull == 2 ? bc.gmax_unduck : bc.gmax_stand;
+			if (hi.X < gmn.X || lo.X > gmx.X || hi.Y < gmn.Y
+				|| lo.Y > gmx.Y || hi.Z < gmn.Z || lo.Z > gmx.Z)
+				continue;
+			const std::vector<float>& pd = hull == 1 ? bc.d_duck
+				: hull == 2 ? bc.d_unduck : bc.d_stand;
+			float tmin = -1.f, tmax = 1.f;
+			float tmin_t = -1.f, tmax_t = 1e9f;
+			int enter = -1;
+			bool outside = false, miss = false;
+			bool getout = false;
+			const int np = static_cast<int>(bc.n.size());
+			for (int pi = 0; pi < np; ++pi) {
+				const float d0 = Dot(bc.n[pi], a) - pd[pi];
+				const float d1 = Dot(bc.n[pi], b) - pd[pi];
+				if (d1 > 0.f)
+					getout = true;
+				if (d0 > 0.f) {
+					outside = true;
+					if (d1 > 0.f) {
+						miss = true;
+						break;
+					}
+					float tt = (d0 - 0.03125f) / (d0 - d1);
+					if (tt < 0.f)
+						tt = 0.f;
+					if (tt > tmin) {
+						tmin = tt;
+						enter = pi;
+					}
+					const float tn = d0 / (d0 - d1);
+					if (tn > tmin_t)
+						tmin_t = tn;
+				} else if (d1 > 0.f) {
+					float tt = (d0 + 0.03125f) / (d0 - d1);
+					if (tt > 1.f)
+						tt = 1.f;
+					if (tt < tmax)
+						tmax = tt;
+					if (bc.pid[pi] >= 0) {
+						const float tn = (d0 - 0.03125f)
+							/ (d0 - d1);
+						if (tn < tmax_t)
+							tmax_t = tn;
+					}
+				}
+			}
+			if (!miss && !outside) {
+				l_ss = true;
+				if (!getout)
+					best = 0.f;   // the mid-loop allsolid zeroing
+				continue;
+			}
+			if (miss || !outside || enter < 0 || tmin >= tmax)
+				continue;
+			if (w.true_interval_corner && tmin_t >= tmax_t)
+				continue;   // corner release (engine-measured rule)
+			if (tmin < best) {
+				best = (tmin > 0.f) ? tmin : 0.f;
+				best_brush = bi;
+				best_plane = enter;
+			}
+		}
+		if (brush_out)
+			*brush_out = best_brush;
+		if (plane_out)
+			*plane_out = best_plane;
+		if (startsolid_out)
+			*startsolid_out = l_ss;
+		return best;
+	}
+
+} // namespace CapContact
+
+// ======================================================================
+// CAPP2P addition - registry A9 (displacement with a terminal
+// constraint), session 34: reach (tx, ty) at tick N with terminal
+// heading psi within a tolerance. The family enumeration ranks by
+// endpoint through the O(k) segment tables, kernel-rolls the
+// heading-feasible candidates for their EXACT terminal state, then
+// drives the best one to the endpoint contract with a compact
+// reversal climb + two-parameter exact-hit tail. ACCEPTS only when
+// BOTH contracts hold (endpoint <= 0.5, |psi error| <= tol);
+// otherwise DECLINES honestly - the caller never receives a
+// silently-wrong schedule.
+namespace CapP2P {
+
+	inline float WrapAngle(float a) {
+		while (a > 3.14159265f)
+			a -= 6.2831853f;
+		while (a < -3.14159265f)
+			a += 6.2831853f;
+		return a;
+	}
+
+	inline bool SolveTerminal(const CapAir::AirKernelCtx& k, float v0,
+	                          float tx, float ty, int N,
+	                          float psi_req, float psi_tol,
+	                          P2PResult* out, float* psi_err_out,
+	                          int* diag_cands = nullptr,
+	                          int* diag_feas = nullptr,
+	                          float* diag_best_perr = nullptr,
+	                          float* diag_best_res = nullptr,
+	                          float* diag_res_perr = nullptr) {
+		struct Cand {
+			int ss = 1, nrev = 0;
+			int revs[3] = { 0, 0, 0 };
+			int bs = 0, bl = 0;
+			float bcv = 0.9f;   // brake strength (stored cosa) - a
+			                    // continuous range lever
+			float res = 1e30f;
+		};
+		SegTables T;
+		BuildSegTables(k.p, v0, N, &T);
+		// stage 1: rank the reversal family by endpoint residual
+		std::vector<Cand> cands;
+		auto offerSeg = [&](int ss, const int* revs, int nrev) {
+			float ex, ey;
+			EvalSegs(T, ss, revs, nrev, &ex, &ey);
+			const float dx = ex - tx, dy = ey - ty;
+			const float r = sqrtf(dx * dx + dy * dy);
+			if (r > 128.f)
+				return;
+			Cand c;
+			c.ss = ss;
+			c.nrev = nrev;
+			for (int i = 0; i < 3; ++i)
+				c.revs[i] = i < nrev ? revs[i] : 0;
+			c.res = r;
+			cands.push_back(c);
+		};
+		for (int ss = -1; ss <= 1; ss += 2) {
+			int revs[3] = { 0, 0, 0 };
+			offerSeg(ss, revs, 0);
+			for (int r1 = 1; r1 < N; ++r1) {
+				revs[0] = r1;
+				offerSeg(ss, revs, 1);
+				for (int r2 = r1 + 6; r2 < N; ++r2) {
+					revs[1] = r2;
+					offerSeg(ss, revs, 2);
+				}
+			}
+			for (int r1 = 1; r1 < N; r1 += 2) {
+				revs[0] = r1;
+				for (int r2 = r1 + 6; r2 < N; r2 += 2) {
+					revs[1] = r2;
+					for (int r3 = r2 + 6; r3 < N; r3 += 3) {
+						revs[2] = r3;
+						offerSeg(ss, revs, 3);
+					}
+				}
+			}
+		}
+		// brake probes are the HEADING control: where the brake run
+		// sits decides how much of the turning happens slow (before)
+		// vs fast (after, turn rate atan(30/s)) - so the probe grid
+		// varies brake START and length, with and without a reversal
+		{
+			const int blstep = N / 8 < 1 ? 1 : N / 8;
+			const int bss[3] = { 1, N / 4, N / 2 };
+			P2PSchedule s;
+			auto offerBrake = [&](int ss, const int* revs, int nrev,
+				int bs, int bl, float bcv) {
+				BuildSchedule(N, ss, revs, nrev, bs, bl, bcv, 0,
+					0.f, 0.f, &s);
+				float ex, ey, evx, evy;
+				Roll(k, v0, s, &ex, &ey, &evx, &evy);
+				const float dx = ex - tx, dy = ey - ty;
+				const float r = sqrtf(dx * dx + dy * dy);
+				if (r > 128.f)
+					return;
+				Cand c;
+				c.ss = ss;
+				c.nrev = nrev;
+				for (int i = 0; i < 3; ++i)
+					c.revs[i] = i < nrev ? revs[i] : 0;
+				c.bs = bs;
+				c.bl = bl;
+				c.bcv = bcv;
+				c.res = r;
+				cands.push_back(c);
+			};
+			for (int ss = -1; ss <= 1; ss += 2)
+				for (int bi = 0; bi < 3; ++bi)
+					for (int bl = blstep; bl <= (3 * N) / 4;
+						bl += blstep) {
+						if (bl < 2)
+							continue;
+						int rv0[3] = { 0, 0, 0 };
+						offerBrake(ss, rv0, 0, bss[bi], bl, 0.9f);
+						offerBrake(ss, rv0, 0, bss[bi], bl, 0.6f);
+						for (int r1 = 6; r1 < N; r1 += 12) {
+							rv0[0] = r1;
+							offerBrake(ss, rv0, 1, bss[bi], bl,
+								0.9f);
+							offerBrake(ss, rv0, 1, bss[bi], bl,
+								0.6f);
+						}
+					}
+		}
+		// stage 2: kernel-roll for exact terminal heading, keep the
+		// heading-feasible candidates ranked by |psi error|
+		struct Scored {
+			Cand c;
+			float perr = 1e30f;
+		};
+		std::vector<Scored> feas;
+		P2PSchedule s;
+		for (size_t i = 0; i < cands.size(); ++i) {
+			const Cand& c = cands[i];
+			BuildSchedule(N, c.ss, c.revs, c.nrev, c.bs, c.bl,
+				c.bcv, 0, 0.f, 0.f, &s);
+			float ex, ey, evx, evy;
+			Roll(k, v0, s, &ex, &ey, &evx, &evy);
+			const float perr = fabsf(WrapAngle(atan2f(evy, evx)
+				- psi_req));
+			if (perr <= psi_tol + 0.35f) {
+				Scored sc;
+				sc.c = c;
+				sc.perr = perr;
+				feas.push_back(sc);
+			}
+		}
+		std::sort(feas.begin(), feas.end(),
+			[](const Scored& a, const Scored& b) {
+				return a.perr < b.perr;
+			});
+		if (diag_cands)
+			*diag_cands = static_cast<int>(cands.size());
+		if (diag_feas)
+			*diag_feas = static_cast<int>(feas.size());
+		if (diag_best_perr)
+			*diag_best_perr = feas.empty() ? 1e30f
+				: feas[0].perr;
+		// stage 3: for up to 10 heading-nearest candidates - fix the
+		// endpoint (reversal climb + FD tail Newton), then STEER THE
+		// HEADING: single-parameter neighbor steps over reversal
+		// times and the brake run's start/length, each step re-fixing
+		// the endpoint before the heading is judged. Accept the first
+		// candidate meeting BOTH contracts.
+		for (size_t fi = 0; fi < feas.size() && fi < 24; ++fi) {
+			Cand c = feas[fi].c;
+			float tc1 = 0.f, tc2 = 0.f;
+			// the exact-hit tail must live in the POST-BRAKE free
+			// region: a blanket tail overwrote brake-run ticks and
+			// moved brake candidates far from their stage-2 ranking
+			auto tmOf = [&]() {
+				const int free_t = N - (c.bl ? c.bs + c.bl : 0);
+				return free_t >= 14 ? 12
+					: (free_t >= 10 ? 8 : (free_t >= 5 ? 4 : 0));
+			};
+			auto evalC = [&](float* pex, float* pey, float* ppsi) {
+				BuildSchedule(N, c.ss, c.revs, c.nrev, c.bs, c.bl,
+					c.bcv, tmOf(), tc1, tc2, &s);
+				float ex, ey, evx, evy;
+				Roll(k, v0, s, &ex, &ey, &evx, &evy);
+				*pex = ex;
+				*pey = ey;
+				if (ppsi)
+					*ppsi = atan2f(evy, evx);
+			};
+			auto resNow = [&]() {
+				float ex, ey;
+				evalC(&ex, &ey, nullptr);
+				return sqrtf((ex - tx) * (ex - tx)
+					+ (ey - ty) * (ey - ty));
+			};
+			// FD tail Newton on (tc1, tc2), THREE STARTS (the proven
+			// SolveFixedN shape); returns the best residual
+			auto newtonFrom = [&](float s1, float s2, int iters) {
+				tc1 = s1;
+				tc2 = s2;
+				float res = resNow();
+				if (tmOf() == 0)
+					return res;
+				for (int it = 0; it < iters && res > 0.25f;
+					++it) {
+					const float h = 0.02f;
+					float ex0, ey0;
+					evalC(&ex0, &ey0, nullptr);
+					float exa, eya, exb, eyb;
+					tc1 += h;
+					evalC(&exa, &eya, nullptr);
+					tc1 -= h;
+					tc2 += h;
+					evalC(&exb, &eyb, nullptr);
+					tc2 -= h;
+					const float j11 = (exa - ex0) / h;
+					const float j21 = (eya - ey0) / h;
+					const float j12 = (exb - ex0) / h;
+					const float j22 = (eyb - ey0) / h;
+					const float det = j11 * j22 - j12 * j21;
+					if (fabsf(det) < 1e-6f)
+						break;
+					const float rx = tx - ex0, ry = ty - ey0;
+					float d1 = (rx * j22 - ry * j12) / det;
+					float d2 = (ry * j11 - rx * j21) / det;
+					if (d1 > 0.6f) d1 = 0.6f;
+					if (d1 < -0.6f) d1 = -0.6f;
+					if (d2 > 0.6f) d2 = 0.6f;
+					if (d2 < -0.6f) d2 = -0.6f;
+					tc1 += d1;
+					tc2 += d2;
+					if (tc1 > 1.f) tc1 = 1.f;
+					if (tc1 < -1.f) tc1 = -1.f;
+					if (tc2 > 1.f) tc2 = 1.f;
+					if (tc2 < -1.f) tc2 = -1.f;
+					res = resNow();
+				}
+				return res;
+			};
+			auto fixEndpoint = [&](int iters) {
+				const float s0a = tc1, s0b = tc2;
+				float best_res = newtonFrom(s0a, s0b, iters);
+				float b1 = tc1, b2 = tc2;
+				if (best_res > 0.25f) {
+					const float r2 = newtonFrom(0.45f, -0.45f,
+						iters);
+					if (r2 < best_res) {
+						best_res = r2;
+						b1 = tc1;
+						b2 = tc2;
+					}
+				}
+				if (best_res > 0.25f) {
+					const float r3 = newtonFrom(-0.45f, 0.45f,
+						iters);
+					if (r3 < best_res) {
+						best_res = r3;
+						b1 = tc1;
+						b2 = tc2;
+					}
+				}
+				tc1 = b1;
+				tc2 = b2;
+				return best_res;
+			};
+			auto legal = [&](const Cand& cc) {
+				for (int i = 0; i < cc.nrev; ++i) {
+					if (cc.revs[i] < 1 || cc.revs[i] >= N)
+						return false;
+					if (i > 0 && cc.revs[i]
+						< cc.revs[i - 1] + 6)
+						return false;
+				}
+				if (cc.bl != 0) {
+					if (cc.bs < 1 || cc.bl < 2
+						|| cc.bs + cc.bl > N)
+						return false;
+				}
+				return true;
+			};
+			// coarse SCORED climb: large integer steps toward the
+			// endpoint that never sell out the heading - one kernel
+			// roll per probe yields BOTH residual and terminal
+			// heading, so the cheap climb judges the combined score
+			// directly (heading-blind climbing measurably walked
+			// candidates into far basins; heading-only judging
+			// measurably stranded them 50u out - this is the middle)
+			auto probe = [&](float* pres, float* pperr) {
+				float ex0, ey0, psi0;
+				evalC(&ex0, &ey0, &psi0);
+				*pres = sqrtf((ex0 - tx) * (ex0 - tx)
+					+ (ey0 - ty) * (ey0 - ty));
+				*pperr = fabsf(WrapAngle(psi0 - psi_req));
+			};
+			auto cheapScore = [&](float r2, float pe2) {
+				return (r2 > 0.5f ? (r2 - 0.5f) * 0.02f : 0.f)
+					+ (pe2 > psi_tol ? (pe2 - psi_tol) * 1.f
+						: 0.f);
+			};
+			{
+				float cr, cp;
+				probe(&cr, &cp);
+				float cscore = cheapScore(cr, cp);
+				bool improved = true;
+				int guard = 0;
+				while (improved && guard++ < 12) {
+					improved = false;
+					auto tryStep = [&](const Cand& c2) {
+						if (!legal(c2))
+							return;
+						Cand save = c;
+						c = c2;
+						float r2, p2;
+						probe(&r2, &p2);
+						const float s2c = cheapScore(r2, p2);
+						if (s2c < cscore - 1e-4f) {
+							cscore = s2c;
+							improved = true;
+						} else {
+							c = save;
+						}
+					};
+					for (int i = 0; i < c.nrev; ++i)
+						for (int d = -4; d <= 4; ++d) {
+							if (d == 0)
+								continue;
+							Cand c2 = c;
+							c2.revs[i] += d;
+							tryStep(c2);
+						}
+					if (c.bl != 0) {
+						for (int d = -4; d <= 4; d += 2) {
+							if (d == 0)
+								continue;
+							Cand c2 = c;
+							c2.bs += d;
+							tryStep(c2);
+							c2 = c;
+							c2.bl += d;
+							tryStep(c2);
+						}
+						// the brake-strength range lever
+						const float dbs[4] = { -0.15f, -0.05f,
+							0.05f, 0.15f };
+						for (int di = 0; di < 4; ++di) {
+							Cand c2 = c;
+							c2.bcv += dbs[di];
+							if (c2.bcv < 0.2f)
+								c2.bcv = 0.2f;
+							if (c2.bcv > 0.999f)
+								c2.bcv = 0.999f;
+							tryStep(c2);
+						}
+					}
+					// paired translation (coupled valleys stall
+					// one-at-a-time moves - the recorded lesson)
+					for (int d = -4; d <= 4; ++d) {
+						if (d == 0)
+							continue;
+						Cand c2 = c;
+						for (int i = 0; i < c2.nrev; ++i)
+							c2.revs[i] += d;
+						tryStep(c2);
+						if (c.bl != 0) {
+							c2 = c;
+							for (int i = 0; i < c2.nrev; ++i)
+								c2.revs[i] += d;
+							c2.bs += d;
+							tryStep(c2);
+						}
+					}
+				}
+			}
+			float res = fixEndpoint(5);
+			// brake-to-the-end candidates have no tail room; buy a
+			// 4-tick exact-hit tail by shrinking the brake
+			for (int shrink = 0; shrink < 2 && res > 0.5f
+				&& c.bl != 0 && tmOf() == 0; ++shrink) {
+				Cand c2 = c;
+				c2.bl -= 4;
+				if (c2.bl < 2 || !legal(c2))
+					break;
+				c = c2;
+				tc1 = 0.f;
+				tc2 = 0.f;
+				res = fixEndpoint(5);
+			}
+			float ex, ey, psi;
+			evalC(&ex, &ey, &psi);
+			float perr = fabsf(WrapAngle(psi - psi_req));
+			// constrained local search: one combined score (heading
+			// error + penalized endpoint violation), integer
+			// neighbors over reversal times and the brake run, the
+			// exact-hit Newton re-fixing the endpoint inside every
+			// probe. Runs whether or not the endpoint has closed -
+			// candidates stuck at res > 0.5 get discrete help too.
+			int guard2 = 0;
+			// violations only: inside both contracts the score is 0;
+			// heading within tol is FREE (no pull away from the
+			// endpoint), heading beyond tol costs like ~2u/deg
+			auto scoreOf = [&](float r2, float pe2) {
+				return (r2 > 0.5f ? (r2 - 0.5f) * 0.02f : 0.f)
+					+ (pe2 > psi_tol ? (pe2 - psi_tol) * 1.f
+						: 0.f);
+			};
+			float score = scoreOf(res, perr);
+			while ((res > 0.5f || perr > psi_tol)
+				&& guard2++ < 14) {
+				Cand best_c = c;
+				float best_tc1 = tc1, best_tc2 = tc2;
+				float best_res = res, best_perr = perr;
+				float best_score = score;
+				bool moved = false;
+				const int steps[4] = { -3, -1, 1, 3 };
+				const Cand base = c;
+				const float base_tc1 = tc1, base_tc2 = tc2;
+				auto tryNeighbor = [&](const Cand& c2) {
+					if (!legal(c2))
+						return;
+					c = c2;
+					tc1 = base_tc1;
+					tc2 = base_tc2;
+					const float r2 = fixEndpoint(3);
+					float ex2, ey2, psi2;
+					evalC(&ex2, &ey2, &psi2);
+					const float pe2 = fabsf(WrapAngle(psi2
+						- psi_req));
+					const float sc2 = scoreOf(r2, pe2);
+					if (sc2 < best_score - 1e-4f) {
+						best_score = sc2;
+						best_res = r2;
+						best_perr = pe2;
+						best_c = c;
+						best_tc1 = tc1;
+						best_tc2 = tc2;
+						moved = true;
+					}
+					c = base;
+					tc1 = base_tc1;
+					tc2 = base_tc2;
+				};
+				for (int i = 0; i < base.nrev; ++i)
+					for (int si = 0; si < 4; ++si) {
+						Cand c2 = base;
+						c2.revs[i] += steps[si];
+						tryNeighbor(c2);
+					}
+				if (base.bl != 0) {
+					for (int si = 0; si < 4; ++si) {
+						Cand c2 = base;
+						c2.bs += steps[si] * 2;
+						tryNeighbor(c2);
+						c2 = base;
+						c2.bl += steps[si] * 2;
+						tryNeighbor(c2);
+					}
+					const float dbs[4] = { -0.1f, -0.03f, 0.03f,
+						0.1f };
+					for (int di = 0; di < 4; ++di) {
+						Cand c2 = base;
+						c2.bcv += dbs[di];
+						if (c2.bcv < 0.2f)
+							c2.bcv = 0.2f;
+						if (c2.bcv > 0.999f)
+							c2.bcv = 0.999f;
+						tryNeighbor(c2);
+					}
+				}
+				if (!moved)
+					break;
+				c = best_c;
+				tc1 = best_tc1;
+				tc2 = best_tc2;
+				res = best_res;
+				perr = best_perr;
+				score = best_score;
+			}
+			// the FINISHER: three continuous controls (tail c1, tail
+			// c2, brake strength) against exactly three constraints
+			// (endpoint x, endpoint y, terminal heading) - a square
+			// 3x3 FD Newton closes what discrete steps cannot
+			if (c.bl != 0 && tmOf() > 0 && res <= 24.f
+				&& perr <= psi_tol + 0.25f) {
+				for (int it = 0; it < 10; ++it) {
+					float ex0, ey0, ps0;
+					evalC(&ex0, &ey0, &ps0);
+					const float rx = tx - ex0, ry = ty - ey0;
+					const float rp = WrapAngle(psi_req - ps0);
+					const float rr = sqrtf(rx * rx + ry * ry);
+					if (rr <= 0.25f && fabsf(rp)
+						<= psi_tol * 0.5f)
+						break;
+					const float h1 = 0.02f, h3 = 0.01f;
+					float exa, eya, psa, exb, eyb, psb, exc,
+						eyc, psc;
+					tc1 += h1;
+					evalC(&exa, &eya, &psa);
+					tc1 -= h1;
+					tc2 += h1;
+					evalC(&exb, &eyb, &psb);
+					tc2 -= h1;
+					const float sb = c.bcv;
+					c.bcv = sb + h3 > 0.999f ? sb - h3 : sb + h3;
+					const float hb = c.bcv - sb;
+					evalC(&exc, &eyc, &psc);
+					c.bcv = sb;
+					const float j11 = (exa - ex0) / h1;
+					const float j21 = (eya - ey0) / h1;
+					const float j31 = WrapAngle(psa - ps0) / h1;
+					const float j12 = (exb - ex0) / h1;
+					const float j22 = (eyb - ey0) / h1;
+					const float j32 = WrapAngle(psb - ps0) / h1;
+					const float j13 = (exc - ex0) / hb;
+					const float j23 = (eyc - ey0) / hb;
+					const float j33 = WrapAngle(psc - ps0) / hb;
+					const float det =
+						j11 * (j22 * j33 - j23 * j32)
+						- j12 * (j21 * j33 - j23 * j31)
+						+ j13 * (j21 * j32 - j22 * j31);
+					if (fabsf(det) < 1e-8f)
+						break;
+					float d1 = (rx * (j22 * j33 - j23 * j32)
+						- j12 * (ry * j33 - j23 * rp)
+						+ j13 * (ry * j32 - j22 * rp)) / det;
+					float d2 = (j11 * (ry * j33 - j23 * rp)
+						- rx * (j21 * j33 - j23 * j31)
+						+ j13 * (j21 * rp - ry * j31)) / det;
+					float d3 = (j11 * (j22 * rp - ry * j32)
+						- j12 * (j21 * rp - ry * j31)
+						+ rx * (j21 * j32 - j22 * j31)) / det;
+					if (d1 > 0.5f) d1 = 0.5f;
+					if (d1 < -0.5f) d1 = -0.5f;
+					if (d2 > 0.5f) d2 = 0.5f;
+					if (d2 < -0.5f) d2 = -0.5f;
+					if (d3 > 0.08f) d3 = 0.08f;
+					if (d3 < -0.08f) d3 = -0.08f;
+					tc1 += d1;
+					tc2 += d2;
+					c.bcv += d3;
+					if (tc1 > 1.f) tc1 = 1.f;
+					if (tc1 < -1.f) tc1 = -1.f;
+					if (tc2 > 1.f) tc2 = 1.f;
+					if (tc2 < -1.f) tc2 = -1.f;
+					if (c.bcv < 0.2f) c.bcv = 0.2f;
+					if (c.bcv > 0.999f) c.bcv = 0.999f;
+				}
+			}
+			evalC(&ex, &ey, &psi);
+			res = sqrtf((ex - tx) * (ex - tx)
+				+ (ey - ty) * (ey - ty));
+			perr = fabsf(WrapAngle(psi - psi_req));
+			if (diag_best_res && res < *diag_best_res) {
+				*diag_best_res = res;
+				if (diag_res_perr)
+					*diag_res_perr = perr;
+			}
+			if (res <= 0.5f && perr <= psi_tol) {
+				P2PResult r;
+				BuildSchedule(N, c.ss, c.revs, c.nrev, c.bs, c.bl,
+					c.bcv, tmOf(), tc1, tc2, &s);
+				r.brake_cosa = c.bcv;
+				float evx, evy;
+				Roll(k, v0, s, &r.ex, &r.ey, &evx, &evy);
+				r.evx = evx;
+				r.evy = evy;
+				r.solved = true;
+				r.residual = res;
+				r.start_side = c.ss;
+				r.nrev = c.nrev;
+				for (int i = 0; i < 3; ++i)
+					r.revs[i] = c.revs[i];
+				r.brake_start = c.bs;
+				r.brake_len = c.bl;
+				r.tail_c1 = tc1;
+				r.tail_c2 = tc2;
+				r.sched = s;
+				*out = r;
+				if (psi_err_out)
+					*psi_err_out = perr;
+				return true;
+			}
+		}
+		return false;   // DECLINE
+	}
+
+} // namespace CapP2P
 } // namespace Solver
