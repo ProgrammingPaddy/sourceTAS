@@ -40,7 +40,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A16 | best/worst board | v·n extrema over heading | C2, B8/B9 | closed-form candidates (endpoints, cos extrema, zero crossings) | dense enumeration (baseline only) | ~ns (few trig); verified to 1e-4 over 640 configs | `[x]` |
 | A17 | board feasibility arcs | loss ≤ L heading arcs | B8, approach windows | closed-form arccos arcs (≤2 per period) | enumeration | ~ns; 0 mismatches / 24×7200 | `[x]` |
 | A18 | one-tick ride law | in-plane gravity, sf state | A19–A22 | proven composition: gravity-half → clamp → accel(sf) → one clip → clamp → gravity-half → clamp | full MoveTick (edges/multi-plane keep it) | same order as A4 kernel + clip; 1246/1246 bitwise | `[x]` interior; `[ ]` edge/multi-plane ticks stay full-engine |
-| A19 | ride N-tick turn/gain | slope vector vs heading | A22, B10/B11 | A6 treatment on the A18 law (one added parameter) | table on the plane | target: ceiling O(1) + build ~minutes | `[ ]` next after A12 |
+| A19 | ride N-tick turn/gain | slope vs heading, sf carried state, **the contact epsilon** (re-contact needs v·n ≤ −(1/32)/dt ≈ −2.08 u/s — hover band measured) | A22, B10/B11 | `CapRide::BuildRide` on the proven A18 law, engine-anchored starts, stay-on-face guard | plane-table refinements | **56–84 s/ramp builds (28–34M nodes); 30/30 witness replays BITWISE as engine continuations; falsifier gaps: 50° +0.9, 60° +215.6, 70° +116.4 (the conservative guard's boundary sliver)** | `[~]` capride 7/0 (s28); named refinement: exact contact-boundary condition |
 | A20 | ride directional reach | in-plane (λ, downslope) | A22, B10 | A8 treatment on the plane (2-D positions) | — | target: bounds O(N); sweep ≪ air (2-D) | `[ ]` |
 | A21 | minimum ride time | exit point, N_min | route timing | inverse of A19/A20 (scan + solve) | — | target <1 ms | `[ ]` |
 | A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | ride point-to-point: the A12 construction on the plane with in-plane gravity | DP table per face (baseline/falsifier) | target 10–100 µs/pair | `[d]` — the ride's A12 |
@@ -48,7 +48,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A24 | direct contact transfer | adjacent-face clip chain | face-to-face routing | exact clip transform at the shared edge | full engine roll-through | ~ns/edge | `[~]` clip exists; adjacency composition not packaged |
 | A25 | ground/runoff acceleration | friction, stopspeed, accelerate, stamina power curve | spawn/launch prep | `CapGround::WalkKernelTick` — the grounded MoveTick chain partially evaluated on the flat-floor domain | full MoveTick baseline | **40.8M ticks/s = 10.9× engine; 200k walk ticks + 50k position checks, 0 bitwise mismatches (velocity, feet z, stamina)** | `[x]` capground 6/6 (s27) |
 | A26 | edge launch | leave-ground event, launch state | route segments | event detector on exact rollouts | — | ~engine-tick cost per scan tick | `[~]` instruments exist (LaunchWitness/ReplayLaunch); API not unified |
-| A27 | END-volume crossing | Minkowski box, z-window | finish timing | per-tick 1-D interval test from A1 window + box | full trace | ~ns/tick | `[~]` box computed; packaged predicate pending |
+| A27 | END-volume crossing | Minkowski box, z-window | finish timing | `CapEnd::EarliestBoxCrossing` — z-window-pruned exact scan | full per-tick scan (baseline) | **= naive on 10k (schedule, box) pairs; 12.1× fewer horizontal tests** | `[x]` capwindow (s28) |
 | A28 | obstacle/corridor traversal | first contact along family | route validation | A14 local-set checks along A12 candidate paths | swept-volume precomputation | target ~µs/leg | `[ ]` last in air chain |
 | A29 | duck capability (NEW, gap) | duck flag/hull/timer, 8.5u shift, 0.34 speed crop | duck-required routes, A3 hulls | package the decoded duck state machine as LAW + hull switch | — | ~ns/tick law | `[ ]` currently domain-stamped OUT of all air/ride families — the stamp is the gap record |
 | A30 | jump capability | jump impulse (double const), stamina scale, autobhop gate, three gravity half-steps | spawn runs, bhop segments, launches | `CapGround::JumpKernelTick` (jump head + the A4 air chain) | — | **50k jump ticks, 0 bitwise mismatches on all channels + stamina; vz law: stamina 0→283.993, 1315.8→210.839; release gate + autobhop bypass verified** | `[x]` capground (s27); SET path (ducked) = A29 debt |
@@ -62,8 +62,8 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | B0 | vertical tick window per face | z window | sweep/search culls | closed form (A1+A2) | — | ~ns | `[x]` deployed |
 | B1 | face-slice validity | λ interval | target filters | closed form (A2) | — | ~ns | `[x]` |
 | B2 | travel bound (replaces the refuted cone) | max-speed integral | reach culls | Σ√(s0²+900i)·dt upper bound | direction-aware version (B22-adjacent, future) | O(N) ~µs, precomputable prefix sums → O(1) | `[x]` certified; forward-tight to 1.0u measured |
-| B3 | earliest contact tick | B0 × B2 | search windows | interval intersection | — | ~ns | `[~]` composition wired ad hoc |
-| B4 | latest useful contact tick | z window + geometry | search windows | closed form from A1 + face extent | — | ~ns | `[ ]` |
+| B3 | earliest contact tick | B0 × B2 | search windows | `CapWindow::ContactWindow` (exact vertical recurrence × certified travel bound) | — | ~µs; falsifier: 915 real schedules, 0 beat the window | `[x]` capwindow (s28) |
+| B4 | latest useful contact tick | z window closure | search windows | below the band falling ⟹ never returns (exact recurrence) | — | ~µs | `[x]` with B3 |
 | B5 | heading-change feasibility | Ψ* | approach culls | A6/A7 lower bounds ADMIT only | heading-aware UB (B22) would enable culls | O(1) | `[~]` admit-only until B22 |
 | B6 | terminal-speed feasibility | speed ceiling | gap culls | required V > √(s0²+900N) ⟹ impossible | — | O(1) ~ns | `[x]` first certified air cull |
 | B7 | point/region reachability | B0×B2 + A8 | candidate filters | interval tests then A8/A12 | R_N membership (batch) | ~ns then µs | `[~]` |
@@ -122,6 +122,23 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | END box | Minkowski intersection, feet-z window | A27 |
 
 ## Change log
+- 2026-08-22/23 (session 28): **A19 built on the proven ride law**
+  (capride 7/0): engine-anchored starts (along-downslope boarding —
+  head-on entries lose everything to the clip, measured), composed
+  surface-friction state, and the discovered **contact-epsilon
+  physics**: the rider hovers 1/32 above the plane, so re-contact
+  needs v·n ≤ −2.08 u/s — the hover band was producing 10/10 witness
+  divergences until guarded, then 30/30 witnesses replay bitwise as
+  engine continuations. Ride physics measured: 450 u/s boarding →
+  1322 u/s after 0.9 s of 50° downslope; ±30° steering nearly free.
+  Falsifier ambers recorded (boundary-surfing trajectories up to
+  +215.6 — the conservative guard's sliver, the named refinement).
+  **A27 + B3/B4 certified** (capwindow 4/4): the vertical recurrence
+  bitwise vs the engine (incl. clamps), window logic = naive scans,
+  the contact window never beaten by 915 real schedules, the
+  END-crossing predicate = naive with 12.1× fewer tests. Battery all
+  green: capkern 5/5, capboard 4/4, capground 6/6, capp2p 12/0,
+  capwindow 4/4, capride 7/0, groute 11/11.
 - 2026-08-22 (session 27): **A11 VERIFIED** (capp2p 12/0) — the
   exact-segment-composition enumeration (robotics motion-primitive
   concatenation on our spirals; exhaustive k≤2) fixed the machinery

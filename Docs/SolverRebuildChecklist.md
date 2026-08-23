@@ -15,6 +15,32 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-23 (session 28): A19 BUILT ON THE PROVEN RIDE LAW;
+A27 + B3/B4 CERTIFIED — THE RIDE FAMILY IS OPEN.** capwindow 4/4:
+the exact vertical recurrence proven bitwise against the engine
+(including velocity clamps), the z-window early-exit logic equal to
+naive scans over 100k cases, the B3/B4 contact window never beaten by
+915 real schedules, and the A27 END-box crossing predicate equal to
+the naive scan with 12.1× fewer horizontal tests. capride 7/0 (A19,
+`CapRide::BuildRide` + the capride suite): surfaces from exact
+ENGINE-REACHED starts (along-downslope boarding — the first run
+proved head-on entries lose nearly everything to the clip and settle
+near-stopped), surface_friction composed as carried state via the
+vz-at-categorize rule, and a discovered piece of ride physics: **the
+rider hovers one trace epsilon (1/32) off the plane, so a tick only
+re-contacts when v·n ≤ −(1/32)/dt ≈ −2.08 u/s** — the hover band
+caused 10/10 witness divergences until the stay-on-face guard used
+the exact epsilon condition, after which ALL 30 witnesses replay
+bitwise as continuations of real engine runs. Measured ride physics:
+a 450 u/s boarding reaches 1322 u/s after 0.9 s of 50° downslope;
+±30° of steering is nearly free; builds 56–84 s per ramp (28–34M
+nodes). Honest ambers: falsifier beats up to +215.6 u/s at 60° from
+trajectories surfing the exact contact boundary that the conservative
+guard excludes — the named refinement is the exact contact-boundary
+condition (carried gap state). Battery: capkern 5/5, capboard 4/4,
+capground 6/6, capp2p 12/0, capwindow 4/4, capride 7/0, groute
+11/11.
+
 **STATUS 2026-08-22c (session 27): A11 VERIFIED; A25 + A30
 BITWISE-CERTIFIED — THREE CHECKLIST ROWS CLOSED IN ONE SESSION.**
 A11 (fixed-tick point-to-point): the Dubins/motion-primitive research

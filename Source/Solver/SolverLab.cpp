@@ -15579,6 +15579,562 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= capwindow: registry B0 (packaged), B3, B4 +
+	// A27 (session 28). The exact vertical recurrence certified
+	// against the engine, the early-exit window logic proven against
+	// naive scans, the contact-tick window falsified against real
+	// schedules, and the END-box crossing predicate proven equal to
+	// the naive scan with its z-window skip ratio measured.
+	int CmdCapWindow(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		World w;
+		if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+			printf("capwindow: clean-air world build failed\n");
+			return 1;
+		}
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capwindow: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+		unsigned rng = 0xB0B0B0B0u;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		// ---- the vertical recurrence vs the ENGINE, bitwise
+		{
+			long long mm = 0;
+			for (int i = 0; i < 5000; ++i) {
+				const float z0 = static_cast<float>(
+					static_cast<int>(rnd() % 8000u)) + 4000.f;
+				const float vz0 = static_cast<float>(
+					static_cast<int>(rnd() % 7200000)
+					- 3600000) / 1000.f;
+				PlayerState s;
+				s.pos = Vec3(0.f, 0.f, z0);
+				s.vel = Vec3(0.f, 0.f, vz0);
+				float z = z0, vz = vz0;
+				for (int t = 0; t < 40; ++t) {
+					CapAir::AirTick(&s, w, p, 0, 1.f);
+					CapWindow::VTick(p, &z, &vz);
+					if (memcmp(&s.pos.Z, &z, 4) != 0
+						|| memcmp(&s.vel.Z, &vz, 4) != 0)
+						mm++;
+				}
+			}
+			snprintf(buf, sizeof(buf), "5000 starts x 40 coast "
+				"ticks vs the engine; %lld bitwise z/vz "
+				"mismatches", mm);
+			check("vertical recurrence = engine", mm == 0, buf);
+		}
+		// ---- ZWindow early exit vs naive full scan
+		{
+			long long mm = 0;
+			for (int i = 0; i < 100000; ++i) {
+				const float z0 = static_cast<float>(
+					static_cast<int>(rnd() % 8000u)) - 2000.f;
+				const float vz0 = static_cast<float>(
+					static_cast<int>(rnd() % 7200000)
+					- 3600000) / 1000.f;
+				const float zlo = static_cast<float>(
+					static_cast<int>(rnd() % 4000u)) - 3000.f;
+				const float zhi = zlo + 8.f + static_cast<float>(
+					rnd() % 800u);
+				int f1, l1;
+				CapWindow::ZWindow(p, z0, vz0, zlo, zhi, 90, &f1,
+					&l1);
+				int f2 = -1, l2 = -1;
+				{
+					float z = z0, vz = vz0;
+					for (int t = 0; t <= 90; ++t) {
+						if (z >= zlo && z <= zhi) {
+							if (f2 < 0)
+								f2 = t;
+							l2 = t;
+						}
+						CapWindow::VTick(p, &z, &vz);
+					}
+				}
+				if (f1 != f2 || l1 != l2)
+					mm++;
+			}
+			snprintf(buf, sizeof(buf), "100000 random windows; "
+				"%lld disagreements with the naive scan", mm);
+			check("z-window early exit sound", mm == 0, buf);
+		}
+		// ---- B3 earliest-contact falsifier: no real schedule
+		// reaches (distance AND z-band) before the certified window
+		{
+			int viol = 0, tested = 0;
+			const int min_gap = 6;
+			for (int i = 0; i < 30000; ++i) {
+				const float v0 = 200.f + static_cast<float>(
+					rnd() % 1400u);
+				const float z0 = 6000.f;
+				const float vz0 = static_cast<float>(
+					static_cast<int>(rnd() % 800000) - 400000)
+					/ 1000.f;
+				const float dist = 100.f + static_cast<float>(
+					rnd() % 1200u);
+				const float zlo = z0 - 900.f + static_cast<float>(
+					rnd() % 600u);
+				const float zhi = zlo + 32.f + static_cast<float>(
+					rnd() % 200u);
+				int te, tl;
+				CapWindow::ContactWindow(p, z0, vz0, v0, dist,
+					zlo, zhi, 90, &te, &tl);
+				// a real random schedule
+				PlayerState s;
+				s.pos = Vec3(0.f, 0.f, z0);
+				s.vel = Vec3(v0, 0.f, vz0);
+				signed char side = 0;
+				int age = 6;
+				int first = -1;
+				for (int t = 1; t <= 90 && first < 0; ++t) {
+					signed char ds;
+					float ca;
+					const unsigned r2 = rnd();
+					if ((r2 & 7) == 0) {
+						ds = 0;
+						ca = 1.f;
+					} else {
+						ds = (r2 & 8) ? 1 : -1;
+						if (side != 0 && ds != side
+							&& age < min_gap)
+							ds = side;
+						ca = 1.f - 2.f * static_cast<float>(
+							(r2 >> 8) & 1023) / 1023.f;
+					}
+					CapAir::AirTick(&s, w, p, ds, ca);
+					if (ds != 0 && side != 0 && ds != side)
+						age = 1;
+					else
+						age = age < 6 ? age + 1 : 6;
+					if (ds != 0)
+						side = ds;
+					const float dd = sqrtf(s.pos.X * s.pos.X
+						+ s.pos.Y * s.pos.Y);
+					if (dd >= dist && s.pos.Z >= zlo
+						&& s.pos.Z <= zhi)
+						first = t;
+				}
+				if (first >= 0) {
+					tested++;
+					if (te < 0 || first < te || first > tl)
+						viol++;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d schedules reached a "
+				"random face condition; %d before/outside the "
+				"certified window", tested, viol);
+			check("B3/B4 window never beaten", tested > 500
+				&& viol == 0, buf);
+		}
+		// ---- A27 vs naive + the skip ratio
+		{
+			long long mm = 0, tested_pruned = 0, tested_naive = 0;
+			const int min_gap = 6;
+			for (int i = 0; i < 10000; ++i) {
+				const int N = 30 + static_cast<int>(rnd() % 61u);
+				const float v0 = 200.f + static_cast<float>(
+					rnd() % 1400u);
+				signed char sides[96];
+				float cosas[96];
+				signed char side = 0;
+				int age = 6;
+				for (int t = 0; t < N; ++t) {
+					signed char ds;
+					float ca;
+					const unsigned r2 = rnd();
+					if ((r2 & 7) == 0) {
+						ds = 0;
+						ca = 1.f;
+					} else {
+						ds = (r2 & 8) ? 1 : -1;
+						if (side != 0 && ds != side
+							&& age < min_gap)
+							ds = side;
+						ca = 1.f - 2.f * static_cast<float>(
+							(r2 >> 8) & 1023) / 1023.f;
+					}
+					sides[t] = ds;
+					cosas[t] = ca;
+					if (ds != 0 && side != 0 && ds != side)
+						age = 1;
+					else
+						age = age < 6 ? age + 1 : 6;
+					if (ds != 0)
+						side = ds;
+				}
+				CapEnd::Box box;
+				box.xlo = static_cast<float>(
+					static_cast<int>(rnd() % 1200u));
+				box.xhi = box.xlo + 200.f + static_cast<float>(
+					rnd() % 600u);
+				box.ylo = -400.f + static_cast<float>(
+					static_cast<int>(rnd() % 800u));
+				box.yhi = box.ylo + 200.f + static_cast<float>(
+					rnd() % 600u);
+				box.zlo = 6000.f - 700.f + static_cast<float>(
+					rnd() % 500u);
+				box.zhi = box.zlo + 118.f;
+				long long tt = 0;
+				const int a1 = CapEnd::EarliestBoxCrossing(k, 0.f,
+					0.f, 6000.f, v0, 0.f, 0.f, sides, cosas, N,
+					box, &tt);
+				tested_pruned += tt;
+				// naive: same rollout, every tick tested
+				int a2 = -1;
+				{
+					float x = 0.f, y = 0.f, z = 6000.f;
+					float vx = v0, vy = 0.f, vz = 0.f;
+					if (x >= box.xlo && x <= box.xhi
+						&& y >= box.ylo && y <= box.yhi
+						&& z >= box.zlo && z <= box.zhi)
+						a2 = 0;
+					for (int t = 0; t < N && a2 < 0; ++t) {
+						float nx, ny, nz2, nvx, nvy, nvz;
+						CapAir::KernelTick(k, x, y, z, vx, vy,
+							vz, sides[t], cosas[t], &nx, &ny,
+							&nz2, &nvx, &nvy, &nvz);
+						x = nx; y = ny; z = nz2;
+						vx = nvx; vy = nvy; vz = nvz;
+						tested_naive++;
+						if (x >= box.xlo && x <= box.xhi
+							&& y >= box.ylo && y <= box.yhi
+							&& z >= box.zlo && z <= box.zhi)
+							a2 = t + 1;
+					}
+				}
+				if (a1 != a2)
+					mm++;
+			}
+			snprintf(buf, sizeof(buf), "10000 (schedule, box) "
+				"pairs; %lld disagreements; horizontal tests "
+				"%lld pruned vs %lld naive (%.1fx skip)", mm,
+				tested_pruned, tested_naive,
+				tested_naive > 0 ? static_cast<double>(
+					tested_naive) / static_cast<double>(
+					tested_pruned > 0 ? tested_pruned : 1)
+					: 0.0);
+			check("A27 crossing = naive scan", mm == 0, buf);
+		}
+		printf("capwindow: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "B0/B3/B4 + A27 WINDOWS CERTIFIED"
+				: "WINDOWS RED - a proof or the instrument is "
+					"wrong");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= capride: registry A19 - the N-tick RIDE
+	// turn/gain maximum (session 28), built on the PROVEN A18 ride
+	// law with composed surface-friction state and the stay-on-face
+	// domain guard. The DP starts from an exact ENGINE-REACHED state
+	// (captured after real contact ticks on the ramp), so witness
+	// replay is a pure continuation of a real engine run and the
+	// composition gate is BITWISE. The falsifier throws random legal
+	// schedules from the same state through the real engine (runs
+	// that leave the face are counted and excluded - that event is
+	// exit material, not a ride transition).
+	int CmdCapRide(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capride: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		snprintf(buf, sizeof(buf), "min_gap %d from params", min_gap);
+		check("dwell law matches the lattice", min_gap == 6, buf);
+		unsigned rng = 0x51DE51DEu;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		const float ralphas[3] = { 50.f, 60.f, 70.f };
+		for (int ia = 0; ia < 3; ++ia) {
+			World w2;
+			Vec3 n;
+			if (!CapBoard::MakeRampWorld(&w2, o.hulls, ralphas[ia],
+				0.f, &n)) {
+				printf("capride: ramp world %d failed\n", ia);
+				return 1;
+			}
+			// ---- capture an exact engine-reached ride state: enter
+			// ALONG the downslope with a small into-face push, the
+			// way a real boarding arrives (a head-on entry loses
+			// nearly all speed to the clip and settles into a
+			// near-stopped state - measured in the first run)
+			PlayerState s0;
+			{
+				Vec3 dsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+				const float dl = Len(dsl);
+				dsl = Scale(dsl, 1.f / dl);
+				PlayerState s;
+				s.pos = Vec3(n.X * 80.f, n.Y * 80.f, n.Z * 80.f);
+				s.vel = Vec3(dsl.X * 450.f - n.X * 40.f,
+					dsl.Y * 450.f - n.Y * 40.f,
+					dsl.Z * 450.f - n.Z * 40.f);
+				int contacts = 0;
+				for (int t = 0; t < 60 && contacts < 3; ++t) {
+					const float s2d = Len2D(s.vel);
+					const float h = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					TickEvents ev;
+					MoveTick(s, w2, p, 0.f, h * 57.2957795f, 0.f,
+						0.f, 0.f, 0, &ev);
+					if (ev.ncontacts > 0)
+						contacts++;
+				}
+				if (contacts < 3) {
+					check("engine entry reaches the ride", false,
+						"never settled into contact");
+					continue;
+				}
+				s0 = s;
+			}
+			// ---- build the A19 surface from that exact state
+			CapRide::RideParams pp;
+			pp.n_max = 60;
+			CapRide::RideSurface S;
+			CapRide::BuildRide(pp, p, n, s0.vel,
+				s0.surface_friction, &S);
+			const float psi0 = Len2D(s0.vel) > 1.f
+				? atan2f(s0.vel.Y, s0.vel.X) : 0.f;
+			printf("capride: ---- ramp %.0f deg: built %.1fs, %lld "
+				"ride ticks, peak layer %d, nodes %lld, %lld "
+				"leave-face transitions%s | start v (%.1f %.1f "
+				"%.1f) sf %.2f ----\n", ralphas[ia],
+				S.build_ms / 1000.0, S.ride_ticks, S.peak_layer,
+				S.total_nodes, S.leave_transitions,
+				S.aborted ? " [ABORTED]" : "", s0.vel.X, s0.vel.Y,
+				s0.vel.Z, s0.surface_friction);
+			snprintf(buf, sizeof(buf), "ramp %.0f: %lld nodes, "
+				"peak layer %d", ralphas[ia], S.total_nodes,
+				S.peak_layer);
+			char nm[64];
+			snprintf(nm, sizeof(nm), "A19 build [%.0f deg]",
+				ralphas[ia]);
+			check(nm, !S.aborted, buf);
+			// slices relative to the start heading
+			printf("capride:   V*ride (rows N, cols dpsi "
+				"0/+30/-30/+60/-60/+90 deg):\n");
+			const int Ns[4] = { 12, 24, 48, 60 };
+			const float dps[6] = { 0.f, 30.f, -30.f, 60.f, -60.f,
+				90.f };
+			for (int ni = 0; ni < 4; ++ni) {
+				printf("capride:   N %2d |", Ns[ni]);
+				for (int di = 0; di < 6; ++di) {
+					float q = psi0 + dps[di] * 0.0174533f;
+					if (q > 3.14159265f)
+						q -= 6.2831853f;
+					if (q < -3.14159265f)
+						q += 6.2831853f;
+					printf(" %6.0f", CapRide::QueryRide(S, Ns[ni],
+						q));
+				}
+				printf("\n");
+			}
+			// ---- BITWISE witness replay through the real engine
+			{
+				int n2 = 0, bad = 0;
+				for (int ni = 0; ni < 4; ++ni)
+					for (int di = 0; di < 6; ++di) {
+						if (n2 >= 10)
+							break;
+						float q = psi0 + dps[di] * 0.0174533f;
+						if (q > 3.14159265f)
+							q -= 6.2831853f;
+						if (q < -3.14159265f)
+							q += 6.2831853f;
+						int node = -1;
+						const float vv = CapRide::QueryRide(S,
+							Ns[ni], q, &node);
+						if (node < 0 || vv < 0.f)
+							continue;
+						n2++;
+						std::vector<signed char> ws;
+						std::vector<float> wc;
+						CapRide::WitnessRide(S, Ns[ni], node,
+							&ws, &wc);
+						PlayerState s = s0;
+						bool left = false;
+						int first_div = -1;
+						float sfc = s0.surface_friction;
+						Vec3 pred = s0.vel;
+						for (size_t k2 = 0; k2 < ws.size();
+							++k2) {
+							// the law's prediction for THIS tick
+							// from the carried composition state
+							Vec3 pv;
+							float vdn, vzc;
+							CapBoard::RideGrayTick(p, n, sfc,
+								s0.basevel, pred, ws[k2],
+								wc[k2], &pv, &vdn, &vzc);
+							const float s2d = Len2D(s.vel);
+							const float h = s2d > 1.f
+								? atan2f(s.vel.Y, s.vel.X)
+								: 0.f;
+							float yaw = h * 57.2957795f;
+							float fmv = 0.f, smv = 0.f;
+							if (ws[k2] != 0 && s2d > 1.f)
+								Air::WishInputs(h,
+									static_cast<int>(ws[k2]),
+									wc[k2], &yaw, &fmv, &smv);
+							TickEvents ev;
+							MoveTick(s, w2, p, 0.f, yaw, fmv,
+								smv, 0.f, 0, &ev);
+							if (ev.ncontacts == 0)
+								left = true;
+							if (first_div < 0
+								&& (memcmp(&s.vel.X, &pv.X, 4)
+									!= 0
+								|| memcmp(&s.vel.Y, &pv.Y, 4)
+									!= 0
+								|| memcmp(&s.vel.Z, &pv.Z, 4)
+									!= 0)) {
+								first_div = static_cast<int>(
+									k2);
+								if (bad == 0)
+									printf("capride:   DIAG "
+										"ramp %.0f tick %d: "
+										"contacts %d, engine "
+										"v(%.3f %.3f %.3f), "
+										"law v(%.3f %.3f "
+										"%.3f), sf %.2f\n",
+										ralphas[ia],
+										first_div,
+										ev.ncontacts,
+										s.vel.X, s.vel.Y,
+										s.vel.Z, pv.X, pv.Y,
+										pv.Z, sfc);
+							}
+							pred = pv;
+							sfc = vzc > 0.f
+								? p.air_friction_up : 1.f;
+						}
+						const CapRide::RNodeR& nd = S.layers[
+							static_cast<size_t>(Ns[ni])][
+							static_cast<size_t>(node)];
+						if (left
+							|| memcmp(&s.vel.X, &nd.vx, 4) != 0
+							|| memcmp(&s.vel.Y, &nd.vy, 4) != 0
+							|| memcmp(&s.vel.Z, &nd.vz, 4)
+								!= 0)
+							bad++;
+					}
+				snprintf(buf, sizeof(buf), "ramp %.0f: %d "
+					"witnesses engine-replayed as continuations; "
+					"%d BITWISE mismatches or face exits",
+					ralphas[ia], n2, bad);
+				snprintf(nm, sizeof(nm),
+					"bitwise witness replay [%.0f deg]",
+					ralphas[ia]);
+				check(nm, n2 >= 5 && bad == 0, buf);
+			}
+			// ---- the adversarial falsifier (measured)
+			{
+				int beats = 0, discarded = 0;
+				float worst = 0.f;
+				const int kTrials = 10000;
+				for (int tr = 0; tr < kTrials; ++tr) {
+					const int N = 6 + static_cast<int>(rnd()
+						% 55u);
+					PlayerState s = s0;
+					signed char side = 0;
+					int age = 6;
+					bool left = false;
+					for (int t = 0; t < N; ++t) {
+						signed char ds;
+						float ca;
+						const unsigned r2 = rnd();
+						if ((r2 & 7) == 0) {
+							ds = 0;
+							ca = 1.f;
+						} else {
+							ds = (r2 & 8) ? 1 : -1;
+							if (side != 0 && ds != side
+								&& age < min_gap)
+								ds = side;
+							ca = 1.f - 2.f * static_cast<float>(
+								(r2 >> 8) & 1023) / 1023.f;
+						}
+						const float s2d = Len2D(s.vel);
+						const float h = s2d > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : 0.f;
+						float yaw = h * 57.2957795f;
+						float fmv = 0.f, smv = 0.f;
+						if (ds != 0 && s2d > 1.f)
+							Air::WishInputs(h,
+								static_cast<int>(ds), ca, &yaw,
+								&fmv, &smv);
+						TickEvents ev;
+						MoveTick(s, w2, p, 0.f, yaw, fmv, smv,
+							0.f, 0, &ev);
+						if (ev.ncontacts == 0) {
+							left = true;
+							break;
+						}
+						if (ds != 0 && side != 0 && ds != side)
+							age = 1;
+						else
+							age = age < 6 ? age + 1 : 6;
+						if (ds != 0)
+							side = ds;
+					}
+					if (left) {
+						discarded++;
+						continue;
+					}
+					const float sp = Len(s.vel);
+					const float s2d = Len2D(s.vel);
+					const float psi = s2d > 1.f
+						? atan2f(s.vel.Y, s.vel.X) : 0.f;
+					float cl = -1.f;
+					const int pb = CapRide::PsiBinR(S, psi);
+					for (int nb = pb - 1; nb <= pb + 1; ++nb) {
+						const int nbw = (nb + S.p.psi_bins)
+							% S.p.psi_bins;
+						const float c2 = CapRide::QueryRide(S, N,
+							CapRide::BinPsiR(S, nbw));
+						if (c2 > cl)
+							cl = c2;
+					}
+					if (sp > cl + 0.51f) {
+						beats++;
+						if (sp - cl > worst)
+							worst = sp - cl;
+					}
+				}
+				printf("capride: %-32s %s | ramp %.0f: %d/%d "
+					"in-domain schedules beat the surface (worst "
+					"+%.1f u/s), %d left the face (excluded) - "
+					"measured LB gap\n",
+					"ride falsifier (measured)",
+					beats == 0 ? "CLEAN" : "GAP", ralphas[ia],
+					beats, kTrials - discarded, worst, discarded);
+			}
+		}
+		printf("capride: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "A19 RIDE SURFACES BUILT ON THE PROVEN LAW "
+				"- falsifier gaps are the measured tightness"
+				: "A19 RED - a proof-backed gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capboard: registry A15/A16/A17
 	// + the A18 one-tick ride law harness (session 24). The clip
 	// itself is the engine's exported Fn::ClipVelocity (A15, solved) -
@@ -21466,6 +22022,18 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapGround(o);
+	}
+	if (cmd == "capwindow") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapWindow(o);
+	}
+	if (cmd == "capride") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapRide(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;

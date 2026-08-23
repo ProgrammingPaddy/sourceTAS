@@ -1136,7 +1136,9 @@ namespace CapBoard {
 	// COMPOSITION is hypothesized, and the harness tests it BITWISE.
 	inline void RideGrayTick(const MoveParams& p, const Vec3& n,
 	                         float sf, const Vec3& basevel, Vec3 vel,
-	                         signed char side, float cosa, Vec3* out) {
+	                         signed char side, float cosa, Vec3* out,
+	                         float* pre_clip_vdotn = nullptr,
+	                         float* vz_at_categorize = nullptr) {
 		const float s2d = Len2D(vel);
 		const float h = s2d > 1.f ? atan2f(vel.Y, vel.X) : 0.f;
 		float yaw = h * 57.2957795f;
@@ -1171,10 +1173,17 @@ namespace CapBoard {
 		}
 		// the basevel ride around TryPlayerMove (AirMove 566-568)
 		vel = vel + bv;
+		if (pre_clip_vdotn)
+			*pre_clip_vdotn = Dot(vel, n);   // >= 0: leaves the face
 		Vec3 clipped;
 		Fn::ClipVelocity(vel, n, &clipped);
 		vel = clipped;
 		vel = vel - bv;
+		// CategorizePosition reads vz HERE (before CheckVelocity 950
+		// and the finish-gravity half): rising with no walkable plane
+		// sets next tick's surface_friction to 0.25
+		if (vz_at_categorize)
+			*vz_at_categorize = vel.Z;
 		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
 		vel.Z -= 1.f * p.gravity * 0.5f * p.dt;
 		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
@@ -2223,4 +2232,414 @@ namespace CapGround {
 	}
 
 } // namespace CapGround
+
+// ======================================================================
+// CAPWINDOW - registry B0 (packaged), B3, B4: the per-tick vertical
+// evolution iterated EXACTLY (the engine's own float recurrence, two
+// operations per tick - "closed form" real-math bracketing would need
+// a float-error argument, and at ~180 flops for 90 ticks exact
+// iteration is already free), intersected with the certified travel
+// bound (B2). CAPEND - registry A27: the earliest tick a trajectory's
+// feet point enters a Minkowski-expanded END box, with the z-window
+// pruning the scan. Session 28.
+// ======================================================================
+namespace CapWindow {
+
+	// the exact clean-air vertical recurrence for one tick, mirroring
+	// MoveTick's order: StartGravity half -> position advances with
+	// the mid velocity -> FinishGravity half (933/951; position uses
+	// the post-AirMove vz, which carries only the first half)
+	inline void VTick(const MoveParams& p, float* z, float* vz) {
+		*vz -= 1.f * p.gravity * 0.5f * p.dt;
+		if (*vz > p.maxvelocity)
+			*vz = p.maxvelocity;
+		else if (*vz < -p.maxvelocity)
+			*vz = -p.maxvelocity;   // the engine's per-component clamp
+		*z += *vz * p.dt;
+		*vz -= 1.f * p.gravity * 0.5f * p.dt;
+		if (*vz > p.maxvelocity)
+			*vz = p.maxvelocity;
+		else if (*vz < -p.maxvelocity)
+			*vz = -p.maxvelocity;
+	}
+	// B0 packaged: the tick window where z lies in [zlo, zhi],
+	// scanning at most n_max ticks with the natural early exit (once
+	// z < zlo with vz < 0 the window is closed forever in clean air).
+	// Returns [t_first, t_last] inclusive, or t_first = -1.
+	inline void ZWindow(const MoveParams& p, float z0, float vz0,
+	                    float zlo, float zhi, int n_max, int* t_first,
+	                    int* t_last) {
+		*t_first = -1;
+		*t_last = -1;
+		float z = z0, vz = vz0;
+		for (int t = 0; t <= n_max; ++t) {
+			if (z >= zlo && z <= zhi) {
+				if (*t_first < 0)
+					*t_first = t;
+				*t_last = t;
+			}
+			if (z < zlo && vz < 0.f)
+				return;   // never returns (B4's closure)
+			VTick(p, &z, &vz);
+		}
+	}
+	// B2's travel bound as prefix sums: reachable horizontal distance
+	// after t ticks (the certified max-speed integral, session 24)
+	inline void TravelPrefix(const MoveParams& p, float v0, int n_max,
+	                         std::vector<float>* travel) {
+		travel->assign(static_cast<size_t>(n_max) + 1, 0.f);
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		float s = 0.f;
+		for (int i = 1; i <= n_max; ++i) {
+			s += sqrtf(v0 * v0 + cap2 * static_cast<float>(i))
+				* p.dt;
+			(*travel)[static_cast<size_t>(i)] = s;
+		}
+	}
+	// B3: the earliest tick a face at horizontal distance dist with
+	// vertical extent [zlo, zhi] can possibly be contacted; B4: the
+	// last useful tick. Both CERTIFIED: the z window is the exact
+	// recurrence, the distance test is the never-beaten travel bound.
+	inline void ContactWindow(const MoveParams& p, float z0, float vz0,
+	                          float v0, float dist, float zlo,
+	                          float zhi, int n_max, int* t_earliest,
+	                          int* t_latest) {
+		int zf, zl;
+		ZWindow(p, z0, vz0, zlo, zhi, n_max, &zf, &zl);
+		*t_earliest = -1;
+		*t_latest = -1;
+		if (zf < 0)
+			return;
+		std::vector<float> travel;
+		TravelPrefix(p, v0, n_max, &travel);
+		for (int t = zf; t <= zl; ++t)
+			if (travel[static_cast<size_t>(t)] + 0.001f >= dist) {
+				*t_earliest = t;
+				break;
+			}
+		if (*t_earliest >= 0)
+			*t_latest = zl;
+	}
+
+} // namespace CapWindow
+
+namespace CapEnd {
+
+	struct Box {
+		float xlo = 0.f, xhi = 0.f;
+		float ylo = 0.f, yhi = 0.f;
+		float zlo = 0.f, zhi = 0.f;
+	};
+	// A27: earliest tick the feet point of an exact kernel rollout
+	// enters the (already Minkowski-expanded) box; -1 if never. The
+	// z-window from the exact vertical recurrence prunes the scan -
+	// only ticks inside the window run the horizontal test.
+	inline int EarliestBoxCrossing(const CapAir::AirKernelCtx& k,
+	                               float px, float py, float pz,
+	                               float vx, float vy, float vz,
+	                               const signed char* side,
+	                               const float* cosa, int n,
+	                               const Box& box,
+	                               long long* ticks_tested) {
+		int zf, zl;
+		CapWindow::ZWindow(k.p, pz, vz, box.zlo, box.zhi, n, &zf,
+			&zl);
+		if (ticks_tested)
+			*ticks_tested = 0;
+		if (zf < 0)
+			return -1;
+		float x = px, y = py, z = pz;
+		float cvx = vx, cvy = vy, cvz = vz;
+		// tick 0 is the start state itself
+		if (zf == 0 && x >= box.xlo && x <= box.xhi && y >= box.ylo
+			&& y <= box.yhi && z >= box.zlo && z <= box.zhi) {
+			if (ticks_tested)
+				*ticks_tested = 1;
+			return 0;
+		}
+		for (int t = 0; t < n && t < zl; ++t) {
+			float nx, ny, nz2, nvx, nvy, nvz;
+			CapAir::KernelTick(k, x, y, z, cvx, cvy, cvz, side[t],
+				cosa[t], &nx, &ny, &nz2, &nvx, &nvy, &nvz);
+			x = nx;
+			y = ny;
+			z = nz2;
+			cvx = nvx;
+			cvy = nvy;
+			cvz = nvz;
+			const int tt = t + 1;
+			if (tt < zf)
+				continue;   // outside the vertical window
+			if (ticks_tested)
+				(*ticks_tested)++;
+			if (x >= box.xlo && x <= box.xhi && y >= box.ylo
+				&& y <= box.yhi && z >= box.zlo && z <= box.zhi)
+				return tt;
+		}
+		return -1;
+	}
+
+} // namespace CapEnd
+
+// ======================================================================
+// CAPRIDE - registry A19: the N-tick RIDE turn/gain maximum
+// V*_ride(S0, N, dpsi | ramp normal), session 28. Built on the PROVEN
+// A18 one-tick ride law (1246/1246 bitwise) with surface_friction as
+// composed carried state (the vz-at-categorize rule) and an explicit
+// STAY-ON-FACE domain guard: a transition whose pre-clip velocity
+// points out of the face (v.n >= 0) EXITS the ride domain (that event
+// is A23/A26 material, not a ride transition). The DP starts from an
+// exact ENGINE-REACHED state (captured after a real contact tick), so
+// witness replay is a pure continuation of a real run - the
+// composition gate is bitwise. Representative per cell: max 3-D speed
+// (stated LB semantics; the falsifier attacks it, M-style).
+// ======================================================================
+namespace CapRide {
+
+	struct RideParams {
+		int n_max = 60;
+		int psi_bins = 721;
+		int vb_max = 640;        // 10 u/s strata up to 6400 (3-D)
+		float v_bin = 10.f;
+	};
+	struct RNodeR {
+		float vx = 0.f, vy = 0.f, vz = 0.f;
+		int parent = -1;
+		int key = -1;
+		short action = -1;
+	};
+	struct RideSurface {
+		RideParams p;
+		Vec3 n;                   // the ramp normal
+		Vec3 v0;                  // the exact engine start velocity
+		float sf0 = 1.f;
+		int slots = 0;
+		std::vector<std::vector<RNodeR> > layers;
+		std::vector<std::vector<float> > pb_vmax;   // [layer][psi bin]
+		std::vector<std::vector<int> >   pb_node;
+		long long ride_ticks = 0;
+		long long leave_transitions = 0;   // domain exits (measured)
+		long long total_nodes = 0;
+		long long node_budget = 60000000;
+		int peak_layer = 0;
+		bool aborted = false;
+		double build_ms = 0.0;
+		std::vector<signed char> act_side;
+		std::vector<float> act_cosa;
+	};
+	inline int KeyR(const RideSurface& S, int pb, int vb, int sidx,
+	                int age, int sfbit) {
+		const int a = age < 1 ? 1 : (age > 6 ? 6 : age);
+		return ((((pb * S.p.vb_max) + vb) * 3 + sidx) * 6 + (a - 1))
+			* 2 + sfbit;
+	}
+	inline int PsiBinR(const RideSurface& S, float psi) {
+		const float u = (psi + 3.14159265f) / 6.2831853f;
+		int b = static_cast<int>(u * static_cast<float>(
+			S.p.psi_bins));
+		if (b < 0) b = 0;
+		if (b >= S.p.psi_bins) b = S.p.psi_bins - 1;
+		return b;
+	}
+	inline float BinPsiR(const RideSurface& S, int bin) {
+		return (static_cast<float>(bin) + 0.5f)
+			/ static_cast<float>(S.p.psi_bins) * 6.2831853f
+			- 3.14159265f;
+	}
+	inline void BuildRide(const RideParams& pp, const MoveParams& p,
+	                      const Vec3& n, const Vec3& v0, float sf0,
+	                      RideSurface* S) {
+		S->p = pp;
+		S->n = n;
+		S->v0 = v0;
+		S->sf0 = sf0;
+		S->slots = pp.psi_bins * pp.vb_max * 3 * 6 * 2;
+		S->layers.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<RNodeR>());
+		S->pb_vmax.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<float>());
+		S->pb_node.assign(static_cast<size_t>(pp.n_max) + 1,
+			std::vector<int>());
+		static const float kCosa[21] = {
+			1.f, 0.9995f, 0.998f, 0.995f, 0.99f, 0.98f, 0.96f,
+			0.93f, 0.9f, 0.85f, 0.8f, 0.7f, 0.6f, 0.45f, 0.3f,
+			0.15f, 0.f, -0.2f, -0.5f, -0.8f, -1.f };
+		S->act_side.clear();
+		S->act_cosa.clear();
+		S->act_side.push_back(0);
+		S->act_cosa.push_back(1.f);
+		for (int sd = 0; sd < 2; ++sd)
+			for (int ci = 0; ci < 21; ++ci) {
+				S->act_side.push_back(sd == 0
+					? static_cast<signed char>(1)
+					: static_cast<signed char>(-1));
+				S->act_cosa.push_back(kCosa[ci]);
+			}
+		const int n_act = static_cast<int>(S->act_side.size());
+		const int min_gap = static_cast<int>(
+			ceilf((1.f / p.dt) / p.strafe_rate_max));
+		const auto t0 = std::chrono::steady_clock::now();
+		std::vector<int> slot(static_cast<size_t>(S->slots), -1);
+		{
+			RNodeR c;
+			c.vx = v0.X;
+			c.vy = v0.Y;
+			c.vz = v0.Z;
+			const float sp2d = Len2D(v0);
+			const float psi = sp2d > 1.f ? atan2f(v0.Y, v0.X) : 0.f;
+			const float sp = Len(v0);
+			int vb = static_cast<int>(sp / pp.v_bin);
+			if (vb >= pp.vb_max) vb = pp.vb_max - 1;
+			const int sfbit = sf0 < 0.5f ? 1 : 0;
+			c.key = KeyR(*S, PsiBinR(*S, psi), vb, 1, 6, sfbit);
+			S->layers[0].push_back(c);
+			S->total_nodes = 1;
+		}
+		const Vec3 bv0;
+		for (int t = 0; t < pp.n_max; ++t) {
+			const std::vector<RNodeR>& curL = S->layers[
+				static_cast<size_t>(t)];
+			std::vector<RNodeR>& nxtL = S->layers[
+				static_cast<size_t>(t) + 1];
+			std::fill(slot.begin(), slot.end(), -1);
+			for (size_t ni = 0; ni < curL.size(); ++ni) {
+				const RNodeR cell = curL[ni];
+				const int sfbit = cell.key % 2;
+				const int rem = cell.key / 2;
+				const int side_code = (rem / 6) % 3;
+				const signed char cside = side_code == 0
+					? static_cast<signed char>(-1)
+					: (side_code == 1
+						? static_cast<signed char>(0)
+						: static_cast<signed char>(1));
+				const int cage = (rem % 6) + 1;
+				const float sf = sfbit ? p.air_friction_up : 1.f;
+				for (int ai = 0; ai < n_act; ++ai) {
+					const signed char ds = S->act_side[
+						static_cast<size_t>(ai)];
+					const float ca = S->act_cosa[
+						static_cast<size_t>(ai)];
+					if (ds != 0 && cside != 0 && ds != cside
+						&& cage < min_gap)
+						continue;
+					Vec3 out;
+					float vdn = 0.f, vzc = 0.f;
+					CapBoard::RideGrayTick(p, n, sf, bv0,
+						Vec3(cell.vx, cell.vy, cell.vz), ds, ca,
+						&out, &vdn, &vzc);
+					++S->ride_ticks;
+					// STAY-ON-FACE: the rider hovers one trace
+					// epsilon (1/32) off the plane, so a tick only
+					// re-contacts when the inward motion closes
+					// that gap within dt: v.n * dt <= -1/32, i.e.
+					// v.n <= -2.083 u/s at 66.67 tps (measured:
+					// separation observed at v.n = -1.80)
+					if (vdn * p.dt > -0.03125f) {
+						++S->leave_transitions;   // hover or exit
+						continue;
+					}
+					const float sp2d = Len2D(out);
+					const float npsi = sp2d > 1.f
+						? atan2f(out.Y, out.X) : 0.f;
+					const float nsp = Len(out);
+					const signed char nside = ds != 0 ? ds
+						: cside;
+					const int nage = (ds != 0 && cside != 0
+						&& ds != cside) ? 1
+						: (cage < 6 ? cage + 1 : 6);
+					const int nsidx = nside < 0 ? 0
+						: (nside == 0 ? 1 : 2);
+					int vb = static_cast<int>(nsp / pp.v_bin);
+					if (vb >= pp.vb_max) vb = pp.vb_max - 1;
+					const int nsf = vzc > 0.f ? 1 : 0;
+					const int nk = KeyR(*S, PsiBinR(*S, npsi), vb,
+						nsidx, nage, nsf);
+					const int have = slot[static_cast<size_t>(nk)];
+					if (have < 0) {
+						RNodeR nc;
+						nc.vx = out.X;
+						nc.vy = out.Y;
+						nc.vz = out.Z;
+						nc.parent = static_cast<int>(ni);
+						nc.key = nk;
+						nc.action = static_cast<short>(ai);
+						slot[static_cast<size_t>(nk)] =
+							static_cast<int>(nxtL.size());
+						nxtL.push_back(nc);
+					} else {
+						RNodeR& dst = nxtL[static_cast<size_t>(
+							have)];
+						const float dsp = sqrtf(dst.vx * dst.vx
+							+ dst.vy * dst.vy
+							+ dst.vz * dst.vz);
+						if (nsp > dsp) {
+							dst.vx = out.X;
+							dst.vy = out.Y;
+							dst.vz = out.Z;
+							dst.parent = static_cast<int>(ni);
+							dst.action = static_cast<short>(ai);
+						}
+					}
+				}
+			}
+			if (static_cast<int>(nxtL.size()) > S->peak_layer)
+				S->peak_layer = static_cast<int>(nxtL.size());
+			S->total_nodes += static_cast<long long>(nxtL.size());
+			if (S->total_nodes > S->node_budget) {
+				S->aborted = true;
+				break;
+			}
+		}
+		for (size_t t = 0; t < S->layers.size(); ++t) {
+			S->pb_vmax[t].assign(static_cast<size_t>(pp.psi_bins),
+				-1.f);
+			S->pb_node[t].assign(static_cast<size_t>(pp.psi_bins),
+				-1);
+			const std::vector<RNodeR>& L = S->layers[t];
+			for (size_t ni = 0; ni < L.size(); ++ni) {
+				const int pb = L[ni].key / (pp.vb_max * 36);
+				const float sp = sqrtf(L[ni].vx * L[ni].vx
+					+ L[ni].vy * L[ni].vy + L[ni].vz * L[ni].vz);
+				if (sp > S->pb_vmax[t][static_cast<size_t>(pb)]) {
+					S->pb_vmax[t][static_cast<size_t>(pb)] = sp;
+					S->pb_node[t][static_cast<size_t>(pb)] =
+						static_cast<int>(ni);
+				}
+			}
+		}
+		S->build_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+	}
+	inline float QueryRide(const RideSurface& S, int N, float dpsi,
+	                       int* node_out = nullptr) {
+		if (N < 0 || N > S.p.n_max)
+			return -1.f;
+		const int pb = PsiBinR(S, dpsi);
+		const float v = S.pb_vmax[static_cast<size_t>(N)][
+			static_cast<size_t>(pb)];
+		if (v >= 0.f && node_out)
+			*node_out = S.pb_node[static_cast<size_t>(N)][
+				static_cast<size_t>(pb)];
+		return v;
+	}
+	inline void WitnessRide(const RideSurface& S, int N, int node,
+	                        std::vector<signed char>* side,
+	                        std::vector<float>* cosa) {
+		side->assign(static_cast<size_t>(N), 0);
+		cosa->assign(static_cast<size_t>(N), 1.f);
+		int ni = node;
+		for (int t = N; t >= 1; --t) {
+			const RNodeR& c = S.layers[static_cast<size_t>(t)][
+				static_cast<size_t>(ni)];
+			(*side)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_side[static_cast<size_t>(c.action)] : 0;
+			(*cosa)[static_cast<size_t>(t) - 1] = c.action >= 0
+				? S.act_cosa[static_cast<size_t>(c.action)] : 1.f;
+			ni = c.parent;
+			if (ni < 0)
+				break;
+		}
+	}
+
+} // namespace CapRide
 } // namespace Solver

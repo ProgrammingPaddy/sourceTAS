@@ -1,0 +1,162 @@
+<title>The Ride Family Opens</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .c-meas{background:var(--amber-soft); color:var(--amber)}
+  .law{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--teal);
+    padding:16px 22px; margin:18px 0; font-family:"IBM Plex Mono",monospace; font-size:14px}
+  .law .why{font-family:"IBM Plex Sans",sans-serif; font-size:13px; color:var(--muted); margin-top:8px; max-width:none}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; margin:14px 0}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 28</div>
+  <h1>The Ride Family Opens</h1>
+  <p class="sub">A19 — the on-ramp turn/gain surface — built on the proven one-tick ride law from
+  exact engine-reached starts, with a new piece of measured contact physics that made every
+  witness replay bit-exact. Plus the tick-window reducers (B3/B4) and the END-crossing predicate
+  (A27), certified.</p>
+  <div class="meta">
+    <span>2026-08-22 → 23</span>
+    <span>suites: capride 7/0 · capwindow 4/4</span>
+    <span>battery green: capkern · capboard · capground · capp2p · groute</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">A19 witness replays</div><div class="v">30 / 30</div>
+    <p>surface-extremal schedules replayed as continuations of real engine runs — bit-identical on all three velocity channels</p></div>
+  <div class="tile"><div class="k">Ride physics</div><div class="v">450 → 1322</div>
+    <p>u/s in 0.9 seconds of 50° downslope riding — the gravity conversion the whole sport is built on, now tabled</p></div>
+  <div class="tile"><div class="k">Windows (B3/B4)</div><div class="v">0 / 915</div>
+    <p>real schedules that beat the certified contact-tick window — none</p></div>
+  <div class="tile"><div class="k">A27 END predicate</div><div class="v">12.1×</div>
+    <p>fewer horizontal tests than a naive per-tick scan, with identical answers on 10,000 cases</p></div>
+</div>
+
+<h2><span class="idx">01</span>The contact-epsilon discovery</h2>
+<p class="lede">The first build's witnesses failed 10 of 10, and the per-tick diagnostic found the
+engine at zero contacts on a tick where the rider was pressing into the face at 1.80 u/s. The
+explanation is a real, previously unstated piece of ride physics:</p>
+<div class="law">the rider hovers one trace epsilon (1/32 unit) off the plane — a tick
+re-contacts only when the inward velocity closes that gap within one tick interval:<br>
+v·n · dt ≤ −1/32, i.e. v·n ≤ −2.083 u/s at 66.67 ticks/second.
+  <div class="why">Inward velocities in the band (−2.08, 0) produce HOVER ticks: legal, airborne,
+  un-clipped. With the stay-on-face guard using this exact condition, all 30 witness replays
+  across three ramp angles became bit-identical continuations of real engine runs. The band also
+  explains the falsifier's ambers (below): trajectories that surf the exact contact boundary,
+  alternating micro-hovers with contact, can beat the pure-contact surface — mixed ride/air
+  motion the conservative guard excludes. The exact boundary condition (carrying the gap as
+  state) is the named refinement.</div></div>
+<p class="lede">A second lesson came free: the first entry attempt hit the ramps nearly head-on
+and lost almost everything to the board clip (settling at 80–140 u/s) — boarding must arrive
+along the slope, the way real runs do. The suite now enters along the downslope with a small
+inward push, and the captured start states ride at 450+ u/s.</p>
+
+<h2><span class="idx">02</span>The A19 surfaces</h2>
+<div class="tablewrap"><table>
+<tr><th>Ramp tilt</th><th class="num">Build</th><th class="num">Nodes</th><th class="num">V*ride(60 ticks, straight)</th><th class="num">at ±30°</th><th class="num">at ±90°</th><th class="num">Falsifier gap</th></tr>
+<tr><td class="nm">50°</td><td class="num">84 s</td><td class="num">33.7M</td><td class="num">1322</td><td class="num">1318</td><td class="num">1070</td><td class="num"><span class="chip c-pass">+0.9</span></td></tr>
+<tr><td class="nm">60°</td><td class="num">65 s</td><td class="num">32.5M</td><td class="num">1456</td><td class="num">1454</td><td class="num">1077</td><td class="num"><span class="chip c-meas">+215.6 (boundary sliver)</span></td></tr>
+<tr><td class="nm">70°</td><td class="num">56 s</td><td class="num">27.7M</td><td class="num">1582</td><td class="num">1581</td><td class="num">937</td><td class="num"><span class="chip c-meas">+116.4 (boundary sliver)</span></td></tr>
+</table></div>
+<p class="lede">Structure worth reading: steering up to ±30° while riding is essentially free at
+every tilt (1322 vs 1318); the tax at ±90° is 19–41%. Steeper ramps convert faster (1582 at 70°
+from a 306 u/s start). Surface-friction state (quarter-strength acceleration while rising) is
+composed inside the build via the categorize-point rule and validated by the bitwise replays. The
+amber falsifier gaps at 60°/70° come from in-domain engine schedules that ride the contact
+boundary the guard conservatively excludes — measured honestly, refinement named.</p>
+
+<h2><span class="idx">03</span>The window reducers and the END predicate</h2>
+<div class="tablewrap"><table>
+<tr><th>Gate</th><th>What it proved</th><th class="num">Result</th></tr>
+<tr><td class="nm">vertical recurrence = engine</td><td class="note">5,000 starts × 40 coast ticks, feet height and vertical speed, including the ±3500 clamp</td><td class="num"><span class="chip c-pass">0 bitwise mismatches</span></td></tr>
+<tr><td class="nm">z-window early exit</td><td class="note">100,000 random windows vs naive full scans</td><td class="num"><span class="chip c-pass">0 disagreements</span></td></tr>
+<tr><td class="nm">B3/B4 contact window</td><td class="note">915 real schedules that reached a random face condition — none before or outside the certified window</td><td class="num"><span class="chip c-pass">0 violations</span></td></tr>
+<tr><td class="nm">A27 END-box crossing</td><td class="note">equal to the naive per-tick scan on 10,000 (schedule, box) pairs; the z-window pruning skips 12.1× of the horizontal tests</td><td class="num"><span class="chip c-pass">0 disagreements</span></td></tr>
+</table></div>
+
+<h2><span class="idx">04</span>The board after session 28</h2>
+<div class="panel"><p>
+<span class="hl">Closed this session:</span> A19 (witnessed, with named refinement), A27, B3, B4.<br>
+<span class="hl">The running battery:</span> capkern 5/5 · capboard 4/4 · capground 6/6 ·
+capp2p 12/0 · capwindow 4/4 · capride 7/0 · groute 11/11.<br>
+<span class="hl">Next:</span> A20 (ride directional reach — same machinery, positions on the
+plane), then A22 (the board→exit solver: the point-to-point construction on the ramp — the
+central transfer kernel), with the exact contact-boundary condition as the ride family's
+refinement theorem.</p></div>
+
+<footer>SourceTAS Capability Library · session 28 · 2026-08-22/23 · checklist: Docs/CapabilityChecklist.md ·
+all numbers measured this session</footer>
+</div>
