@@ -19,6 +19,32 @@ A11 short-flight interior coverage, then the A29 duck and A31
 trigger debt rows. A32 stays excluded by decree. The change-log
 tail below is the session journal.
 
+**STATUS 2026-08-23h (session 35): A23, A24, A28 CLOSE — THE LOCAL
+MOVE MIRROR.** A24's first design (two analytical transfer laws)
+was refuted by its own census — valley-crease crossings produce
+three-plus-bump chains (17/36) no two-plane law covers — and the
+structural answer is `CapEdge::TryMoveLocal`: the verified
+TryPlayerMove transcribed as a PURE LOCAL FUNCTION over the bitwise
+A14 clip (rebases, crease resolution, stop-dead guard, allsolid
+zeroing, the unswept stuck guard): 36/36 crossing ticks BITWISE in
+position AND velocity (capmin 8/0). A28
+(`CapContact::FirstContactOnPath`, the A12+A14 composition): 24/24
+solved paths agree with engine replays, 16 clean tick-for-tick +
+8 obstructed at the exact tick and brush (capcontact 5/0); the
+two-ramp world rebuilt with FINITE segments (the backing slab had
+engulfed the spawns — caught by the zero-clean falsifier), and a
+valley relearned as non-convex air (two wall brushes, never one).
+A23 (`CapRideReach::EdgeIntercept`): 25/25 == brute, 8/8 witnesses.
+NEW DOMAIN LAW on the sf term: the air kernel's FIXED ctx sf vs the
+engine's stale-stateful 0.25-when-rising — braking wishes diverge
+~250 u/s in one rising tick (measured); kernel rolls with braking
+wishes are valid on FALLING flights. The stuck-guard predictor (the
+d34 silent freeze at (0,0,−6)) is armed in the A14 flight gate.
+Battery green: capcontact 5/0, capmin 8/0, capsolve 10/0, capxfer
+8/0, capkern 5/5, capboard 5/5, capground 6/6, capwindow 6/6.
+Remaining A: A22 exact-hit tail, A19/A20 carried-gap, A8
+refinements, A11 interior, A29, A31.
+
 **STATUS 2026-08-23g (session 34): A9 AND A14 CLOSE.** A14
 (capcontact 4/0, new suite): `CapContact` — the engine's per-brush
 clip transcribed VERBATIM over a corridor-gathered local set:

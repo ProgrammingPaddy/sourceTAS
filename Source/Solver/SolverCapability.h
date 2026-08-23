@@ -4141,7 +4141,8 @@ namespace CapContact {
 	inline float ClipSegment(const LocalSet& S, const Vec3& a,
 	                         const Vec3& b, int* brush_out = nullptr,
 	                         int* plane_out = nullptr,
-	                         bool* startsolid_out = nullptr) {
+	                         bool* startsolid_out = nullptr,
+	                         bool* allsolid_out = nullptr) {
 		const Vec3 lo(fminf(a.X, b.X), fminf(a.Y, b.Y),
 			fminf(a.Z, b.Z));
 		const Vec3 hi(fmaxf(a.X, b.X), fmaxf(a.Y, b.Y),
@@ -4153,7 +4154,7 @@ namespace CapContact {
 		const int hull = S.hull;
 		float best = 1.f;
 		int best_brush = -1, best_plane = -1;
-		bool l_ss = false;
+		bool l_ss = false, l_as = false;
 		for (size_t oi = 0; oi < S.brushes.size(); ++oi) {
 			const int bi = S.brushes[oi];
 			const WorldBrush& bc = w.brushes[static_cast<size_t>(
@@ -4210,8 +4211,10 @@ namespace CapContact {
 			}
 			if (!miss && !outside) {
 				l_ss = true;
-				if (!getout)
+				if (!getout) {
+					l_as = true;
 					best = 0.f;   // the mid-loop allsolid zeroing
+				}
 				continue;
 			}
 			if (miss || !outside || enter < 0 || tmin >= tmax)
@@ -4230,7 +4233,60 @@ namespace CapContact {
 			*plane_out = best_plane;
 		if (startsolid_out)
 			*startsolid_out = l_ss;
+		if (allsolid_out)
+			*allsolid_out = l_as;
 		return best;
+	}
+
+	// ------------------------------------------------------------------
+	// A28 (corridor traversal), session 35: the A12 + A14 composition.
+	// Roll a control schedule through the certified air kernel and clip
+	// every motion segment against the local set. Returns -1 when the
+	// path is CLEAN through `horizon` ticks, else the first contact
+	// tick (engine tick index); the obstruction reports exactly
+	// (fraction, brush, plane). Returns -2 (DECLINE) if any segment
+	// leaves the corridor - never a silent answer from an incomplete
+	// set.
+	inline int FirstContactOnPath(const CapAir::AirKernelCtx& k,
+	                              const LocalSet& S, const Vec3& pos,
+	                              const Vec3& vel,
+	                              const signed char* sides,
+	                              const float* cosas, int n_sched,
+	                              int horizon,
+	                              float* frac_out = nullptr,
+	                              int* brush_out = nullptr,
+	                              int* plane_out = nullptr) {
+		float kx = pos.X, ky = pos.Y, kz = pos.Z;
+		float kvx = vel.X, kvy = vel.Y, kvz = vel.Z;
+		for (int t = 0; t < horizon; ++t) {
+			const signed char ds = t < n_sched ? sides[t] : 0;
+			const float cca = t < n_sched ? cosas[t] : 1.f;
+			float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+			CapAir::KernelTick(k, kx, ky, kz, kvx, kvy, kvz, ds,
+				cca, &nx2, &ny2, &nz2, &nvx2, &nvy2, &nvz2);
+			int lb, lp;
+			bool lss;
+			const float lf = ClipSegment(S, Vec3(kx, ky, kz),
+				Vec3(nx2, ny2, nz2), &lb, &lp, &lss);
+			if (lf < 0.f)
+				return -2;   // DECLINE: left the corridor
+			if (lf < 1.f) {
+				if (frac_out)
+					*frac_out = lf;
+				if (brush_out)
+					*brush_out = lb;
+				if (plane_out)
+					*plane_out = lp;
+				return t + 1;
+			}
+			kx = nx2;
+			ky = ny2;
+			kz = nz2;
+			kvx = nvx2;
+			kvy = nvy2;
+			kvz = nvz2;
+		}
+		return -1;   // clean through the horizon
 	}
 
 } // namespace CapContact
@@ -4819,4 +4875,228 @@ namespace CapP2P {
 	}
 
 } // namespace CapP2P
+
+// ======================================================================
+// CAPEDGE - registry A24 (direct contact transfer), session 35. The
+// adjacent-face crossing tick's velocity laws, transcribed from the
+// verified TryPlayerMove (SolverMove.cpp 55-173). A crossing takes
+// one of two engine shapes:
+//   SEQUENTIAL - the bump against face B comes after a partial move
+//     (fraction > 0), which REBASES the clip set: two single-plane
+//     clips compose, clip(clip(v, A), B), no guard between them.
+//   CREASE - both planes accumulate with no progress: the engine
+//     clips the REBASED velocity against each plane alone, and when
+//     neither clears the other it projects the LAST clip result
+//     (not the rebased velocity - float-distinct, dir.nB is not
+//     exactly zero) onto the crease line cross(A, B); the stop-dead
+//     guard zeroes anything turned past perpendicular to the tick's
+//     primal velocity.
+// The suite predicts every engine wedge crossing with BOTH laws and
+// gates that one matches bitwise - the shape census is printed, and
+// a crossing neither law explains is a RED.
+namespace CapEdge {
+
+	// TryPlayerMove 137-164, float-exact.
+	inline void ResolveTwoPlanes(const Vec3& v_rebased, const Vec3& nA,
+	                             const Vec3& nB, const Vec3& primal,
+	                             Vec3* out) {
+		Vec3 v;
+		Fn::ClipVelocity(v_rebased, nA, &v);
+		if (Dot(v, nB) < 0.f) {
+			Fn::ClipVelocity(v_rebased, nB, &v);
+			if (Dot(v, nA) < 0.f) {
+				Vec3 dir(nA.Y * nB.Z - nA.Z * nB.Y,
+					nA.Z * nB.X - nA.X * nB.Z,
+					nA.X * nB.Y - nA.Y * nB.X);
+				const float dl = Len(dir);
+				if (dl > 1e-6f)
+					dir = Scale(dir, 1.f / dl);
+				// the engine projects s.vel = the LAST clip result
+				v = Scale(dir, Dot(dir, v));
+			}
+		}
+		if (Dot(v, primal) <= 0.f)
+			v = Vec3();
+		*out = v;
+	}
+
+	// The rebased sequential composition (airborne single-plane path
+	// has no guard).
+	inline void SequentialTransfer(const Vec3& v_m, const Vec3& nA,
+	                               const Vec3& nB, Vec3* out) {
+		Vec3 v1;
+		Fn::ClipVelocity(v_m, nA, &v1);
+		Fn::ClipVelocity(v1, nB, out);
+	}
+
+	// The verified TryPlayerMove (SolverMove.cpp 55-173) as a PURE
+	// LOCAL function: every trace answered by the bitwise-certified
+	// local clip (A14), so the whole bump chain - partial-move
+	// rebases, the crease resolution, the stop-dead guard, the
+	// mid-loop allsolid zeroing, the unswept stuck guard - is
+	// reproduced without the engine or the world grid. The
+	// two-plane laws above are the analytical decomposition; THIS is
+	// the executable one. Returns false on a corridor DECLINE.
+	inline bool TryMoveLocal(const CapContact::LocalSet& S,
+	                         const MoveParams& p, bool on_ground,
+	                         Vec3* pos, Vec3* vel,
+	                         int* nbumps_out = nullptr) {
+		float time_left = p.dt;
+		Vec3 planes[5];
+		int numplanes = 0;
+		Vec3 original_v = *vel;
+		const Vec3 primal_v = *vel;
+		float all_fraction = 0.f;
+		int nb = 0;
+		for (int bump = 0; bump < 4; ++bump) {
+			if (Len2(*vel) == 0.f)
+				break;
+			const Vec3 end = *pos + Scale(*vel, time_left);
+			int tb, tp;
+			bool tss, tas;
+			const float frac = CapContact::ClipSegment(S, *pos, end,
+				&tb, &tp, &tss, &tas);
+			if (frac < 0.f)
+				return false;   // DECLINE
+			if (tas) {
+				*vel = Vec3();
+				nb++;
+				break;
+			}
+			all_fraction += frac;
+			if (frac > 0.f) {
+				if (frac >= 1.f) {
+					const Vec3 dest = *pos
+						+ Scale(end - *pos, frac);
+					int qb, qp;
+					bool qss, qas;
+					const float sf = CapContact::ClipSegment(S,
+						dest, dest, &qb, &qp, &qss, &qas);
+					if (sf < 0.f)
+						return false;
+					if (qss || sf != 1.f) {
+						*pos = dest;
+						*vel = Vec3();
+						break;
+					}
+				}
+				*pos = *pos + Scale(end - *pos, frac);
+				original_v = *vel;
+				numplanes = 0;
+			}
+			if (frac >= 1.f || tb < 0)
+				break;
+			time_left -= time_left * frac;
+			const Vec3 n = S.w->brushes[static_cast<size_t>(tb)].n[
+				static_cast<size_t>(tp)];
+			nb++;
+			if (numplanes >= 5) {
+				*vel = Vec3();
+				break;
+			}
+			planes[numplanes++] = n;
+			if (numplanes == 1 && !on_ground) {
+				Fn::ClipVelocity(original_v, planes[0], vel);
+				original_v = *vel;
+			} else {
+				int i = 0;
+				for (; i < numplanes; ++i) {
+					Fn::ClipVelocity(original_v, planes[i], vel);
+					int j = 0;
+					for (; j < numplanes; ++j)
+						if (j != i && Dot(*vel, planes[j]) < 0.f)
+							break;
+					if (j == numplanes)
+						break;
+				}
+				if (i == numplanes) {
+					if (numplanes != 2) {
+						*vel = Vec3();
+						break;
+					}
+					Vec3 dir(planes[0].Y * planes[1].Z
+						- planes[0].Z * planes[1].Y,
+						planes[0].Z * planes[1].X
+						- planes[0].X * planes[1].Z,
+						planes[0].X * planes[1].Y
+						- planes[0].Y * planes[1].X);
+					const float dl = Len(dir);
+					if (dl > 1e-6f)
+						dir = Scale(dir, 1.f / dl);
+					*vel = Scale(dir, Dot(dir, *vel));
+				}
+				if (Dot(*vel, primal_v) <= 0.f) {
+					*vel = Vec3();
+					break;
+				}
+			}
+		}
+		if (all_fraction == 0.f)
+			*vel = Vec3();
+		if (nbumps_out)
+			*nbumps_out = nb;
+		return true;
+	}
+
+	// The full crossing-tick prediction, position AND velocity:
+	// airborne, no wish, no basevel - start-gravity half -> clamp ->
+	// TryMoveLocal (the whole bump chain) -> clamp -> finish half ->
+	// clamp. CategorizePosition is state-only in this domain (no
+	// walkable plane on ride-steep faces).
+	inline bool EdgeTickFull(const CapContact::LocalSet& S,
+	                         const MoveParams& p, float gscale,
+	                         const Vec3& pos_pre, const Vec3& v_pre,
+	                         Vec3* pos_out, Vec3* v_out,
+	                         int* nbumps_out = nullptr) {
+		Vec3 vel = v_pre;
+		Vec3 pos = pos_pre;
+		vel.Z -= gscale * p.gravity * 0.5f * p.dt;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		if (!TryMoveLocal(S, p, false, &pos, &vel, nbumps_out))
+			return false;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		vel.Z -= gscale * p.gravity * 0.5f * p.dt;
+		CapAir::KernelCheckVelocity(p, &vel.X, &vel.Y, &vel.Z);
+		*pos_out = pos;
+		*v_out = vel;
+		return true;
+	}
+
+} // namespace CapEdge
+
+// ======================================================================
+// CAPRIDEREACH addition - registry A23 (ride edge interception),
+// session 35: the earliest ride tick at which each sample point
+// along an in-plane edge segment becomes reachable at the lattice
+// contract - the A21 minimum-time query batched along the edge
+// line. Exact crossing mechanics (actually leaving the face) belong
+// to the A24/A26 composition; this row answers WHERE and WHEN the
+// edge comes into reach.
+namespace CapRideReach {
+
+	inline int EdgeIntercept(const RRSurface& S, float eu0, float ev0,
+	                         float eu1, float ev1, int samples,
+	                         float contract, int* n_out, int* node_out,
+	                         float* res_out) {
+		int answered = 0;
+		for (int i = 0; i < samples; ++i) {
+			const float t = samples > 1
+				? static_cast<float>(i)
+					/ static_cast<float>(samples - 1) : 0.f;
+			const float tu = eu0 + (eu1 - eu0) * t;
+			const float tv = ev0 + (ev1 - ev0) * t;
+			int node = -1;
+			float res = 1e30f;
+			const int N = MinRideTime(S, tu, tv, contract, &node,
+				&res);
+			n_out[i] = N;
+			node_out[i] = node;
+			res_out[i] = res;
+			if (N > 0)
+				answered++;
+		}
+		return answered;
+	}
+
+} // namespace CapRideReach
 } // namespace Solver

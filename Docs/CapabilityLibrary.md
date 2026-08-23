@@ -408,6 +408,19 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23h (session 35): **A23, A24, A28 close** (detail in the
+  checklist change log). The headline is structural: A24 =
+  `CapEdge::TryMoveLocal`, the verified TryPlayerMove as a pure
+  local function over the bitwise A14 clip — its own census refuted
+  the two-law draft (three-plus-bump crease chains), and the full
+  mirror matched 36/36 crossings bitwise in position and velocity.
+  A28 = the A12+A14 composition (24/24 vs engine); A23 = the A21
+  query along edge segments (25/25 == brute). NEW sf-term domain
+  law: the air kernel's fixed ctx sf vs the engine's
+  stale-stateful rising 0.25 — braking wishes diverge on rising
+  ticks; kernel rolls valid on falling flights. Remaining A: A22
+  tail, A19/A20 carried-gap, A8 refinements, A11 interior, A29,
+  A31.
 - 2026-08-23g (session 34): **A9 and A14 close** (detail in the
   checklist change log). A14: `CapContact` — the verified trace's
   per-brush clip verbatim on corridor local sets, 40k/40k bitwise,

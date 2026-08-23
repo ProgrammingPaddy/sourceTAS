@@ -1,0 +1,177 @@
+<title>The Local Move Mirror</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .c-meas{background:var(--amber-soft); color:var(--amber)}
+  .callout{background:var(--blue-soft); border:1px solid var(--blue); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout b{color:var(--blue)}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; margin:14px 0}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 35</div>
+  <h1>The Local Move Mirror</h1>
+  <p class="sub">Three more A rows fall — edge interception, adjacent-face transfer, corridor
+  traversal — and the session's centerpiece is structural: the engine's whole bump machinery,
+  running as a pure local function on the bitwise clip. Plus a new domain law the falsifiers
+  forced into the terms table.</p>
+  <div class="meta">
+    <span>2026-08-23</span>
+    <span>capcontact 5/0 · capmin 8/0</span>
+    <span>rows closed: A23 · A24 · A28</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">A24 crossing ticks</div><div class="v">36 / 36</div>
+    <p>valley-crease crossings matched BITWISE in position and velocity — 17 of them three-plus-bump chains</p></div>
+  <div class="tile"><div class="k">A28 solved paths</div><div class="v">24 / 24</div>
+    <p>16 clean tick-for-tick, 8 obstructed at the exact engine tick and brush; 4–5 µs per leg</p></div>
+  <div class="tile"><div class="k">A23 edge samples</div><div class="v">25 / 25</div>
+    <p>equal to the brute per-layer scan, 8/8 interception witnesses engine-validated</p></div>
+  <div class="tile"><div class="k">New domain law</div><div class="v">sf · rising</div>
+    <p>braking wishes diverge ~250 u/s in one rising tick — kernel rolls are falling-domain</p></div>
+</div>
+
+<h2><span class="idx">01</span>A24 — the census refuted the pretty design, so the mirror won</h2>
+<p class="lede">The first draft shipped two analytical transfer laws — the sequential rebase and
+the two-plane crease resolution, both transcribed from the verified mover. Then the valley-wedge
+census reported what actually happens at a crease.</p>
+<p>Of 36 crossing ticks, <b>17 were three-plus-bump chains</b> — clip the left wall, rebase
+across a partial move, clip the right wall, then resolve a two-plane set that includes the left
+wall <i>again</i>. No pairwise law covers that. The structural answer:
+<code>CapEdge::TryMoveLocal</code> — the verified <code>TryPlayerMove</code> transcribed
+operation-for-operation as a pure local function, with every trace answered by the
+bitwise-certified A14 clip. Partial-move rebases, the crease projection (of the <i>last clip
+result</i>, a float-level detail), the stop-dead guard, the mid-loop allsolid zeroing, and the
+unswept stuck guard all ride along. The gate: <b>36/36 crossing ticks matched bitwise in both
+position and velocity</b>, two-bump and three-plus-bump chains alike. The two analytical laws
+remain in the package as the documented decomposition; the mirror is the executable one.</p>
+<div class="callout"><b>Two geometry lessons paid for in falsifier time:</b> a valley is
+non-convex air — its solid is a union of two wall bands, two brushes, never one (the single-brush
+draft produced a ridge and a rider that stalled at the crease); and finite test brushes matter —
+an infinite backing slab behind an "opposing ramp" quietly engulfed the entire spawn region,
+caught only because the clean-path class measured zero.</div>
+
+<h2><span class="idx">02</span>A28 — solved paths against real geometry, both verdicts exact</h2>
+<p class="lede">Corridor traversal is the A12 + A14 composition: solve a point-to-point schedule,
+then certify the flight against nearby geometry without touching the engine.</p>
+<p><code>CapContact::FirstContactOnPath</code> kernel-rolls the schedule and clips every motion
+segment against the corridor's local set, returning clean, or the obstruction (tick, brush,
+fraction), or DECLINE outside its domain. Against a two-segment ramp world with solved paths
+threading the lane: <b>24/24 agree with full engine replays — 16 clean tick-for-tick, 8
+obstructed at the exact tick against the exact brush</b>, at 4–5 µs per path check. The A14
+flight gate also gained the stuck-guard predictor: the engine's silent freeze (swept-clean tick,
+embedded endpoint, velocity zeroed to exactly (0, 0, −6) with no contact event — the recorded d34
+pathology) is now predicted from the unswept endpoint query and verified when it fires.</p>
+
+<h2><span class="idx">03</span>The sf domain law — found by a 250 u/s divergence in open air</h2>
+<p class="lede">Two flights diverged at tick 2, hundreds of units from any brush, with identical
+vertical state. The horizontal-only signature pointed at the wish budget.</p>
+<p>The air kernel's context carries a <b>fixed</b> surface friction; the engine's is
+<b>stale-stateful</b> — 0.25 on rising ticks, applied one tick late. A max-gain wish never
+notices (its accel request, ~30, sits far below either budget), but a <i>braking</i> wish
+requests hundreds — and 562.5·sf differs by 4× between the two. Measured: ~250 u/s of divergence
+in a single rising braking tick. The law is now in the terms table where every kernel-roll
+consumer (A11–A13, A28, C7) can see it: <b>kernel rolls with braking wishes are valid on falling
+flights</b>, or must carry sf state. The flight gates respect the domain; nothing in the
+certified suites was outside it — the C7 exactness results stand on their own engine-verified
+gates.</p>
+
+<h2><span class="idx">04</span>A23, the board, and what remains</h2>
+<p><b>A23</b> closed as the quiet one: <code>CapRideReach::EdgeIntercept</code> batches the A21
+minimum-time query along an in-plane edge segment — 25/25 samples equal the brute per-layer
+scan, 8/8 sampled interception witnesses replay as engine continuations without a single
+boundary fringe.</p>
+<div class="tablewrap"><table>
+  <tr><th>Suite</th><th>Result</th><th>Covers</th></tr>
+  <tr><td class="nm">capcontact</td><td class="num"><span class="chip c-pass">5 / 0</span></td>
+    <td class="note">A14 bitwise × 2 worlds · DECLINE law · flight contacts (falling domain, stuck-guard armed) · A28</td></tr>
+  <tr><td class="nm">capmin</td><td class="num"><span class="chip c-pass">8 / 0</span></td>
+    <td class="note">A21 · A23 · A24 (the mirror) · A26</td></tr>
+  <tr><td class="nm">capsolve · capxfer</td><td class="num"><span class="chip c-pass">10/0 · 8/0</span></td>
+    <td class="note">the air point family · the C7 composition</td></tr>
+  <tr><td class="nm">capkern · capboard · capground · capwindow</td>
+    <td class="num"><span class="chip c-pass">5/5 · 5/5 · 6/6 · 6/6</span></td>
+    <td class="note">regression green</td></tr>
+</table></div>
+<p>The A march's remaining open work: the A22 exact-hit tail on the ride plane, the A19/A20
+carried-gap exact law (the ride boundary sliver), the A8 direction-aware refinements, A11's
+short-flight interior coverage, and the A29 duck / A31 trigger debt rows.</p>
+
+<footer>SourceTAS capability library · session 35 · 2026-08-23 ·
+docs: CapabilityChecklist.md + .html (rows A23, A24, A28 + the sf domain law),
+CapabilityLibrary.md, SolverRebuildChecklist.md</footer>
+</div>

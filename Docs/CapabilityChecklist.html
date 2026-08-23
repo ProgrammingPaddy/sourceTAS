@@ -157,7 +157,7 @@ const TERMS = [
  ["step","step & arc length","step = post-update speed × dt exactly; max-gain arc length is schedule-independent"],
  ["revs","reversal times","strafe-side flips ≥6 ticks apart (dwell law); ≤3 at measured optima; the point-to-point family's coordinates"],
  ["vert","z, vz closed form","gravity halves ±6/tick with the ±3500 clamp; position uses the mid velocity — certified bitwise vs engine"],
- ["sf","surface friction state","1 falling / 0.25 rising (no-walkable rule); scales only the accel budget; STALE — this tick uses last tick's value"],
+ ["sf","surface friction state","1 falling / 0.25 rising (no-walkable rule); scales only the accel budget; STALE — this tick uses last tick's value. AIR-KERNEL DOMAIN LAW (s35): the kernel ctx carries a FIXED sf — on rising ticks a BRAKING wish's budget 562.5·sf diverges from the engine (~250 u/s in one tick, measured), while max-gain wishes (add ≤ ~30) never reach the budget. Kernel rolls with braking wishes are valid on FALLING flights, or must carry sf state"],
  ["vdn","v·n at a face","boarding needs v·n < 0; loss = |v·n|; post² = s² + vz² − (v·n)² (dev ≤ 0.0034 u/s vs engine clip)"],
  ["ceps","the contact epsilon (STANDING LAW, s28)","a ridden plane re-contacts only when v·n·dt ≤ −1/32 (v·n ≤ −2.083 u/s at 66.67 tps); the band (−2.083, 0) = legal airborne HOVER ticks"],
  ["gap","the carried hover gap","the clip's adjust pass drifts the 1/32 offset by ~3.5e-5 u/tick, making rare micro-fraction bumps; the exact carried-gap law is the ride family's open refinement"],
@@ -264,12 +264,14 @@ const D = [
  "exact-hit tail on the plane (next); face table baseline",
  "0.2–0.3 µs/query (~10,000× the scan) · lattice resolution","capexit 9/0",
  "286/286 engine-reachable exit targets answered; indexed answers at lattice resolution (mean ~30u within the 96u contract), the nearest-node full scan (0.7u mean) available when precision beats speed. Every answer is an exact replayable schedule."],
-["A23","A","ride edge interception","todo",["ceps"],["A26"],["A20"],
- "A20 bounds + A22 at edge targets","—","~A22","—",
- "Earliest/latest reachable points on a face edge — the exit-event selector."],
-["A24","A","direct contact transfer","part",["vdn"],[],["A15"],
- "exact clip at the shared edge","engine roll-through","~ns/edge","—",
- "Face-to-face adjacency transfer; the clip transform exists, the adjacency composition is unpackaged."],
+["A23","A","ride edge interception","done",["ceps"],["A26"],["A20","A21"],
+ "CapRideReach::EdgeIntercept — the A21 minimum-time query batched along an in-plane edge segment",
+ "—","~0.86 ms/sample (A21's cost)","capmin 8/0",
+ "CLOSED session 35: 25/25 edge samples equal the brute per-layer scan and 8/8 sampled interception witnesses replay as engine continuations keeping contact (0 boundary fringe). Answers WHERE and WHEN each edge point comes into reach at the lattice contract; the exact crossing mechanics live in A24/A26."],
+["A24","A","direct contact transfer","done",["vdn","clipf"],[],["A15","A14"],
+ "CapEdge::TryMoveLocal — the verified TryPlayerMove as a PURE LOCAL FUNCTION over the bitwise A14 clip: partial-move rebases, two-plane crease resolution, stop-dead guard, allsolid zeroing, the unswept stuck guard; EdgeTickFull wraps the whole crossing tick",
+ "the analytical two-plane laws (kept as the decomposition); full engine roll-through","~ns/edge chain","capmin 8/0",
+ "CLOSED session 35 — and the design story matters: the first attempt shipped two analytical transfer laws (sequential rebase / crease resolution), and its own census refuted it — valley-crease crossings produce three-plus-bump chains (17 of 36) no two-plane law covers. The full mirror answers structurally: 36/36 crossing ticks BITWISE in position AND velocity, every bump shape included."],
 ["A25","A","ground/runoff acceleration","done",["stam"],["A30","A26"],[],
  "CapGround::WalkKernelTick — the grounded chain partially evaluated on the flat-floor domain",
  "full engine baseline","40.8M ticks/s = 10.9× engine","capground 6/6",
@@ -282,9 +284,10 @@ const D = [
  "z-window-pruned exact scan (CapEnd::EarliestBoxCrossing)","full per-tick scan",
  "= naive on 10k pairs · 12.1× fewer tests","capwindow 6/6",
  "The finish predicate: the exact vertical recurrence prunes the scan to the ticks that can matter."],
-["A28","A","corridor traversal","todo",[],["B15"],["A11","A14"],
- "local-set first-contact checks along A11 candidate paths","swept volumes","target ~µs/leg","—",
- "The last air-chain row: certify a transfer flight clean against nearby geometry."],
+["A28","A","corridor traversal","done",["sf"],["B15"],["A11","A12","A14"],
+ "CapContact::FirstContactOnPath — the A12 + A14 composition: kernel-roll the schedule, clip every motion segment against the corridor set; clean / obstructed(tick, brush, fraction) / DECLINE",
+ "swept-volume precomputation","4–5 µs/leg measured","capcontact 5/0",
+ "CLOSED session 35: 24/24 solved paths agree with real engine replays — 16 clean tick-for-tick, 8 obstructed at the exact tick AND brush. Two lessons banked en route: the two-ramp test world needed FINITE segments (the first build's 2000-deep backing slab engulfed the spawn region — caught by the zero-clean falsifier), and the air kernel's sf domain law (see the sf term) now bounds every kernel-roll flight gate to falling flights with the stuck-guard predictor armed."],
 ["A29","A","duck capability (gap row)","todo",["duck"],[],[],
  "package the decoded duck machine","—","~ns/tick law","—",
  "Currently domain-stamped OUT of every family — the stamp is the honest debt record. Real routes duck; the SET-path jump variant also waits on this."],
@@ -564,7 +567,7 @@ document.body.addEventListener('click', e => {
 
 document.getElementById('foot').textContent =
   'SourceTAS Capability Library · living dashboard · canonical text: Docs/CapabilityChecklist.md · '
-  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 34 (2026-08-23) · the A march: A9 + A14 closed this session; open: A22 tail, A23, A24, A28, A19/A20 carried-gap, A8 refinements, A11 interior, A29, A31';
+  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 35 (2026-08-23) · the A march: A23 + A24 + A28 closed this session; open: A22 tail, A19/A20 carried-gap, A8 refinements, A11 interior, A29, A31';
 render();
 renderTerms();
 </script>

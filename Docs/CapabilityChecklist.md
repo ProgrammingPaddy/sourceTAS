@@ -49,12 +49,12 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A20 | ride directional reach | in-plane (downslope, cross-slope), contact-epsilon guard + drift margin | A22, B10 | `CapRideReach::BuildRideReach` — position-tracking sweep on the proven ride law; **engine-validated witnesses per direction** (a direction with no clean witness DECLINES its bound) | finer local refinement | **9–19 s/ramp (3.3–6.1M nodes at 64u/10°/50u-s); 23/24 directions validated (upslope@50° declined — the near-walkable near-stall corner); D\*ride(0.72 s): down 702–844u, cross ~470u, up ≈ 0** | `[~]` capexit 9/0 (s29) |
 | A21 | minimum ride time | exit point, N_min | route timing | `CapRideReach::MinRideTime` — first A20 layer answering within the lattice contract; indexed-first, every miss confirmed by the exhaustive scan (result EQUALS brute by construction) | pure brute per-layer scan (same answers, measured 696 µs vs 857 µs — the confirm pass eats the index's edge on miss-heavy scans) | ~0.86 ms/query | `[x]` s33 (capmin: 50/50 == brute; 12/12 minimum-time witnesses engine-validated, 0 fringe) |
 | A22 | board→exit solver | entry state × exit point | C6, the two-ramp transfer | **v1: cell-witness lookup in the A20 sweep** (exact schedules out); v2: the A11 exact-hit construction on the plane | DP table per face (baseline/falsifier) | **v2 (s30): O(1) indexed query 0.2–0.3 µs (~10,000× the layer scan), lattice-resolution answers (mean ~30u, worst 55u, all within the 96u contract; the nearest-node full scan at 0.7u mean remains available)** | `[~]` v2 indexed (s30); exact-hit tail on the plane = next |
-| A23 | ride edge interception | edge geometry, exit λ | launch selection | A20 bounds + A22 solve at edge targets | — | target ~A22 | `[ ]` |
-| A24 | direct contact transfer | adjacent-face clip chain | face-to-face routing | exact clip transform at the shared edge | full engine roll-through | ~ns/edge | `[~]` clip exists; adjacency composition not packaged |
+| A23 | ride edge interception | edge geometry, exit λ | launch selection | `CapRideReach::EdgeIntercept` — the A21 minimum-time query batched along an in-plane edge segment | — | ~0.86 ms/sample (A21's cost) | `[x]` s35 (capmin 8/0): 25/25 samples equal the brute per-layer scan; 8/8 interception witnesses engine-validated, 0 fringe |
+| A24 | direct contact transfer | adjacent-face clip chain, crease law | face-to-face routing | **`CapEdge::TryMoveLocal` — the verified TryPlayerMove as a PURE LOCAL FUNCTION** (every trace = the bitwise A14 clip): partial-move rebases, two-plane crease resolution, stop-dead guard, allsolid zeroing, the unswept stuck guard; `EdgeTickFull` wraps the whole crossing tick | the analytical two-plane laws (`ResolveTwoPlanes`/`SequentialTransfer`, kept as the decomposition); full engine roll-through | ~ns/edge chain | `[x]` s35 (capmin 8/0): 36/36 valley-crease crossing ticks BITWISE in position AND velocity — including 17 three-plus-bump chains no two-plane law covers (the census that forced the full mirror) |
 | A25 | ground/runoff acceleration | friction, stopspeed, accelerate, stamina power curve | spawn/launch prep | `CapGround::WalkKernelTick` — the grounded MoveTick chain partially evaluated on the flat-floor domain | full MoveTick baseline | **40.8M ticks/s = 10.9× engine; 200k walk ticks + 50k position checks, 0 bitwise mismatches (velocity, feet z, stamina)** | `[x]` capground 6/6 (s27) |
 | A26 | edge launch | leave-ground event, launch state | route segments | `CapLaunch::Detector` — the unified leave-ground event detector fed by exact rollouts; captures both boundary states | the route-graph LaunchWitness/ReplayLaunch instruments remain the production launch pipeline | ~ns/tick fed | `[x]` s33 (capmin): threshold bracketed to ONE constant across speeds — (270.7, 272.4] ∋ 256+16, the A3 hull-overhang law measured, quadrant semantics not assumed; captures continue BITWISE; first clean air tick hands to A1 bitwise |
 | A27 | END-volume crossing | Minkowski box, z-window | finish timing | `CapEnd::EarliestBoxCrossing` — z-window-pruned exact scan | full per-tick scan (baseline) | **= naive on 10k (schedule, box) pairs; 12.1× fewer horizontal tests** | `[x]` capwindow (s28) |
-| A28 | obstacle/corridor traversal | first contact along family | route validation | A14 local-set checks along A12 candidate paths | swept-volume precomputation | target ~µs/leg | `[ ]` last in air chain |
+| A28 | obstacle/corridor traversal | first contact along family | route validation | `CapContact::FirstContactOnPath` — the A12 + A14 composition: kernel-roll the schedule, clip every motion segment against the corridor set; clean / obstructed(tick, brush, fraction) / DECLINE | swept-volume precomputation | 4–5 µs/leg measured | `[x]` s35 (capcontact 5/0): 24/24 solved paths agree with engine replays — 16 clean tick-for-tick, 8 obstructed at the exact tick AND brush; plus the flight gate 14/14 with the stuck-guard predictor armed |
 | A29 | duck capability (NEW, gap) | duck flag/hull/timer, 8.5u shift, 0.34 speed crop | duck-required routes, A3 hulls | package the decoded duck state machine as LAW + hull switch | — | ~ns/tick law | `[ ]` currently domain-stamped OUT of all air/ride families — the stamp is the gap record |
 | A30 | jump capability | jump impulse (double const), stamina scale, autobhop gate, three gravity half-steps | spawn runs, bhop segments, launches | `CapGround::JumpKernelTick` (jump head + the A4 air chain) | — | **50k jump ticks, 0 bitwise mismatches on all channels + stamina; vz law: stamina 0→283.993, 1315.8→210.839; release gate + autobhop bypass verified** | `[x]` capground (s27); SET path (ducked) = A29 debt |
 | A31 | trigger interactions (NEW, gap) | basevel, gravity_scale, teleport | maps with push/teleport/gravity | mirror the trigger application rules as transforms | — | ~ns/event | `[ ]` engine mirror carries state; capability + tests not built |
@@ -117,7 +117,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | step, arc length | step = post-update speed × dt; max-gain L(N) deterministic | A8/B2, A11 |
 | reversal times | ≥6 apart (dwell); ≤3 at optimum (measured) | A11/A12 parameters |
 | z, vz | closed form (±6 halves) | A1, B0, A13, A27 |
-| sf (surface friction) | 1 falling / 0.25 rising; budget-only | A18/A19, braking regime |
+| sf (surface friction) | 1 falling / 0.25 rising; budget-only; STALE (this tick uses last tick's value). **AIR-KERNEL DOMAIN LAW (s35): the kernel ctx carries a FIXED sf — on rising ticks a BRAKING wish's budget 562.5·sf diverges from the engine (measured ~250 u/s in one tick); max-gain wishes (add ≤ ~30) never reach the budget. Kernel rolls with braking wishes are valid on falling flights, or must carry sf state** | A18/A19, braking regime, every kernel-roll consumer (A11–A13, A28, C7) |
 | v·n, loss, post² | clip laws (dev ≤ 0.0034) | A15–A17, C2 |
 | in-plane gravity | constant per face | A18–A22 |
 | jump impulse | double-precision constant × stamina scale (decoded) | A30, A25 |
@@ -129,6 +129,35 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | trace clip fraction | f = (d1 − 1/32)/(d1 − d2); the end sits EXACTLY 1/32 above the expanded plane along n; clipped velocity slides the remaining (1−f)·dt | C7 contact prediction (verified to ≤1e-4 u), A18 boundary work |
 
 ## Change log
+- 2026-08-23h (session 35): **A23, A24, A28 close — and the LOCAL
+  MOVE MIRROR arrives.** A24's first design (two analytical transfer
+  laws) was REFUTED by its own census: valley-crease crossings
+  produced three-plus-bump chains (17 of 36) no two-plane law
+  covers. The answer is structural: **`CapEdge::TryMoveLocal` — the
+  verified TryPlayerMove transcribed as a PURE LOCAL FUNCTION over
+  the bitwise A14 clip** (partial-move rebases, crease resolution,
+  stop-dead guard, allsolid zeroing, the unswept stuck guard) —
+  36/36 crossing ticks matched BITWISE in position AND velocity
+  (capmin 8/0). A28: `CapContact::FirstContactOnPath` (the A12+A14
+  composition) — 24/24 solved paths agree with engine replays, 16
+  clean tick-for-tick and 8 obstructed at the exact tick and brush
+  (capcontact 5/0); en route, the two-ramp world was rebuilt with
+  FINITE segments after the first build's backing slab engulfed the
+  spawn region (a wrong-world lesson, caught by the zero-clean
+  falsifier), and a VALLEY was relearned to be non-convex air — two
+  wall brushes, never one. A23: `CapRideReach::EdgeIntercept` —
+  25/25 edge samples equal the brute scan, 8/8 witnesses validated.
+  **NEW DOMAIN LAW (terms table, sf row): the air kernel's ctx
+  carries FIXED surface friction while the engine's is STALE-
+  STATEFUL (0.25 on rising ticks) — a BRAKING wish's accel budget
+  562.5·sf diverges ~250 u/s in one rising tick (measured), while
+  max-gain wishes never reach the budget. Kernel rolls with braking
+  wishes are valid on FALLING flights** — the flight gates now
+  respect the domain, and the stuck-guard predictor (the d34
+  freeze: silent velocity zero at (0,0,−6)) is armed in the A14
+  flight gate. Battery green: capcontact 5/0, capmin 8/0, capsolve
+  10/0, capxfer 8/0, capkern 5/5, capboard 5/5, capground 6/6,
+  capwindow 6/6.
 - 2026-08-23g (session 34): **A9 and A14 close — the march continues.**
   A14 (capcontact 4/0, new suite): `CapContact` runs the engine's own
   per-brush clip verbatim over a corridor-gathered local set —
