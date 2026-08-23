@@ -3583,4 +3583,108 @@ namespace CapBounds {
 	}
 
 } // namespace CapBounds
+
+// ======================================================================
+// CAPHULL - registry A3 (hull contact geometry), session 32. The
+// engine never traces the player as a point: every brush plane (n, d)
+// is pre-expanded to (n, d + off(n)) where off is the Minkowski
+// support of the NEGATED player hull (SolverWorld.cpp HullExpand),
+// and the trace moves the hull ORIGIN (the feet point) against the
+// expanded set. So every origin-space prediction - the A1 vertical
+// timetable, A2 face slices, C7 boarding targets - must aim at
+// d + off(n), NOT d. Aiming at the raw plane is exactly the measured
+// C7 v1 systematic (contacts 1.8-3.7 ticks early: the hull's leading
+// edge reaches the face before the origin does). Float arithmetic
+// mirrors HullExpand exactly (same products, same left-to-right sum,
+// one negation) so packaged offsets are BITWISE equal to the ones the
+// world loader bakes into d_stand/d_duck/d_unduck.
+namespace CapHull {
+
+	// off(n) for hull box [mn, mx]: -min over hull corners of n.corner.
+	inline float PlaneOffset(const Vec3& n, const Vec3& mn,
+	                         const Vec3& mx) {
+		return -((n.X > 0.f ? n.X * mn.X : n.X * mx.X)
+			+ (n.Y > 0.f ? n.Y * mn.Y : n.Y * mx.Y)
+			+ (n.Z > 0.f ? n.Z * mn.Z : n.Z * mx.Z));
+	}
+
+	// The player hulls by movement hull state (0 standing, 1 ducked,
+	// 2 post-air-unduck transient, which is identical to standing).
+	inline float PlaneOffsetHull(const Hulls& h, const Vec3& n,
+	                             int hull) {
+		const Vec3& mn = hull == 1 ? h.duck_min
+			: (hull == 2 ? h.unduck_min : h.stand_min);
+		const Vec3& mx = hull == 1 ? h.duck_max
+			: (hull == 2 ? h.unduck_max : h.stand_max);
+		return PlaneOffset(n, mn, mx);
+	}
+
+} // namespace CapHull
+
+// ======================================================================
+// CAPLABEL - registry C0 (canonical transition label) + C1 (local
+// Pareto comparison), session 32. C0 is the ONE struct every kernel
+// emits when it crosses a boundary (C7 exit->board, C6 board->exit),
+// so downstream composition consumes a single exact format. Fields
+// split into two roles:
+//   COMPATIBILITY (kind, boundary position u/v, heading psi, vz,
+//     sf_quarter): where/how the route continues. NOT ordered - two
+//     labels with different compatibility reach different successor
+//     states, and no monotonicity theorem in psi/vz/position has been
+//     certified, so C1 never compares across them.
+//   QUALITY (dt down, s2 up, loss2 down): certified-direction fields.
+//     Fewer ticks is better by decree (C10: cost IS ticks); more s2
+//     is better by the coast monotonicity theorem's direction; less
+//     boundary loss is better because loss subtracts from s2 exactly.
+// C1 dominance is therefore CELL-LOCAL: labels are comparable only
+// when their compatibility fields fall in the same cell at the
+// caller's chosen pitch, and within a cell a dominates b iff a is >=
+// in every quality direction and > in at least one. Scalarizing the
+// tuple into one number remains banned as truth (C11: order only).
+namespace CapLabel {
+
+	struct Transition {
+		unsigned char kind = 0;     // 0 = exit->board (C7),
+		                            // 1 = board->exit (C6)
+		unsigned char sf_quarter = 0; // 1 = quarter-strength friction
+		int   dt = 0;               // ticks consumed (the route cost)
+		float u = 0.f, v = 0.f;     // boundary position, face frame
+		float psi = 0.f;            // horizontal heading, radians
+		float vz = 0.f;             // vertical velocity at boundary
+		float s2 = 0.f;             // horizontal speed^2 at boundary
+		float loss2 = 0.f;          // s^2 given up crossing it (>= 0)
+	};
+
+	// The compatibility cell at pitch (pos_pitch u, psi_pitch rad,
+	// vz_pitch u/s). Same cell = comparable.
+	inline bool SameCell(const Transition& a, const Transition& b,
+	                     float pos_pitch, float psi_pitch,
+	                     float vz_pitch) {
+		if (a.kind != b.kind || a.sf_quarter != b.sf_quarter)
+			return false;
+		if (static_cast<int>(floorf(a.u / pos_pitch))
+			!= static_cast<int>(floorf(b.u / pos_pitch)))
+			return false;
+		if (static_cast<int>(floorf(a.v / pos_pitch))
+			!= static_cast<int>(floorf(b.v / pos_pitch)))
+			return false;
+		if (static_cast<int>(floorf(a.psi / psi_pitch))
+			!= static_cast<int>(floorf(b.psi / psi_pitch)))
+			return false;
+		if (static_cast<int>(floorf(a.vz / vz_pitch))
+			!= static_cast<int>(floorf(b.vz / vz_pitch)))
+			return false;
+		return true;
+	}
+
+	// C1: strict dominance inside one compatibility cell. Returns
+	// true iff a is at least as good in every quality direction and
+	// strictly better in one. Irreflexive by construction.
+	inline bool Dominates(const Transition& a, const Transition& b) {
+		if (a.dt > b.dt || a.s2 < b.s2 || a.loss2 > b.loss2)
+			return false;
+		return a.dt < b.dt || a.s2 > b.s2 || a.loss2 < b.loss2;
+	}
+
+} // namespace CapLabel
 } // namespace Solver

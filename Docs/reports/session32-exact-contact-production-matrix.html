@@ -1,0 +1,222 @@
+<title>Exact Contact, Measured Matrix</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .c-meas{background:var(--amber-soft); color:var(--amber)}
+  .callout{background:var(--blue-soft); border:1px solid var(--blue); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout b{color:var(--blue)}
+  .panel{background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:16px 20px; margin:14px 0}
+  .panel p, .panel li{font-size:13.5px; color:var(--muted)}
+  .panel .hl{color:var(--ink); font-weight:600}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 32</div>
+  <h1>Exact Contact, Measured Matrix</h1>
+  <p class="sub">Five registry rows close. The transfer kernel stops predicting contacts within
+  bounds and starts predicting them exactly — same tick, position to a ten-thousandth of a unit —
+  because the hull offset and the engine's own clip fraction are now packaged laws. And the
+  board→exit matrix runs at production rate: a million real pairs in four and a half minutes,
+  measured, not extrapolated.</p>
+  <div class="meta">
+    <span>2026-08-23</span>
+    <span>suites: capxfer 8/0 · capmat 9/0 (new)</span>
+    <span>rows closed: A3 · C0 · C1 · C6 · C7&nbsp;v2</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">C7 contact tick</div><div class="v">63 / 63</div>
+    <p>engine first-contacts on the exact predicted tick, both ramps, every solved schedule</p></div>
+  <div class="tile"><div class="k">C7 contact position</div><div class="v">≤ 1e-4 u</div>
+    <p>worst deviation between the predicted end-of-tick position and the engine's — mean prints as 0.0000</p></div>
+  <div class="tile"><div class="k">C6 production rate</div><div class="v">4.5 min</div>
+    <p>per 10⁶ (boarding state, exit target) pairs — 715,057 real pairs measured at 270 µs/pair amortized</p></div>
+  <div class="tile"><div class="k">C1 order laws</div><div class="v">0 violations</div>
+    <p>irreflexivity, antisymmetry, transitivity over 38,231 emitted C0 labels</p></div>
+</div>
+
+<h2><span class="idx">01</span>The 1.8–3.7-tick systematic was a missing law, and now it is a capability</h2>
+<p class="lede">Session 31's transfer kernel landed contacts 1.8–3.7 ticks early and 13–24 units
+off. That was not noise — it was the hull.</p>
+<p>The engine never traces the player as a point. Every brush plane <code>(n, d)</code> is
+pre-expanded to <code>d + off(n)</code>, where <code>off(n)</code> is the Minkowski support of the
+negated player hull, and the trace moves the hull <b>origin</b> (the feet point) against that
+expanded set. Aiming a boarding target at the raw face plane therefore aims it below the surface
+the engine actually collides with — the hull's leading edge arrives first, which is exactly the
+early-contact signature v1 measured.</p>
+<p>Registry A3 now packages this as <code>CapHull::PlaneOffset</code>, written float-identical to
+the world loader's own expansion (same products, same left-to-right sum, one negation). The
+capxfer suite checks the packaged offsets against the world's baked
+<code>d_stand/d_duck/d_unduck</code> for every plane of every brush, all three hull states:
+<span class="chip c-pass">48/48 bitwise</span>. The face slice (A2) then simply targets the
+expanded plane, and the systematic vanishes.</p>
+
+<h2><span class="idx">02</span>The contact is predicted exactly — through the engine's own clip law</h2>
+<p class="lede">With the target on the right plane, the remaining question was how precisely the
+composition can call the contact. The answer: exactly, because every piece of the contact is an
+engine truth we already hold.</p>
+<div class="panel">
+  <p><span class="hl">The prediction pipeline (C7 v2), per solved schedule:</span></p>
+  <p>1 · Roll the schedule through the certified A4 air kernel (full 3-D state, ~5 µs for a
+  90-tick flight) and find the first tick whose motion segment crosses the hull-expanded plane —
+  distances <code>d1</code> above, <code>d2</code> below.</p>
+  <p>2 · Apply the engine's trace clip law: the fraction is
+  <code>f = (d1 − 1/32) / (d1 − d2)</code>, which leaves the origin <b>exactly 1/32 above the
+  traced plane</b> — the same 1/32 that already governs the contact epsilon and the ground rest
+  height.</p>
+  <p>3 · The in-tick move velocity is the kernel's position delta over dt (the position law —
+  no mid-chain state re-derived), clip it with the exported <code>Fn::ClipVelocity</code>, and
+  slide the remaining <code>(1 − f)·dt</code>. That point is the predicted end-of-tick
+  position.</p>
+</div>
+<p>The engine verified all of it: <b>63/63 contacts on the exact predicted tick, end position
+within 10⁻⁴ units, and the proven A18 ride law bitwise at every one of the 63 contact ticks.</b>
+The session's earlier draft gated contacts with a travel-distance bound; the failures of that
+bound were themselves informative — slow braked arrivals shrank the bound below the residual,
+and two curved brake paths at 65° crossed the face plane <i>before</i> their requested tick.
+Both phenomena are now handled by prediction rather than tolerance: the kernel roll predicts the
+early boardings exactly too, and they are counted in the open
+(<span class="chip c-meas">61/63 board on the requested tick · 2 early, predicted</span>).</p>
+<div class="callout"><b>New terms-table laws.</b> The hull offset
+<code>off(n) = −Σ nᵢ·(nᵢ&gt;0 ? minᵢ : maxᵢ)</code> and the trace clip fraction
+<code>f = (d1 − 1/32)/(d1 − d2)</code> are recorded in the checklist's terms table — every future
+origin-space plane prediction consumes them, and the 1/32 family now appears in three proven
+places: re-contact threshold, rest height, and trace backoff.</div>
+
+<h2><span class="idx">03</span>C6 runs at production rate — real pairs, no extrapolation</h2>
+<p class="lede">The board→exit kernel's target was set in the registry from the start: a million
+(boarding state, exit target) pairs in minutes. The new capmat harness runs it as production
+would.</p>
+<p>Rows are engine-settled boarding states (an entry-speed × cross-slope grid, each settled into
+ride contact by the engine — 12/12 rows across two ramps). Per row, one A20 ride-reach surface is
+built, and then the <b>full time-resolved matrix</b> — every horizon from 4 to 48 ticks, every
+in-plane cell of each layer's reachable extent — is answered through the A22 indexed query.</p>
+<div class="tablewrap"><table>
+  <tr><th>Measure</th><th>Value</th><th>Reading</th></tr>
+  <tr><td class="nm">Real pairs answered</td><td class="num">715,057</td>
+    <td class="note">611,725 within the 96u lattice contract; two ramps × six rows × 45 horizons</td></tr>
+  <tr><td class="nm">Amortized cost</td><td class="num">270 µs/pair</td>
+    <td class="note">builds + queries over all pairs → <b>10⁶ pairs in 4.5 min</b> — the C6 target met</td></tr>
+  <tr><td class="nm">Query alone</td><td class="num">3.9 µs mean</td>
+    <td class="note">the indexed constant-time path over full production layers</td></tr>
+  <tr><td class="nm">A20 build</td><td class="num">~16 s/row</td>
+    <td class="note">dominates the amortization — cheaper builds are the named lever for the next order of magnitude</td></tr>
+  <tr><td class="nm">Soundness: indexed vs exhaustive</td><td class="num">1800/1800</td>
+    <td class="note">the indexed answer never beats the exhaustive scan (mean gap 17.9u, max 73.2u — the cell-representative price, measured)</td></tr>
+  <tr><td class="nm">Soundness: engine witnesses</td><td class="num">22/24</td>
+    <td class="note">sampled 48-tick reach nodes — the carriers of the matrix's answers — replay through the engine within bound; 2 boundary-fringe declines counted, not hidden</td></tr>
+</table></div>
+
+<h2><span class="idx">04</span>One label to compose on — and an honesty boundary for comparing them</h2>
+<p class="lede">Both kernels now emit the same struct at every boundary crossing, which is what
+the composition layer has been waiting for.</p>
+<p><b>C0, <code>CapLabel::Transition</code></b>, splits its fields by role.
+<i>Compatibility</i> fields — kind, in-plane position, heading, vertical velocity, the
+surface-friction bit — locate where the route continues; they are never ordered.
+<i>Quality</i> fields carry certified directions only: fewer ticks (cost is ticks by decree),
+more s² (the coast monotonicity theorem's direction), less boundary loss (it subtracts from s²
+exactly). C7 emitted 63 labels at verified transfer contacts; C6 emitted 38,231 across the
+production matrix.</p>
+<p><b>C1, <code>CapLabel::Dominates</code></b>, is deliberately <b>cell-local</b>: two labels are
+comparable only when their compatibility fields share a cell at the caller's pitch, because no
+monotonicity theorem in heading, vertical velocity, or position has been certified — comparing
+across them would smuggle an unproven claim into a prune. Within a cell, strict componentwise
+dominance. Property gates over the emitted set: irreflexive, zero antisymmetry violations, zero
+transitivity violations in 706 sampled chains. Scalarizing the tuple into one number stays banned
+as truth (C11: order only, never truth).</p>
+
+<h2><span class="idx">05</span>The board, and what opens next</h2>
+<div class="tablewrap"><table>
+  <tr><th>Suite</th><th>Result</th><th>Covers</th></tr>
+  <tr><td class="nm">capxfer</td><td class="num"><span class="chip c-pass">8 / 0</span></td>
+    <td class="note">C7 v2 exact contact prediction · A3 bitwise gates · A18 at contact · C0 emission</td></tr>
+  <tr><td class="nm">capmat (new)</td><td class="num"><span class="chip c-pass">9 / 0</span></td>
+    <td class="note">C6 production rate · A22 soundness cross-checks · engine witnesses · C1 property gates</td></tr>
+  <tr><td class="nm">capkern · capboard · capground · capwindow</td>
+    <td class="num"><span class="chip c-pass">5/5 · 5/5 · 6/6 · 6/6</span></td>
+    <td class="note">regression green after the header additions</td></tr>
+</table></div>
+<div class="panel">
+  <p><span class="hl">Open, by name:</span></p>
+  <p>· C9 min-plus composition over C0 labels — the pieces now exist on both sides of the boundary.</p>
+  <p>· B16 successor-face sets and C5 requirement matching on the certified B13/B14 bounds.</p>
+  <p>· Cheaper A20 builds — the C6 amortization lever (~16 s/row today).</p>
+  <p>· The carried-gap exact law (ride boundary sliver; the 2 witness fringe declines live there).</p>
+  <p>· A11 short-flight interior coverage + analytic inversion; B22 heading-aware ceiling; A29/A31 debts.</p>
+</div>
+
+<footer>SourceTAS capability library · session 32 · 2026-08-23 · suites: capxfer, capmat ·
+docs: CapabilityChecklist.md + .html (rows A3, C0, C1, C6, C7), CapabilityLibrary.md,
+SolverRebuildChecklist.md</footer>
+</div>

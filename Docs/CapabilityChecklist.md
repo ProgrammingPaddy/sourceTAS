@@ -29,7 +29,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A0 | canonical frame transform | position, heading | every table/family | O(1) rotation+translation; tables canonical, witnesses world-frame | — | ~ns | `[~]` implicit in builds; formal float-semantics note done, helper API not extracted |
 | A1 | vertical state z(N), vz(N) | z, vz, gravity halves | arrival windows (B0), A13, A27 | closed form | per-tick iteration (pointless) | ~ns, O(1) | `[x]` |
 | A2 | face slice λ(z) | λ, face plane | A13 targets, B1 | plane/polygon algebra | — | ~ns, O(1) | `[x]` |
-| A3 | hull contact geometry | hull boxes, support offsets | A14, A26, A27 | Minkowski offsets per plane (engine's own d_stand/d_duck) | analytic contact regions per face | ~ns/plane | `[~]` offsets exist in World; face contact-region API not packaged |
+| A3 | hull contact geometry | hull boxes, support offsets | A14, A26, A27, C7 targeting | `CapHull::PlaneOffset` — Minkowski support of the negated hull, float-identical to the world loader's own expansion (d = d_raw + off(n)) | analytic contact regions per face (edge/bevel regimes, open) | O(1), ~ns/plane | `[x]` packaged s32; capxfer gates it bitwise vs d_stand/d_duck/d_unduck (48/48); fixing C7 v1's 1.8–3.7-tick early-contact systematic was its first consumer |
 | A4 | one-tick air law | c = s·cosα_true, s², a, δψ | everything airborne | closed law (TickLaw) + bitwise kernel | full MoveTick (9× slower) | kernel 16.0M ticks/s = 62 ns/tick; law match: worst Δs² 5.0, Δψ 1.7e-5 rad over 1M states | `[x]` capkern 5/5 |
 | A5 | dwell automaton | dwell age, min_gap 6 | all schedule legality | counter + comparison | — | ~ns | `[x]` guarded by the lattice-agreement gate |
 | A6 | N-tick turn/gain max V* | s², ψ, reversal count | B5/B6, C5, transfer valuation | closed-form ceiling √(s0²+900N) for bounds; band table for full surfaces | parametric family (via A12 machinery, future); shooting oracle | ceiling O(1) ns; band build 48–276 s/v0, then O(1) query; gaps: sampled-action 0, continuous +20…+93 u/s measured | `[x]` as certified interval; `[ ]` heading-aware UB (B22) |
@@ -92,12 +92,12 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 
 | ID | Function | Key terms | Primary method | Other methods | Efficiency | Status |
 |----|----------|-----------|----------------|---------------|------------|--------|
-| C0 | canonical transition label | (dt, E, ψ, vz, loss, …) | fixed tuple, exact fields | — | ~ns | `[~]` fields exist across code; single struct not unified |
-| C1 | local Pareto comparison | label partial order | dominance over the tuple | scalarization (banned as truth) | ~ns/pair | `[ ]` |
+| C0 | canonical transition label | (dt, E, ψ, vz, loss, …) | `CapLabel::Transition` — ONE struct, fields split by role: compatibility (kind, u/v, ψ, vz, sf) vs quality (dt↓, s2↑, loss2↓) | — | ~ns | `[x]` unified s32; emitted by BOTH kernels (C7 capxfer 63 labels, C6 capmat 38,231 labels) |
+| C1 | local Pareto comparison | label partial order | `CapLabel::Dominates` — CELL-LOCAL strict dominance (compatibility fields must share a cell at the caller's pitch; no uncertified cross-state comparison) | scalarization (banned as truth) | ~ns/pair | `[x]` s32; property gates over 38k emitted labels: irreflexive, 0 antisymmetry / 0 transitivity violations (capmat) |
 | C2–C4 | quality projections (board/ride/air) | label views | pure projections of C0 | — | ~ns | `[ ]` after C0 |
 | C5 | successor-requirement matching | B14 vs exit label | interval test | — | ~ns | `[d]` after B14 |
-| C6 | sampled board→exit kernel | A22 matrix | batch A22 over sampled pairs | on-demand + memo | target: 10⁶ pairs in minutes | `[ ]` the end-state test's left half |
-| C7 | sampled exit→board kernel | A12/A13 matrix | **the capxfer composition: vertical timetable → face slices → O(1) culls → batch A11 → engine verification** | reach-table per start (measured 4–5 orders slower to first answer); shooting | **v1 VERIFIED (capxfer 4/0, s31): transfers land within 1.8–3.7 ticks and 13–24u; A18 law bitwise at all 62 contacts; organize ~3.5 ms/start, fast path ~100 µs/target, fallback-heavy ~5 ms** | `[~]` v1 (s31); hull-offset anticipation + matrix production = v2 |
+| C6 | sampled board→exit kernel | A22 matrix | **the capmat production loop: per boarding row ONE A20 surface, then the full time-resolved matrix (every horizon × every in-plane cell) through the A22 indexed query** | on-demand + memo | **v1 VERIFIED (capmat 9/0, s32): 715,057 REAL pairs at 270 µs/pair amortized = 10⁶ pairs in 4.5 min (target met, no extrapolation); queries alone 3.9 µs mean; builds dominate (~16 s/row)** | `[x]` v1 s32; soundness ridealongs: indexed-never-beats-exhaustive 1800/1800, engine witnesses 22/24 (2 boundary fringe, counted); cheaper builds = the named lever |
+| C7 | sampled exit→board kernel | A12/A13 matrix | **the capxfer composition: A1 vertical timetable → A2+A3 HULL-EXPANDED face slices → B13 O(1) culls → batch A11 → A4 kernel roll predicting the contact EXACTLY (engine clip fraction (d1−1/32)/(d1−d2) + clipped slide) → engine verification** | reach-table per start (measured 4–5 orders slower to first answer); shooting | **v2 VERIFIED (capxfer 8/0, s32): contact tick EXACT 63/63, end position dev ≤ 1e-4 u; A18 law bitwise at all 63 contacts; 61/63 board on the requested tick (2 curved brake paths board early — predicted exactly, counted); organize ~3.5 ms/start, ~100 µs/target fast path** | `[x]` v2 s32; v1's 1.8–3.7-tick systematic was exactly the A3 offset; interior-coverage amber inherited from A11 |
 | C8 | composition without re-simulation | memo keys | memoized exact results (repeat-share measured 84–85%) | — | hit ~ns | `[~]` measured; production memo not built |
 | C9 | min-plus path composition | tick costs | standard shortest-path over labels | — | ~µs/graph | `[ ]` trivial once C0 exists |
 | C10 | route cost = ticks | g | by decree | — | — | `[x]` |
@@ -125,8 +125,32 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | basevel / gravity_scale | trigger-applied state (mirror carries it) | A31 |
 | E = s² + vz² | conserved less loss at clips | B12, C0 |
 | END box | Minkowski intersection, feet-z window | A27 |
+| hull offset off(n) | Minkowski support of the negated hull: −Σ nᵢ·(nᵢ>0 ? minᵢ : maxᵢ); traces run on d + off(n) | A3, C7 targeting, every origin-space plane prediction |
+| trace clip fraction | f = (d1 − 1/32)/(d1 − d2); the end sits EXACTLY 1/32 above the expanded plane along n; clipped velocity slides the remaining (1−f)·dt | C7 contact prediction (verified to ≤1e-4 u), A18 boundary work |
 
 ## Change log
+- 2026-08-23e (session 32): **FIVE ROWS CLOSE — A3, C0, C1, C6, C7
+  v2.** A3 packaged (`CapHull::PlaneOffset`, float-identical to the
+  world loader's expansion, gated bitwise 48/48 in capxfer) and its
+  first consumer collapses C7 v1's early-contact systematic: targets
+  now sit on the HULL-EXPANDED plane, and the A4 kernel roll plus the
+  engine's own clip law — fraction (d1−1/32)/(d1−d2), end exactly
+  1/32 above the plane, clipped slide for the remaining time —
+  predicts every contact EXACTLY: **capxfer 8/0, contact tick exact
+  63/63, end position within 1e-4 u, A18 bitwise at all 63 contacts**
+  (2 curved brake paths board early — predicted exactly, counted
+  honestly). C6 v1 VERIFIED (**capmat 9/0**): per boarding row one
+  A20 surface, then the FULL time-resolved matrix through the A22
+  indexed query — **715,057 real pairs at 270 µs/pair amortized =
+  10⁶ pairs in 4.5 min** (target met without extrapolation; queries
+  alone 3.9 µs; builds ~16 s/row are the named lever), with
+  soundness ridealongs (indexed never beats exhaustive 1800/1800;
+  engine witnesses 22/24, 2 boundary fringe). C0 unified
+  (`CapLabel::Transition`, compatibility vs quality fields) and
+  emitted by BOTH kernels (63 + 38,231 labels); C1 cell-local strict
+  dominance property-gated over the emitted set (irreflexive, 0
+  antisymmetry, 0 transitivity violations). Regression green:
+  capkern 5/5, capboard 5/5, capground 6/6, capwindow 6/6.
 - 2026-08-23c (session 31): **C7 v1 VERIFIED (capxfer 4/0) — the
   first true composition**: an air exit state answering boarding
   targets on a destination ramp through the full chain (A1 vertical

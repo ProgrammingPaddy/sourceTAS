@@ -391,11 +391,13 @@ family), then the LB surfaces retire into interval semantics.
    an underived threshold; the LB-vs-band comparison is per-sign
    (chirality-aware) and seam-wrapped.
 
-**Next (spine order):** the theorem step for V* (turn-then-accelerate
-branch family + heading-aware UB); ride A19/A20 on the proven A18
-law; the A22 board→exit kernel; direction-aware D* UB; local
-refinement for R_N; then C6/C7 sampled kernels toward the 10⁶-pair
-end-state test.
+**Next (spine order, updated session 32):** C0 label production
+plumbing into C9 min-plus composition (C6+C7 now emit the unified
+label); B16 successor-face sets and C5 requirement matching on the
+certified B13/B14 bounds; cheaper A20 builds (the C6 amortization
+lever, ~16 s/row today); the carried-gap exact law (ride boundary
+sliver); B22 heading-aware ceiling; direction-aware D* UB; A11
+analytic inversion + short-flight interior coverage; A29/A31 debts.
 
 **Row-list note (session 27):** `Docs/CapabilityChecklist.md` is the
 CANONICAL complete row list (it extends the registry with A29–A32 and
@@ -404,6 +406,23 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23e (session 32): **the composition layer becomes real —
+  A3, C0, C1, C6, C7 v2 all close** (full detail in the checklist
+  change log, the per-session record since session 29). A3 packaged
+  as `CapHull::PlaneOffset` (bitwise vs the world loader, 48/48);
+  C7 v2 aims at the HULL-EXPANDED plane and predicts every contact
+  EXACTLY through the engine's own clip law — capxfer 8/0, contact
+  tick exact 63/63, end position ≤ 1e-4 u, A18 bitwise at all 63
+  contacts; the trace clip fraction f = (d1 − 1/32)/(d1 − d2) is
+  recorded as a terms-table law. C6 v1 verified — capmat 9/0,
+  715,057 real pairs at 270 µs/pair amortized (10⁶ in 4.5 min, no
+  extrapolation), indexed-never-beats-exhaustive 1800/1800, engine
+  witnesses 22/24 with the 2 boundary-fringe declines counted. C0
+  `CapLabel::Transition` unified (compatibility vs quality fields)
+  and emitted by both kernels; C1 cell-local strict dominance
+  property-gated over 38k labels. Sessions 29–31 (A20/A22, the
+  constant-time session, C7 v1 + the interactive dashboard) are
+  logged in `Docs/CapabilityChecklist.md`'s change log.
 - 2026-08-23 (session 28): A19 (ride N-tick turn/gain) built on the
   proven A18 law — capride 7/0, 30/30 witnesses bitwise as engine
   continuations; **THE CONTACT EPSILON discovered and recorded as a

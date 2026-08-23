@@ -15,6 +15,35 @@ ruling, 13c the measured answers to the nine Level-B gates, 13d the
 adversarial-review findings, 15 the standing ruling and the two Stage-A
 finish lines. The change-log tail below is the session journal.
 
+**STATUS 2026-08-23e (session 32): FIVE ROWS CLOSE — EXACT CONTACT
+PREDICTION AND THE PRODUCTION MATRIX.** A3 packaged
+(`CapHull::PlaneOffset`, float-identical to the world loader's own
+hull expansion, gated bitwise 48/48 inside capxfer) and immediately
+consumed: **C7 v2 (capxfer 8/0)** aims its boarding targets at the
+HULL-EXPANDED plane — v1's 1.8–3.7-tick early-contact systematic
+was exactly this missing offset — and the A4 kernel roll predicts
+every contact EXACTLY through the engine's own clip law (fraction
+(d1 − 1/32)/(d1 − d2), end position exactly 1/32 above the traced
+plane, clipped slide for the remaining time): contact tick exact
+63/63, end position within 1e-4 u, A18 ride law bitwise at all 63
+contacts; 61/63 schedules board on the requested tick and the 2
+curved brake paths that board early are predicted exactly and
+counted. **C6 v1 (capmat 9/0)**: per boarding row one A20 surface,
+then the FULL time-resolved matrix through the A22 indexed query —
+715,057 REAL pairs at 270 µs/pair amortized = 10⁶ pairs in 4.5 min
+(the C6 target met without extrapolation; queries alone 3.9 µs
+mean; A20 builds ~16 s/row are the named amortization lever), with
+soundness ridealongs: indexed-never-beats-exhaustive 1800/1800,
+engine witnesses 22/24 (2 boundary-fringe declines counted). **C0
+unified** (`CapLabel::Transition`, compatibility vs quality fields;
+emitted by BOTH kernels — 63 + 38,231 labels) and **C1 certified as
+cell-local strict dominance** (property gates over the emitted set:
+irreflexive, 0 antisymmetry, 0 transitivity violations; no
+uncertified cross-state comparison — that is the honesty boundary).
+Two new terms-table laws recorded: the hull offset off(n) and the
+trace clip fraction. Regression green: capkern 5/5, capboard 5/5,
+capground 6/6, capwindow 6/6, capxfer 8/0, capmat 9/0.
+
 **STATUS 2026-08-23d (session 31): C7 v1 — THE FIRST TRUE
 COMPOSITION VERIFIED; THE INTERACTIVE DASHBOARD OPENED.** capxfer
 4/0: one air exit state answers boarding targets on a destination

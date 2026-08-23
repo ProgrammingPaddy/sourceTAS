@@ -166,7 +166,9 @@ const TERMS = [
  ["stam","stamina","drains 15/tick; scales walk xy by pow(1−st·0.00019, 1.05) and the jump impulse; landing arms nothing"],
  ["duck","duck state (A29 debt)","flag/hull/timer machine, 8.5u air shift, 0.34 speed crop — decoded, domain-stamped OUT of all current families"],
  ["trig","trigger state (A31 debt)","basevel / gravity_scale / teleports — the engine mirror carries them; capability + tests not built"],
- ["end","END box & z-window","Minkowski-expanded finish volume; the exact vertical recurrence prunes crossing scans 12.1×"]
+ ["end","END box & z-window","Minkowski-expanded finish volume; the exact vertical recurrence prunes crossing scans 12.1×"],
+ ["hoff","hull offset off(n)","Minkowski support of the negated hull: −Σ nᵢ·(nᵢ>0 ? minᵢ : maxᵢ). The engine traces the ORIGIN against d + off(n) — every origin-space plane prediction must aim there. Packaged as CapHull::PlaneOffset, float-identical to the world loader (48/48 bitwise)"],
+ ["clipf","trace clip fraction","f = (d1 − 1/32)/(d1 − d2): the trace ends EXACTLY 1/32 above the expanded plane along n, then the clipped move velocity slides the remaining (1−f)·dt. Verified to ≤1e-4 u at all 63 C7 contacts (session 32)"]
 ];
 const D = [
 // id, cat, name, st, terms[], feeds[], deps[], method, alts, eff, suite, detail
@@ -181,10 +183,10 @@ const D = [
 ["A2","A","face slice λ(z)","done",[],["A13","B1"],[],
  "plane algebra","—","~ns","—",
  "A tilted face at fixed height is a 1-D interval — the (T, λ) target parameterization that keeps face-targeting one-dimensional per tick."],
-["A3","A","hull contact geometry","part",[],["A14","A26","A27"],[],
- "Minkowski plane offsets (the engine's own d_stand/d_duck)","analytic contact regions",
- "~ns/plane","—",
- "The world stores hull-expanded plane distances. The C7 transfer measurement shows the practical consequence: the hull's leading edge contacts 1.8–3.7 ticks before the feet-point crossing. A packaged face contact-region API remains open."],
+["A3","A","hull contact geometry","done",["hoff"],["A14","A26","A27","C7"],[],
+ "CapHull::PlaneOffset — Minkowski support of the negated hull, float-identical to the world loader's expansion (d + off(n))","analytic contact regions (edge/bevel regimes, open)",
+ "O(1), ~ns/plane","capxfer 8/0 (A3 gates)",
+ "PACKAGED session 32. The engine never traces the player as a point: brush planes are pre-expanded by off(n) and the trace moves the hull ORIGIN. The capxfer gate checks the packaged offsets bitwise against the world's own d_stand/d_duck/d_unduck (48/48). First consumer: C7 v2 targeting, which collapsed v1's 1.8–3.7-tick early-contact systematic to EXACT contact prediction. The face contact-region API (edges/bevels) remains the named extension."],
 ["A4","A","one-tick air law","done",["s2","c","turn"],["A6","A8","A11","A18","A30"],[],
  "closed law (Strafe::TickLaw) + bitwise kernel (CapAir::KernelTick)",
  "full engine tick (9× slower)","62 ns/tick · 16.0M/s","capkern 5/5",
@@ -359,12 +361,12 @@ const D = [
 ["B22","B","heading-aware speed ceiling (gap row)","todo",["turn","s2"],["B5"],["A6"],
  "the braking-time analysis (the recorded theorem step)","empirical margins (never prune)","target O(1)","—",
  "Closes A6's 180°-at-speed corner and turns heading feasibility into a cull."],
-["C0","C","canonical transition label","part",[],["C1","C9"],[],
- "one fixed exact tuple","—","~ns","—",
- "(dt, E, ψ, vz, loss, …) — the fields exist across the code; the unified struct is the composition layer's first packaging task."],
-["C1","C","local Pareto comparison","todo",[],[],["C0"],
- "dominance over the tuple","scalarization (banned as truth)","~ns/pair","—",
- "Retain alternatives that trade time/resource/heading — the anti-collapse rule at composition level."],
+["C0","C","canonical transition label","done",[],["C1","C9"],[],
+ "CapLabel::Transition — ONE struct, fields split by role: compatibility (kind, u/v, ψ, vz, sf) vs quality (dt↓, s2↑, loss2↓)","—","~ns","capxfer 8/0 + capmat 9/0 (emission)",
+ "UNIFIED session 32 and emitted by BOTH kernels: C7 (63 labels at verified transfer contacts) and C6 (38,231 labels across the production matrix). Compatibility fields locate the successor state and are never ordered; quality fields carry certified directions only (ticks by decree, s² by the coast monotonicity theorem, loss because it subtracts from s² exactly)."],
+["C1","C","local Pareto comparison","done",[],[],["C0"],
+ "CapLabel::Dominates — CELL-LOCAL strict dominance: compatibility fields must share a cell at the caller's pitch; within a cell, ≥ in every quality direction and > in one","scalarization (banned as truth)","~ns/pair","capmat 9/0 (property gates)",
+ "Session 32: no monotonicity theorem in ψ/vz/position is certified, so dominance never compares across compatibility cells — that is the honesty boundary. Property-gated over the 38k emitted labels: irreflexive, 0 antisymmetry violations, 0 transitivity violations in 706 sampled chains. Retaining alternatives that trade time/resource/heading remains the anti-collapse rule."],
 ["C2","C","board-quality projection","todo",["vdn"],[],["C0","A16"],
  "projection of the label","—","~ns","—","Projections inform ordering; they never admit or prune."],
 ["C3","C","ride-quality projection","todo",[],[],["C0"],
@@ -374,15 +376,15 @@ const D = [
 ["C5","C","successor-requirement match","des",["s2","vdn"],[],["B13","B14"],
  "interval test against the certified minimums","—","~ns","—",
  "Value an exit by what the NEXT capability requires — the speed-compounding explainer, now buildable on certified B13/B14."],
-["C6","C","sampled board→exit kernel","part",["ceps"],[],["A22"],
- "batch the A22 indexed queries over sampled pairs","on-demand + memo",
- "0.2–0.3 µs/query measured; matrix production run pending","capexit (machinery)",
- "The left half of the two-ramp transfer table; the query engine exists and is measured — the matrix production harness is the remaining step."],
-["C7","C","sampled exit→board kernel","part",["vert","revs"],[],["A11","A13","B13"],
- "the capxfer composition: vertical timetable → face slices → O(1) culls → batch A11 → engine verification",
+["C6","C","sampled board→exit kernel","done",["ceps"],[],["A22"],
+ "the capmat production loop: per boarding row ONE A20 surface, then the FULL time-resolved matrix (every horizon × every in-plane cell) through the A22 indexed query","on-demand + memo",
+ "715,057 REAL pairs at 270 µs/pair amortized = 10⁶ in 4.5 min · queries alone 3.9 µs mean · builds ~16 s/row","capmat 9/0",
+ "VERIFIED v1 (session 32): the C6 target — 10⁶ pairs in minutes — met with real pairs, no extrapolation. Rows are engine-settled boarding states (speed × cross-slope grid); soundness rides along: the indexed answer never beats the exhaustive scan (1800/1800 sampled) and engine-replayed witnesses validate 22/24 (2 boundary-fringe declines, counted not hidden). Builds dominate the amortized cost — cheaper A20 builds are the named lever."],
+["C7","C","sampled exit→board kernel","done",["vert","revs","hoff","clipf"],[],["A11","A13","B13"],
+ "the capxfer composition: A1 vertical timetable → A2+A3 HULL-EXPANDED face slices → B13 O(1) culls → batch A11 → A4 kernel roll predicting the contact EXACTLY (clip fraction + clipped slide) → engine verification",
  "reach-table per start (measured 4–5 orders slower to first answer); shooting",
- "organize ~3.5 ms/start · fast path ~100 µs/target · fallback-heavy targets ~5 ms","capxfer 4/0",
- "VERIFIED v1 (session 31): transfers from an air exit state onto a destination ramp land within 1.8–3.7 ticks and 13–24u of prediction, with the A18 ride law bitwise at all 62 contact ticks. The hull's early-contact offset (A3) is the measured systematic; anticipating it is the v2 refinement."],
+ "organize ~3.5 ms/start · ~100 µs/target fast path · prediction roll ~5 µs","capxfer 8/0",
+ "VERIFIED v2 (session 32): contact tick EXACT 63/63, end position within 1e-4 u of prediction, A18 ride law bitwise at all 63 contacts. v1's 1.8–3.7-tick systematic was exactly the missing hull offset; v2 aims at the expanded plane and predicts the contact through the engine's own clip law — fraction (d1−1/32)/(d1−d2), end exactly 1/32 above the plane, clipped slide for the remaining time. 61/63 solved schedules board on the requested tick; 2 curved brake paths board early — predicted exactly, counted honestly. Interior-coverage amber inherited from A11."],
 ["C8","C","composition without re-simulation","part",[],[],[],
  "memoized exact results (repeat-share measured 84–85%)","—","hit ~ns","—",
  "The batch/organize-once pattern IS this row's production form; a shared memo store remains open."],
@@ -558,7 +560,7 @@ document.body.addEventListener('click', e => {
 
 document.getElementById('foot').textContent =
   'SourceTAS Capability Library · living dashboard · canonical text: Docs/CapabilityChecklist.md · '
-  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 31 (2026-08-23)';
+  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 32 (2026-08-23)';
 render();
 renderTerms();
 </script>

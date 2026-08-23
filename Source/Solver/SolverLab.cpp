@@ -16596,20 +16596,405 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
-	// ================= capxfer: registry C7 v1 - the exit->board
-	// TRANSFER KERNEL (session 31): one air exit state -> many
+	// ================= capmat: registry C6 v1 - the sampled
+	// board->exit PRODUCTION HARNESS (session 32): batch the A22 v2
+	// indexed target queries over a real matrix of (boarding state,
+	// exit target) pairs and measure the production rate against the
+	// C6 target (10^6 pairs in minutes). Rows are engine-anchored
+	// boarding states (varied entry speed and cross-slope push, each
+	// settled into ride contact by the engine); per row ONE A20
+	// ride-reach surface is built and then answers every (horizon,
+	// in-plane target) query in constant time via the cell index.
+	// Soundness gates ride along: sampled exhaustive cross-checks
+	// (the indexed answer can never beat the exhaustive scan), and
+	// engine-replayed witnesses for sampled answered pairs (the A20
+	// DECLINE semantics: boundary-fringe candidates the engine
+	// rejects are counted, not hidden). Answered pairs emit the C0
+	// canonical transition label (kind 1 = board->exit) and the C1
+	// dominance comparator is property-tested over the emitted set:
+	// irreflexive, antisymmetric, transitive, cell-local only.
+	int CmdCapMat(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("capmat: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		unsigned rng = 0xC6C6C6C6u;
+		auto rnd = [&]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		std::vector<CapLabel::Transition> labels;
+		long long pairs_total = 0, answered_total = 0;
+		double build_ms_total = 0.0, query_us_total = 0.0;
+		int xchk_n = 0, xchk_ok = 0;
+		double xchk_gap_sum = 0.0, xchk_gap_max = 0.0;
+		const float ralphas[2] = { 50.f, 60.f };
+		for (int ia = 0; ia < 2; ++ia) {
+			World w2;
+			Vec3 n;
+			if (!CapBoard::MakeRampWorld(&w2, o.hulls, ralphas[ia],
+				0.f, &n)) {
+				printf("capmat: ramp world %d failed\n", ia);
+				return 1;
+			}
+			// ---- the boarding-state rows: entry speed x cross-slope
+			// push, engine-settled into ride contact
+			const float speeds[3] = { 350.f, 450.f, 550.f };
+			const float crosses[3] = { -80.f, 0.f, 80.f };
+			std::vector<PlayerState> starts;
+			Vec3 dsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+			dsl = Scale(dsl, 1.f / Len(dsl));
+			const Vec3 csl = Cross(n, dsl);
+			for (int is = 0; is < 3
+				&& static_cast<int>(starts.size()) < 6; ++is) {
+				for (int ic = 0; ic < 3
+					&& static_cast<int>(starts.size()) < 6; ++ic) {
+					PlayerState s;
+					s.pos = Vec3(n.X * 80.f, n.Y * 80.f,
+						n.Z * 80.f);
+					s.vel = Vec3(
+						dsl.X * speeds[is] + csl.X * crosses[ic]
+							- n.X * 40.f,
+						dsl.Y * speeds[is] + csl.Y * crosses[ic]
+							- n.Y * 40.f,
+						dsl.Z * speeds[is] + csl.Z * crosses[ic]
+							- n.Z * 40.f);
+					int contacts = 0;
+					for (int t = 0; t < 60 && contacts < 3; ++t) {
+						const float s2d = Len2D(s.vel);
+						const float h = s2d > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : 0.f;
+						TickEvents ev;
+						MoveTick(s, w2, p, 0.f, h * 57.2957795f,
+							0.f, 0.f, 0.f, 0, &ev);
+						if (ev.ncontacts > 0)
+							contacts++;
+					}
+					if (contacts >= 3)
+						starts.push_back(s);
+				}
+			}
+			snprintf(buf, sizeof(buf), "ramp %.0f: %d/6 entry rows "
+				"engine-settled into ride contact", ralphas[ia],
+				static_cast<int>(starts.size()));
+			char nm[64];
+			snprintf(nm, sizeof(nm), "C6 rows settle [%.0f deg]",
+				ralphas[ia]);
+			check(nm, static_cast<int>(starts.size()) >= 5, buf);
+			// ---- per row: one surface build, then the target sweep
+			long long a_pairs = 0, a_answered = 0;
+			int builds_ok = 0;
+			std::vector<CapRideReach::RRSurface> surfs(
+				starts.size());
+			for (size_t r = 0; r < starts.size(); ++r) {
+				CapRideReach::RRParams pp;
+				pp.n_max = 48;
+				CapRideReach::RRSurface& S = surfs[r];
+				CapRideReach::BuildRideReach(pp, p, n,
+					starts[r].pos, starts[r].vel,
+					starts[r].surface_friction, &S);
+				build_ms_total += S.build_ms;
+				if (!S.aborted)
+					builds_ok++;
+				// the FULL time-resolved matrix: every horizon this
+				// surface holds (the production consumer's shape -
+				// builds amortize over all of it)
+				for (int N = 4; N <= 48; ++N) {
+					const std::vector<CapRideReach::RRNode>& L =
+						S.layers[static_cast<size_t>(N)];
+					if (L.empty())
+						continue;
+					const auto tq0 =
+						std::chrono::steady_clock::now();
+					// bbox of the layer in the in-plane frame
+					float umin = 1e30f, umax = -1e30f;
+					float vmin = 1e30f, vmax = -1e30f;
+					for (size_t ni = 0; ni < L.size(); ++ni) {
+						const float rx = L[ni].px - S.pos0.X;
+						const float ry = L[ni].py - S.pos0.Y;
+						const float rz = L[ni].pz - S.pos0.Z;
+						const float u = rx * S.dsl.X + ry * S.dsl.Y
+							+ rz * S.dsl.Z;
+						const float v = rx * S.csl.X + ry * S.csl.Y
+							+ rz * S.csl.Z;
+						if (u < umin) umin = u;
+						if (u > umax) umax = u;
+						if (v < vmin) vmin = v;
+						if (v > vmax) vmax = v;
+					}
+					// the target lattice: quarter-cell step over
+					// the bbox plus one cell of margin
+					const float step = S.p.hp * 0.25f;
+					const float u0 = umin - S.p.hp;
+					const float u1 = umax + S.p.hp;
+					const float v0 = vmin - S.p.hp;
+					const float v1 = vmax + S.p.hp;
+					for (float tu = u0; tu <= u1; tu += step) {
+						for (float tv = v0; tv <= v1; tv += step) {
+							float res = 1e30f;
+							const int node =
+								CapRideReach::QueryTargetFast(S,
+									N, tu, tv, &res);
+							a_pairs++;
+							const bool hit = node >= 0
+								&& res <= 96.f;
+							if (hit)
+								a_answered++;
+							// sampled exhaustive cross-check: the
+							// indexed residual can never beat the
+							// full scan
+							if ((a_pairs % 397) == 0) {
+								float rex = 1e30f;
+								const int nex =
+									CapRideReach::QueryTarget(S,
+										N, tu, tv, &rex);
+								xchk_n++;
+								const double gap =
+									static_cast<double>(res)
+									- static_cast<double>(rex);
+								if (nex >= 0 && gap >= -1e-3) {
+									xchk_ok++;
+									if (gap > 0.0) {
+										xchk_gap_sum += gap;
+										if (gap > xchk_gap_max)
+											xchk_gap_max = gap;
+									}
+								}
+							}
+							// C0 emission: sampled answered pairs
+							if (hit && (a_answered & 15) == 0) {
+								const CapRideReach::RRNode& nd =
+									L[static_cast<size_t>(node)];
+								CapLabel::Transition Lb;
+								Lb.kind = 1;
+								Lb.sf_quarter = nd.sf;
+								Lb.dt = N;
+								const float rx = nd.px - S.pos0.X;
+								const float ry = nd.py - S.pos0.Y;
+								const float rz = nd.pz - S.pos0.Z;
+								Lb.u = rx * S.dsl.X + ry * S.dsl.Y
+									+ rz * S.dsl.Z;
+								Lb.v = rx * S.csl.X + ry * S.csl.Y
+									+ rz * S.csl.Z;
+								Lb.psi = atan2f(nd.vy, nd.vx);
+								Lb.vz = nd.vz;
+								Lb.s2 = nd.vx * nd.vx
+									+ nd.vy * nd.vy;
+								Lb.loss2 = 0.f;
+								labels.push_back(Lb);
+							}
+						}
+					}
+					query_us_total += std::chrono::duration<
+						double, std::micro>(
+						std::chrono::steady_clock::now()
+						- tq0).count();
+				}
+			}
+			pairs_total += a_pairs;
+			answered_total += a_answered;
+			snprintf(nm, sizeof(nm), "A20 builds [%.0f deg]",
+				ralphas[ia]);
+			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d surfaces "
+				"built un-aborted", ralphas[ia], builds_ok,
+				static_cast<int>(starts.size()));
+			check(nm, builds_ok == static_cast<int>(starts.size()),
+				buf);
+			printf("capmat: ---- ramp %.0f deg: %lld pairs, %lld "
+				"answered (res <= 96u) across %d rows, horizons "
+				"4..48 ----\n", ralphas[ia], a_pairs,
+				a_answered, static_cast<int>(starts.size()));
+			// ---- witness gate: sampled layer-48 reach nodes (the
+			// carriers of the matrix's answers) replay through the
+			// ENGINE (A20 DECLINE semantics: witnesses that leave
+			// the face are the recorded boundary fringe, counted
+			// honestly)
+			{
+				int tried = 0, validated = 0, fringe = 0,
+					landed_off = 0;
+				const int N = 48;
+				for (int it = 0; it < 200 && tried < 12; ++it) {
+					const size_t r = rnd() % surfs.size();
+					const CapRideReach::RRSurface& S = surfs[r];
+					const std::vector<CapRideReach::RRNode>& L =
+						S.layers[static_cast<size_t>(N)];
+					if (L.empty())
+						continue;
+					const int node = static_cast<int>(rnd()
+						% static_cast<unsigned>(L.size()));
+					tried++;
+					std::vector<signed char> ws;
+					std::vector<float> wc;
+					CapRideReach::WitnessRR(S, N, node, &ws, &wc);
+					PlayerState s = starts[r];
+					bool left = false;
+					for (size_t k2 = 0; k2 < ws.size(); ++k2) {
+						const float s2d = Len2D(s.vel);
+						const float h = s2d > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : 0.f;
+						float yaw = h * 57.2957795f;
+						float fmv = 0.f, smv = 0.f;
+						if (ws[k2] != 0 && s2d > 1.f)
+							Air::WishInputs(h,
+								static_cast<int>(ws[k2]), wc[k2],
+								&yaw, &fmv, &smv);
+						TickEvents ev;
+						MoveTick(s, w2, p, 0.f, yaw, fmv, smv,
+							0.f, 0, &ev);
+						if (ev.ncontacts == 0) {
+							left = true;
+							break;
+						}
+					}
+					if (left) {
+						fringe++;
+						continue;
+					}
+					const CapRideReach::RRNode& nd =
+						L[static_cast<size_t>(node)];
+					const float dx = s.pos.X - nd.px;
+					const float dy = s.pos.Y - nd.py;
+					const float dz = s.pos.Z - nd.pz;
+					const float dev = sqrtf(dx * dx + dy * dy
+						+ dz * dz);
+					if (dev <= 96.f)
+						validated++;
+					else
+						landed_off++;
+				}
+				snprintf(nm, sizeof(nm), "C6 witnesses [%.0f deg]",
+					ralphas[ia]);
+				snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d "
+					"engine-validated within 96u (%d boundary "
+					"fringe, %d landed off)", ralphas[ia],
+					validated, tried, fringe, landed_off);
+				check(nm, tried >= 10 && validated >= (tried * 2)
+					/ 3 && landed_off == 0, buf);
+			}
+		}
+		// ---- the production rate against the C6 target
+		{
+			const double wall_s = (build_ms_total
+				+ query_us_total / 1000.0) / 1000.0;
+			const double us_per_pair = pairs_total
+				? (build_ms_total * 1000.0 + query_us_total)
+					/ static_cast<double>(pairs_total)
+				: 1e30;
+			const double min_per_1e6 = us_per_pair * 1e6 / 6e7;
+			printf("capmat: TOTAL %lld pairs (%lld answered) | "
+				"builds %.1f s + queries %.2f s = %.1f s wall | "
+				"amortized %.2f us/pair -> 10^6 pairs in %.2f min "
+				"| query-only mean %.2f us\n", pairs_total,
+				answered_total, build_ms_total / 1000.0,
+				query_us_total / 1e6, wall_s, us_per_pair,
+				min_per_1e6,
+				pairs_total ? query_us_total
+					/ static_cast<double>(pairs_total) : 0.0);
+			snprintf(buf, sizeof(buf), "%lld real pairs at %.2f "
+				"us/pair amortized = 10^6 in %.2f min (target: "
+				"minutes)", pairs_total, us_per_pair, min_per_1e6);
+			check("C6 production rate", pairs_total >= 500000
+				&& min_per_1e6 <= 10.0, buf);
+			snprintf(buf, sizeof(buf), "%d/%d sampled exhaustive "
+				"cross-checks (indexed never beats full scan; "
+				"mean gap %.3f u, max %.3f u)", xchk_ok, xchk_n,
+				xchk_n ? xchk_gap_sum / xchk_n : 0.0,
+				xchk_gap_max);
+			check("A22 indexed vs exhaustive", xchk_n >= 1000
+				&& xchk_ok == xchk_n, buf);
+		}
+		// ---- C0/C1: property gates over the emitted labels
+		{
+			const int nl = static_cast<int>(labels.size());
+			bool irr_ok = true;
+			for (int i = 0; i < nl; ++i)
+				if (CapLabel::Dominates(labels[
+					static_cast<size_t>(i)],
+					labels[static_cast<size_t>(i)]))
+					irr_ok = false;
+			int anti_bad = 0, trans_bad = 0, trans_n = 0;
+			for (int it = 0; it < 30000 && nl >= 3; ++it) {
+				const CapLabel::Transition& a = labels[rnd()
+					% static_cast<unsigned>(nl)];
+				const CapLabel::Transition& b = labels[rnd()
+					% static_cast<unsigned>(nl)];
+				const CapLabel::Transition& c = labels[rnd()
+					% static_cast<unsigned>(nl)];
+				if (CapLabel::Dominates(a, b)
+					&& CapLabel::Dominates(b, a))
+					anti_bad++;
+				if (CapLabel::Dominates(a, b)
+					&& CapLabel::Dominates(b, c)) {
+					trans_n++;
+					if (!CapLabel::Dominates(a, c))
+						trans_bad++;
+				}
+			}
+			// cell-local dominance share (pitch 64u / 10 deg / 50)
+			int comp_pairs = 0, dom_pairs = 0;
+			for (int it = 0; it < 30000 && nl >= 2; ++it) {
+				const CapLabel::Transition& a = labels[rnd()
+					% static_cast<unsigned>(nl)];
+				const CapLabel::Transition& b = labels[rnd()
+					% static_cast<unsigned>(nl)];
+				if (!CapLabel::SameCell(a, b, 64.f, 0.17453293f,
+					50.f))
+					continue;
+				comp_pairs++;
+				if (CapLabel::Dominates(a, b)
+					|| CapLabel::Dominates(b, a))
+					dom_pairs++;
+			}
+			printf("capmat: C0 labels emitted %d | C1 sampled "
+				"comparable pairs %d, dominated %d\n", nl,
+				comp_pairs, dom_pairs);
+			snprintf(buf, sizeof(buf), "%d labels: irreflexive %s, "
+				"antisymmetry violations %d, transitivity "
+				"violations %d/%d chains", nl,
+				irr_ok ? "yes" : "NO", anti_bad, trans_bad,
+				trans_n);
+			check("C1 partial-order laws", nl >= 500 && irr_ok
+				&& anti_bad == 0 && trans_bad == 0, buf);
+		}
+		printf("capmat: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "C6 v1 BOARD->EXIT PRODUCTION MATRIX "
+				"VERIFIED AT THE MEASURED RATE"
+				: "C6 RED - a gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
+	// ================= capxfer: registry C7 v2 - the exit->board
+	// TRANSFER KERNEL (sessions 31-32): one air exit state -> many
 	// boarding targets on a destination ramp. The composition under
 	// test: A1 (deterministic vertical) picks each target's arrival
-	// tick, A2 gives the face's slice line at that tick, B13/B2 culls
-	// prune infeasible targets in constant time, batch A11 solves the
-	// horizontal problem in ~100 us per target (the certified
-	// vz-decoupling makes the horizontal schedule valid under the
-	// real vertical), and the ENGINE verifies: the replay must
-	// first-contact the ramp near the target near the predicted tick,
-	// with the contact tick's velocity matching the proven A18 law
-	// bitwise. Method choice tested, not assumed: the reach-table
-	// alternative costs 30-100+ s per start before its first answer
-	// (measured, session 29); batch A11 organizes in ~1 ms.
+	// tick, A2+A3 give the face's HULL-EXPANDED slice line at that
+	// tick (v2: targets sit on the plane the engine actually traces
+	// against, d + CapHull::PlaneOffset(n) - v1 aimed at the raw
+	// brush plane and measured the hull's leading edge arriving
+	// 1.8-3.7 ticks early), B13/B2 culls prune infeasible targets in
+	// constant time, batch A11 solves the horizontal problem in ~100
+	// us per target (the certified vz-decoupling makes the horizontal
+	// schedule valid under the real vertical), the certified air
+	// kernel rolls each solved schedule to PREDICT the contact
+	// exactly (the crossing segment against the expanded plane, the
+	// engine's own clip fraction (d1 - 1/32)/(d1 - d2), the clipped
+	// slide of the remaining time), and the ENGINE verifies: first
+	// contact on the EXACT predicted tick, end position within 1u,
+	// contact-tick velocity matching the proven A18 law bitwise.
+	// Braked interior schedules whose curved path crosses the face
+	// before the requested tick are counted as early boardings -
+	// predicted exactly, attained honestly. Verified transfers emit
+	// the C0 canonical transition label. Method tested, not assumed:
+	// the reach-table alternative costs 30-100+ s per start before
+	// its first answer (measured, session 29); batch A11 organizes in
+	// ~1 ms.
 	int CmdCapXfer(const ReplayOpts& o) {
 		const MoveParams& p = o.params;
 		int pass = 0, fail = 0;
@@ -16631,7 +17016,43 @@ namespace {
 				printf("capxfer: ramp world %d failed\n", ia);
 				return 1;
 			}
-			const float cot_a = n.Z / (-n.X);   // cos/sin, n.X < 0
+			// ---- A3 gate: the packaged offsets are BITWISE the
+			// world loader's own expansions, every plane, all three
+			// hulls
+			{
+				int planes = 0, exact = 0;
+				for (size_t bi = 0; bi < w2.brushes.size(); ++bi) {
+					const WorldBrush& wb = w2.brushes[bi];
+					for (size_t pi = 0; pi < wb.n.size(); ++pi) {
+						planes += 3;
+						const float es = wb.d[pi]
+							+ CapHull::PlaneOffsetHull(o.hulls,
+								wb.n[pi], 0);
+						const float ed = wb.d[pi]
+							+ CapHull::PlaneOffsetHull(o.hulls,
+								wb.n[pi], 1);
+						const float eu = wb.d[pi]
+							+ CapHull::PlaneOffsetHull(o.hulls,
+								wb.n[pi], 2);
+						if (memcmp(&es, &wb.d_stand[pi], 4) == 0)
+							exact++;
+						if (memcmp(&ed, &wb.d_duck[pi], 4) == 0)
+							exact++;
+						if (memcmp(&eu, &wb.d_unduck[pi], 4) == 0)
+							exact++;
+					}
+				}
+				char nm[64];
+				snprintf(nm, sizeof(nm), "A3 offsets bitwise [%.0f "
+					"deg]", ralphas[ia]);
+				snprintf(buf, sizeof(buf), "%d/%d expanded plane "
+					"distances match d_stand/d_duck/d_unduck",
+					exact, planes);
+				check(nm, planes > 0 && exact == planes, buf);
+			}
+			// the boarding plane the engine traces the origin
+			// against: n.p = d + off, d = 0 (face through origin)
+			const float off = CapHull::PlaneOffsetHull(o.hulls, n, 0);
 			// the exit state (the previous ramp's departure): well
 			// behind and above the face, flying toward it
 			const Vec3 xpos(-550.f, 0.f, 250.f);
@@ -16652,8 +17073,16 @@ namespace {
 			// target grid: arrival ticks whose face slice sits in
 			// the boarding band, lateral offsets across the face
 			int targets = 0, culled = 0, solved = 0, contacts = 0;
-			int tick_ok = 0, pos_ok = 0, law_ok = 0, law_n = 0;
-			double us_solve = 0.0, sum_terr = 0.0, sum_perr = 0.0;
+			int law_ok = 0, law_n = 0;
+			int no_cross = 0, early_cross = 0, pred_tick_ok = 0;
+			int attained = 0;
+			double us_solve = 0.0, sum_pend = 0.0, sum_tdist = 0.0;
+			float max_pend = 0.f, max_tdist = 0.f;
+			std::vector<CapLabel::Transition> labels;
+			// the face's in-plane basis (for C0 label positions)
+			Vec3 fdsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+			fdsl = Scale(fdsl, 1.f / Len(fdsl));
+			const Vec3 fcsl = Cross(n, fdsl);
 			CapP2P::P2PBatch B;
 			int batchN = -1;
 			double us_organize = 0.0;
@@ -16661,9 +17090,12 @@ namespace {
 				const float zT = zt[T];
 				if (zT > -40.f || zT < -700.f)
 					continue;   // outside the boarding band
-				const float xT = zT * cot_a;   // the slice line
 				for (float y = -300.f; y <= 300.f; y += 100.f) {
 					targets++;
+					// the slice line ON THE EXPANDED PLANE (A2+A3):
+					// n.x xT + n.y y + n.z zT = off
+					const float xT = (off - n.Z * zT - n.Y * y)
+						/ n.X;
 					// constant-time culls first (B13 necessary
 					// departure speed vs the actual exit speed)
 					const float dx = xT - xpos.X;
@@ -16703,11 +17135,76 @@ namespace {
 					if (!res.solved)
 						continue;
 					solved++;
+					// ---- KERNEL PREDICTION (A4 + A3): roll the
+					// schedule through the certified air kernel and
+					// find the tick whose motion segment crosses
+					// the hull-expanded plane. The engine's own
+					// clip law then fixes the whole contact: the
+					// fraction (d1 - 1/32)/(d1 - d2) leaves the
+					// origin exactly 1/32 above the traced plane
+					// along the ray, and the clipped move velocity
+					// slides the remaining time. The move velocity
+					// IS the kernel position delta over dt (the
+					// position law), so no mid-chain state is
+					// re-derived.
+					int pred_tick = -1;
+					Vec3 pred_end;
+					{
+						float kx = xpos.X, ky = xpos.Y,
+							kz = xpos.Z;
+						float kvx = xvel.X, kvy = xvel.Y,
+							kvz = xvel.Z;
+						for (int t = 0; t < 95 && pred_tick < 0;
+							++t) {
+							const signed char ds = t < res.sched.n
+								? res.sched.side[t] : 0;
+							const float cca = t < res.sched.n
+								? res.sched.cosa[t] : 1.f;
+							float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+							CapAir::KernelTick(k, kx, ky, kz, kvx,
+								kvy, kvz, ds, cca, &nx2, &ny2,
+								&nz2, &nvx2, &nvy2, &nvz2);
+							const float da = n.X * kx + n.Y * ky
+								+ n.Z * kz - off;
+							const float db = n.X * nx2 + n.Y * ny2
+								+ n.Z * nz2 - off;
+							if (db <= 0.f && da > 0.f) {
+								float fe = (da - 0.03125f)
+									/ (da - db);
+								if (fe < 0.f)
+									fe = 0.f;
+								const Vec3 C(
+									kx + (nx2 - kx) * fe,
+									ky + (ny2 - ky) * fe,
+									kz + (nz2 - kz) * fe);
+								const Vec3 vm(
+									(nx2 - kx) / p.dt,
+									(ny2 - ky) / p.dt,
+									(nz2 - kz) / p.dt);
+								Vec3 vc;
+								Fn::ClipVelocity(vm, n, &vc);
+								const float rem = (1.f - fe)
+									* p.dt;
+								pred_end = Vec3(C.X + vc.X * rem,
+									C.Y + vc.Y * rem,
+									C.Z + vc.Z * rem);
+								pred_tick = t + 1;
+							}
+							kx = nx2; ky = ny2; kz = nz2;
+							kvx = nvx2; kvy = nvy2; kvz = nvz2;
+						}
+					}
+					if (pred_tick < 0) {
+						no_cross++;
+						continue;
+					}
+					if (pred_tick < T)
+						early_cross++;
 					// ---- ENGINE VERIFICATION: replay from the
-					// exit state in the ramp world; the flight
-					// must first-contact near the target near T,
-					// and the contact tick's velocity must match
-					// the proven ride law bitwise
+					// exit state in the ramp world; first contact
+					// must land on the predicted tick at the
+					// predicted position, with the contact tick's
+					// velocity matching the proven A18 law bitwise
 					PlayerState s;
 					s.pos = xpos;
 					s.vel = xvel;
@@ -16742,18 +17239,29 @@ namespace {
 					if (t_contact < 0)
 						continue;
 					contacts++;
-					const float terr = fabsf(
-						static_cast<float>(t_contact - T));
-					sum_terr += terr;
-					if (terr <= 3.f)
-						tick_ok++;
-					const float pdx = cpos.X - xT;
-					const float pdy = cpos.Y - y;
-					const float perr = sqrtf(pdx * pdx
-						+ pdy * pdy);
-					sum_perr += perr;
-					if (perr <= 96.f)
-						pos_ok++;
+					if (t_contact == pred_tick)
+						pred_tick_ok++;
+					const float pex = cpos.X - pred_end.X;
+					const float pey = cpos.Y - pred_end.Y;
+					const float pez = cpos.Z - pred_end.Z;
+					const float pend = sqrtf(pex * pex + pey * pey
+						+ pez * pez);
+					sum_pend += pend;
+					if (pend > max_pend)
+						max_pend = pend;
+					// requested-target attainment (a curved braked
+					// path may legitimately board early; counted,
+					// not hidden)
+					if (pred_tick >= T && pred_tick <= T + 1) {
+						attained++;
+						const float tdx = cpos.X - xT;
+						const float tdy = cpos.Y - y;
+						const float td = sqrtf(tdx * tdx
+							+ tdy * tdy);
+						sum_tdist += td;
+						if (td > max_tdist)
+							max_tdist = td;
+					}
 					// the contact tick's velocity vs the proven
 					// A18 law (velocity is fraction-independent)
 					if (law_n < 40) {
@@ -16776,6 +17284,23 @@ namespace {
 								== 0)
 							law_ok++;
 					}
+					// C0: every verified transfer emits the ONE
+					// canonical transition label
+					CapLabel::Transition L;
+					L.kind = 0;
+					L.sf_quarter = csf < 0.5f ? 1 : 0;
+					L.dt = t_contact;
+					L.u = cpos.X * fdsl.X + cpos.Y * fdsl.Y
+						+ cpos.Z * fdsl.Z;
+					L.v = cpos.X * fcsl.X + cpos.Y * fcsl.Y
+						+ cpos.Z * fcsl.Z;
+					L.psi = atan2f(s.vel.Y, s.vel.X);
+					L.vz = s.vel.Z;
+					L.s2 = s.vel.X * s.vel.X + s.vel.Y * s.vel.Y;
+					const float pre2 = cvel_pre.X * cvel_pre.X
+						+ cvel_pre.Y * cvel_pre.Y;
+					L.loss2 = pre2 > L.s2 ? pre2 - L.s2 : 0.f;
+					labels.push_back(L);
 				}
 			}
 			printf("capxfer: ---- ramp %.0f deg: %d targets = %d "
@@ -16784,21 +17309,49 @@ namespace {
 				"----\n", ralphas[ia], targets, culled, solved,
 				us_organize / 1000.0,
 				solved ? us_solve / solved : 0.0, contacts);
-			printf("capxfer:   contact tick err mean %.1f (within 3 "
-				"ticks: %d/%d) | contact pos err mean %.1f u "
-				"(within 96u: %d/%d) | A18 law bitwise at "
-				"contact: %d/%d\n",
-				contacts ? sum_terr / contacts : 0.0, tick_ok,
-				contacts, contacts ? sum_perr / contacts : 0.0,
-				pos_ok, contacts, law_ok, law_n);
+			printf("capxfer:   kernel prediction: contact tick exact "
+				"%d/%d | end position dev mean %.4f max %.4f u | "
+				"early-boarding paths %d, no-cross %d\n",
+				pred_tick_ok, contacts,
+				contacts ? sum_pend / contacts : 0.0, max_pend,
+				early_cross, no_cross);
+			printf("capxfer:   requested-target attainment: %d/%d "
+				"on the requested tick (contact-to-target dist "
+				"mean %.1f max %.1f u) | A18 law bitwise at "
+				"contact: %d/%d\n", attained, solved,
+				attained ? sum_tdist / attained : 0.0, max_tdist,
+				law_ok, law_n);
+			// C1 over the emitted labels (cell pitch: 64u, 10 deg,
+			// 50 u/s)
+			{
+				int dompairs = 0;
+				for (size_t i = 0; i < labels.size(); ++i)
+					for (size_t j = 0; j < labels.size(); ++j)
+						if (i != j && CapLabel::SameCell(labels[i],
+							labels[j], 64.f, 0.17453293f, 50.f)
+							&& CapLabel::Dominates(labels[i],
+								labels[j]))
+							dompairs++;
+				printf("capxfer:   C0 labels emitted: %d verified "
+					"transfers | C1 cell-local dominated pairs: "
+					"%d\n", static_cast<int>(labels.size()),
+					dompairs);
+			}
 			char nm[64];
-			snprintf(nm, sizeof(nm), "C7 transfers land [%.0f deg]",
-				ralphas[ia]);
-			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d contacts "
-				"within 3 ticks and %d/%d within 96u of target",
-				ralphas[ia], tick_ok, contacts, pos_ok, contacts);
-			check(nm, contacts >= 20 && tick_ok >= (contacts * 9)
-				/ 10 && pos_ok >= (contacts * 9) / 10, buf);
+			snprintf(nm, sizeof(nm), "C7 v2 prediction exact [%.0f "
+				"deg]", ralphas[ia]);
+			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d contact "
+				"ticks exact, end position within 1u (max dev "
+				"%.4f)", ralphas[ia], pred_tick_ok, contacts,
+				max_pend);
+			check(nm, contacts >= 20 && pred_tick_ok == contacts
+				&& max_pend <= 1.f, buf);
+			snprintf(nm, sizeof(nm), "C7 targets attained [%.0f "
+				"deg]", ralphas[ia]);
+			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d solved "
+				"schedules board on the requested tick",
+				ralphas[ia], attained, solved);
+			check(nm, attained >= 20, buf);
 			snprintf(nm, sizeof(nm), "A18 law at contact [%.0f "
 				"deg]", ralphas[ia]);
 			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d contact "
@@ -16806,8 +17359,8 @@ namespace {
 			check(nm, law_n >= 10 && law_ok == law_n, buf);
 		}
 		printf("capxfer: %d passed, %d failed | %s\n", pass, fail,
-			fail == 0 ? "C7 v1 EXIT->BOARD TRANSFER KERNEL "
-				"VERIFIED"
+			fail == 0 ? "C7 v2 EXIT->BOARD TRANSFER KERNEL "
+				"VERIFIED (A3-EXPANDED TARGETING)"
 				: "C7 RED - a composition gate failed");
 		fflush(stdout);
 		return fail == 0 ? 0 : 2;
@@ -22783,6 +23336,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapXfer(o);
+	}
+	if (cmd == "capmat") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapMat(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;
