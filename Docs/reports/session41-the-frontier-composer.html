@@ -1,0 +1,166 @@
+<title>The Frontier Composer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .callout{background:var(--blue-soft); border:1px solid var(--blue); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout b{color:var(--blue)}
+  .callout2{background:var(--amber-soft); border:1px solid var(--amber); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout2 b{color:var(--amber)}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 41</div>
+  <h1>The Frontier Composer</h1>
+  <p class="sub">The checklist gains its function inventory — every function behind every
+  capability and every term, in both files — and composition opens: C9's min-plus route
+  composer lands certified, with a measured proof that its Pareto frontier is load-bearing.</p>
+  <div class="meta">
+    <span>2026-08-23</span>
+    <span>cappath 6/0 · 97 functions inventoried · C9 CERTIFIED</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">Functions inventoried</div><div class="v">97</div>
+    <p>every capability and term now lists its code — clickable chips with home-file tooltips in the dashboard, a canonical section in the md</p></div>
+  <div class="tile"><div class="k">Oracle agreement</div><div class="v">300/300</div>
+    <p>the composer equals an independent edge-graph Bellman-Ford oracle on every random graph — 184 feasible, 116 infeasible</p></div>
+  <div class="tile"><div class="k">Anti-collapse gadget</div><div class="v">60/60</div>
+    <p>the naive one-arrival-per-node Dijkstra is wrong on every instance; the frontier composer is exact on all of them</p></div>
+  <div class="tile"><div class="k">Real C7 labels routed</div><div class="v">37</div>
+    <p>engine-verified transfer labels route to the oracle's optimum with an exact witness re-walk — floor pinned</p></div>
+</div>
+
+<h2><span class="idx">01</span>The function inventory</h2>
+<p class="lede">User directive: the checklist shows every function related to a capability —
+and the same for the terms.</p>
+<p>Both checklist files now carry the full code ↔ capability mapping, extracted from the
+source, not from memory. The dashboard gains a <b>Functions column</b> in the capability table
+and the terms catalog: each function is a clickable chip (click filters to every row that
+carries it; hover shows its home file — <code>Cap*</code> in SolverCapability.h,
+<code>Fn::</code> the vtable-pinned engine mirrors in SolverMove.cpp, <code>Strafe::</code> /
+<code>Air::</code> their own headers), functions join the search index, and the row detail
+drawer lists them in full. The md gains the canonical "function inventory" section the
+dashboard mirrors.</p>
+<p>The inventory is honest where the code is: rows whose form is not a packaged library
+function say so in parenthetical notes rather than inventing names — <b>A22 v3's exact-hit
+tail is a certified recipe inside capgap's Gate C</b> (over <code>CapRide::MirrorTick</code>),
+not yet a packaged function; B6's ceiling check is applied inline; B12/B19/B20/C15 live in
+legacy paths. Surfacing those gaps is part of what the inventory is for.</p>
+
+<h2><span class="idx">02</span>C9 — the min-plus composer</h2>
+<p><code>CapPath::MinPlusRoute</code> is Dijkstra by accumulated ticks over C0 transition
+labels — but the "min" never scalarizes the state away. Per (node, compatibility cell) the
+composer keeps the <b>full C1 Pareto frontier</b> of arrivals, because a slower arrival with
+more retained speed can be the only one that admits the next leg. Admission is the C5 interval
+shape — a leg fires only from the cell its label was certified in, with at least the energy it
+was measured at — and relaxation is conservative: the successor takes the label's certified
+fields verbatim, surplus arrival energy is dropped, never extrapolated. No label ever claims
+more than its kernel measured.</p>
+<div class="callout"><b>THE LEGO RULE's routing form:</b> every non-dominated arrival stays a
+first-class alternative. Dominance prunes only inside a compatibility cell, through
+<code>CapLabel::Dominates</code> — the certified quality directions and nothing else.</div>
+
+<h2><span class="idx">03</span>The gates</h2>
+<div class="tablewrap"><table>
+  <tr><th>Gate</th><th>Result</th><th>What it certifies</th></tr>
+  <tr><td class="nm">== oracle</td><td class="num"><span class="chip c-pass">300/300</span></td>
+    <td class="note">the composer equals an independent edge-graph Bellman-Ford oracle on random graphs — feasible (184) and infeasible (116) both</td></tr>
+  <tr><td class="nm">witness law</td><td class="num"><span class="chip c-pass">184/184</span></td>
+    <td class="note">every returned path re-walks admissibly leg by leg and sums exactly to the returned optimum</td></tr>
+  <tr><td class="nm">prune soundness</td><td class="num"><span class="chip c-pass">254 + 46</span></td>
+    <td class="note">all 254 completed unpruned runs match; the 46 declines are cycle blowups, every one on an infeasible graph — zero mismatches</td></tr>
+  <tr><td class="nm">anti-collapse gadget</td><td class="num"><span class="chip c-pass">60/60</span></td>
+    <td class="note">the one-arrival-per-node scalar collapse returns wrong answers on every instance; the frontier composer matches the oracle on all</td></tr>
+  <tr><td class="nm">pool DECLINE law</td><td class="num"><span class="chip c-pass">−2</span></td>
+    <td class="note">an insufficient arrival pool declines — never an answer from a truncated frontier</td></tr>
+  <tr><td class="nm">real C7 labels</td><td class="num"><span class="chip c-pass">37 → exact</span></td>
+    <td class="note">engine-verified transfer labels (the capxfer recipe, 55° ramp) route to the oracle's optimum, witness legs re-walk exactly; label floor pinned at the measured 37</td></tr>
+</table></div>
+
+<h2><span class="idx">04</span>The measured law behind the prune</h2>
+<div class="callout2"><b>Dominance is also termination.</b> The first run of the prune-soundness
+gate failed 254/300 — and the diagnosis became a finding: on a cyclic graph, each lap
+re-arrives in the same cell with worse ticks and worse loss at equal speed, and the dominance
+prune retires it. With the prune disabled, a cyclic graph with an unreachable goal grows
+arrivals without bound until the pool declines. All 46 divergences were exactly that — zero
+genuine mismatches, zero declines on feasible graphs. The prune is not an optimization on top
+of the composer; it is what makes the composer terminate.</div>
+<p>The named remainder is scope, not doubt: production edge enumeration — which faces can
+follow which exits, with certified requirement bounds instead of emitted samples — awaits B16
+successor-face sets and C5 matching on the certified B13/B14 minimums. That is the recorded
+next arc.</p>
+
+<footer>SourceTAS capability library · session 41 · 2026-08-23 · cappath 6/0 · full battery
+green (seventeen suites) · next: B16 + C5 on certified B13/B14, cheaper A20 builds</footer>
+</div>

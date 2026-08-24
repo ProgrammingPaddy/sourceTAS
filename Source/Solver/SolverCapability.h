@@ -49,8 +49,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "SolverAir.h"
@@ -5550,4 +5552,224 @@ namespace CapRideReach {
 	}
 
 } // namespace CapRideReach
+
+// ======================================================================
+// CAPPATH - registry C9 (min-plus path composition), session 41.
+// Shortest route over C0 transition labels - but the "min" is NOT a
+// scalar collapse: per (node, compatibility cell) the composer keeps
+// the full C1 Pareto frontier of arrivals, because a slower arrival
+// with more retained s2 can be the ONLY one that admits the next leg
+// (the anti-collapse gadget in cappath proves a scalar Dijkstra
+// returns wrong answers on exactly that shape). This is THE LEGO
+// RULE applied to routing: every non-dominated arrival stays a
+// first-class alternative; dominance prunes only inside a cell,
+// through CapLabel::Dominates - the certified quality directions and
+// nothing else.
+//
+// Edge semantics (the honest-composition rule): an edge carries the
+// state cell its label was certified FROM (pre) and the C0 label it
+// emits (post). Admission = SameCell(arrival, pre) AND arrival.s2 >=
+// pre.s2 - the C5 interval shape: a leg fires only from the cell it
+// was measured in, with at least the energy it was measured at.
+// Relaxation is CONSERVATIVE: the successor takes post's certified
+// fields verbatim - surplus arrival energy is dropped, never
+// extrapolated (no label ever claims more than its kernel measured).
+// Route cost = accumulated post.dt (ticks, C10 by decree); loss2
+// accumulates as bookkeeping; both are exact integer/float sums.
+namespace CapPath {
+
+	struct Edge {
+		int from = 0, to = 0;
+		CapLabel::Transition pre;  // admission cell + minimum s2 at `from`
+		CapLabel::Transition post; // the emitted C0 label: dt = leg ticks,
+		                           // compatibility = the state at `to`,
+		                           // s2 = the certified arrival energy
+	};
+
+	struct Arrival {
+		CapLabel::Transition st;   // st.dt = ACCUMULATED route ticks,
+		                           // st.loss2 = accumulated loss; the
+		                           // compatibility fields + s2 = the
+		                           // state standing at `node`
+		int node = 0;
+		int via = -1;              // edge index that produced it (-1 start)
+		int prev = -1;             // producing arrival (witness chain)
+		bool retired = false;      // dominated after insertion (lazy)
+	};
+
+	// Multi-label min-plus route: best total ticks start->goal, or -1
+	// if unreachable. out_path receives the edge indices in leg order
+	// (C15 shape: the witness chain reconstructs exactly); *out_len =
+	// leg count (0 if start == goal state suffices). disable_prune is
+	// the certification lever: with it the composer keeps EVERY
+	// arrival, and the suite gates that pruning never changes the
+	// answer. MEASURED (s41): dominance is ALSO the termination
+	// mechanism on cyclic graphs - each cycle lap re-arrives with
+	// worse dt/loss2 at equal s2 and is dominated away, so the
+	// unpruned lever on a cyclic graph with an unreachable goal grows
+	// without bound and DECLINES at max_pool (the suite categorizes
+	// exactly this). out_pops/out_kept report measured work for the
+	// honest efficiency line. Arrival pool is bounded by max_pool: on
+	// overflow the composer DECLINES (-2) rather than answer from a
+	// truncated frontier - the library's standing honesty semantics.
+	inline int MinPlusRoute(const Edge* edges, int n_edges, int n_nodes,
+	                        const CapLabel::Transition& start_state,
+	                        int start_node, int goal_node,
+	                        float pos_pitch, float psi_pitch,
+	                        float vz_pitch,
+	                        int* out_path, int max_path, int* out_len,
+	                        bool disable_prune = false,
+	                        int max_pool = 1 << 20,
+	                        int* out_pops = nullptr,
+	                        int* out_kept = nullptr) {
+		if (out_len)
+			*out_len = 0;
+		if (n_nodes <= 0 || start_node < 0 || start_node >= n_nodes
+			|| goal_node < 0 || goal_node >= n_nodes)
+			return -1;
+		// Per-node adjacency (build once).
+		std::vector<int> deg(n_nodes, 0), off(n_nodes + 1, 0);
+		for (int e = 0; e < n_edges; ++e)
+			if (edges[e].from >= 0 && edges[e].from < n_nodes)
+				deg[edges[e].from]++;
+		for (int i = 0; i < n_nodes; ++i)
+			off[i + 1] = off[i] + deg[i];
+		std::vector<int> adj(off[n_nodes]);
+		{
+			std::vector<int> cur(off.begin(), off.end() - 1);
+			for (int e = 0; e < n_edges; ++e)
+				if (edges[e].from >= 0 && edges[e].from < n_nodes)
+					adj[cur[edges[e].from]++] = e;
+		}
+		std::vector<Arrival> pool;
+		pool.reserve(256);
+		// Retained (non-dominated) arrival indices per node; cells
+		// mix within the list, SameCell separates them on scan.
+		std::vector<std::vector<int> > retained(n_nodes);
+		// Binary min-heap over (accumulated dt, pool index).
+		std::vector<std::pair<int, int> > heap;
+		heap.reserve(256);
+		auto heap_push = [&heap](int dt, int idx) {
+			heap.push_back(std::make_pair(dt, idx));
+			std::push_heap(heap.begin(), heap.end(),
+				std::greater<std::pair<int, int> >());
+		};
+		auto heap_pop = [&heap]() {
+			std::pop_heap(heap.begin(), heap.end(),
+				std::greater<std::pair<int, int> >());
+			const std::pair<int, int> top = heap.back();
+			heap.pop_back();
+			return top;
+		};
+		// Offer an arrival: reject if a retained same-cell arrival
+		// dominates or equals it; retire retained ones it dominates.
+		auto offer = [&](const Arrival& a) -> int {
+			std::vector<int>& lst = retained[a.node];
+			if (!disable_prune) {
+				for (size_t i = 0; i < lst.size(); ++i) {
+					const Arrival& r = pool[lst[i]];
+					if (r.retired)
+						continue;
+					if (!CapLabel::SameCell(r.st, a.st, pos_pitch,
+							psi_pitch, vz_pitch))
+						continue;
+					if (CapLabel::Dominates(r.st, a.st))
+						return -1;
+					// equal in all three quality dirs = duplicate
+					if (r.st.dt == a.st.dt && r.st.s2 == a.st.s2
+						&& r.st.loss2 == a.st.loss2)
+						return -1;
+				}
+				for (size_t i = 0; i < lst.size(); ++i) {
+					Arrival& r = pool[lst[i]];
+					if (!r.retired
+						&& CapLabel::SameCell(r.st, a.st, pos_pitch,
+							psi_pitch, vz_pitch)
+						&& CapLabel::Dominates(a.st, r.st))
+						r.retired = true;
+				}
+			}
+			if (static_cast<int>(pool.size()) >= max_pool)
+				return -2;
+			pool.push_back(a);
+			const int idx = static_cast<int>(pool.size()) - 1;
+			lst.push_back(idx);
+			return idx;
+		};
+		Arrival start;
+		start.st = start_state;
+		start.st.dt = 0;
+		start.st.loss2 = 0.f;
+		start.node = start_node;
+		const int s_idx = offer(start);
+		if (s_idx == -2)
+			return -2;
+		if (s_idx >= 0)
+			heap_push(0, s_idx);
+		int best_goal = -1;
+		int best_dt = 0;
+		int pops = 0;
+		while (!heap.empty()) {
+			const std::pair<int, int> top = heap_pop();
+			const Arrival a = pool[top.second];
+			if (pool[top.second].retired)
+				continue;
+			pops++;
+			// Dijkstra with nonnegative leg ticks: the first goal pop
+			// at minimum dt is optimal IN dt; later pops can only tie
+			// or exceed. (Other quality dirs stay on the frontier -
+			// the goal contract here is minimum ticks, C10.)
+			if (a.node == goal_node
+				&& (best_goal < 0 || a.st.dt < best_dt)) {
+				best_goal = top.second;
+				best_dt = a.st.dt;
+			}
+			if (best_goal >= 0 && a.st.dt >= best_dt)
+				continue; // nothing cheaper can emerge past here
+			for (int s = off[a.node]; s < off[a.node + 1]; ++s) {
+				const Edge& e = edges[adj[s]];
+				if (e.to < 0 || e.to >= n_nodes || e.post.dt < 0)
+					continue;
+				// C5-shaped admission against the leg's certified cell.
+				if (!CapLabel::SameCell(a.st, e.pre, pos_pitch,
+						psi_pitch, vz_pitch))
+					continue;
+				if (a.st.s2 < e.pre.s2)
+					continue;
+				Arrival nx;
+				nx.st = e.post; // conservative: certified fields verbatim
+				nx.st.dt = a.st.dt + e.post.dt;
+				nx.st.loss2 = a.st.loss2 + e.post.loss2;
+				nx.node = e.to;
+				nx.via = adj[s];
+				nx.prev = top.second;
+				const int idx = offer(nx);
+				if (idx == -2)
+					return -2;
+				if (idx >= 0)
+					heap_push(nx.st.dt, idx);
+			}
+		}
+		if (out_pops)
+			*out_pops = pops;
+		if (out_kept)
+			*out_kept = static_cast<int>(pool.size());
+		if (best_goal < 0)
+			return -1;
+		// Witness chain: walk prev links, emit edge indices in order.
+		int chain[512];
+		int n = 0;
+		for (int i = best_goal; i >= 0 && pool[i].via >= 0
+			&& n < 512; i = pool[i].prev)
+			chain[n++] = pool[i].via;
+		if (out_path && out_len) {
+			const int m = n < max_path ? n : max_path;
+			for (int i = 0; i < m; ++i)
+				out_path[i] = chain[n - 1 - i];
+			*out_len = m;
+		}
+		return best_dt;
+	}
+
+} // namespace CapPath
 } // namespace Solver

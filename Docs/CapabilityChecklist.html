@@ -78,6 +78,13 @@
   .ref{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--blue); cursor:pointer;
     margin-right:6px; white-space:nowrap}
   .ref:hover{text-decoration:underline}
+  .fn{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10.5px;
+    padding:1px 7px; border-radius:4px; background:var(--blue-soft); color:var(--blue);
+    cursor:pointer; margin:1px 3px 1px 0; white-space:nowrap}
+  .fn:hover{outline:1px solid var(--blue)}
+  .fnnote{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10.5px;
+    color:var(--faint); margin:1px 3px 1px 0}
+  td.fns{min-width:210px; max-width:320px}
   tr.detail td{background:var(--surface2); border-left:3px solid var(--teal); padding:14px 16px}
   .detail-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px 24px; max-width:1100px}
   .detail-grid .full{grid-column:1 / -1}
@@ -98,7 +105,10 @@
   <h1>The Capability Checklist</h1>
   <p class="sub">Every capability, reducer, and composition function — searchable, sortable, and
   cross-linked. Click a row for the full record; click a term chip anywhere to see everything
-  that uses it; click an ID reference to jump to that row. Canonical text:
+  that uses it; click an ID reference to jump to that row; click a FUNCTION chip to filter to
+  every row that carries it (hover it for its home file). Each suite runs as the matching
+  <code style="font-family:'IBM Plex Mono',monospace">CmdCap*</code> driver in SolverLab.cpp.
+  Canonical text:
   <code style="font-family:'IBM Plex Mono',monospace">Docs/CapabilityChecklist.md</code>. Hover any
   cell for its tooltip.</p>
 </header>
@@ -127,6 +137,7 @@
     <th data-k="name">Capability <span class="arr"></span></th>
     <th data-k="st">Status <span class="arr"></span></th>
     <th data-k="terms">Terms</th>
+    <th data-k="fns">Functions</th>
     <th data-k="eff">Efficiency <span class="arr"></span></th>
     <th data-k="suite">Suite <span class="arr"></span></th>
   </tr></thead>
@@ -137,7 +148,7 @@
 <h2>The terms catalog</h2>
 <div class="tablewrap">
 <table>
-  <thead><tr><th>Term</th><th>Exact law / source</th><th>Used by</th></tr></thead>
+  <thead><tr><th>Term</th><th>Exact law / source</th><th>Functions</th><th>Used by</th></tr></thead>
   <tbody id="termrows"></tbody>
 </table>
 </div>
@@ -219,7 +230,7 @@ const D = [
 ["A11","A","fixed-time point solve","done",["revs","c","step"],["A12","C7","B13"],["A4","A5"],
  "EXACT SEGMENT COMPOSITION (all-plus spiral prefixes, exhaustive k≤2) + brake range control with PER-CANDIDATE STRENGTH + brake-first shapes + kernel refinement + the exact-hit tail with its 3-PARAMETER LEAST-NORM RESCUE ((c1, c2, brake strength) via Jᵀ(JJᵀ)⁻¹); BATCH: endpoints spatially hashed once per start",
  "analytic inversion (open, the last speed refinement); shooting oracle; reach-table batch",
- "single ~1–6 ms · BATCH 34–157 µs/target after 0.1–1.7 ms organize","capp2p 21/0",
+ "single ~1–6 ms · BATCH 34–157 µs/target after 0.1–1.7 ms organize","capp2p 30/0",
  "The point-to-point core. Machinery 99–100/100 on its own family, 167/167 bitwise engine replays, every schedule dwell-legal. Session 40 applied THE LEGO RULE (user directive): the exact-hit stage is a STRATEGY PORTFOLIO — the proven 2×2 tail, the 3-parameter least-norm tail, and the post-brake-sized tail, each INTACT as its own unit, composed as fallbacks that run only while unsolved (monotone by construction). The portfolio beat every individually-tuned configuration on every cell: 400: 99/100/100 · 800: 91/100/96 · 1400: 93/98/100 — misses 127 → 23 of 900, with two cells exceeding all constituents. Coverage is now pinned as NINE hard floor gates in capp2p and two solver floors in capxfer (both ramps 37/49) — floors only ever rise. Remaining measured amber: multi-brake-phase deep interior (worst 48u at 800/N90)."],
 ["A12","A","point-to-point solver","done",["revs","vert"],["C7","B13","B14"],["A11"],
  "CapP2P::SolveFreeN — A11 iterated over N with the certified B13 precull",
@@ -373,7 +384,7 @@ const D = [
 ["C0","C","canonical transition label","done",[],["C1","C9"],[],
  "CapLabel::Transition — ONE struct, fields split by role: compatibility (kind, u/v, ψ, vz, sf) vs quality (dt↓, s2↑, loss2↓)","—","~ns","capxfer 8/0 + capmat 9/0 (emission)",
  "UNIFIED session 32 and emitted by BOTH kernels: C7 (63 labels at verified transfer contacts) and C6 (38,231 labels across the production matrix). Compatibility fields locate the successor state and are never ordered; quality fields carry certified directions only (ticks by decree, s² by the coast monotonicity theorem, loss because it subtracts from s² exactly)."],
-["C1","C","local Pareto comparison","done",[],[],["C0"],
+["C1","C","local Pareto comparison","done",[],["C9"],["C0"],
  "CapLabel::Dominates — CELL-LOCAL strict dominance: compatibility fields must share a cell at the caller's pitch; within a cell, ≥ in every quality direction and > in one","scalarization (banned as truth)","~ns/pair","capmat 9/0 (property gates)",
  "Session 32: no monotonicity theorem in ψ/vz/position is certified, so dominance never compares across compatibility cells — that is the honesty boundary. Property-gated over the 38k emitted labels: irreflexive, 0 antisymmetry violations, 0 transitivity violations in 706 sampled chains. Retaining alternatives that trade time/resource/heading remains the anti-collapse rule."],
 ["C2","C","board-quality projection","todo",["vdn"],[],["C0","A16"],
@@ -397,8 +408,11 @@ const D = [
 ["C8","C","composition without re-simulation","part",[],[],[],
  "memoized exact results (repeat-share measured 84–85%)","—","hit ~ns","—",
  "The batch/organize-once pattern IS this row's production form; a shared memo store remains open."],
-["C9","C","min-plus path composition","todo",[],[],["C0"],
- "shortest path over labels","—","~µs/graph","—","Trivial once the label exists."],
+["C9","C","min-plus path composition","done",["s2"],[],["C0","C1"],
+ "CapPath::MinPlusRoute — multi-label Dijkstra by accumulated ticks with CELL-LOCAL Pareto retention (the C1 discipline lifted to routes: per (node, compatibility cell) the full frontier survives); admission = SameCell + s2 ≥ requirement (the C5 interval shape); relaxation CONSERVATIVE — the successor takes the label's certified fields verbatim, surplus arrival energy is dropped, never extrapolated",
+ "scalar one-arrival-per-node Dijkstra (REFUTED as truth by the anti-collapse gadget; kept as the suite's foil)",
+ "~µs/graph (300 graphs + oracle < 1 s); pool-bounded, DECLINES (−2) on overflow","cappath 6/0",
+ "CERTIFIED v1 session 41. Equals the INDEPENDENT edge-graph Bellman-Ford oracle on 300/300 random graphs (184 feasible, 116 infeasible); witness law 184/184 — every returned path re-walks admissibly and sums to the optimum; the dominance prune is LOSSLESS (254 completed unpruned runs all match; the 46 declines are cycle blowups, every one on an infeasible graph) — and the measured law behind them: DOMINANCE IS ALSO THE TERMINATION MECHANISM on cycles (each lap re-arrives with worse dt/loss2 at equal s2 and is dominated away). THE ANTI-COLLAPSE GADGET: a one-arrival-per-node Dijkstra returns wrong answers on 60/60 instances while the frontier composer matches the oracle — the measured proof the Pareto frontier is load-bearing, THE LEGO RULE's routing form. REAL LABELS: 37 engine-verified C7 transfers (37 cells at the production pitch, floor PINNED at 37) route to the oracle's optimum with an exact witness re-walk. Named remainder: production edge enumeration awaits B16 successor-face sets + C5 certified requirement edges."],
 ["C10","C","route cost = ticks","done",[],[],[],
  "by decree","—","—","—","Ticks are the objective; the certified-bounds rule keeps the heuristic honest."],
 ["C11","C","search-order heuristics","done",[],[],[],
@@ -415,6 +429,103 @@ const D = [
  "The mechanism is proven: hierarchical witnesses cold-replay bit-identically."]
 ];
 
+// ============ THE FUNCTION INVENTORY (session 41; mirror of the md's
+// "function inventory" section — update both). Every function that
+// implements a capability, keyed by registry ID. Names are namespace-
+// qualified exactly as in code. Home files by prefix: Cap* →
+// SolverCapability.h; Fn:: → SolverMove.cpp (vtable-pinned engine
+// mirrors); Strafe:: → SolverStrafe.h; Air:: → SolverAir.h; CmdCap* →
+// SolverLab.cpp (suite drivers). Entries in (parentheses) are honest
+// notes: the row's form lives inline / in a suite / in a legacy path
+// rather than as a packaged library function.
+const FNS = {
+ A0:["CapFrame::MakeCanonical","CapFrame::ToCanonical","CapFrame::FromCanonical"],
+ A1:["CapWindow::VTick","CapWindow::ZWindow"],
+ A2:["(the slice-line algebra lives inline in CapFaceSolve::SolveToFace)"],
+ A3:["CapHull::PlaneOffset","CapHull::PlaneOffsetHull"],
+ A4:["CapAir::MakeAirKernel","CapAir::KernelTick","CapAir::KernelCheckVelocity","CapAir::AirTick","Strafe::Law","Strafe::TickLaw::{Accel,NewSpeed2,TurnRad,BandCos,OptGain2}","Air::WishInputs","Fn::WishFromInput"],
+ A5:["CapP2P::BuildSchedule","(the dwell-age fields inside every lattice Build*)"],
+ A6:["CapAir::BuildVStar","CapAir::BuildVStarStrat","CapAir::BuildVStarX","CapAir::QueryVStar","CapAir::QueryVStarS","CapAir::QueryVStarX","CapAir::Witness","CapAir::WitnessS","CapAir::WitnessX","(indexing: CapAir::CellIndex / PsiBin* / BinPsi* / Key*)"],
+ A7:["CapAir::QueryPsiStar","CapAir::QueryPsiStarX"],
+ A8:["CapReach::BuildReach","CapReach::DStarUB","CapReach::WitnessR","CapBounds::AccelBudget","CapBounds::MaxTurnUB","CapBounds::TurnGateTicks","CapBounds::TurnGatedTravelUB"],
+ A9:["CapP2P::SolveTerminal","CapP2P::WrapAngle"],
+ A10:["CapP2P::MinAirTime"],
+ A11:["CapP2P::SolveFixedN","CapP2P::SolveTargetBatch","CapP2P::BuildP2PBatch","CapP2P::BuildSchedule","CapP2P::Roll","CapP2P::BuildSegTables","CapP2P::EvalSegs","CapP2P::BCellOf"],
+ A12:["CapP2P::SolveFreeN"],
+ A13:["CapFaceSolve::SolveToFace","CapFaceSolve::PredictContact"],
+ A14:["CapContact::BuildLocalSet","CapContact::ClipSegment"],
+ A15:["Fn::ClipVelocity","CapBoard::BoardVdotN"],
+ A16:["CapBoard::BestWorstBoard"],
+ A17:["CapBoard::LossFeasibleArcs"],
+ A18:["CapBoard::RideGrayTick","CapRide::MirrorTick"],
+ A19:["CapRide::BuildRide","CapRide::QueryRide","CapRide::WitnessRide"],
+ A20:["CapRideReach::BuildRideReach","CapRideReach::QueryTarget","CapRideReach::QueryTargetFast","CapRideReach::WitnessRR"],
+ A21:["CapRideReach::MinRideTime"],
+ A22:["CapRideReach::QueryTarget","CapRideReach::QueryTargetFast","(v3 exact-hit tail: certified recipe in capgap Gate C over CapRide::MirrorTick — not yet a packaged library function)"],
+ A23:["CapRideReach::EdgeIntercept"],
+ A24:["CapEdge::TryMoveLocal","CapEdge::EdgeTickFull","CapEdge::ResolveTwoPlanes","CapEdge::SequentialTransfer"],
+ A25:["CapGround::MakeGroundCtx","CapGround::WalkKernelTick","CapGround::KFriction","CapGround::KFinishGravityFn"],
+ A26:["CapLaunch::Detector::Feed"],
+ A27:["CapEnd::EarliestBoxCrossing"],
+ A28:["CapContact::FirstContactOnPath"],
+ A29:["Fn::Duck","Fn::CanUnduck","Fn::FinishDuck","Fn::FinishUnDuck","Fn::HandleDuckingSpeedCrop","Fn::ReduceTimers","CapHull::PlaneOffsetHull"],
+ A30:["CapGround::JumpKernelTick","Fn::CheckJumpButton"],
+ A31:["CapTrigger::ApplyHit"],
+ A32:[],
+ B0:["CapWindow::ZWindow","CapWindow::VTick"],
+ B1:["(the λ-interval existence test lives inline in CapFaceSolve::SolveToFace)"],
+ B2:["CapWindow::TravelPrefix","CapBounds::TravelN"],
+ B3:["CapWindow::ContactWindow"],
+ B4:["CapWindow::ContactWindow","CapWindow::ZWindow"],
+ B5:["CapAir::QueryVStar","CapAir::QueryPsiStar","(admit-only reads of the A6/A7 surfaces)"],
+ B6:["(the O(1) ceiling check √(s0²+900N), applied inline — the capair gates and the B13 bisection)"],
+ B7:["(the pattern row: B0/B2 culls ahead of A11/A12 — demonstrated in CapFaceSolve::SolveToFace)"],
+ B8:["CapBoard::LossFeasibleArcs"],
+ B9:["CapBoard::BestWorstBoard"],
+ B10:[], B11:[],
+ B12:["(legacy pre-library form: the certified U_E computation in SolverExitField.h)"],
+ B13:["CapBounds::MinDepartSpeed","CapBounds::TravelN"],
+ B14:["CapBounds::MinIncomingSpeed","CapBounds::BestPost2"],
+ B15:[], B16:[],
+ B17:["(derives from A6/A8 certified reads — no dedicated function yet)"],
+ B18:[],
+ B19:["(hash compare inside the legacy route-search path)"],
+ B20:["(the groute incumbent-cutoff mechanism — legacy path)"],
+ B21:[], B22:[],
+ C0:["CapLabel::Transition (struct)","(emitters: the C7 chain in CmdCapXfer, the C6 loop in CmdCapMat)"],
+ C1:["CapLabel::SameCell","CapLabel::Dominates"],
+ C2:[], C3:[], C4:[], C5:[],
+ C6:["(the capmat production loop in CmdCapMat over CapRideReach::BuildRideReach + QueryTargetFast + CapLabel emission)"],
+ C7:["CapFaceSolve::SolveToFace","CapFaceSolve::PredictContact","CapP2P::SolveTargetBatch","CapBounds::MinDepartSpeed","CapWindow::ZWindow","(composed by CmdCapXfer)"],
+ C8:["CapP2P::BuildP2PBatch","(the organize-once/batch pattern — the shared memo store remains open)"],
+ C9:["CapPath::MinPlusRoute"],
+ C10:[], C11:[], C12:[], C13:[],
+ C14:["(engine/law/collision stamps exist loose; the unified ledger is open)"],
+ C15:["(the groute hierarchical witness assemble/replay instruments — legacy path, groute 11/11)"]
+};
+// Functions that EMBODY each term's law (the terms catalog's third column).
+const TERMFNS = {
+ s2:["Strafe::TickLaw::NewSpeed2","Strafe::TickLaw::OptGain2","CapAir::KernelTick"],
+ c:["Strafe::ToTrueWishCos","Strafe::ToStoredWishCos","Strafe::ToTrueRotSide","Strafe::ToStoredSide","Strafe::TickLaw::Accel","Fn::WishFromInput","Air::WishInputs"],
+ turn:["Strafe::TickLaw::TurnRad","Strafe::TickLaw::BandCos"],
+ step:["CapBounds::TravelN","CapWindow::TravelPrefix"],
+ revs:["CapP2P::BuildSchedule"],
+ vert:["CapWindow::VTick","CapWindow::ZWindow","CapGround::KFinishGravityFn"],
+ sf:["CapAir::MakeAirKernel","CapRide::MirrorTick"],
+ vdn:["CapBoard::BoardVdotN","Fn::ClipVelocity","CapBoard::BestWorstBoard"],
+ ceps:["CapRide::MirrorTick","CapBoard::RideGrayTick"],
+ gap:["CapRide::MirrorTick"],
+ gt:["CapBoard::RideGrayTick"],
+ jump:["CapGround::JumpKernelTick","Fn::CheckJumpButton"],
+ stam:["CapGround::WalkKernelTick","Fn::ReduceTimers"],
+ duck:["Fn::Duck","Fn::CanUnduck","Fn::FinishDuck","Fn::FinishUnDuck","Fn::HandleDuckingSpeedCrop"],
+ trig:["CapTrigger::ApplyHit"],
+ end:["CapEnd::EarliestBoxCrossing"],
+ hoff:["CapHull::PlaneOffset","CapHull::PlaneOffsetHull"],
+ clipf:["CapFaceSolve::PredictContact","CapContact::ClipSegment"],
+ hlaw:["CapBounds::AccelBudget","CapBounds::MaxTurnUB","CapBounds::TurnGateTicks","CapBounds::TurnGatedTravelUB"]
+};
+
 // ============ RENDERING ============
 const rowsEl = document.getElementById('rows');
 const termsById = {};
@@ -428,6 +539,25 @@ function termChip(id){
 }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
 function ref(id){ return '<span class="ref" data-ref="'+id+'">'+id+'</span>'; }
+function fnHome(name){
+  if (name.startsWith('Fn::')) return 'SolverMove.cpp — vtable-pinned engine mirror';
+  if (name.startsWith('Strafe::')) return 'SolverStrafe.h';
+  if (name.startsWith('Air::')) return 'SolverAir.h';
+  if (name.startsWith('CmdCap')) return 'SolverLab.cpp — suite driver';
+  return 'SolverCapability.h';
+}
+function fnChip(name){
+  if (name.startsWith('('))
+    return '<span class="fnnote" title="honest note — no packaged function">'+esc(name)+'</span>';
+  return '<span class="fn" data-fn="'+esc(name)+'" title="'+esc(fnHome(name))+'">'+esc(name)+'</span>';
+}
+function fnCell(id){ return (FNS[id]||[]).map(fnChip).join('') || '—'; }
+// "NS::{A,B}" carries both the raw form and each expansion into search.
+function fnExpand(f){
+  const m = f.match(/^(.*)::\{(.*)\}$/);
+  if (!m) return [f];
+  return [f].concat(m[2].split(',').map(x => m[1] + '::' + x.trim()));
+}
 
 // tuple layout: 0 id, 1 cat, 2 name, 3 status, 4 terms[], 5 feeds[],
 // 6 deps[], 7 method, 8 alternatives, 9 efficiency, 10 suite, 11 detail
@@ -437,7 +567,8 @@ function matches(r){
   if (!q) return true;
   const hay = (r[0]+' '+r[2]+' '+r[7]+' '+r[8]+' '+r[9]+' '+r[10]+' '+r[11]+' '
     + r[4].map(t => (termsById[t]||[t,t])[1]).join(' ')
-    + ' ' + r[5].join(' ') + ' ' + r[6].join(' ') + ' ' + r[3]).toLowerCase();
+    + ' ' + r[5].join(' ') + ' ' + r[6].join(' ') + ' ' + r[3]
+    + ' ' + (FNS[r[0]]||[]).flatMap(fnExpand).join(' ')).toLowerCase();
   return q.toLowerCase().split(/\s+/).every(w => hay.includes(w));
 }
 function render(){
@@ -460,6 +591,7 @@ function render(){
       + '<td class="nm">'+esc(r[2])+'</td>'
       + '<td><span class="st '+st[1]+'">'+st[0]+'</span></td>'
       + '<td>'+r[4].map(termChip).join('')+'</td>'
+      + '<td class="fns">'+fnCell(r[0])+'</td>'
       + '<td class="eff" title="'+esc(r[9])+'">'+esc(r[9])+'</td>'
       + '<td class="eff">'+esc(r[10])+'</td>'
       + '</tr>';
@@ -479,7 +611,7 @@ function openDetail(id){
   const r = D.find(x => x[0] === id);
   const tr = document.createElement('tr');
   tr.className = 'detail';
-  tr.innerHTML = '<td colspan="6"><div class="detail-grid">'
+  tr.innerHTML = '<td colspan="7"><div class="detail-grid">'
     + '<div class="full"><div class="dk">'+r[0]+' — '+esc(r[2])+'</div><div class="dv">'+esc(r[11])+'</div></div>'
     + '<div><div class="dk">Primary method</div><div class="dv">'+esc(r[7])+'</div></div>'
     + '<div><div class="dk">Other methods</div><div class="dv mut">'+esc(r[8])+'</div></div>'
@@ -487,6 +619,7 @@ function openDetail(id){
     + '<div><div class="dk">Suite</div><div class="dv">'+esc(r[10])+'</div></div>'
     + '<div><div class="dk">Feeds</div><div class="dv">'+(r[5].length ? r[5].map(ref).join('') : '—')+'</div></div>'
     + '<div><div class="dk">Depends on</div><div class="dv">'+(r[6].length ? r[6].map(ref).join('') : '—')+'</div></div>'
+    + '<div class="full"><div class="dk">Functions</div><div class="dv">'+fnCell(r[0])+'</div></div>'
     + '<div class="full"><div class="dk">Terms</div><div class="dv">'+(r[4].length ? r[4].map(termChip).join('') : '—')+'</div></div>'
     + '</div></td>';
   row.after(tr);
@@ -496,8 +629,11 @@ function renderTerms(){
   let html = '';
   for (const t of TERMS){
     const used = D.filter(r => r[4].includes(t[0])).map(r => ref(r[0])).join('');
+    const fns = (TERMFNS[t[0]]||[]).map(fnChip).join('');
     html += '<tr><td class="nm">'+termChip(t[0])+' '+esc(t[1])+'</td>'
-      + '<td class="mut">'+esc(t[2])+'</td><td>'+(used || '—')+'</td></tr>';
+      + '<td class="mut">'+esc(t[2])+'</td>'
+      + '<td class="fns">'+(fns || '—')+'</td>'
+      + '<td>'+(used || '—')+'</td></tr>';
   }
   document.getElementById('termrows').innerHTML = html;
 }
@@ -543,12 +679,26 @@ document.body.addEventListener('click', e => {
         + '<td class="id">'+r[0]+'</td><td class="nm">'+esc(r[2])+'</td>'
         + '<td><span class="st '+st[1]+'">'+st[0]+'</span></td>'
         + '<td>'+r[4].map(termChip).join('')+'</td>'
+        + '<td class="fns">'+fnCell(r[0])+'</td>'
         + '<td class="eff">'+esc(r[9])+'</td><td class="eff">'+esc(r[10])+'</td></tr>';
     }
     rowsEl.innerHTML = html;
     document.getElementById('counts').textContent =
       keep.length + '/' + D.length + ' rows using term: '
       + (termsById[tid]||[tid,tid])[1];
+    e.stopPropagation();
+    return;
+  }
+  const fc = e.target.closest('.fn');
+  if (fc){
+    // filter the main table to every row that carries this function
+    catF = 'all'; stF = null; q = fc.dataset.fn;
+    document.getElementById('q').value = q;
+    document.querySelectorAll('#catchips .chip').forEach(x =>
+      x.classList.toggle('on', x.dataset.cat === 'all'));
+    document.querySelectorAll('#stchips .chip').forEach(x => x.classList.remove('on'));
+    render();
+    document.getElementById('tbl').scrollIntoView({block:'start', behavior:'smooth'});
     e.stopPropagation();
     return;
   }
@@ -567,9 +717,14 @@ document.body.addEventListener('click', e => {
   }
 });
 
+const fnCount = (() => {
+  const s = new Set();
+  for (const k in FNS) FNS[k].forEach(f => { if (f[0] !== '(') fnExpand(f).slice(f.includes('{')?1:0).forEach(x => s.add(x)); });
+  return s.size;
+})();
 document.getElementById('foot').textContent =
   'SourceTAS Capability Library · living dashboard · canonical text: Docs/CapabilityChecklist.md · '
-  + D.length + ' rows, ' + TERMS.length + ' terms · statuses as of session 40 (2026-08-23) · THE A CATEGORY IS COMPLETE · THE LEGO RULE is binding semantics #8: strategy portfolios, monotone improvements, pinned coverage floors (A11 misses 127→23 of 900) — composition resumes: C9, B16+C5, cheaper A20 builds';
+  + D.length + ' rows, ' + TERMS.length + ' terms, ' + fnCount + ' inventoried functions · statuses as of session 41 (2026-08-23) · THE A CATEGORY IS COMPLETE · THE LEGO RULE is binding semantics #8 · C9 CERTIFIED (cappath 6/0: the frontier composer beats the scalar collapse 60/60, real C7 labels route exactly) — next: B16 + C5 on certified B13/B14, cheaper A20 builds';
 render();
 renderTerms();
 </script>

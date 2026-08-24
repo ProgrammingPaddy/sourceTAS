@@ -37,7 +37,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A8 | directional reach D* | arc length L(N), projections, **the heading-freedom + turn-bound lemmas** | B2, B13, B22, corridor checks | certified bounds (single query); on-demand sweep (batch); **the TURN-GATED direction-aware UB (s39): D*_φ(N) ≤ Σ_{i≥T_turn} √(s0²+900i)·dt, gated by two certified lemmas — heading is ONE-TICK FREE at s ≤ B = 562.5·sf (full-brake reversal, constructive), and above B one tick turns at most atan(B/(s−B)) (measured 93.3% tight)** | parametric family endpoints (future, exact); local refinement on-demand (no consumer yet) | bounds O(N) ~µs; the direction-aware UB certifies a 3–5% tightening for backward φ at high speed | `[x]` s39 (capreach 8/0): reversal witnesses 4/4 exact (slowest backward 7.50 = 562.5−555, the arithmetic confirming the law); turn bound unbeaten by 200k adversarial one-tick actions; the travel UB unbeaten by 20k schedules × 4 (s0, φ) configs — the LAST A amber resolved |
 | A9 | displacement with terminal constraint | endpoint + (ψ_N or V_N) | A22 pairing | `CapP2P::SolveTerminal` — endpoint-ranked family (reversals × brake placement × brake STRENGTH) → heading-feasible kernel rolls → scored coarse climb (both contracts judged per roll) → **the 3×3 finisher: (tail c1, tail c2, brake strength) against (endpoint x, y, heading) — a square Newton** → accept only when BOTH contracts hold, else DECLINE | Pareto layer of A8 sweep (future); richer heading family (second brake run) | ~24 ms/request | `[x]` v1 s34 (capsolve): contracts HARD 19/19 (endpoint ≤ 0.5u, heading ≤ tol, independently re-rolled), engine bitwise 8/8; acceptance 19/40 vs the adversarial generator (random braked schedules' exact terminal states) = the measured family-sufficiency line |
 | A10 | minimum air time N_min | N window, feasibility | route timing, B21 | `CapP2P::MinAirTime` — the A1 z-window intersected with the A12 scan, first feasible N wins | table lookup | 3.0 ms mean (window-restricted scan) | `[x]` s33 (capsolve: 24/24 == brute full scan) |
-| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 21/0): machinery 99–100/100; single-shot 0.6–3.3 ms; BATCH MODE (s30): organize 0.1–1.4 ms/start, then 34–135 µs/target with full-solver fallback — the 10–30 µs ambition met at short flights; 150/150 bitwise replays** | `[x]` machinery + batch; s40 (THE LEGO RULE): the exact-hit stage is a **STRATEGY PORTFOLIO** — (a) the proven 2×2 three-start tail, (b) the 3-parameter least-norm tail, (c) the post-brake-sized tail, each intact as its own unit, composed as fallbacks (later strategies run only while unsolved → MONOTONE by construction). **The portfolio beat every individual configuration on every cell: 400: 99/100/100 · 800: 91/100/96 · 1400: 93/98/100 — misses 127 → 23 of 900 (2.6%)**; measured coverage pinned as NINE HARD FLOOR GATES in capp2p + two solver-coverage floors in capxfer (55°/65° both 37/49). Remaining measured amber: multi-brake-phase deep interior (worst 48u at 800/N90) |
+| A11 | fixed-time point solve | reversal times, brake run, exact-hit tail, segment tables | A12 core | **EXACT SEGMENT COMPOSITION** (the all-plus spiral's prefix tables give any reversal schedule's endpoint in O(k), no trig — exhaustive k≤2, dense k=3) + brake-run range control + kernel refinement + exact-hit Newton | analytic inversion (the remaining speed refinement); shooting oracle; reach-table batch | **v4 VERIFIED (capp2p 30/0 since the s40 floors): machinery 99–100/100; single-shot 0.6–3.3 ms; BATCH MODE (s30): organize 0.1–1.4 ms/start, then 34–135 µs/target with full-solver fallback — the 10–30 µs ambition met at short flights; 150/150 bitwise replays** | `[x]` machinery + batch; s40 (THE LEGO RULE): the exact-hit stage is a **STRATEGY PORTFOLIO** — (a) the proven 2×2 three-start tail, (b) the 3-parameter least-norm tail, (c) the post-brake-sized tail, each intact as its own unit, composed as fallbacks (later strategies run only while unsolved → MONOTONE by construction). **The portfolio beat every individual configuration on every cell: 400: 99/100/100 · 800: 91/100/96 · 1400: 93/98/100 — misses 127 → 23 of 900 (2.6%)**; measured coverage pinned as NINE HARD FLOOR GATES in capp2p + two solver-coverage floors in capxfer (55°/65° both 37/49). Remaining measured amber: multi-brake-phase deep interior (worst 48u at 800/N90) |
 | A12 | point-to-point air solver | all of A10/A11 | C7, gap feasibility (B13/B14), A22 pairing | `CapP2P::SolveFreeN` — A11 iterated over N with the certified B13 precull (a necessary condition can never hide a feasible N — gated) | shooting oracle (cross-check); R_N table (batch) | 9.7 ms mean free-N scan; 261 N-candidates culled / 36 targets | `[x]` s33 (capsolve: 36/36 preculled == brute, 10/10 engine bitwise); found+fixed the latent small-N stride hang in the brake probes |
 | A13 | point-to-face solve | (T, λ) targets | entrance/transfer (C7 consumes it) | `CapFaceSolve::SolveToFace` — A12 at 1-D λ targets per candidate tick on the HULL-EXPANDED plane + `PredictContact` (the exact clip-law prediction) | generic 2-D targeting (wasteful) | organize ~3.5 ms/start + ~100 µs/target (capxfer's measured chain) | `[x]` s33 — capxfer refactored to CONSUME the package (8/0 = its acceptance); rotated-azimuth scenario gates the general slice geometry (12/12 predictions exact) |
 | A14 | first-contact prediction | trace, local brush set | A28, event scans | `CapContact::BuildLocalSet` + `ClipSegment` — the engine's per-brush clip (enter-clamp tie-break, DIST_EPSILON pads, corner release, start-solid law) transcribed VERBATIM over a corridor-gathered set; out-of-corridor queries DECLINE | full-world trace (the engine's own, same answers) | 60–74 ns/query vs 113–166 ns full trace (1–2-brush worlds; the locality win scales with brush count) | `[x]` s34 (capcontact 4/0): 40,000/40,000 queries BITWISE identical to the full trace (fraction bits + brush + plane + startsolid), DECLINE law clean, 25/25 flight first-contacts (tick AND brush) vs engine replays |
@@ -99,7 +99,7 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | C6 | sampled board→exit kernel | A22 matrix | **the capmat production loop: per boarding row ONE A20 surface, then the full time-resolved matrix (every horizon × every in-plane cell) through the A22 indexed query** | on-demand + memo | **v1 VERIFIED (capmat 9/0, s32): 715,057 REAL pairs at 270 µs/pair amortized = 10⁶ pairs in 4.5 min (target met, no extrapolation); queries alone 3.9 µs mean; builds dominate (~16 s/row)** | `[x]` v1 s32; soundness ridealongs: indexed-never-beats-exhaustive 1800/1800, engine witnesses 22/24 (2 boundary fringe, counted); cheaper builds = the named lever |
 | C7 | sampled exit→board kernel | A12/A13 matrix | **the capxfer composition: A1 vertical timetable → A2+A3 HULL-EXPANDED face slices → B13 O(1) culls → batch A11 → A4 kernel roll predicting the contact EXACTLY (engine clip fraction (d1−1/32)/(d1−d2) + clipped slide) → engine verification** | reach-table per start (measured 4–5 orders slower to first answer); shooting | **v2 VERIFIED (capxfer 8/0, s32): contact tick EXACT 63/63, end position dev ≤ 1e-4 u; A18 law bitwise at all 63 contacts; 61/63 board on the requested tick (2 curved brake paths board early — predicted exactly, counted); organize ~3.5 ms/start, ~100 µs/target fast path** | `[x]` v2 s32; v1's 1.8–3.7-tick systematic was exactly the A3 offset; interior-coverage amber inherited from A11 |
 | C8 | composition without re-simulation | memo keys | memoized exact results (repeat-share measured 84–85%) | — | hit ~ns | `[~]` measured; production memo not built |
-| C9 | min-plus path composition | tick costs | standard shortest-path over labels | — | ~µs/graph | `[ ]` trivial once C0 exists |
+| C9 | min-plus path composition | tick costs, cell-local frontier | **`CapPath::MinPlusRoute` — multi-label Dijkstra by accumulated ticks with CELL-LOCAL Pareto retention** (the C1 discipline lifted to routes: per (node, compatibility cell) the full frontier survives); admission = SameCell + s2 ≥ requirement (the C5 interval shape); relaxation CONSERVATIVE — the successor takes the label's certified fields verbatim, surplus arrival energy dropped, never extrapolated | scalar one-arrival-per-node Dijkstra (REFUTED as truth by the anti-collapse gadget; kept as the suite's foil) | ~µs/graph (300 graphs + oracle < 1 s); pool-bounded, DECLINES (−2) on overflow | `[x]` v1 s41 (cappath 6/0): == the independent edge-graph Bellman-Ford oracle 300/300 (184 feasible, 116 infeasible); witness law 184/184; the dominance prune LOSSLESS (254 completed unpruned runs match; the 46 declines are cycle blowups, all on infeasible graphs — measured law: **dominance is ALSO the termination mechanism on cycles**); **THE ANTI-COLLAPSE GADGET: the scalar collapse wrong 60/60 while the frontier composer matches the oracle** — the Pareto frontier is load-bearing (THE LEGO RULE's routing form); real C7 labels: 37 engine-verified transfers (37 cells, floor pinned) route to the oracle's optimum with exact witness re-walk. Named remainder: production edge enumeration awaits B16 + C5 certified requirement edges |
 | C10 | route cost = ticks | g | by decree | — | — | `[x]` |
 | C11 | search-order heuristics | any | quarantined: order only, never truth | — | — | `[x]` rule standing |
 | C12/C13 | refinement priority / value-of-information | bound gaps | largest-gap-first over certified intervals | — | ~ns/candidate | `[ ]` |
@@ -130,7 +130,130 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | hull offset off(n) | Minkowski support of the negated hull: −Σ nᵢ·(nᵢ>0 ? minᵢ : maxᵢ); traces run on d + off(n) | A3, C7 targeting, every origin-space plane prediction |
 | trace clip fraction | f = (d1 − 1/32)/(d1 − d2); the end sits EXACTLY 1/32 above the expanded plane along n; clipped velocity slides the remaining (1−f)·dt | C7 contact prediction (verified to ≤1e-4 u), A18 boundary work |
 
+## The function inventory (code ↔ capability)
+
+**Opened session 41 (user directive: the checklist shows every
+function related to a capability, and every function behind each
+term).** One row per capability that has packaged code; a row absent
+here has no packaged function yet — its status column says why.
+Names are namespace-qualified exactly as in code. Home files by
+prefix: `Cap*` → `SolverCapability.h`; `Fn::` → `SolverMove.cpp`
+(vtable-pinned engine mirrors); `Strafe::` → `SolverStrafe.h`;
+`Air::` → `SolverAir.h`. Each suite runs as the matching `CmdCap*`
+driver in `SolverLab.cpp` (capp2p → `CmdCapP2P`, etc.). Entries in
+(parentheses) are honest notes — the row's form lives inline, in a
+suite recipe, or in a legacy path rather than as a packaged library
+function. The HTML dashboard mirrors this section as its `FNS` /
+`TERMFNS` data (update both).
+
+| ID | Functions |
+|----|-----------|
+| A0 | `CapFrame::MakeCanonical` · `CapFrame::ToCanonical` · `CapFrame::FromCanonical` |
+| A1 | `CapWindow::VTick` · `CapWindow::ZWindow` |
+| A2 | (the slice-line algebra lives inline in `CapFaceSolve::SolveToFace`) |
+| A3 | `CapHull::PlaneOffset` · `CapHull::PlaneOffsetHull` |
+| A4 | `CapAir::MakeAirKernel` · `CapAir::KernelTick` · `CapAir::KernelCheckVelocity` · `CapAir::AirTick` · `Strafe::Law` · `Strafe::TickLaw::{Accel, NewSpeed2, TurnRad, BandCos, OptGain2}` · `Air::WishInputs` · `Fn::WishFromInput` |
+| A5 | `CapP2P::BuildSchedule` · (the dwell-age fields inside every lattice Build*) |
+| A6 | `CapAir::BuildVStar` · `CapAir::BuildVStarStrat` · `CapAir::BuildVStarX` · `CapAir::QueryVStar` · `CapAir::QueryVStarS` · `CapAir::QueryVStarX` · `CapAir::Witness` · `CapAir::WitnessS` · `CapAir::WitnessX` · (indexing: `CapAir::CellIndex` / `PsiBin*` / `BinPsi*` / `Key*`) |
+| A7 | `CapAir::QueryPsiStar` · `CapAir::QueryPsiStarX` |
+| A8 | `CapReach::BuildReach` · `CapReach::DStarUB` · `CapReach::WitnessR` · `CapBounds::AccelBudget` · `CapBounds::MaxTurnUB` · `CapBounds::TurnGateTicks` · `CapBounds::TurnGatedTravelUB` |
+| A9 | `CapP2P::SolveTerminal` · `CapP2P::WrapAngle` |
+| A10 | `CapP2P::MinAirTime` |
+| A11 | `CapP2P::SolveFixedN` · `CapP2P::SolveTargetBatch` · `CapP2P::BuildP2PBatch` · `CapP2P::BuildSchedule` · `CapP2P::Roll` · `CapP2P::BuildSegTables` · `CapP2P::EvalSegs` · `CapP2P::BCellOf` |
+| A12 | `CapP2P::SolveFreeN` |
+| A13 | `CapFaceSolve::SolveToFace` · `CapFaceSolve::PredictContact` |
+| A14 | `CapContact::BuildLocalSet` · `CapContact::ClipSegment` |
+| A15 | `Fn::ClipVelocity` · `CapBoard::BoardVdotN` |
+| A16 | `CapBoard::BestWorstBoard` |
+| A17 | `CapBoard::LossFeasibleArcs` |
+| A18 | `CapBoard::RideGrayTick` · `CapRide::MirrorTick` |
+| A19 | `CapRide::BuildRide` · `CapRide::QueryRide` · `CapRide::WitnessRide` |
+| A20 | `CapRideReach::BuildRideReach` · `CapRideReach::QueryTarget` · `CapRideReach::QueryTargetFast` · `CapRideReach::WitnessRR` |
+| A21 | `CapRideReach::MinRideTime` |
+| A22 | `CapRideReach::QueryTarget` · `CapRideReach::QueryTargetFast` · (v3 exact-hit tail: certified recipe in capgap Gate C over `CapRide::MirrorTick` — not yet a packaged library function) |
+| A23 | `CapRideReach::EdgeIntercept` |
+| A24 | `CapEdge::TryMoveLocal` · `CapEdge::EdgeTickFull` · `CapEdge::ResolveTwoPlanes` · `CapEdge::SequentialTransfer` |
+| A25 | `CapGround::MakeGroundCtx` · `CapGround::WalkKernelTick` · `CapGround::KFriction` · `CapGround::KFinishGravityFn` |
+| A26 | `CapLaunch::Detector::Feed` |
+| A27 | `CapEnd::EarliestBoxCrossing` |
+| A28 | `CapContact::FirstContactOnPath` |
+| A29 | `Fn::Duck` · `Fn::CanUnduck` · `Fn::FinishDuck` · `Fn::FinishUnDuck` · `Fn::HandleDuckingSpeedCrop` · `Fn::ReduceTimers` · `CapHull::PlaneOffsetHull` |
+| A30 | `CapGround::JumpKernelTick` · `Fn::CheckJumpButton` |
+| A31 | `CapTrigger::ApplyHit` |
+| B0 | `CapWindow::ZWindow` · `CapWindow::VTick` |
+| B1 | (the λ-interval existence test lives inline in `CapFaceSolve::SolveToFace`) |
+| B2 | `CapWindow::TravelPrefix` · `CapBounds::TravelN` |
+| B3 | `CapWindow::ContactWindow` |
+| B4 | `CapWindow::ContactWindow` · `CapWindow::ZWindow` |
+| B5 | `CapAir::QueryVStar` · `CapAir::QueryPsiStar` · (admit-only reads of the A6/A7 surfaces) |
+| B6 | (the O(1) ceiling check √(s0²+900N), applied inline — the capair gates and the B13 bisection) |
+| B7 | (the pattern row: B0/B2 culls ahead of A11/A12 — demonstrated in `CapFaceSolve::SolveToFace`) |
+| B8 | `CapBoard::LossFeasibleArcs` |
+| B9 | `CapBoard::BestWorstBoard` |
+| B12 | (legacy pre-library form: the certified U_E computation in `SolverExitField.h`) |
+| B13 | `CapBounds::MinDepartSpeed` · `CapBounds::TravelN` |
+| B14 | `CapBounds::MinIncomingSpeed` · `CapBounds::BestPost2` |
+| B17 | (derives from A6/A8 certified reads — no dedicated function yet) |
+| B19 | (hash compare inside the legacy route-search path) |
+| B20 | (the groute incumbent-cutoff mechanism — legacy path) |
+| C0 | `CapLabel::Transition` (struct) · (emitters: the C7 chain in `CmdCapXfer`, the C6 loop in `CmdCapMat`) |
+| C1 | `CapLabel::SameCell` · `CapLabel::Dominates` |
+| C6 | (the capmat production loop in `CmdCapMat` over `CapRideReach::BuildRideReach` + `QueryTargetFast` + `CapLabel` emission) |
+| C7 | `CapFaceSolve::SolveToFace` · `CapFaceSolve::PredictContact` · `CapP2P::SolveTargetBatch` · `CapBounds::MinDepartSpeed` · `CapWindow::ZWindow` · (composed by `CmdCapXfer`) |
+| C8 | `CapP2P::BuildP2PBatch` · (the organize-once/batch pattern — the shared memo store remains open) |
+| C9 | `CapPath::MinPlusRoute` |
+| C14 | (engine/law/collision stamps exist loose; the unified ledger is open) |
+| C15 | (the groute hierarchical witness assemble/replay instruments — legacy path, groute 11/11) |
+
+**Functions behind each term** (the dashboard's terms-catalog
+column; keyed by the dashboard chip ids):
+
+| Term chip | Functions |
+|-----------|-----------|
+| s2 | `Strafe::TickLaw::NewSpeed2` · `Strafe::TickLaw::OptGain2` · `CapAir::KernelTick` |
+| c | `Strafe::ToTrueWishCos` · `Strafe::ToStoredWishCos` · `Strafe::ToTrueRotSide` · `Strafe::ToStoredSide` · `Strafe::TickLaw::Accel` · `Fn::WishFromInput` · `Air::WishInputs` |
+| turn | `Strafe::TickLaw::TurnRad` · `Strafe::TickLaw::BandCos` |
+| step | `CapBounds::TravelN` · `CapWindow::TravelPrefix` |
+| revs | `CapP2P::BuildSchedule` |
+| vert | `CapWindow::VTick` · `CapWindow::ZWindow` · `CapGround::KFinishGravityFn` |
+| sf | `CapAir::MakeAirKernel` · `CapRide::MirrorTick` |
+| vdn | `CapBoard::BoardVdotN` · `Fn::ClipVelocity` · `CapBoard::BestWorstBoard` |
+| ceps | `CapRide::MirrorTick` · `CapBoard::RideGrayTick` |
+| gap | `CapRide::MirrorTick` |
+| gt | `CapBoard::RideGrayTick` |
+| jump | `CapGround::JumpKernelTick` · `Fn::CheckJumpButton` |
+| stam | `CapGround::WalkKernelTick` · `Fn::ReduceTimers` |
+| duck | `Fn::Duck` · `Fn::CanUnduck` · `Fn::FinishDuck` · `Fn::FinishUnDuck` · `Fn::HandleDuckingSpeedCrop` |
+| trig | `CapTrigger::ApplyHit` |
+| end | `CapEnd::EarliestBoxCrossing` |
+| hoff | `CapHull::PlaneOffset` · `CapHull::PlaneOffsetHull` |
+| clipf | `CapFaceSolve::PredictContact` · `CapContact::ClipSegment` |
+| hlaw | `CapBounds::AccelBudget` · `CapBounds::MaxTurnUB` · `CapBounds::TurnGateTicks` · `CapBounds::TurnGatedTravelUB` |
+
 ## Change log
+- 2026-08-23n (session 41): **THE FUNCTION INVENTORY + C9 CERTIFIED —
+  composition opens with the frontier composer.** (1) User directive:
+  the checklist shows every function related to a capability, and
+  every function behind each term — the new "function inventory"
+  section here and the `FNS`/`TERMFNS` data + Functions columns,
+  clickable chips, and per-chip home-file tooltips in the dashboard
+  (97 inventoried functions; honest parenthetical notes where a row's
+  form lives inline, in a suite recipe, or in a legacy path — e.g.
+  A22 v3's tail is a certified recipe in capgap Gate C, not yet a
+  packaged function). (2) C9 lands as `CapPath::MinPlusRoute`
+  (cappath 6/0): multi-label Dijkstra by accumulated ticks with
+  CELL-LOCAL Pareto retention — the C1 discipline lifted to routes,
+  admission the C5 interval shape, relaxation conservative (certified
+  label fields verbatim). Equals the independent edge-graph
+  Bellman-Ford oracle 300/300; witness law 184/184; prune lossless
+  (46 unpruned declines are cycle blowups, all infeasible — the
+  measured law: dominance is ALSO termination on cycles); THE
+  ANTI-COLLAPSE GADGET refutes the scalar one-arrival-per-node
+  collapse 60/60 while the frontier composer stays exact — the
+  measured proof the frontier is load-bearing, THE LEGO RULE's
+  routing form; 37 engine-verified C7 labels (floor pinned) route to
+  the oracle's optimum with exact witness re-walk. Full battery
+  green. Next: B16 successor-face sets + C5 on certified B13/B14.
 - 2026-08-23m (session 40): **THE LEGO RULE (user directive) enters
   the binding semantics, and its first application beats every
   tuned configuration.** The rule: multiple approaches per

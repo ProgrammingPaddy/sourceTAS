@@ -11,13 +11,38 @@ a measurable pass/fail, never a vibe.
 
 **THE A CATEGORY IS COMPLETE (session 37, 2026-08-23): A0–A31 all
 closed, A32 excluded by decree** — the user directive "finish all A
-first" is delivered across sessions 33–37. Two named ambers remain
-on already-certified rows (A8 direction-aware UB + local
-refinement; A11 short-flight interior coverage) — refinements, not
-open rows. **NOW ->** those ambers if desired, then the composition
-resumption recorded in the library's next-spine (C9 min-plus over
-the C0 labels, B16 + C5 on certified B13/B14, cheaper A20 builds).
-The change-log tail below is the session journal.
+first" is delivered across sessions 33–37. Composition is now OPEN:
+C9 is certified (cappath 6/0, session 41). **NOW ->** B16
+successor-face sets + C5 requirement matching on certified B13/B14
+(the production edge enumeration C9 routes over), then cheaper A20
+builds (the C6 amortization lever). The change-log tail below is
+the session journal.
+
+**STATUS 2026-08-23n (session 41): THE FUNCTION INVENTORY + C9
+CERTIFIED — composition opens.** User directive: both checklist
+files now show every function behind every capability and every
+term — the md's "function inventory" section and the dashboard's
+Functions columns (clickable chips, home-file tooltips, 97
+functions; honest parenthetical notes where a row's form lives
+inline, in a suite recipe, or in a legacy path — the inventory
+surfaced that A22 v3's exact-hit tail is a certified recipe in
+capgap Gate C, not yet a packaged library function). Then C9:
+`CapPath::MinPlusRoute`, the multi-label min-plus composer —
+Dijkstra by accumulated ticks with CELL-LOCAL Pareto retention (the
+C1 discipline lifted to routes; admission = SameCell + s2 ≥
+requirement, the C5 interval shape; relaxation conservative:
+certified label fields verbatim, surplus energy never
+extrapolated). cappath 6/0: == the independent edge-graph
+Bellman-Ford oracle 300/300 (184 feasible, 116 infeasible); witness
+law 184/184; prune lossless (254 completed unpruned runs match; the
+46 declines are cycle blowups, every one infeasible — the measured
+law: DOMINANCE IS ALSO TERMINATION on cycles); the anti-collapse
+gadget refutes the one-arrival-per-node scalar collapse 60/60 while
+the frontier composer stays exact — the frontier is load-bearing,
+THE LEGO RULE's routing form; 37 engine-verified C7 labels (floor
+pinned at the measured count) route to the oracle's optimum with an
+exact witness re-walk. Named remainder: production edges await B16
++ C5. Full battery green (seventeen suites).
 
 **STATUS 2026-08-23m (session 40): THE LEGO RULE — binding
 semantics #8, and its first application beats every tuned

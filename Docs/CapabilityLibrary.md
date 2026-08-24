@@ -422,6 +422,19 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23n (session 41): **the function inventory + C9 certified
+  (cappath 6/0)** — user directive: both checklist files now carry
+  every function behind every capability AND every term (97
+  inventoried, honest notes where a form lives inline/in a suite/in
+  a legacy path). Composition opens: `CapPath::MinPlusRoute` — the
+  multi-label min-plus composer with cell-local Pareto retention
+  (the C1 discipline lifted to routes; THE LEGO RULE's routing
+  form). Equals the independent Bellman-Ford oracle 300/300; the
+  anti-collapse gadget refutes the scalar collapse 60/60; the
+  dominance prune measured lossless AND measured to be the
+  termination mechanism on cycles; 37 real C7 labels route exactly
+  (floor pinned). Detail in the checklist change log. Next-spine:
+  B16 + C5 on certified B13/B14, cheaper A20 builds.
 - 2026-08-23m (session 40): **THE LEGO RULE enters the binding
   semantics (#8)** — user directive: multiple approaches are
   first-class units composed as monotone fallback portfolios;

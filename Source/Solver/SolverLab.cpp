@@ -19443,6 +19443,499 @@ namespace {
 		return fail == 0 ? 0 : 2;
 	}
 
+	// ================= cappath: registry C9 - MIN-PLUS PATH
+	// COMPOSITION over C0 labels (session 41). The composer is
+	// CapPath::MinPlusRoute: Dijkstra by accumulated ticks with
+	// CELL-LOCAL Pareto retention - per (node, compatibility cell) the
+	// full C1 frontier of arrivals survives, because a slower arrival
+	// with more retained s2 can be the ONLY one that admits the next
+	// leg. Gates: (1) exactness - the composer equals an INDEPENDENT
+	// edge-graph Bellman-Ford oracle on random graphs, feasible and
+	// infeasible both (the state after a leg is its label verbatim,
+	// so edge->edge chaining is the whole reachability structure and
+	// the oracle needs no frontier logic); (2) the witness law - every
+	// returned path re-walks admissibly leg by leg and sums to the
+	// returned optimum (the C15 shape); (3) prune soundness - the
+	// disable_prune lever changes NOTHING on any graph (the frontier
+	// prune is lossless: a dominating same-cell arrival admits every
+	// leg the dominated one admits, at no more ticks, and produces the
+	// identical successor state); (4) THE ANTI-COLLAPSE GADGET - a
+	// family where the naive one-arrival-per-node collapse (built here
+	// as the foil) returns WRONG answers on every instance while the
+	// multi-label composer matches the oracle: the measured proof that
+	// the Pareto frontier is load-bearing, THE LEGO RULE's routing
+	// form; (5) the pool DECLINE law - an insufficient arrival pool
+	// declines (-2), never answers from a truncated frontier; (6) REAL
+	// LABELS - the C7 chain (the capxfer recipe, 55 deg ramp) emits
+	// engine-verified transfer labels and the composer routes over
+	// them + per-cell glue legs, matching the oracle with an exact
+	// witness re-walk. Label correctness itself rests on capxfer's own
+	// gates; this suite certifies the COMPOSITION over those labels.
+	int CmdCapPath(const ReplayOpts& o) {
+		const MoveParams& p = o.params;
+		int pass = 0, fail = 0;
+		char buf[300];
+		auto check = [&](const char* name, bool ok, const char* det) {
+			printf("cappath: %-32s %s | %s\n", name,
+				ok ? "PASS" : "FAIL", det);
+			if (ok) pass++; else fail++;
+		};
+		// the production pitches (capxfer/capmat's): 64u, 10 deg,
+		// 50 u/s
+		const float PP = 64.f, SP = 0.17453293f, VP = 50.f;
+		unsigned rng = 0xC9410001u; // deterministic - floors reproduce
+		auto rnd = [&rng]() {
+			rng ^= rng << 13;
+			rng ^= rng >> 17;
+			rng ^= rng << 5;
+			return rng;
+		};
+		auto rndf = [&](float lo, float hi) {
+			return lo + (hi - lo)
+				* static_cast<float>(rnd() % 10000u) / 9999.f;
+		};
+		// a synthetic label in one of three distinct position cells
+		// (u = 100*cell at 64u pitch -> bins 0/1/3)
+		auto mkcell = [](int cell, float s2) {
+			CapLabel::Transition t;
+			t.kind = 0;
+			t.sf_quarter = 0;
+			t.u = 100.f * static_cast<float>(cell);
+			t.v = 0.f;
+			t.psi = 0.f;
+			t.vz = 0.f;
+			t.s2 = s2;
+			t.dt = 0;
+			t.loss2 = 0.f;
+			return t;
+		};
+		// the independent oracle: Bellman-Ford on the EDGE graph
+		auto oracle = [&](const std::vector<CapPath::Edge>& E,
+		                  const CapLabel::Transition& st, int start,
+		                  int goal) -> long long {
+			const int m = static_cast<int>(E.size());
+			std::vector<long long> best(m, -1);
+			for (int e = 0; e < m; ++e)
+				if (E[e].from == start
+					&& CapLabel::SameCell(st, E[e].pre, PP, SP, VP)
+					&& st.s2 >= E[e].pre.s2)
+					best[e] = E[e].post.dt;
+			for (int it = 0; it < m; ++it) {
+				bool ch = false;
+				for (int a2 = 0; a2 < m; ++a2) {
+					if (best[a2] < 0)
+						continue;
+					for (int b2 = 0; b2 < m; ++b2) {
+						if (E[a2].to != E[b2].from)
+							continue;
+						if (!CapLabel::SameCell(E[a2].post,
+							E[b2].pre, PP, SP, VP))
+							continue;
+						if (E[a2].post.s2 < E[b2].pre.s2)
+							continue;
+						const long long nd = best[a2]
+							+ E[b2].post.dt;
+						if (best[b2] < 0 || nd < best[b2]) {
+							best[b2] = nd;
+							ch = true;
+						}
+					}
+				}
+				if (!ch)
+					break;
+			}
+			long long ans = -1;
+			for (int e = 0; e < m; ++e)
+				if (E[e].to == goal && best[e] >= 0
+					&& (ans < 0 || best[e] < ans))
+					ans = best[e];
+			return ans;
+		};
+		// the foil: ONE best-dt arrival per node - the naive scalar
+		// collapse the gadget refutes
+		auto foil = [&](const std::vector<CapPath::Edge>& E,
+		                int n_nodes, const CapLabel::Transition& st,
+		                int start, int goal) -> long long {
+			const int m = static_cast<int>(E.size());
+			std::vector<long long> bd(n_nodes, -1);
+			std::vector<CapLabel::Transition> bst(n_nodes);
+			bd[start] = 0;
+			bst[start] = st;
+			for (int it = 0; it <= n_nodes; ++it) {
+				bool ch = false;
+				for (int e = 0; e < m; ++e) {
+					const CapPath::Edge& ed = E[e];
+					if (bd[ed.from] < 0)
+						continue;
+					if (!CapLabel::SameCell(bst[ed.from], ed.pre,
+						PP, SP, VP))
+						continue;
+					if (bst[ed.from].s2 < ed.pre.s2)
+						continue;
+					const long long nd = bd[ed.from] + ed.post.dt;
+					if (bd[ed.to] < 0 || nd < bd[ed.to]) {
+						bd[ed.to] = nd;
+						bst[ed.to] = ed.post;
+						ch = true;
+					}
+				}
+				if (!ch)
+					break;
+			}
+			return bd[goal];
+		};
+		// ---- gates 1-3: random graphs vs the oracle, the witness
+		// law, prune soundness
+		{
+			const int total = 300;
+			int agree = 0, feas = 0, infeas = 0;
+			int walk_ok = 0, walk_n = 0, prune_same = 0;
+			int np_decl = 0, np_decl_feas = 0, np_wrong = 0;
+			long long kept_p = 0, kept_np = 0;
+			for (int g = 0; g < total; ++g) {
+				const int nn = 3 + static_cast<int>(rnd() % 6u);
+				const int ne = 4 + static_cast<int>(rnd() % 21u);
+				std::vector<int> cell(nn);
+				for (int i = 0; i < nn; ++i)
+					cell[i] = static_cast<int>(rnd() % 3u);
+				std::vector<CapPath::Edge> E(ne);
+				for (int e = 0; e < ne; ++e) {
+					E[e].from = static_cast<int>(rnd() % nn);
+					E[e].to = static_cast<int>(rnd() % nn);
+					const float req = (rnd() % 4u) ? 2e4f : 8e5f;
+					const float out = (rnd() % 2u) ? 1e5f : 1e6f;
+					E[e].pre = mkcell(cell[E[e].from], req);
+					E[e].post = mkcell(cell[E[e].to], out);
+					E[e].post.dt = 1
+						+ static_cast<int>(rnd() % 40u);
+					E[e].post.loss2 = rndf(0.f, 1e4f);
+				}
+				const int start = 0, goal = nn - 1;
+				CapLabel::Transition st = mkcell(cell[start],
+					(rnd() % 2u) ? 5e4f : 1e6f);
+				int path[64];
+				int plen = 0, pops = 0, kept = 0;
+				const int r = CapPath::MinPlusRoute(E.data(), ne,
+					nn, st, start, goal, PP, SP, VP, path, 64,
+					&plen, false, 1 << 20, &pops, &kept);
+				const long long b = oracle(E, st, start, goal);
+				if ((r < 0 && b < 0)
+					|| (r >= 0 && b >= 0
+						&& static_cast<long long>(r) == b))
+					agree++;
+				if (b >= 0)
+					feas++;
+				else
+					infeas++;
+				if (r >= 0) {
+					walk_n++;
+					CapLabel::Transition cur = st;
+					long long tot = 0;
+					int node = start;
+					bool ok = true;
+					for (int i2 = 0; i2 < plen; ++i2) {
+						const CapPath::Edge& ed = E[path[i2]];
+						if (ed.from != node
+							|| !CapLabel::SameCell(cur, ed.pre,
+								PP, SP, VP)
+							|| cur.s2 < ed.pre.s2) {
+							ok = false;
+							break;
+						}
+						tot += ed.post.dt;
+						cur = ed.post;
+						node = ed.to;
+					}
+					if (ok && node == goal && tot == r)
+						walk_ok++;
+				}
+				// the prune lever: dominance is ALSO the composer's
+				// termination mechanism on cycles (each lap arrives
+				// with worse dt/loss2 at equal s2 and gets dominated
+				// away) - so the unpruned run on a cyclic graph with
+				// an unreachable goal grows without bound and must
+				// DECLINE at the pool cap. Categorize, don't hide:
+				// completed runs must MATCH; declines are legal only
+				// where the oracle says infeasible.
+				int plen2 = 0, kept2 = 0;
+				const int r2 = CapPath::MinPlusRoute(E.data(), ne,
+					nn, st, start, goal, PP, SP, VP, nullptr, 0,
+					&plen2, true, 1 << 18, nullptr, &kept2);
+				if (r2 == -2) {
+					np_decl++;
+					if (b >= 0)
+						np_decl_feas++;
+				} else if (r2 == r) {
+					prune_same++;
+					kept_p += kept;
+					kept_np += kept2;
+				} else {
+					np_wrong++;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%d/%d graphs agree with the "
+				"edge-graph Bellman-Ford oracle (%d feasible, %d "
+				"infeasible)", agree, total, feas, infeas);
+			check("C9 == oracle (random graphs)", agree == total
+				&& feas > 50 && infeas > 20, buf);
+			snprintf(buf, sizeof(buf), "%d/%d returned paths re-walk "
+				"admissibly and sum to the optimum", walk_ok,
+				walk_n);
+			check("C9 witness law", walk_n > 50 && walk_ok == walk_n,
+				buf);
+			snprintf(buf, sizeof(buf), "%d completed unpruned runs "
+				"all match (%d mismatches); %d cycle blowup "
+				"declines, %d of them on feasible graphs (must be "
+				"0); arrivals kept %lld pruned vs %lld unpruned",
+				prune_same, np_wrong, np_decl, np_decl_feas,
+				kept_p, kept_np);
+			check("C9 prune soundness", np_wrong == 0
+				&& np_decl_feas == 0
+				&& prune_same + np_decl == total, buf);
+		}
+		// ---- gate 4: the anti-collapse gadget
+		{
+			const int total = 60;
+			int comp_ok = 0, foil_wrong = 0;
+			for (int g = 0; g < total; ++g) {
+				const int fast = 1 + static_cast<int>(rnd() % 10u);
+				const int slow = fast + 1
+					+ static_cast<int>(rnd() % 10u);
+				const int gl = 1 + static_cast<int>(rnd() % 10u);
+				std::vector<CapPath::Edge> E(3);
+				// S(0)->M(1) two ways into the SAME cell: fast/low-s2
+				// vs slow/high-s2 - neither C1-dominates
+				E[0].from = 0;
+				E[0].to = 1;
+				E[0].pre = mkcell(0, 1e4f);
+				E[0].post = mkcell(1, 1e4f);
+				E[0].post.dt = fast;
+				E[1].from = 0;
+				E[1].to = 1;
+				E[1].pre = mkcell(0, 1e4f);
+				E[1].post = mkcell(1, 1e6f);
+				E[1].post.dt = slow;
+				// M(1)->G(2): admissible only from the high-s2 arrival
+				E[2].from = 1;
+				E[2].to = 2;
+				E[2].pre = mkcell(1, 5e5f);
+				E[2].post = mkcell(2, 8e5f);
+				E[2].post.dt = gl;
+				const CapLabel::Transition st = mkcell(0, 2e4f);
+				int plen = 0;
+				const int r = CapPath::MinPlusRoute(E.data(), 3, 3,
+					st, 0, 2, PP, SP, VP, nullptr, 0, &plen);
+				const long long b = oracle(E, st, 0, 2);
+				const long long f = foil(E, 3, st, 0, 2);
+				if (r == slow + gl && b == static_cast<long long>(r))
+					comp_ok++;
+				if (f != b)
+					foil_wrong++;
+			}
+			snprintf(buf, sizeof(buf), "composer == oracle == "
+				"slow+glue on %d/%d; the one-arrival-per-node "
+				"collapse wrong on %d/%d", comp_ok, total,
+				foil_wrong, total);
+			check("C9 anti-collapse gadget", comp_ok == total
+				&& foil_wrong == total, buf);
+		}
+		// ---- gate 5: the pool DECLINE law
+		{
+			std::vector<CapPath::Edge> E(3);
+			E[0].from = 0;
+			E[0].to = 1;
+			E[0].pre = mkcell(0, 1e4f);
+			E[0].post = mkcell(1, 1e4f);
+			E[0].post.dt = 2;
+			E[1].from = 0;
+			E[1].to = 1;
+			E[1].pre = mkcell(0, 1e4f);
+			E[1].post = mkcell(1, 1e6f);
+			E[1].post.dt = 5;
+			E[2].from = 1;
+			E[2].to = 2;
+			E[2].pre = mkcell(1, 5e5f);
+			E[2].post = mkcell(2, 8e5f);
+			E[2].post.dt = 3;
+			const CapLabel::Transition st = mkcell(0, 2e4f);
+			int plen = 0;
+			const int r = CapPath::MinPlusRoute(E.data(), 3, 3, st,
+				0, 2, PP, SP, VP, nullptr, 0, &plen, false, 2);
+			snprintf(buf, sizeof(buf), "max_pool 2 -> %d (declines; "
+				"never a truncated-frontier answer)", r);
+			check("C9 pool DECLINE law", r == -2, buf);
+		}
+		// ---- gate 6: REAL C7 labels (the capxfer recipe, 55 deg)
+		{
+			World w2;
+			Vec3 n;
+			if (!CapBoard::MakeRampWorld(&w2, o.hulls, 55.f, 180.f,
+				&n)) {
+				check("C9 real C7 labels", false,
+					"ramp world failed");
+			} else {
+				const CapAir::AirKernelCtx k =
+					CapAir::MakeAirKernel(p);
+				const float off = CapHull::PlaneOffsetHull(o.hulls,
+					n, 0);
+				const Vec3 xpos(-550.f, 0.f, 250.f);
+				const Vec3 xvel(750.f, 0.f, 60.f);
+				CapFaceSolve::FaceSolveCfg fc;
+				fc.n = n;
+				fc.d_exp = off;
+				fc.t_lo = 40;
+				fc.t_hi = 88;
+				fc.t_step = 4;
+				fc.z_lo = -700.f;
+				fc.z_hi = -40.f;
+				fc.lam_lo = -300.f;
+				fc.lam_hi = 300.f;
+				fc.lam_step = 100.f;
+				fc.horizon = 95;
+				std::vector<CapFaceSolve::FaceHit> hits;
+				int targets = 0, culled = 0;
+				double uso = 0.0, uss = 0.0;
+				CapFaceSolve::SolveToFace(k, fc, xpos, xvel, &hits,
+					&targets, &culled, &uso, &uss);
+				Vec3 fdsl(n.Z * n.X, n.Z * n.Y, n.Z * n.Z - 1.f);
+				fdsl = Scale(fdsl, 1.f / Len(fdsl));
+				const Vec3 fcsl = Cross(n, fdsl);
+				std::vector<CapLabel::Transition> labels;
+				for (size_t hi2 = 0; hi2 < hits.size(); ++hi2) {
+					const CapFaceSolve::FaceHit& h = hits[hi2];
+					if (h.pred_tick < 0)
+						continue;
+					PlayerState s;
+					s.pos = xpos;
+					s.vel = xvel;
+					int t_contact = -1;
+					Vec3 cpos, cvel_pre;
+					float csf = 1.f;
+					for (int t = 0; t < 95 && t_contact < 0; ++t) {
+						const signed char ds = t < h.res.sched.n
+							? h.res.sched.side[t] : 0;
+						const float cca = t < h.res.sched.n
+							? h.res.sched.cosa[t] : 1.f;
+						cvel_pre = s.vel;
+						csf = s.surface_friction;
+						const float s2d = Len2D(s.vel);
+						const float hh = s2d > 1.f
+							? atan2f(s.vel.Y, s.vel.X) : 0.f;
+						float yaw = hh * 57.2957795f;
+						float fmv = 0.f, smv = 0.f;
+						if (ds != 0 && s2d > 1.f)
+							Air::WishInputs(hh,
+								static_cast<int>(ds), cca, &yaw,
+								&fmv, &smv);
+						TickEvents ev;
+						MoveTick(s, w2, p, 0.f, yaw, fmv, smv,
+							0.f, 0, &ev);
+						if (ev.ncontacts > 0) {
+							t_contact = t + 1;
+							cpos = s.pos;
+						}
+					}
+					if (t_contact < 0)
+						continue;
+					CapLabel::Transition L;
+					L.kind = 0;
+					L.sf_quarter = csf < 0.5f ? 1 : 0;
+					L.dt = t_contact;
+					L.u = cpos.X * fdsl.X + cpos.Y * fdsl.Y
+						+ cpos.Z * fdsl.Z;
+					L.v = cpos.X * fcsl.X + cpos.Y * fcsl.Y
+						+ cpos.Z * fcsl.Z;
+					L.psi = atan2f(s.vel.Y, s.vel.X);
+					L.vz = s.vel.Z;
+					L.s2 = s.vel.X * s.vel.X + s.vel.Y * s.vel.Y;
+					const float pre2 = cvel_pre.X * cvel_pre.X
+						+ cvel_pre.Y * cvel_pre.Y;
+					L.loss2 = pre2 > L.s2 ? pre2 - L.s2 : 0.f;
+					labels.push_back(L);
+				}
+				const int nl = static_cast<int>(labels.size());
+				// the route graph over the real labels: node 0 = the
+				// exit state, node 1 = the boarding plane, node 2 =
+				// the goal. One leg per verified label; one glue leg
+				// (synthetic bookkeeping, honestly labeled) per
+				// DISTINCT arrival cell with a per-cell cost, so the
+				// optimum couples a real leg's ticks with its
+				// arrival cell.
+				CapLabel::Transition st;
+				st.kind = 0;
+				st.sf_quarter = 0;
+				st.u = 0.f;
+				st.v = 0.f;
+				st.psi = 0.f;
+				st.vz = 0.f;
+				st.dt = 0;
+				st.loss2 = 0.f;
+				st.s2 = xvel.X * xvel.X + xvel.Y * xvel.Y;
+				std::vector<CapPath::Edge> E;
+				for (int i2 = 0; i2 < nl; ++i2) {
+					CapPath::Edge e;
+					e.from = 0;
+					e.to = 1;
+					e.pre = st;
+					e.post = labels[i2];
+					E.push_back(e);
+				}
+				int ncells = 0;
+				for (int i2 = 0; i2 < nl; ++i2) {
+					bool seen = false;
+					for (int j2 = 0; j2 < i2 && !seen; ++j2)
+						if (CapLabel::SameCell(labels[i2],
+							labels[j2], PP, SP, VP))
+							seen = true;
+					if (seen)
+						continue;
+					CapPath::Edge e;
+					e.from = 1;
+					e.to = 2;
+					e.pre = labels[i2];
+					e.pre.s2 = 1e4f; // floor below every real s2
+					e.post = mkcell(2, 1e5f);
+					e.post.dt = 5 + 7 * ncells;
+					E.push_back(e);
+					ncells++;
+				}
+				int path[8];
+				int plen = 0;
+				const int r = CapPath::MinPlusRoute(E.data(),
+					static_cast<int>(E.size()), 3, st, 0, 2, PP,
+					SP, VP, path, 8, &plen);
+				const long long b = oracle(E, st, 0, 2);
+				bool wok = false;
+				if (r >= 0 && plen == 2) {
+					const CapPath::Edge& e1 = E[path[0]];
+					const CapPath::Edge& e2 = E[path[1]];
+					wok = e1.from == 0 && e1.to == 1
+						&& e2.from == 1 && e2.to == 2
+						&& CapLabel::SameCell(e1.post, e2.pre,
+							PP, SP, VP)
+						&& e1.post.s2 >= e2.pre.s2
+						&& e1.post.dt + e2.post.dt == r;
+				}
+				snprintf(buf, sizeof(buf), "%d verified labels in "
+					"%d cells; best route %d ticks == oracle "
+					"%lld; witness legs re-walk exact", nl,
+					ncells, r, b);
+				// the label-count floor pins at the measured value
+				// (deterministic recipe - the count reproduces;
+				// s41 measured 37 labels in 37 cells)
+				check("C9 real C7 labels", nl >= 37 && ncells >= 37
+					&& r >= 0 && b == static_cast<long long>(r)
+					&& wok, buf);
+			}
+		}
+		printf("cappath: %d passed, %d failed | %s\n", pass, fail,
+			fail == 0 ? "C9 MIN-PLUS COMPOSITION CERTIFIED - THE "
+				"FRONTIER IS LOAD-BEARING"
+				: "C9 RED - a gate failed");
+		fflush(stdout);
+		return fail == 0 ? 0 : 2;
+	}
+
 	// ================= capxfer: registry C7 v2 - the exit->board
 	// TRANSFER KERNEL (sessions 31-32): one air exit state -> many
 	// boarding targets on a destination ramp. The composition under
@@ -25889,6 +26382,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapDebt(o);
+	}
+	if (cmd == "cappath") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdCapPath(o);
 	}
 	if (cmd == "faceleg" && argc >= 3) {
 		ReplayOpts o;
