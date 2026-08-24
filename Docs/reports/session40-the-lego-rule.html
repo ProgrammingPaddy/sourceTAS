@@ -1,0 +1,132 @@
+<title>The Lego Rule</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .callout{background:var(--blue-soft); border:1px solid var(--blue); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout b{color:var(--blue)}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 40</div>
+  <h1>The Lego Rule</h1>
+  <p class="sub">A standing correction becomes binding semantics: multiple approaches per
+  algorithm are first-class units, composed so improvements are monotone by construction — and
+  the first application beats every individually-tuned configuration on every cell.</p>
+  <div class="meta">
+    <span>2026-08-23</span>
+    <span>binding semantics #8 · capp2p 30/0 · capxfer 10/0</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">A11 misses</div><div class="v">127 → 23</div>
+    <p>of 900 general targets — the portfolio exceeds every constituent, two cells above all of them</p></div>
+  <div class="tile"><div class="k">capxfer coverage</div><div class="v">37 + 37</div>
+    <p>of 49 per ramp (baseline 34/29) — the C7 consumer inherits the union</p></div>
+  <div class="tile"><div class="k">Floors armed</div><div class="v">11</div>
+    <p>nine per-cell gates in capp2p, two solver floors in capxfer — regressions now FAIL, never hide</p></div>
+  <div class="tile"><div class="k">Strategies kept intact</div><div class="v">3</div>
+    <p>the proven 2×2 tail, the 3-parameter least-norm tail, the post-brake-sized tail — none edited into another</p></div>
+</div>
+
+<h2><span class="idx">01</span>The rule</h2>
+<div class="callout"><b>User directive, verbatim:</b> "You can have multiple approaches to each
+algorithm... Nothing should ever regress while working on another, that's the entire point of
+having atomic units that can be combined like lego."</div>
+<p>Now binding semantics #8: never edit approach A into approach B — keep both intact and
+compose them as <b>ordered fallback portfolios</b>. Each later strategy runs only while the
+previous ones left the input unsolved, and evaluations update the answer only on improvement, so
+the composition is monotone by construction and its coverage is the union of the constituents'.
+"Improved X but regressed Y" is never a tradeoff to accept — it signals a missing composition.
+And enforcement is mechanical: measured per-class coverage pins as <b>hard floor gates</b> under
+deterministic seeds; floors only ever rise.</p>
+
+<h2><span class="idx">02</span>The application — and the union beat the parts</h2>
+<p class="lede">Session 38 had knob-tuned one tail implementation and accepted cell tradeoffs.
+Session 40 retired that compromise: three strategies, each exactly as certified, in fallback
+order.</p>
+<div class="tablewrap"><table>
+  <tr><th>v0 \ N</th><th>30</th><th>60</th><th>90</th></tr>
+  <tr><td class="nm">400</td><td class="num">88 → <b>99</b></td><td class="num">99 → <b>100</b></td><td class="num">100 → <b>100</b></td></tr>
+  <tr><td class="nm">800</td><td class="num">67 → <b>91</b></td><td class="num">97 → <b>100</b></td><td class="num">93 → <b>96</b></td></tr>
+  <tr><td class="nm">1400</td><td class="num">48 → <b>93</b></td><td class="num">94 → <b>98</b></td><td class="num">87 → <b>100</b></td></tr>
+</table></div>
+<p>Every cell is at or above every previous variant — including the always-on 3-parameter run's
+best cells and the untouched baseline's perfect long-flight cells — and two cells (400/N30,
+1400/N90) exceed <i>all</i> constituents, because a strategy that half-closes a target hands the
+next strategy a better starting shape. That compounding is exactly what the lego architecture
+buys. All twelve suites green, with the family's hard gates (bitwise replays, dwell legality)
+untouched throughout.</p>
+
+<footer>SourceTAS capability library · session 40 · 2026-08-23 · the rule: CapabilityLibrary.md
+binding semantics #8 + the standing memory · floors: capp2p ×9, capxfer ×2</footer>
+</div>
