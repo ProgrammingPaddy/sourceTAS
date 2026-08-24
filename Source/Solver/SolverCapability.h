@@ -1945,162 +1945,188 @@ namespace CapP2P {
 			top[ci] = c;
 			top[ci].res = cur;
 		}
-		// ---- stage 3: the exact-hit tail - 2-parameter Newton on
-		// the two stored-cosa values of the tail halves, from three
-		// starting points, on the TOP THREE refined candidates
-		// (running it only on the global best left basins unclosed -
-		// the v2 machinery measurement)
+		// ---- stage 3: the exact-hit tail as a STRATEGY PORTFOLIO
+		// (session 40 - THE LEGO RULE, user directive: multiple
+		// approaches are first-class units composed as fallbacks, so
+		// adding one can never regress another). Each later strategy
+		// runs only while the target is UNSOLVED, and evaluations
+		// update the answer only on improvement - the composition is
+		// MONOTONE by construction and its coverage is the union:
+		//   (a) the PROVEN 2x2 three-start Newton (session 30, the
+		//       certified behavior unchanged);
+		//   (b) the 3-PARAMETER least-norm Newton - brake strength
+		//       joins (c1, c2) - from the same starts (session 38;
+		//       lifts the deep-interior cells);
+		//   (c) the POST-BRAKE-SIZED 2x2 - the tail confined to the
+		//       free region, the brake shrunk by 4 to buy room when
+		//       it runs to the schedule's end (the A9-shape
+		//       variant).
 		{
 			const int tail_m = N >= 48 ? 24
 				: (N >= 24 ? 12 : (N >= 12 ? 8 : 0));
-			for (int rank = 0; rank < 3 && tail_m > 0
-				&& best.residual > 0.25f; ++rank) {
-				// select the best not-yet-consumed refined
-				// candidate (consumed ones are marked -1)
-				int sel = -1;
-				float selr = 1e30f;
-				for (int i = 0; i < K; ++i)
-					if (top[i].res >= 0.f && top[i].res < selr) {
-						selr = top[i].res;
-						sel = i;
+			// the top-3 refined candidates, fixed once - every
+			// strategy sees the same three
+			int sel3[3] = { -1, -1, -1 };
+			{
+				bool used[8] = { false, false, false, false,
+					false, false, false, false };
+				for (int r2 = 0; r2 < 3; ++r2) {
+					int sel = -1;
+					float selr = 1e30f;
+					for (int i = 0; i < K; ++i)
+						if (!used[i] && top[i].res < selr) {
+							selr = top[i].res;
+							sel = i;
+						}
+					if (sel < 0)
+						break;
+					used[sel] = true;
+					sel3[r2] = sel;
+				}
+			}
+			const float starts[3][2] = {
+				{ 0.f, 0.f }, { 0.35f, -0.35f },
+				{ -0.35f, 0.35f } };
+			for (int strat = 0; strat < 3 && tail_m > 0; ++strat) {
+				if (strat > 0 && best.residual <= 0.5f)
+					break;   // solved - later strategies idle
+				for (int rank = 0; rank < 3
+					&& best.residual > 0.25f; ++rank) {
+					const int sel = sel3[rank];
+					if (sel < 0)
+						continue;
+					int revs[3] = { top[sel].revs[0],
+						top[sel].revs[1], top[sel].revs[2] };
+					const int nrev = top[sel].nrev;
+					const int ss = top[sel].ss;
+					bc = top[sel].bcv;
+					int bs3 = top[sel].bs;
+					int bl3 = top[sel].bl;
+					int tl = tail_m;
+					const bool use3 = strat == 1;
+					if (strat == 1 && bl3 == 0)
+						continue;   // (b) needs a brake to vary
+					if (strat == 2) {
+						if (bl3 == 0)
+							continue;
+						int free_t = N - (bs3 + bl3);
+						if (free_t < 5 && bl3 >= 6) {
+							bl3 -= 4;
+							free_t = N - (bs3 + bl3);
+						}
+						tl = free_t >= tail_m + 2 ? tail_m
+							: (free_t >= 10 ? 8
+							: (free_t >= 5 ? 4 : 0));
+						if (tl == 0)
+							continue;
 					}
-				if (sel < 0)
-					break;
-				top[sel].res = -1.f;   // mark consumed
-				int revs[3] = { top[sel].revs[0],
-					top[sel].revs[1], top[sel].revs[2] };
-				const int nrev = top[sel].nrev;
-				const int ss = top[sel].ss;
-				const int bs2 = top[sel].bs;
-				const int bl2 = top[sel].bl;
-				bc = top[sel].bcv;   // the candidate's strength
-				// NOTE (s38, measured): sizing the tail to the
-				// post-brake region NET-REGRESSED here - the
-				// overlapping tail acts as a useful hybrid shape
-				// dimension in this solver's flow, unlike A9's.
-				// Kept as-is; the brake STRENGTH joins the tail
-				// Newton as a third parameter instead.
-				const int bs3 = bs2, bl3 = bl2;
-				const int tl = tail_m;
-				// start 3 = the 3-parameter RESCUE (brake strength
-				// joins the Newton) - only after the proven 2x2
-				// starts have had their chance, and only on brake
-				// candidates (s38: running 3-param always
-				// destabilized long-N solves the 2x2 owned)
-				const float starts[4][2] = {
-					{ 0.f, 0.f }, { 0.35f, -0.35f },
-					{ -0.35f, 0.35f }, { 0.f, 0.f } };
-				for (int st = 0; st < 4
-					&& best.residual > 0.25f; ++st) {
-					const bool use3 = st == 3 && bl3 > 0;
-					if (st == 3 && !use3)
-						break;
-					if (st == 3 && best.residual <= 0.5f)
-						break;
-					float c1 = starts[st][0];
-					float c2 = starts[st][1];
-					for (int it = 0; it < 8; ++it) {
-						BuildSchedule(N, ss, revs, nrev, bs3,
-							bl3, bc, tl, c1, c2, &s);
-						float ex, ey, evx, evy;
-						Roll(k, v0, s, &ex, &ey, &evx, &evy);
-						best.rollouts++;
-						const float fx = ex - tx, fy = ey - ty;
-						const float r0 = sqrtf(fx * fx
-							+ fy * fy);
-						if (r0 < best.residual) {
-							best.residual = r0;
-							best.ex = ex;
-							best.ey = ey;
-							best.evx = evx;
-							best.evy = evy;
-							best.brake_start = bs3;
-							best.brake_len = bl3;
-							best.brake_cosa = bc;
-							best.tail_c1 = c1;
-							best.tail_c2 = c2;
-							best.sched = s;
-						}
-						if (r0 <= 0.25f)
-							break;
-						const float h = 0.02f;
-						float ex1, ey1, ex2, ey2, dvx, dvy;
-						BuildSchedule(N, ss, revs, nrev, bs3,
-							bl3, bc, tl, c1 + h, c2, &s);
-						Roll(k, v0, s, &ex1, &ey1, &dvx, &dvy);
-						BuildSchedule(N, ss, revs, nrev, bs3,
-							bl3, bc, tl, c1, c2 + h, &s);
-						Roll(k, v0, s, &ex2, &ey2, &dvx, &dvy);
-						best.rollouts += 2;
-						const float j11 = (ex1 - ex) / h;
-						const float j21 = (ey1 - ey) / h;
-						const float j12 = (ex2 - ex) / h;
-						const float j22 = (ey2 - ey) / h;
-						if (use3) {
-							// THREE-PARAMETER least-norm step
-							// (s38): the brake STRENGTH joins
-							// (c1, c2) - 2 constraints, 3
-							// controls, minimum-norm solve via
-							// J^T (J J^T)^{-1} r
-							const float hb = bc + 0.02f
-								<= 0.999f ? 0.02f : -0.02f;
-							float ex3, ey3;
-							bc += hb;
-							BuildSchedule(N, ss, revs, nrev,
-								bs3, bl3, bc, tl, c1, c2, &s);
-							Roll(k, v0, s, &ex3, &ey3, &dvx,
-								&dvy);
-							bc -= hb;
+					for (int st = 0; st < 3
+						&& best.residual > 0.25f; ++st) {
+						float c1 = starts[st][0];
+						float c2 = starts[st][1];
+						for (int it = 0; it < 8; ++it) {
+							BuildSchedule(N, ss, revs, nrev, bs3,
+								bl3, bc, tl, c1, c2, &s);
+							float ex, ey, evx, evy;
+							Roll(k, v0, s, &ex, &ey, &evx, &evy);
 							best.rollouts++;
-							const float j13 = (ex3 - ex) / hb;
-							const float j23 = (ey3 - ey) / hb;
-							const float a = j11 * j11
-								+ j12 * j12 + j13 * j13;
-							const float b = j11 * j21
-								+ j12 * j22 + j13 * j23;
-							const float cq = j21 * j21
-								+ j22 * j22 + j23 * j23;
-							const float det = a * cq - b * b;
-							if (fabsf(det) < 1e-8f)
+							const float fx = ex - tx, fy = ey - ty;
+							const float r0 = sqrtf(fx * fx
+								+ fy * fy);
+							if (r0 < best.residual) {
+								best.residual = r0;
+								best.ex = ex;
+								best.ey = ey;
+								best.evx = evx;
+								best.evy = evy;
+								best.brake_start = bs3;
+								best.brake_len = bl3;
+								best.brake_cosa = bc;
+								best.tail_c1 = c1;
+								best.tail_c2 = c2;
+								best.sched = s;
+							}
+							if (r0 <= 0.25f)
 								break;
-							const float y1 = (-fx * cq
-								+ fy * b) / det;
-							const float y2 = (-a * fy
-								+ b * fx) / det;
-							float d1 = j11 * y1 + j21 * y2;
-							float d2 = j12 * y1 + j22 * y2;
-							float d3 = j13 * y1 + j23 * y2;
-							if (d1 > 0.3f) d1 = 0.3f;
-							if (d1 < -0.3f) d1 = -0.3f;
-							if (d2 > 0.3f) d2 = 0.3f;
-							if (d2 < -0.3f) d2 = -0.3f;
-							if (d3 > 0.1f) d3 = 0.1f;
-							if (d3 < -0.1f) d3 = -0.1f;
-							c1 += d1;
-							c2 += d2;
-							bc += d3;
-							if (bc < 0.2f) bc = 0.2f;
-							if (bc > 0.999f) bc = 0.999f;
-						} else {
-							const float det = j11 * j22
-								- j12 * j21;
-							if (fabsf(det) < 1e-6f)
-								break;
-							float d1 = (-fx * j22 + fy * j12)
-								/ det;
-							float d2 = (-j11 * fy + j21 * fx)
-								/ det;
-							if (d1 > 0.3f) d1 = 0.3f;
-							if (d1 < -0.3f) d1 = -0.3f;
-							if (d2 > 0.3f) d2 = 0.3f;
-							if (d2 < -0.3f) d2 = -0.3f;
-							c1 += d1;
-							c2 += d2;
+							const float h = 0.02f;
+							float ex1, ey1, ex2, ey2, dvx, dvy;
+							BuildSchedule(N, ss, revs, nrev, bs3,
+								bl3, bc, tl, c1 + h, c2, &s);
+							Roll(k, v0, s, &ex1, &ey1, &dvx, &dvy);
+							BuildSchedule(N, ss, revs, nrev, bs3,
+								bl3, bc, tl, c1, c2 + h, &s);
+							Roll(k, v0, s, &ex2, &ey2, &dvx, &dvy);
+							best.rollouts += 2;
+							const float j11 = (ex1 - ex) / h;
+							const float j21 = (ey1 - ey) / h;
+							const float j12 = (ex2 - ex) / h;
+							const float j22 = (ey2 - ey) / h;
+							if (use3) {
+								// THREE-PARAMETER least-norm step
+								// (s38): the brake STRENGTH joins
+								// (c1, c2) - 2 constraints, 3
+								// controls, minimum-norm solve via
+								// J^T (J J^T)^{-1} r
+								const float hb = bc + 0.02f
+									<= 0.999f ? 0.02f : -0.02f;
+								float ex3, ey3;
+								bc += hb;
+								BuildSchedule(N, ss, revs, nrev,
+									bs3, bl3, bc, tl, c1, c2, &s);
+								Roll(k, v0, s, &ex3, &ey3, &dvx,
+									&dvy);
+								bc -= hb;
+								best.rollouts++;
+								const float j13 = (ex3 - ex) / hb;
+								const float j23 = (ey3 - ey) / hb;
+								const float a = j11 * j11
+									+ j12 * j12 + j13 * j13;
+								const float b = j11 * j21
+									+ j12 * j22 + j13 * j23;
+								const float cq = j21 * j21
+									+ j22 * j22 + j23 * j23;
+								const float det = a * cq - b * b;
+								if (fabsf(det) < 1e-8f)
+									break;
+								const float y1 = (-fx * cq
+									+ fy * b) / det;
+								const float y2 = (-a * fy
+									+ b * fx) / det;
+								float d1 = j11 * y1 + j21 * y2;
+								float d2 = j12 * y1 + j22 * y2;
+								float d3 = j13 * y1 + j23 * y2;
+								if (d1 > 0.3f) d1 = 0.3f;
+								if (d1 < -0.3f) d1 = -0.3f;
+								if (d2 > 0.3f) d2 = 0.3f;
+								if (d2 < -0.3f) d2 = -0.3f;
+								if (d3 > 0.1f) d3 = 0.1f;
+								if (d3 < -0.1f) d3 = -0.1f;
+								c1 += d1;
+								c2 += d2;
+								bc += d3;
+								if (bc < 0.2f) bc = 0.2f;
+								if (bc > 0.999f) bc = 0.999f;
+							} else {
+								const float det = j11 * j22
+									- j12 * j21;
+								if (fabsf(det) < 1e-6f)
+									break;
+								float d1 = (-fx * j22 + fy * j12)
+									/ det;
+								float d2 = (-j11 * fy + j21 * fx)
+									/ det;
+								if (d1 > 0.3f) d1 = 0.3f;
+								if (d1 < -0.3f) d1 = -0.3f;
+								if (d2 > 0.3f) d2 = 0.3f;
+								if (d2 < -0.3f) d2 = -0.3f;
+								c1 += d1;
+								c2 += d2;
+							}
+							if (c1 > 0.95f) c1 = 0.95f;
+							if (c1 < -0.95f) c1 = -0.95f;
+							if (c2 > 0.95f) c2 = 0.95f;
+							if (c2 < -0.95f) c2 = -0.95f;
 						}
-						if (c1 > 0.95f) c1 = 0.95f;
-						if (c1 < -0.95f) c1 = -0.95f;
-						if (c2 > 0.95f) c2 = 0.95f;
-						if (c2 < -0.95f) c2 = -0.95f;
 					}
 				}
 			}
@@ -2354,9 +2380,11 @@ namespace CapP2P {
 					improved = true;
 			}
 		}
-		// the exact-hit tail (three starts)
+		// the exact-hit tail as the STRATEGY PORTFOLIO (session 40,
+		// the lego rule - see the fixed-N solver's stage 3): the
+		// proven 2x2, then the 3-parameter least-norm, then the
+		// post-brake-sized 2x2, each only while unsolved.
 		{
-			bc = best.brake_cosa;
 			const int tail_m = N >= 48 ? 24
 				: (N >= 24 ? 12 : (N >= 12 ? 8 : 0));
 			if (tail_m > 0 && best.residual > 0.25f) {
@@ -2364,23 +2392,35 @@ namespace CapP2P {
 					best.revs[2] };
 				const int nrev = best.nrev;
 				const int ss = best.start_side;
-				const int bs2 = best.brake_start;
-				const int bl2 = best.brake_len;
-				const int tl = tail_m;
-				// start 3 = the 3-parameter rescue (see the fixed-N
-				// solver's note)
-				const float starts[4][2] = {
+				const float starts[3][2] = {
 					{ 0.f, 0.f }, { 0.35f, -0.35f },
-					{ -0.35f, 0.35f }, { 0.f, 0.f } };
-				for (int st = 0; st < 4
-					&& best.residual > 0.25f; ++st) {
-					const bool use3 = st == 3 && bl2 > 0;
-					if (st == 3 && !use3)
-						break;
-					if (st == 3 && best.residual <= 0.5f)
-						break;
-					float c1 = starts[st][0];
-					float c2 = starts[st][1];
+					{ -0.35f, 0.35f } };
+				for (int strat = 0; strat < 3; ++strat) {
+					if (strat > 0 && best.residual <= 0.5f)
+						break;   // solved - later strategies idle
+					int bs2 = best.brake_start;
+					int bl2 = best.brake_len;
+					bc = best.brake_cosa;
+					int tl = tail_m;
+					const bool use3 = strat == 1;
+					if (strat >= 1 && bl2 == 0)
+						continue;   // (b)/(c) need a brake
+					if (strat == 2) {
+						int free_t = N - (bs2 + bl2);
+						if (free_t < 5 && bl2 >= 6) {
+							bl2 -= 4;
+							free_t = N - (bs2 + bl2);
+						}
+						tl = free_t >= tail_m + 2 ? tail_m
+							: (free_t >= 10 ? 8
+							: (free_t >= 5 ? 4 : 0));
+						if (tl == 0)
+							continue;
+					}
+					for (int st = 0; st < 3
+						&& best.residual > 0.25f; ++st) {
+						float c1 = starts[st][0];
+						float c2 = starts[st][1];
 					for (int it = 0; it < 8; ++it) {
 						BuildSchedule(N, ss, revs, nrev, bs2,
 							bl2, bc, tl, c1, c2, &s);
@@ -2484,6 +2524,7 @@ namespace CapP2P {
 						if (c2 > 0.95f) c2 = 0.95f;
 						if (c2 < -0.95f) c2 = -0.95f;
 					}
+				}
 				}
 			}
 		}

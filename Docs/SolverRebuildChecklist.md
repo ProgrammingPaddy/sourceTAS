@@ -19,6 +19,26 @@ resumption recorded in the library's next-spine (C9 min-plus over
 the C0 labels, B16 + C5 on certified B13/B14, cheaper A20 builds).
 The change-log tail below is the session journal.
 
+**STATUS 2026-08-23m (session 40): THE LEGO RULE — binding
+semantics #8, and its first application beats every tuned
+configuration.** User directive: multiple approaches per algorithm
+are FIRST-CLASS units; improvements must be MONOTONE. Never edit
+approach A into approach B — compose them as ordered fallback
+portfolios (later strategies run only while unsolved; evals update
+only on improvement → coverage = the union by construction);
+"improved X but regressed Y" signals a missing composition, never a
+tradeoff; measured coverage pins as HARD FLOOR GATES that only ever
+rise. Applied to A11's exact-hit stage (the proven 2×2 tail + the
+3-parameter least-norm tail + the post-brake-sized tail as three
+intact fallback strategies): the portfolio EXCEEDED every
+individual configuration on every cell — 400: 99/100/100; 800:
+91/100/96; 1400: 93/98/100; misses 127 → 23 of 900 (2.6%), two
+cells above all constituents. capxfer coverage rose to 37/49 on
+BOTH ramps. Floors armed: nine per-cell gates in capp2p (30/0) and
+two solver floors in capxfer (10/0). The rule is recorded in the
+library's binding semantics, the standing memory, and here. All
+twelve suites green.
+
 **STATUS 2026-08-23l (session 39): THE LAST A AMBER RESOLVES — THE
 A CATEGORY IS COMPLETE WITH NO OPEN AMBERS.** A8's direction-aware
 family lands as certified law (capreach 8/0): the HEADING-FREEDOM

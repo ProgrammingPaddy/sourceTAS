@@ -15271,6 +15271,23 @@ namespace {
 					"family sufficiency (measured)",
 					hitB == kTrials ? "FULL" : "PARTIAL", v0, N,
 					hitB, kTrials);
+				// THE LEGO RULE's enforcement (session 40, user
+				// directive): measured coverage is pinned as a
+				// HARD FLOOR - any change that regresses a cell
+				// FAILS here instead of hiding in a mean. Floors =
+				// the strategy portfolio's measured results under
+				// the deterministic seed. Raise them when coverage
+				// genuinely improves; never lower them.
+				static const int kFloorB[3][3] = {
+					{ 99, 100, 100 },
+					{ 91, 100, 96 },
+					{ 93, 98, 100 } };
+				snprintf(nm, sizeof(nm), "A11 floor v0=%.0f N=%d",
+					v0, N);
+				snprintf(buf, sizeof(buf), "general %d/%d vs the "
+					"pinned floor %d", hitB, kTrials,
+					kFloorB[vi][ni]);
+				check(nm, hitB >= kFloorB[vi][ni], buf);
 			}
 		// ---- BATCH MODE (session 30): organize the family once per
 		// start, then answer many targets each in near-constant time
@@ -19699,6 +19716,14 @@ namespace {
 				"schedules board on the requested tick",
 				ralphas[ia], attained, solved);
 			check(nm, attained >= 20, buf);
+			// the lego rule's floor (s40): solver coverage pinned
+			static const int kSolvedFloor[2] = { 37, 37 };
+			snprintf(nm, sizeof(nm), "C7 coverage floor [%.0f "
+				"deg]", ralphas[ia]);
+			snprintf(buf, sizeof(buf), "ramp %.0f: %d solved vs "
+				"the pinned floor %d", ralphas[ia], solved,
+				kSolvedFloor[ia]);
+			check(nm, solved >= kSolvedFloor[ia], buf);
 			snprintf(nm, sizeof(nm), "A18 law at contact [%.0f "
 				"deg]", ralphas[ia]);
 			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d contact "

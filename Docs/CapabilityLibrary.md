@@ -74,6 +74,20 @@ any particular solver architecture.
 7. **No map geometry and no human data in capability derivation** —
    synthetic/unit domains only. Map geometry enters only through
    B/C-layer consumers after the map-independent function is solved.
+8. **THE LEGO RULE (user directive 2026-08-23, session 40):
+   multiple approaches per algorithm are FIRST-CLASS units, and
+   improvements must be MONOTONE.** Never edit approach A into
+   approach B; keep both intact and compose them as ordered
+   fallback portfolios (each strategy runs only while the previous
+   left the input unsolved; evaluations update only on
+   improvement — the composition's coverage is the union of the
+   constituents' by construction). "Improved X but regressed Y" is
+   never a tradeoff to accept — it signals a missing composition.
+   Enforcement: measured per-class coverage is pinned as HARD FLOOR
+   GATES in the suites (deterministic seeds make counts
+   reproducible); floors only ever rise. First applied: the A11
+   tail portfolio + the capp2p/capxfer floors (session 40 — the
+   portfolio beat every individual configuration on every cell).
 
 ## The standard deliverables (every capability, every time)
 
@@ -408,6 +422,14 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-23m (session 40): **THE LEGO RULE enters the binding
+  semantics (#8)** — user directive: multiple approaches are
+  first-class units composed as monotone fallback portfolios;
+  coverage floors as hard gates. First application: the A11 tail
+  portfolio beat every tuned configuration on every cell (misses
+  127 → 23 of 900; capxfer 37/49 both ramps); floors armed in
+  capp2p (nine) and capxfer (two). Detail in the checklist change
+  log.
 - 2026-08-23l (session 39): **the last A amber resolves — A8's
   direction-aware family as certified law** (capreach 8/0): the
   heading-freedom lemma (one-tick reversal at s ≤ 562.5·sf,
