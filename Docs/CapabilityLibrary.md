@@ -422,6 +422,20 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-24a (session 42): **the B march — eight rows close with
+  certified functions and falsifier gates** (B5, B7, B10, B11, B15,
+  B16, B17, B21), **B22 lands sound-partial** (0 of 120k
+  adversarial schedules beat it; total bite at short horizons —
+  net-π at 1400 u/s in ≤8 ticks certified impossible — but no bite
+  at N 20–40: the joint turn-gain frontier theorem is the
+  completion criterion), **B18 recorded as deliberately open**
+  (prune only if proven; B19 is its certified special case). The
+  measured headlines: the B10 ride ceilings are TIGHT (the exact
+  sweeps reach 99–100% of the bounds, 0 violations over ~100M
+  nodes); B16 never excludes a face the exact chain boards and
+  culls 88% of random candidates with proofs; B21 makes h_cert
+  nonzero for the first time. Detail in the checklist change log.
+  B status: 21/23 done + B22 sound-partial + B18 open-by-design.
 - 2026-08-23n (session 41): **the function inventory + C9 certified
   (cappath 6/0)** — user directive: both checklist files now carry
   every function behind every capability AND every term (97

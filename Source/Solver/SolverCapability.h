@@ -5772,4 +5772,400 @@ namespace CapPath {
 	}
 
 } // namespace CapPath
+
+// ======================================================================
+// THE B MARCH (session 42) - the remaining certified reducers, every
+// one derived from ALREADY-CERTIFIED laws and attacked by its own
+// falsifier. Soundness inventory used below (all previously gated):
+//   - ONE-TICK GAIN LAW: delta(s^2) <= cap^2 = 900 for EVERY control
+//     in BOTH accel regimes (cap-limited: delta = cap^2 - (v c)^2;
+//     budget-limited: budget-limited implies v c < cap - budget so
+//     delta = budget (2 v c + budget) < 0) - the algebra of the
+//     certified Strafe::TickLaw, the base of the A6 ceiling.
+//   - SHED LAW (s39): |v'| >= |v| - a >= |v| - budget: speed sheds
+//     at most B = accel*wishspeed*dt*sf per tick.
+//   - TURN LAW (s39): one-tick |dpsi| <= atan(B/(s-B)) above B, free
+//     at or below B (CapBounds::MaxTurnUB, 200k-action certified).
+//   - VERTICAL: z/vz exact (A1); TRAVEL: the B2 prefix integral
+//     (never beaten, 915-schedule + 30k-schedule falsifiers).
+namespace CapBounds {
+
+	// ---- B22: the heading-aware speed ceiling ------------------------
+	// Certified UB on the total |heading turn| achievable in N ticks
+	// by ANY schedule that ENDS at speed >= v_term. Per tick i the
+	// speed entering the tick has two certified lower bounds: the
+	// forward shed floor s0 - i*B, and the backward gain floor
+	// sqrt(v_term^2 - 900*(N-i)) (to end at v_term, s_i^2 can be at
+	// most 900 per remaining tick lower). MaxTurnUB is nonincreasing
+	// in s, so evaluating it at the max of the two floors bounds the
+	// tick's turn. Sum over ticks. Nonincreasing in v_term (the
+	// bisection lever). Capped at pi + epsilon on early-out (net
+	// heading change never exceeds pi).
+	inline double MaxTotalTurnUB(const MoveParams& p, float s0, int N,
+	                             float v_term, float sf) {
+		const float B = AccelBudget(p, sf);
+		double tot = 0.0;
+		for (int i = 0; i < N; ++i) {
+			const float fwd = s0 - static_cast<float>(i) * B;
+			const float rem2 = v_term * v_term
+				- 900.f * static_cast<float>(N - i);
+			const float bwd = rem2 > 0.f ? sqrtf(rem2) : 0.f;
+			const float smin = fwd > bwd ? fwd : bwd;
+			tot += MaxTurnUB(p, smin > 0.f ? smin : 0.f, sf);
+			if (tot >= 3.2)
+				return tot; // already past any net |dpsi|
+		}
+		return tot;
+	}
+
+	// The B22 ceiling: an UPPER bound on terminal speed for any
+	// N-tick schedule whose NET heading change magnitude is >=
+	// dpsi_abs. Monotone bisection against MaxTotalTurnUB (the B13
+	// pattern); returns the blind ceiling when the heading constraint
+	// cannot bite. SOUND for mixed sf sequences when called with
+	// sf = 1 (larger B enlarges both the turn and shed allowances).
+	inline float HeadingAwareSpeedUB(const MoveParams& p, float s0,
+	                                 int N, float dpsi_abs, float sf) {
+		const float blind = sqrtf(s0 * s0
+			+ 900.f * static_cast<float>(N));
+		if (dpsi_abs <= 0.f || N <= 0)
+			return blind;
+		if (dpsi_abs > 3.14159265f)
+			dpsi_abs = 3.14159265f;
+		if (MaxTotalTurnUB(p, s0, N, blind, sf)
+			>= static_cast<double>(dpsi_abs))
+			return blind;
+		float lo = 0.f, hi = blind;
+		for (int it = 0; it < 48; ++it) {
+			const float mid = 0.5f * (lo + hi);
+			if (MaxTotalTurnUB(p, s0, N, mid, sf)
+				>= static_cast<double>(dpsi_abs))
+				lo = mid;
+			else
+				hi = mid;
+		}
+		return hi; // the certified side of the bracket
+	}
+
+	// B5's cull: FALSE => achieving net |dpsi| in N ticks while
+	// ENDING at speed >= v_floor is IMPOSSIBLE, with proof.
+	inline bool HeadingChangeFeasibleUB(const MoveParams& p, float s0,
+	                                    int N, float dpsi_abs,
+	                                    float v_floor, float sf) {
+		if (dpsi_abs <= 0.f)
+			return true;
+		if (dpsi_abs > 3.14159265f)
+			dpsi_abs = 3.14159265f;
+		return MaxTotalTurnUB(p, s0, N,
+			v_floor > 0.f ? v_floor : 0.f, sf)
+			>= static_cast<double>(dpsi_abs);
+	}
+
+	// ---- B17: cell optimistic bound ----------------------------------
+	// The per-cell value UB from certified bounds ONLY (the
+	// proofs-only rule): the blind ceiling intersected with the B22
+	// heading-aware ceiling at the cell's minimum |dpsi|. Instruments
+	// (fpot/doom/exitgate) may inform ordering, never this number.
+	inline float CellOptimisticSpeedUB(const MoveParams& p, float s0,
+	                                   int N, float dpsi_min_abs,
+	                                   float sf) {
+		return HeadingAwareSpeedUB(p, s0, N, dpsi_min_abs, sf);
+	}
+
+	// ---- B10: ride reachability bounds -------------------------------
+	// The certified ride speed ceiling (3-D speed): per ride tick the
+	// air-accelerate add obeys the same delta(s^2) <= 900 algebra (the
+	// wish is horizontal; the projection c is the horizontal
+	// component - identical maximization), gravity adds a vector of
+	// magnitude at most g*dt, and the clip only removes speed. Order
+	// maximized: s' <= sqrt(s^2 + 900) + g*dt. Conservative by the
+	// full g*dt (the in-plane projection g*dt*sqrt(1-nz^2) is smaller
+	// on every real face - the falsifier measures the slack).
+	inline float RideSpeedCeilingN(const MoveParams& p, float s0,
+	                               int N) {
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		const float gdt = p.gravity * p.dt;
+		float s = s0;
+		for (int i = 0; i < N; ++i)
+			s = sqrtf(s * s + cap2) + gdt;
+		return s;
+	}
+
+	// The B10 travel bound: per-tick displacement is at most the
+	// tick's move speed times dt, and the move speed is below the
+	// tick's ceiling (the move phase carries only half the tick's
+	// gravity). Prefix sums, the B2 shape.
+	inline void RideTravelPrefix(const MoveParams& p, float s0,
+	                             int n_max, std::vector<float>* travel) {
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		const float gdt = p.gravity * p.dt;
+		travel->assign(static_cast<size_t>(n_max) + 1, 0.f);
+		float s = s0;
+		double d = 0.0;
+		for (int i = 1; i <= n_max; ++i) {
+			s = sqrtf(s * s + cap2) + gdt;
+			d += static_cast<double>(s) * p.dt;
+			(*travel)[static_cast<size_t>(i)] = static_cast<float>(d);
+		}
+	}
+
+	// ---- B11: minimum ride ticks -------------------------------------
+	// First N whose certified ride travel bound covers dist; -1 if
+	// n_max cannot (a certified impossibility either way: any real
+	// ride needs AT LEAST the returned N).
+	inline int MinRideTicks(const MoveParams& p, float s0, float dist,
+	                        int n_max) {
+		if (dist <= 0.f)
+			return 0;
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		const float gdt = p.gravity * p.dt;
+		float s = s0;
+		double d = 0.0;
+		for (int i = 1; i <= n_max; ++i) {
+			s = sqrtf(s * s + cap2) + gdt;
+			d += static_cast<double>(s) * p.dt;
+			if (d + 1e-3 >= static_cast<double>(dist))
+				return i;
+		}
+		return -1;
+	}
+
+	// The air twin (B2 inverse, feeds B21): first N whose certified
+	// air travel bound covers dist.
+	inline int MinAirTicks(const MoveParams& p, float v0, float dist,
+	                       int n_max) {
+		if (dist <= 0.f)
+			return 0;
+		const float cap2 = p.air_speed_cap * p.air_speed_cap;
+		double d = 0.0;
+		for (int i = 1; i <= n_max; ++i) {
+			d += static_cast<double>(sqrtf(v0 * v0
+				+ cap2 * static_cast<float>(i))) * p.dt;
+			if (d + 1e-3 >= static_cast<double>(dist))
+				return i;
+		}
+		return -1;
+	}
+
+	// ---- B21: minimum remaining ticks to END -------------------------
+	// The admissible heuristic: the sum of certified per-leg minima.
+	// Each term is a certified lower bound on its leg alone, so the
+	// sum lower-bounds any route that traverses the legs in order
+	// (concatenation can only add transition ticks, never remove
+	// leg-internal ones). Returns -1 when any leg is certifiably not
+	// coverable within its horizon.
+	struct RouteLeg {
+		int kind = 0;      // 0 = air (B2 inverse), 1 = ride (B11)
+		float v0 = 0.f;    // certified speed UB entering the leg
+		float dist = 0.f;  // leg point-to-point distance
+		int n_max = 256;   // per-leg horizon
+	};
+	inline long long RouteTicksLB(const MoveParams& p,
+	                              const RouteLeg* legs, int n_legs) {
+		long long sum = 0;
+		for (int i = 0; i < n_legs; ++i) {
+			const int m = legs[i].kind == 0
+				? MinAirTicks(p, legs[i].v0, legs[i].dist,
+					legs[i].n_max)
+				: MinRideTicks(p, legs[i].v0, legs[i].dist,
+					legs[i].n_max);
+			if (m < 0)
+				return -1;
+			sum += m;
+		}
+		return sum;
+	}
+
+} // namespace CapBounds
+
+// ======================================================================
+// CAPCONTACT addition - registry B15 (guaranteed collision /
+// corridor exclusion), session 42. Certificates over a WHOLE
+// schedule family at once, from two certified envelopes: z is EXACT
+// per tick (the A1 recurrence - every clean-air schedule shares it),
+// and xy lies in the disc of radius travel[i] (the B2 bound, never
+// beaten). Against the A14 local set:
+//   +1 CLEAN-CERT  - no schedule can touch any brush through tick N
+//                    (every tick's envelope is fully outside every
+//                    brush: some plane has min-over-envelope > 0);
+//   -1 EXCLUDE     - EVERY schedule has contacted by *cert_tick_out
+//                    (the envelope is fully inside a brush: all
+//                    planes have max-over-envelope < 0 - a clean
+//                    kernel position cannot be inside solid, so
+//                    every real path clipped at or before that
+//                    tick);
+//    0 UNKNOWN     - neither certificate holds; run A28 per
+//                    schedule;
+//   -2 DECLINE     - the envelope leaves the gathered corridor box
+//                    (the local set cannot answer - the A14 law).
+namespace CapContact {
+
+	inline int CorridorCertificate(const LocalSet& S,
+	                               const MoveParams& p,
+	                               const Vec3& pos0, float v0,
+	                               float vz0, int N,
+	                               int* cert_tick_out = nullptr) {
+		if (cert_tick_out)
+			*cert_tick_out = -1;
+		const World& w = *S.w;
+		const int hull = S.hull;
+		std::vector<float> travel;
+		CapWindow::TravelPrefix(p, v0, N, &travel);
+		float z = pos0.Z, vz = vz0;
+		bool all_clean = true;
+		for (int i = 1; i <= N; ++i) {
+			// the tick's SWEPT envelope: contact can happen
+			// mid-segment, so the z extent is the whole interval the
+			// tick traverses (z is linear in the segment fraction),
+			// and the xy radius is the end-of-tick travel bound
+			// (displacement is monotone within the tick).
+			const float zprev = z;
+			CapWindow::VTick(p, &z, &vz);
+			const float zlo2 = zprev < z ? zprev : z;
+			const float zhi2 = zprev < z ? z : zprev;
+			const float zmid = 0.5f * (zlo2 + zhi2);
+			const float zhalf = 0.5f * (zhi2 - zlo2);
+			const float r = travel[static_cast<size_t>(i)];
+			// corridor containment (the DECLINE law)
+			if (pos0.X - r < S.lo.X || pos0.X + r > S.hi.X
+				|| pos0.Y - r < S.lo.Y || pos0.Y + r > S.hi.Y
+				|| zlo2 < S.lo.Z || zhi2 > S.hi.Z)
+				return -2;
+			bool tick_clean = true;
+			for (size_t oi = 0; oi < S.brushes.size(); ++oi) {
+				const WorldBrush& bc = w.brushes[
+					static_cast<size_t>(S.brushes[oi])];
+				const std::vector<float>& pd = hull == 1
+					? bc.d_duck : hull == 2 ? bc.d_unduck
+					: bc.d_stand;
+				bool outside_some = false, inside_all = true;
+				for (size_t pi = 0; pi < bc.n.size(); ++pi) {
+					const Vec3& nn = bc.n[pi];
+					const float ext = r * sqrtf(nn.X * nn.X
+						+ nn.Y * nn.Y)
+						+ fabsf(nn.Z) * zhalf;
+					const float dc = nn.X * pos0.X + nn.Y * pos0.Y
+						+ nn.Z * zmid - pd[pi];
+					if (dc - ext > 0.f)
+						outside_some = true;
+					if (dc + ext >= 0.f)
+						inside_all = false;
+				}
+				if (inside_all) {
+					if (cert_tick_out)
+						*cert_tick_out = i;
+					return -1; // every schedule contacted by tick i
+				}
+				if (!outside_some)
+					tick_clean = false;
+			}
+			if (!tick_clean)
+				all_clean = false;
+		}
+		return all_clean ? 1 : 0;
+	}
+
+} // namespace CapContact
+
+// ======================================================================
+// CAPSUCC - registry B16 (conservative successor-face set), session
+// 42. The route-enumeration filter: which candidate faces can
+// POSSIBLY follow an exit state. Every test is a certified NECESSARY
+// condition, so a culled face is culled with proof and a surviving
+// face means only "not excluded":
+//   bit 0 - the B0 x B2 contact window is empty (the exact z
+//           recurrence never enters the face's band while the
+//           never-beaten travel bound can reach its distance);
+//   bit 1 - boarding is impossible at every window tick: the
+//           minimum achievable v.n = vz(t)*n.Z - smax(t)*|n_xy|
+//           (vz exact, |v_xy| <= the A6 ceiling, direction free) is
+//           >= 0 throughout - no arrival can have v.n < 0 (A15's
+//           boarding requirement).
+namespace CapSucc {
+
+	struct FaceCand {
+		Vec3 n;              // face normal (engine's, unit)
+		float dist = 0.f;    // horizontal distance to nearest point
+		float zlo = 0.f;     // boarding band (origin z)
+		float zhi = 0.f;
+	};
+
+	// verdict[i] = 1 survivor / 0 culled; reason[i] = cull bitmask.
+	// Returns the survivor count.
+	inline int FilterFaces(const MoveParams& p, const Vec3& pos,
+	                       const Vec3& vel, int horizon,
+	                       const FaceCand* f, int nf,
+	                       unsigned char* verdict,
+	                       unsigned char* reason) {
+		const float v0 = sqrtf(vel.X * vel.X + vel.Y * vel.Y);
+		int alive = 0;
+		for (int i = 0; i < nf; ++i) {
+			verdict[i] = 0;
+			reason[i] = 0;
+			int te = -1, tl = -1;
+			CapWindow::ContactWindow(p, pos.Z, vel.Z, v0, f[i].dist,
+				f[i].zlo, f[i].zhi, horizon, &te, &tl);
+			if (te < 0) {
+				reason[i] |= 1;
+				continue;
+			}
+			const float nxy = sqrtf(f[i].n.X * f[i].n.X
+				+ f[i].n.Y * f[i].n.Y);
+			bool boardable = false;
+			float z = pos.Z, vz = vel.Z;
+			for (int t = 1; t <= tl && !boardable; ++t) {
+				CapWindow::VTick(p, &z, &vz);
+				if (t < te)
+					continue;
+				const float smax = sqrtf(v0 * v0
+					+ 900.f * static_cast<float>(t));
+				if (vz * f[i].n.Z - smax * nxy < 0.f)
+					boardable = true;
+			}
+			if (!boardable) {
+				reason[i] |= 2;
+				continue;
+			}
+			verdict[i] = 1;
+			alive++;
+		}
+		return alive;
+	}
+
+} // namespace CapSucc
+
+// ======================================================================
+// CAPP2P addition - registry B7 (point/region reachability), session
+// 42. The compositional pattern packaged: constant-time certified
+// culls first, the exact solver behind them, honesty about the gap.
+//   0 EXCLUDED  - beyond the B2 travel bound at the horizon: no
+//                 schedule reaches (certified);
+//   1 REACHABLE - the A12 family produced an exact witness schedule;
+//   2 UNKNOWN   - inside the bounds but the family declined (the
+//                 measured family-sufficiency gap; never claimed
+//                 unreachable).
+namespace CapP2P {
+
+	inline int ClassifyTarget(const CapAir::AirKernelCtx& k, float v0,
+	                          float tx, float ty, int n_lo, int n_hi,
+	                          P2PResult* out, int* n_out,
+	                          int* culled = nullptr) {
+		if (n_out)
+			*n_out = -1;
+		const float dist = sqrtf(tx * tx + ty * ty);
+		std::vector<float> travel;
+		CapWindow::TravelPrefix(k.p, v0, n_hi, &travel);
+		if (dist > travel[static_cast<size_t>(n_hi)] + 0.001f)
+			return 0;
+		const int N = SolveFreeN(k, v0, tx, ty, n_lo, n_hi, out,
+			culled);
+		if (N > 0) {
+			if (n_out)
+				*n_out = N;
+			return 1;
+		}
+		return 2;
+	}
+
+} // namespace CapP2P
 } // namespace Solver

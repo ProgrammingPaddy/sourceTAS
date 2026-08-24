@@ -16286,6 +16286,45 @@ namespace {
 					beats == 0 ? "CLEAN" : "GAP", ralphas[ia],
 					beats, kTrials - discarded, worst, discarded);
 			}
+			// ---- B10 (session 42): the certified ride speed
+			// ceiling s' <= sqrt(s^2+900) + g*dt vs THIS surface's
+			// exact sweep - tens of millions of engine-law nodes
+			// are the attack; the ceiling must clear every layer's
+			// maximum. The measured closest approach is the honest
+			// tightness line (the ceiling spends the full g*dt
+			// where the face only converts sin(alpha) of it).
+			{
+				const float s0sp = Len(S.v0);
+				int lay_n = 0, lay_bad = 0;
+				float worstfrac = 0.f;
+				for (int N = 1; N <= S.p.n_max
+					&& N < static_cast<int>(S.pb_vmax.size());
+					++N) {
+					float mx = 0.f;
+					const std::vector<float>& row = S.pb_vmax[
+						static_cast<size_t>(N)];
+					for (size_t b2 = 0; b2 < row.size(); ++b2)
+						if (row[b2] > mx)
+							mx = row[b2];
+					if (mx <= 0.f)
+						continue;
+					lay_n++;
+					const float ub = CapBounds::RideSpeedCeilingN(
+						p, s0sp, N);
+					if (mx > ub + 0.51f)
+						lay_bad++;
+					if (ub > 1.f && mx / ub > worstfrac)
+						worstfrac = mx / ub;
+				}
+				char nm[64];
+				snprintf(nm, sizeof(nm), "B10 ride speed ceiling "
+					"[%.0f deg]", ralphas[ia]);
+				snprintf(buf, sizeof(buf), "%d nonempty layers, %d "
+					"exact-sweep maxima above the ceiling "
+					"(closest approach %.0f%% of the bound)",
+					lay_n, lay_bad, worstfrac * 100.f);
+				check(nm, lay_n >= 20 && lay_bad == 0, buf);
+			}
 		}
 		printf("capride: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "A19 RIDE SURFACES BUILT ON THE PROVEN LAW "
@@ -18062,6 +18101,138 @@ namespace {
 				&& agree == paths - declines && clean_n >= 4
 				&& obst_n >= 4, buf);
 		}
+		// ---- B15 (session 42): corridor certificates over WHOLE
+		// schedule families. The envelope is certified (z exact per
+		// tick + the never-beaten B2 travel disc, extended over each
+		// tick's swept z-interval); the certificate speaks for EVERY
+		// dwell-legal schedule at once. The falsifier samples
+		// schedules and rolls them through the exact A14/A28 chain:
+		// a CLEAN-CERT scenario may show no contact ever; an EXCLUDE
+		// scenario must contact on every roll, at or before the
+		// certified tick.
+		{
+			CapContact::LocalSet SB15;
+			CapContact::BuildLocalSet(wB, 0,
+				Vec3(-3000.f, -3000.f, -2600.f),
+				Vec3(3000.f, 3000.f, 1500.f), &SB15);
+			const float t55 = tanf(55.f * 0.0174533f);
+			auto mksched = [&](signed char* sides, float* cosas,
+				int N) {
+				signed char side = 0;
+				int age = 6;
+				for (int t = 0; t < N; ++t) {
+					signed char ds;
+					float ca;
+					const unsigned r2 = rnd();
+					if ((r2 & 7) == 0) {
+						ds = 0;
+						ca = 1.f;
+					} else {
+						ds = (r2 & 8) ? 1 : -1;
+						if (side != 0 && ds != side
+							&& age < min_gap)
+							ds = side;
+						ca = 1.f - 2.f * static_cast<float>(
+							(r2 >> 8) & 1023) / 1023.f;
+					}
+					sides[t] = ds;
+					cosas[t] = ca;
+					if (ds != 0 && side != 0 && ds != side)
+						age = 1;
+					else
+						age = age < 6 ? age + 1 : 6;
+					if (ds != 0)
+						side = ds;
+				}
+			};
+			int n_clean = 0, n_excl = 0, n_unk = 0, n_decl = 0;
+			int clean_contra = 0, excl_contra = 0;
+			long long rolls = 0;
+			// class 1: high passes over the lane -> CLEAN-CERT
+			for (int i = 0; i < 12; ++i) {
+				const float x0 = -400.f + 25.f
+					* static_cast<float>(i);
+				const float y0 = rndf(-80.f, 80.f);
+				const float zf = -400.f + t55 * x0;
+				const Vec3 pos0(x0, y0, zf + rndf(560.f, 700.f));
+				const float v0 = 800.f;
+				const int N = 20;
+				int ct = -1;
+				const int cert = CapContact::CorridorCertificate(
+					SB15, p, pos0, v0, 0.f, N, &ct);
+				if (cert == 1) {
+					n_clean++;
+					for (int tr = 0; tr < 300; ++tr) {
+						signed char sd[24];
+						float ca[24];
+						mksched(sd, ca, N);
+						rolls++;
+						const int r3 =
+							CapContact::FirstContactOnPath(k,
+								SB15, pos0,
+								Vec3(v0, 0.f, 0.f), sd, ca, N,
+								N);
+						if (r3 >= 0)
+							clean_contra++;
+					}
+				} else if (cert == -1) n_excl++;
+				else if (cert == -2) n_decl++;
+				else n_unk++;
+			}
+			// class 2: plunging starts over segment 1 -> EXCLUDE
+			for (int i = 0; i < 12; ++i) {
+				const float x0 = 110.f + 12.f
+					* static_cast<float>(i);
+				const float y0 = rndf(-50.f, 50.f);
+				const float zf = -400.f + t55 * x0;
+				const Vec3 pos0(x0, y0, zf + 40.f);
+				const float v0 = 300.f;
+				const int N = 20;
+				int ct = -1;
+				const int cert = CapContact::CorridorCertificate(
+					SB15, p, pos0, v0, -450.f, N, &ct);
+				if (cert == -1) {
+					n_excl++;
+					for (int tr = 0; tr < 300; ++tr) {
+						signed char sd[24];
+						float ca[24];
+						mksched(sd, ca, N);
+						rolls++;
+						const int r3 =
+							CapContact::FirstContactOnPath(k,
+								SB15, pos0,
+								Vec3(v0, 0.f, -450.f), sd, ca,
+								N, N);
+						if (r3 < 0 || r3 > ct)
+							excl_contra++;
+					}
+				} else if (cert == 1) n_clean++;
+				else if (cert == -2) n_decl++;
+				else n_unk++;
+			}
+			// class 3: grazing starts -> expected UNKNOWN (honest)
+			for (int i = 0; i < 8; ++i) {
+				const float x0 = rndf(-100.f, 200.f);
+				const float zf = -400.f + t55 * x0;
+				const Vec3 pos0(x0, rndf(-50.f, 50.f), zf + 150.f);
+				int ct = -1;
+				const int cert = CapContact::CorridorCertificate(
+					SB15, p, pos0, 500.f, -200.f, 20, &ct);
+				if (cert == 1) n_clean++;
+				else if (cert == -1) n_excl++;
+				else if (cert == -2) n_decl++;
+				else n_unk++;
+			}
+			snprintf(buf, sizeof(buf), "certs: %d clean / %d "
+				"exclude / %d unknown / %d decline; %lld exact "
+				"rolls: %d contacts under a CLEAN cert, %d "
+				"exclude-cert misses (both must be 0)", n_clean,
+				n_excl, n_unk, n_decl, rolls, clean_contra,
+				excl_contra);
+			check("B15 corridor certificates", n_clean >= 8
+				&& n_excl >= 8 && n_unk >= 1 && rolls >= 4000
+				&& clean_contra == 0 && excl_contra == 0, buf);
+		}
 		printf("capcontact: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "A14/A28 LOCAL CONTACT + CORRIDOR TRAVERSAL BITWISE VS "
 				"THE FULL TRACE"
@@ -18540,6 +18711,111 @@ namespace {
 			check("A9 engine bitwise", engine_n >= 6
 				&& engine_ok == engine_n, buf);
 		}
+		// ---- B7 (session 42): the reachability classifier - the
+		// compositional pattern packaged (constant-time certified
+		// cull first, the exact A12 family behind it, UNKNOWN kept
+		// honest). Gates: an EXCLUDED verdict is never contradicted
+		// by the full scan; a known-reachable target (an exact
+		// kernel rollout's own endpoint) is never EXCLUDED, and its
+		// REACHABLE witness re-rolls onto the target.
+		{
+			const CapAir::AirKernelCtx kb7 = CapAir::MakeAirKernel(p);
+			unsigned rng7 = 0xB7B7B7u;
+			auto rnd7 = [&rng7]() {
+				rng7 ^= rng7 << 13;
+				rng7 ^= rng7 >> 17;
+				rng7 ^= rng7 << 5;
+				return rng7;
+			};
+			const float v0 = 500.f;
+			const int n_hi = 60;
+			int exc_n = 0, exc_bad = 0;
+			int rch_n = 0, rch_wrong_exc = 0, rch_ok = 0;
+			int unk_n = 0, cls1 = 0;
+			// (1) targets beyond the horizon travel bound
+			for (int i = 0; i < 12; ++i) {
+				const float ang = static_cast<float>(rnd7() % 628u)
+					* 0.01f;
+				const float dd = 9000.f + static_cast<float>(
+					rnd7() % 4000u);
+				CapP2P::P2PResult pr;
+				int nfound = -1;
+				const int cls = CapP2P::ClassifyTarget(kb7, v0,
+					dd * cosf(ang), dd * sinf(ang), 1, n_hi, &pr,
+					&nfound);
+				if (cls == 0) {
+					exc_n++;
+					// the honesty check: the full family scan must
+					// also find nothing
+					CapP2P::P2PResult pr2;
+					if (CapP2P::SolveFreeN(kb7, v0, dd * cosf(ang),
+						dd * sinf(ang), 1, n_hi, &pr2) > 0)
+						exc_bad++;
+				}
+			}
+			// (2) known-reachable targets: exact kernel rollouts'
+			// own endpoints
+			for (int i = 0; i < 25; ++i) {
+				const int N = 10 + static_cast<int>(rnd7() % 45u);
+				CapP2P::P2PSchedule sc;
+				sc.n = N;
+				signed char side = 0;
+				int age = 6;
+				for (int t = 0; t < N; ++t) {
+					signed char ds;
+					float ca;
+					const unsigned r2 = rnd7();
+					if ((r2 & 7) == 0) {
+						ds = 0;
+						ca = 1.f;
+					} else {
+						ds = (r2 & 8) ? 1 : -1;
+						if (side != 0 && ds != side && age < 6)
+							ds = side;
+						ca = 1.f - 2.f * static_cast<float>(
+							(r2 >> 8) & 1023) / 1023.f;
+					}
+					sc.side[t] = ds;
+					sc.cosa[t] = ca;
+					if (ds != 0 && side != 0 && ds != side)
+						age = 1;
+					else
+						age = age < 6 ? age + 1 : 6;
+					if (ds != 0)
+						side = ds;
+				}
+				float ex, ey, evx, evy;
+				CapP2P::Roll(kb7, v0, sc, &ex, &ey, &evx, &evy);
+				CapP2P::P2PResult pr;
+				int nfound = -1;
+				const int cls = CapP2P::ClassifyTarget(kb7, v0, ex,
+					ey, 1, n_hi, &pr, &nfound);
+				rch_n++;
+				if (cls == 0)
+					rch_wrong_exc++;
+				else if (cls == 1) {
+					cls1++;
+					float rx2, ry2, rvx2, rvy2;
+					CapP2P::Roll(kb7, v0, pr.sched, &rx2, &ry2,
+						&rvx2, &rvy2);
+					const float dx2 = rx2 - ex, dy2 = ry2 - ey;
+					if (sqrtf(dx2 * dx2 + dy2 * dy2) <= 0.75f)
+						rch_ok++;
+				} else
+					unk_n++;
+			}
+			snprintf(buf, sizeof(buf), "%d EXCLUDED verdicts, %d "
+				"contradicted by the full scan; %d known-reachable "
+				"targets: %d wrongly excluded, %d/%d witnesses "
+				"re-roll onto the target, %d honest UNKNOWNs "
+				"(family declines, never claimed unreachable)",
+				exc_n, exc_bad, rch_n, rch_wrong_exc, rch_ok,
+				cls1, unk_n);
+			check("B7 reachability classifier", exc_n >= 10
+				&& exc_bad == 0 && rch_n >= 20
+				&& rch_wrong_exc == 0 && cls1 > 0
+				&& rch_ok == cls1, buf);
+		}
 		printf("capsolve: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "A0/A9/A10/A12/A13 AIR POINT FAMILY PACKAGED "
 				"AND GATED"
@@ -18682,6 +18958,134 @@ namespace {
 				trials ? us_brute / trials : 0.0);
 			check("A21 vs brute", trials >= 40 && agree == trials
 				&& answered >= 35, buf);
+			// ---- B10 (session 42): the certified ride TRAVEL bound
+			// vs this surface's exact position-tracking sweep - every
+			// layer's farthest in-plane node must sit inside the
+			// bound (millions of engine-law nodes as the attack).
+			{
+				const float s0sp = Len(s0.vel);
+				std::vector<float> rtv;
+				CapBounds::RideTravelPrefix(p, s0sp, S.p.n_max,
+					&rtv);
+				int lay_n = 0, lay_bad = 0;
+				float worstfrac = 0.f;
+				for (int N = 1; N <= S.p.n_max
+					&& N < static_cast<int>(S.layers.size()); ++N) {
+					const std::vector<CapRideReach::RRNode>& L =
+						S.layers[static_cast<size_t>(N)];
+					if (L.empty())
+						continue;
+					float mx = 0.f;
+					for (size_t q = 0; q < L.size(); ++q) {
+						const float rx = L[q].px - S.pos0.X;
+						const float ry = L[q].py - S.pos0.Y;
+						const float rz = L[q].pz - S.pos0.Z;
+						const float tu = rx * S.dsl.X + ry
+							* S.dsl.Y + rz * S.dsl.Z;
+						const float tv = rx * S.csl.X + ry
+							* S.csl.Y + rz * S.csl.Z;
+						const float dd = sqrtf(tu * tu + tv * tv);
+						if (dd > mx)
+							mx = dd;
+					}
+					lay_n++;
+					const float ub = rtv[static_cast<size_t>(N)];
+					if (mx > ub + 0.51f)
+						lay_bad++;
+					if (ub > 1.f && mx / ub > worstfrac)
+						worstfrac = mx / ub;
+				}
+				snprintf(buf, sizeof(buf), "%d nonempty layers, %d "
+					"exact-sweep maxima beyond the bound (closest "
+					"approach %.0f%% of the bound)", lay_n,
+					lay_bad, worstfrac * 100.f);
+				check("B10 ride travel bound", lay_n >= 20
+					&& lay_bad == 0, buf);
+			}
+			// ---- B11 (session 42): the certified minimum-ride-ticks
+			// LB vs A21's exact answers - the inverse bound may never
+			// exceed the exact minimum time.
+			{
+				const float s0sp = Len(s0.vel);
+				int nq = 0, bad = 0;
+				double slack = 0.0;
+				for (size_t q = 0; q < found_n.size(); ++q) {
+					const float dd = sqrtf(found_u[q] * found_u[q]
+						+ found_v[q] * found_v[q]);
+					// A21 answers within its 96u lattice contract:
+					// the LB bounds the distance the answer
+					// actually certifies
+					const float dcert = dd > 96.f ? dd - 96.f : 0.f;
+					const int lb = CapBounds::MinRideTicks(p, s0sp,
+						dcert, 96);
+					nq++;
+					if (lb < 0 || lb > found_n[q])
+						bad++;
+					else
+						slack += found_n[q] - lb;
+				}
+				snprintf(buf, sizeof(buf), "%d exact minima: %d "
+					"LB violations (mean slack %.1f ticks - the "
+					"lattice pays contact+turn the pure bound "
+					"ignores)", nq, bad,
+					nq ? slack / nq : 0.0);
+				check("B11 min ride ticks LB", nq >= 30 && bad == 0,
+					buf);
+			}
+			// ---- B21 (session 42): the admissible heuristic - the
+			// sum of certified per-leg minima never exceeds the true
+			// composed total, built from EXACT leg answers (A12 air +
+			// A21 ride).
+			{
+				const CapAir::AirKernelCtx kk =
+					CapAir::MakeAirKernel(p);
+				const float s0sp = Len(s0.vel);
+				const float v_air = 500.f;
+				int combos = 0, bad = 0;
+				double slack = 0.0;
+				for (int ai = 0; ai < 4; ++ai) {
+					const float D_air = 300.f + 250.f
+						* static_cast<float>(ai);
+					CapP2P::P2PResult pr;
+					const int n_air = CapP2P::SolveFreeN(kk, v_air,
+						D_air, 0.f, 1, 90, &pr);
+					if (n_air <= 0)
+						continue; // family DECLINE - counted honestly
+					for (size_t q = 0; q < found_n.size()
+						&& q < 8; ++q) {
+						const float dd = sqrtf(found_u[q]
+							* found_u[q] + found_v[q]
+							* found_v[q]);
+						CapBounds::RouteLeg legs[2];
+						legs[0].kind = 0;
+						legs[0].v0 = v_air;
+						legs[0].dist = D_air > 0.5f
+							? D_air - 0.5f : 0.f; // A12 contract
+						legs[0].n_max = 128;
+						legs[1].kind = 1;
+						legs[1].v0 = s0sp;
+						legs[1].dist = dd > 96.f
+							? dd - 96.f : 0.f; // A21 contract
+						legs[1].n_max = 96;
+						const long long h = CapBounds::RouteTicksLB(
+							p, legs, 2);
+						const long long tru = n_air + found_n[q];
+						combos++;
+						if (h < 0 || h > tru)
+							bad++;
+						else
+							slack += static_cast<double>(tru - h);
+					}
+				}
+				snprintf(buf, sizeof(buf), "%d air+ride composed "
+					"scenarios (exact legs): %d heuristic "
+					"violations (mean slack %.1f ticks)", combos,
+					bad, combos ? slack / combos : 0.0);
+				// 16 measured: 2 of 4 air distances decline within
+				// the horizon (counted, deterministic) - pinned
+				check("B21 route ticks LB admissible", combos >= 16
+					&& bad == 0, buf);
+			}
 			// witnesses: the found layer's node replays as an
 			// engine continuation (A20 DECLINE semantics: fringe
 			// counted)
@@ -20194,6 +20598,39 @@ namespace {
 					"%d\n", static_cast<int>(labels.size()),
 					dompairs);
 			}
+			// ---- B16 (session 42): the successor-face filter may
+			// NEVER exclude a face the exact chain just boarded -
+			// necessity gated with the solver's own proven targets
+			// (the filter's dist = the nearest target the batch
+			// actually solved and the engine verified).
+			{
+				float mind = 1e30f;
+				for (size_t hb = 0; hb < hits.size(); ++hb) {
+					const float ddx = hits[hb].wx - xpos.X;
+					const float ddy = hits[hb].wy - xpos.Y;
+					const float dd = sqrtf(ddx * ddx + ddy * ddy);
+					if (dd < mind)
+						mind = dd;
+				}
+				CapSucc::FaceCand fcand;
+				fcand.n = n;
+				fcand.dist = mind;
+				fcand.zlo = fc.z_lo;
+				fcand.zhi = fc.z_hi;
+				unsigned char verd = 0, reas = 0;
+				const int alive = CapSucc::FilterFaces(p, xpos,
+					xvel, fc.horizon, &fcand, 1, &verd, &reas);
+				char nm2[64];
+				snprintf(nm2, sizeof(nm2), "B16 no false exclusion "
+					"[%.0f deg]", ralphas[ia]);
+				snprintf(buf, sizeof(buf), "the boarded face "
+					"(dist %.0f u, band [%.0f, %.0f]) verdict %d "
+					"(reason mask %d) - a certified-necessary "
+					"filter may never cull it", mind, fc.z_lo,
+					fc.z_hi, verd, reas);
+				check(nm2, !hits.empty() && alive == 1
+					&& verd == 1, buf);
+			}
 			char nm[64];
 			snprintf(nm, sizeof(nm), "C7 v2 prediction exact [%.0f "
 				"deg]", ralphas[ia]);
@@ -20222,6 +20659,86 @@ namespace {
 			snprintf(buf, sizeof(buf), "ramp %.0f: %d/%d contact "
 				"ticks bitwise", ralphas[ia], law_ok, law_n);
 			check(nm, law_n >= 10 && law_ok == law_n, buf);
+		}
+		// ---- B16 (session 42): the certified culls fire with the
+		// right reasons, and the measured selectivity over random
+		// candidates is the honest yield line. Reason bit 0 = the
+		// B0 x B2 contact window is empty; bit 1 = no window tick
+		// can have v.n < 0 (min achievable v.n = vz*nz - smax*|nxy|,
+		// vz exact, |vxy| <= the A6 ceiling).
+		{
+			const Vec3 xpos(-550.f, 0.f, 250.f);
+			const Vec3 xvel(750.f, 0.f, 60.f);
+			const float a55 = 55.f * 0.0174533f;
+			const Vec3 n55(-sinf(a55), 0.f, cosf(a55));
+			unsigned char verd = 0, reas = 0;
+			// (a) beyond every travel bound -> window cull
+			CapSucc::FaceCand fa;
+			fa.n = n55;
+			fa.dist = 20000.f;
+			fa.zlo = -700.f;
+			fa.zhi = -40.f;
+			CapSucc::FilterFaces(p, xpos, xvel, 95, &fa, 1, &verd,
+				&reas);
+			const bool cull_far = verd == 0 && (reas & 1) != 0;
+			// (b) a band the exact z timetable never enters
+			CapSucc::FaceCand fb;
+			fb.n = n55;
+			fb.dist = 300.f;
+			fb.zlo = 400.f;
+			fb.zhi = 600.f;
+			CapSucc::FilterFaces(p, xpos, xvel, 95, &fb, 1, &verd,
+				&reas);
+			const bool cull_zwin = verd == 0 && (reas & 1) != 0;
+			// (c) an upward face whose window is all-rising: vz > 0
+			// at every window tick and nxy = 0 -> min v.n > 0, no
+			// arrival can board
+			CapSucc::FaceCand fcu;
+			fcu.n = Vec3(0.f, 0.f, 1.f);
+			fcu.dist = 5.f; // coverable within the rising window
+			fcu.zlo = 260.f;
+			fcu.zhi = 270.f;
+			CapSucc::FilterFaces(p, Vec3(0.f, 0.f, 250.f),
+				Vec3(300.f, 0.f, 400.f), 20, &fcu, 1, &verd,
+				&reas);
+			const bool cull_board = verd == 0 && (reas & 2) != 0;
+			// measured selectivity over random candidates
+			int surv = 0;
+			const int cand_n = 200;
+			unsigned rng2 = 0xB16B16u;
+			auto rnd2 = [&rng2]() {
+				rng2 ^= rng2 << 13;
+				rng2 ^= rng2 >> 17;
+				rng2 ^= rng2 << 5;
+				return rng2;
+			};
+			for (int i = 0; i < cand_n; ++i) {
+				const float az = static_cast<float>(rnd2() % 6283u)
+					* 0.001f;
+				const float tilt = 0.3f + 0.001f
+					* static_cast<float>(rnd2() % 1200u);
+				CapSucc::FaceCand fr;
+				fr.n = Vec3(-sinf(tilt) * cosf(az),
+					-sinf(tilt) * sinf(az), cosf(tilt));
+				fr.dist = 100.f + static_cast<float>(rnd2()
+					% 5900u);
+				const float zl = -800.f + static_cast<float>(
+					rnd2() % 1000u);
+				fr.zlo = zl;
+				fr.zhi = zl + 60.f;
+				CapSucc::FilterFaces(p, xpos, xvel, 95, &fr, 1,
+					&verd, &reas);
+				if (verd == 1)
+					surv++;
+			}
+			snprintf(buf, sizeof(buf), "far/z-band/all-rising culls "
+				"fired with reasons %s/%s/%s; selectivity: %d/%d "
+				"random candidates survive (measured)",
+				cull_far ? "ok" : "MISS",
+				cull_zwin ? "ok" : "MISS",
+				cull_board ? "ok" : "MISS", surv, cand_n);
+			check("B16 certified culls + yield", cull_far
+				&& cull_zwin && cull_board && surv > 0, buf);
 		}
 		printf("capxfer: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "C7 v2 EXIT->BOARD TRANSFER KERNEL "
@@ -20978,6 +21495,117 @@ namespace {
 			check("A8 turn-gated travel UB", cfgs == 4
 				&& clean == cfgs, buf);
 		}
+		// ---- B22 (session 42): THE HEADING-AWARE SPEED CEILING.
+		// V*(N, dpsi) <= HeadingAwareSpeedUB - built from the two
+		// certified s39 lemmas plus the gain law: the speed entering
+		// each tick is at least max(s0 - i*B, sqrt(V^2 - 900(N-i))),
+		// the turn of that tick at most MaxTurnUB there, and the sum
+		// must reach the net |dpsi|. Adversary: random legal
+		// schedules AND bang-bang extremes (full-brake/full-turn),
+		// every one checked against the ceiling AT ITS OWN achieved
+		// dpsi; the B5 cull must also call every achieved
+		// (dpsi, V) feasible. Measured: where the ceiling bites vs
+		// the blind ceiling, and the closest adversarial approach.
+		{
+			const float s0s2[3] = { 600.f, 1000.f, 1400.f };
+			const int Ns2[2] = { 20, 40 };
+			long long viol = 0, cull_viol = 0, total = 0;
+			float worstfrac = 0.f;
+			float bite_pi = 1.f; // min over configs of UB(pi)/blind
+			for (int si = 0; si < 3; ++si)
+				for (int ni = 0; ni < 2; ++ni) {
+					const float s0 = s0s2[si];
+					const int N = Ns2[ni];
+					const float blind = sqrtf(s0 * s0
+						+ 900.f * static_cast<float>(N));
+					const float ubpi = CapBounds::HeadingAwareSpeedUB(
+						p, s0, N, 3.14159265f, 1.f);
+					if (blind > 1.f && ubpi / blind < bite_pi)
+						bite_pi = ubpi / blind;
+					for (int tr = 0; tr < 20000; ++tr) {
+						CapP2P::P2PSchedule sc;
+						sc.n = N;
+						signed char side = 0;
+						int age = 6;
+						const bool bang = (tr & 1) != 0;
+						for (int t = 0; t < N; ++t) {
+							signed char ds;
+							float ca;
+							const unsigned r2 = rnd();
+							if (!bang && (r2 & 7) == 0) {
+								ds = 0;
+								ca = 1.f;
+							} else {
+								ds = (r2 & 8) ? 1 : -1;
+								if (side != 0 && ds != side
+									&& age < min_gap)
+									ds = side;
+								ca = bang
+									? ((r2 & 16) ? 1.f : -1.f)
+									: 1.f - 2.f
+										* static_cast<float>(
+											(r2 >> 8) & 1023)
+										/ 1023.f;
+							}
+							sc.side[t] = ds;
+							sc.cosa[t] = ca;
+							if (ds != 0 && side != 0 && ds != side)
+								age = 1;
+							else
+								age = age < 6 ? age + 1 : 6;
+							if (ds != 0)
+								side = ds;
+						}
+						float ex, ey, evx, evy;
+						CapP2P::Roll(k, s0, sc, &ex, &ey, &evx,
+							&evy);
+						const float V = sqrtf(evx * evx
+							+ evy * evy);
+						const float dpsi = fabsf(atan2f(evy, evx));
+						const float ub =
+							CapBounds::HeadingAwareSpeedUB(p, s0,
+								N, dpsi, 1.f);
+						total++;
+						if (V > ub + 0.5f)
+							viol++;
+						else if (ub > 1.f && dpsi > 1.5f
+							&& V / ub > worstfrac)
+							worstfrac = V / ub;
+						if (!CapBounds::HeadingChangeFeasibleUB(p,
+							s0, N, dpsi, V - 0.5f, 1.f))
+							cull_viol++;
+					}
+				}
+			// the bite domain, measured: at practical horizons the
+			// two-lemma composition rarely binds (the joint
+			// turn-gain frontier is the named tightening); at short
+			// horizons the reverse-heading corner must close.
+			float bite_short = 1.f;
+			for (int N2 = 2; N2 <= 8; ++N2) {
+				const float blind2 = sqrtf(1400.f * 1400.f
+					+ 900.f * static_cast<float>(N2));
+				const float u2 = CapBounds::HeadingAwareSpeedUB(p,
+					1400.f, N2, 3.14159265f, 1.f) / blind2;
+				if (u2 < bite_short)
+					bite_short = u2;
+			}
+			snprintf(buf, sizeof(buf), "%lld schedules x 6 configs: "
+				"%lld ceiling violations (worst high-turn "
+				"adversary reaches %.0f%% of the bound); measured "
+				"bite: UB(pi)/blind = %.0f%% at N 20-40, %.0f%% "
+				"best over N 2-8 at s0 1400", total, viol,
+				worstfrac * 100.f, bite_pi * 100.f,
+				bite_short * 100.f);
+			check("B22 heading-aware speed UB (sound)",
+				total >= 100000 && viol == 0
+				&& bite_short < 0.999f, buf);
+			snprintf(buf, sizeof(buf), "%lld achieved (dpsi, V) "
+				"pairs: %lld called infeasible by the cull (must "
+				"be 0 - every achieved pair is feasible)", total,
+				cull_viol);
+			check("B5 heading cull consistency", cull_viol == 0,
+				buf);
+		}
 		printf("capreach: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "REACH FAMILY LB/UB CERTIFIED AT THE "
 				"MEASURED PITCH"
@@ -21080,6 +21708,47 @@ namespace {
 						fprintf(csv, "%.0f,%d,%d,%.1f\n",
 							pp.v0, N, db, b1);
 					}
+			// ---- B17 (session 42): the cell optimistic bound -
+			// derived from certified bounds ONLY (the A6 ceiling
+			// through the B22 heading-aware form; instruments never
+			// touch it) - must clear every exact engine-built
+			// surface value at this v0. The closest approach is the
+			// measured tightness.
+			{
+				int nq = 0, bad = 0;
+				float tight = 0.f;
+				for (int ni = 0; ni < 5; ++ni)
+					for (int db = 0; db <= 180; db += 10) {
+						const float dp = static_cast<float>(db)
+							* 0.0174533f;
+						float ex = CapAir::QueryVStar(S, Ns[ni],
+							dp);
+						const float ex2 = CapAir::QueryVStar(S,
+							Ns[ni], -dp);
+						if (ex2 > ex)
+							ex = ex2;
+						if (ex <= 0.f)
+							continue;
+						const float dmin = dp > 0.01f
+							? dp - 0.01f : 0.f;
+						const float ub =
+							CapBounds::CellOptimisticSpeedUB(p,
+								pp.v0, Ns[ni], dmin, 1.f);
+						nq++;
+						if (ex > ub + 0.51f)
+							bad++;
+						else if (ub > 1.f && ex / ub > tight)
+							tight = ex / ub;
+					}
+				char nm2[64];
+				snprintf(nm2, sizeof(nm2), "B17 cell bound [v0 "
+					"%.0f]", pp.v0);
+				snprintf(buf, sizeof(buf), "%d (N, dpsi) cells: %d "
+					"exact values above the bound (closest "
+					"approach %.0f%% - the B22 bite is the named "
+					"tightening)", nq, bad, tight * 100.f);
+				check(nm2, nq >= 50 && bad == 0, buf);
+			}
 			// structure extraction at a representative point
 			{
 				int cell = -1;

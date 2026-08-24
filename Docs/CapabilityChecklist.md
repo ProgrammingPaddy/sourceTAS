@@ -69,24 +69,24 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | B2 | travel bound (replaces the refuted cone) | max-speed integral | reach culls | Σ√(s0²+900i)·dt upper bound | direction-aware version (B22-adjacent, future) | O(N) ~µs, precomputable prefix sums → O(1) | `[x]` certified; forward-tight to 1.0u measured |
 | B3 | earliest contact tick | B0 × B2 | search windows | `CapWindow::ContactWindow` (exact vertical recurrence × certified travel bound) | — | ~µs; falsifier: 915 real schedules, 0 beat the window | `[x]` capwindow (s28) |
 | B4 | latest useful contact tick | z window closure | search windows | below the band falling ⟹ never returns (exact recurrence) | — | ~µs | `[x]` with B3 |
-| B5 | heading-change feasibility | Ψ* | approach culls | A6/A7 lower bounds ADMIT only | heading-aware UB (B22) would enable culls | O(1) | `[~]` admit-only until B22 |
+| B5 | heading-change feasibility | Ψ*, the heading laws | approach culls | admit by the certified A6/A7 LBs; REJECT by the B22-sound cull `CapBounds::HeadingChangeFeasibleUB` (FALSE ⟹ the heading change at the speed floor is impossible, with proof) | — | O(1)/~µs | `[x]` s42 (capreach 10/0): consistency gated — 120k adversarial schedules' achieved (Δψ, V) pairs, 0 called infeasible; the cull's bite tracks B22's (total at short horizons — net-π at 1400 u/s within 8 ticks certified IMPOSSIBLE — quiet at long horizons until the B22 tightening) |
 | B6 | terminal-speed feasibility | speed ceiling | gap culls | required V > √(s0²+900N) ⟹ impossible | — | O(1) ~ns | `[x]` first certified air cull |
-| B7 | point/region reachability | B0×B2 + A8 | candidate filters | interval tests then A8/A12 | R_N membership (batch) | ~ns then µs | `[~]` |
+| B7 | point/region reachability | B0×B2 + A12 | candidate filters | `CapP2P::ClassifyTarget` — the pattern PACKAGED: the B2 travel cull first (0 EXCLUDED, certified), the exact A12 family behind it (1 REACHABLE + witness), honesty about the gap (2 UNKNOWN — never claimed unreachable) | R_N membership (batch) | ~ns cull, ms solve | `[x]` s42 (capsolve 11/0): 12 EXCLUDED verdicts re-attacked by the full scan (0 contradictions); 25 known-reachable targets (exact rollouts' own endpoints): 0 wrongly excluded, 25/25 witnesses re-roll onto the target |
 | B8 | boardability bound | A17 arcs | arrival culls | closed-form arcs | — | ~ns | `[x]` via A17 |
 | B9 | minimum unavoidable board loss | min v·n | valuation floors | closed form (A16) | — | ~ns | `[x]` via A16 |
-| B10 | ride point/edge reachability | A19/A20 bounds | ride culls | ride analogues of B2/B6 | — | target ~ns | `[ ]` with A19/A20 |
-| B11 | minimum ride ticks | A21 | timing bounds | inverse ride bounds | — | target O(1) | `[ ]` |
+| B10 | ride point/edge reachability | ride ceiling, ride travel | ride culls, B11 | `CapBounds::RideSpeedCeilingN` + `RideTravelPrefix` — the certified ride analogues of B6/B2: per ride tick the accel obeys the same Δ(s²) ≤ 900 algebra, gravity adds ≤ g·dt, the clip only removes speed ⟹ s' ≤ √(s²+900) + g·dt; travel = the prefix integral | in-plane-gravity refinement (g·dt·sin α, the named tightening) | O(N) ~µs, prefix-summable | `[x]` s42 (capride 10/0 + capmin 11/0): the speed ceiling clears every layer maximum of all three A19 exact sweeps (50/60/70°, 28–34M nodes each) with the sweep reaching **100% of the bound** (measured TIGHT); the travel bound clears every A20 layer's farthest node at 99% closest approach; 0 violations anywhere |
+| B11 | minimum ride ticks | B10 inverse | timing bounds, B21 | `CapBounds::MinRideTicks` — the B10 travel bound inverted (first N whose bound covers the distance; certified-monotone) | — | O(N) ~µs | `[x]` s42 (capmin 11/0): vs 50 A21 exact minima at the lattice's own certified contract (dist − 96u): 0 violations, mean slack 1.2 ticks |
 | B12 | ride energy ceiling U_E | E = s²+vz² | ride culls | certified (session 15) | — | O(1) | `[x]` |
 | B13 | minimum departure resource for a gap | A12 inverse | exit valuation | `CapBounds::MinDepartSpeed` — closed-form ceiling + travel-bound bisection (both certified-monotone) | table | **O(1)/~µs; 24 A11-solver attacks from 0.98× the bound, 0 refutations** | `[x]` capwindow (s30) |
 | B14 | successor's minimum incoming resource | backward A12/A16/A22 | the speed-compounding explainer | `CapBounds::MinIncomingSpeed` — **exact piecewise-quadratic infimum** (the monotone-bisection draft REFUTED at 20/127, a missing zero-loss root at 22/185 — both falsifier-caught, both fixed) | — | **O(1) closed form; 185 configs × 401 exact-clip headings at 0.98× the bound, 0 violations** | `[x]` capwindow (s30) |
-| B15 | guaranteed collision / corridor exclusion | A14 along families | route culls | local-set trace certificates | swept volumes | target ~µs/leg | `[ ]` |
-| B16 | conservative successor-face set | B0–B15 | route enumeration | intersection of the above | — | ~µs/face pair | `[ ]` composition |
-| B17 | cell optimistic bound | capability extrema per cell | batch search | derive from A6/A8 bounds ONLY (instruments retired from pruning) | — | O(1)/cell | `[~]` proofs-only rule enforced |
-| B18 | boundary-label dominance | state equivalence | frontier compression | OPEN THEOREM — prune only if proven | — | — | `[ ]` open |
+| B15 | guaranteed collision / corridor exclusion | family envelopes vs the A14 local set | route culls | `CapContact::CorridorCertificate` — certificates over a WHOLE schedule family from two certified envelopes (z exact per tick, xy the never-beaten B2 disc, extended over each tick's swept z-interval): +1 CLEAN-CERT / −1 EXCLUDE (every schedule contacts by the certified tick) / 0 UNKNOWN / −2 corridor DECLINE | swept volumes | ~µs/leg | `[x]` s42 (capcontact 6/0): 12 CLEAN + 12 EXCLUDE + 8 honest UNKNOWN on the two-segment world; 7,200 exact A28 rolls attacked them — 0 contacts under a CLEAN cert, 0 EXCLUDE misses |
+| B16 | conservative successor-face set | certified necessary conditions | route enumeration (C5/C9 edges) | `CapSucc::FilterFaces` — every test certified-NECESSARY: nonempty B0×B2 contact window (reason bit 0); some window tick admits v·n < 0 (min achievable v·n = vz·n.Z − smax·\|n_xy\|, vz exact, \|v_xy\| ≤ the A6 ceiling — bit 1). Culled = proof; survivor = "not excluded" | tighter conditions from B13/B14 (the C5 arc) | ~µs/face | `[x]` v1 s42 (capxfer 13/0): may NEVER exclude a face the exact chain boards — gated on both real ramps with the solver's proven targets (verdict 1 both); certified culls fire with the right reasons; measured selectivity 24/200 survivors (88% certified cull rate on that distribution). The production edge enumerator C9 was waiting for |
+| B17 | cell optimistic bound | certified ceilings only | batch search | `CapBounds::CellOptimisticSpeedUB` — the A6 ceiling through the B22 heading-aware form; instruments (fpot/doom/exitgate) may inform ordering, NEVER this number (enforced by construction: the function consumes only certified ceilings) | — | O(1)/cell (bisection when the heading constraint could bite) | `[x]` s42 (capair B17 gates × 6 v0): every (N, Δψ) cell of every exact engine-built V* surface sits at or below the bound |
+| B18 | boundary-label dominance | state equivalence | frontier compression | OPEN THEOREM — prune only if proven | — | — | `[ ]` DELIBERATELY open (s42 review): the one B row that stays TODO until someone proves it; its certified special case (exact duplicates) is B19, done. Nothing prunes on it; listed so the gap never hides |
 | B19 | exact duplicate dominance | state identity | dedup | hash compare | — | ~ns; measured near-zero yield on real geometry | `[x]` kept, expectations recorded |
 | B20 | competitive horizon | incumbent T* | global search | T*−g cutoff | — | O(1) | `[x]` mechanism ready, unengaged |
-| B21 | minimum remaining ticks to END | compose B2/B11 | admissible h | sum of certified leg minima | — | target O(path) | `[ ]` — h_cert stays 0 until real |
-| B22 | heading-aware speed ceiling (NEW row) | V*(N, Δψ) UB | closes A6's 180°-at-speed corner; B5 culls | braking-time analysis (the recorded theorem step) | empirical band + margin (never prunes) | target O(1) | `[ ]` next theorem |
+| B21 | minimum remaining ticks to END | compose B2/B11 | admissible h | `CapBounds::RouteTicksLB` — the sum of certified per-leg minima (`MinAirTicks` air, `MinRideTicks` ride); each term lower-bounds its leg alone, so the sum lower-bounds any route through the legs in order (concatenation only ADDS transition ticks) | — | O(legs × N) ~µs | `[x]` v1 s42 (capmin 11/0): 16 air+ride scenarios from EXACT leg answers (A12 + A21, each at its own certified contract) — 0 violations, mean slack 3.1 ticks. **h_cert is no longer zero** |
+| B22 | heading-aware speed ceiling | V*(N, Δψ) UB, the heading laws | B5 culls, B17 | `CapBounds::MaxTotalTurnUB` + `HeadingAwareSpeedUB` — the two certified s39 lemmas composed: per tick the speed has two certified floors (shed floor s0 − i·B; gain floor √(V² − 900(N−i))), the tick's turn ≤ MaxTurnUB there, the total must reach the net \|Δψ\|; certified-monotone bisection over V (the B13 pattern) | **THE NAMED TIGHTENING: the joint turn-gain frontier** (a tick that turns θ at speed s forfeits gain — the braking-time theorem, still the recorded step) | O(N) per eval × 48 bisection | `[~]` SOUND v0.5 s42 (capreach 10/0): 120k adversarial schedules (random + bang-bang) × 6 configs — 0 ceiling violations, worst adversary 75% of the bound. The measured bite is two-sided and honest: at short horizons the ceiling collapses to 0 (net-π at 1400 u/s within 8 ticks certified IMPOSSIBLE, and no adversary achieved it); at N 20–40 the composition does not bite (each lemma alone lets a fast tick also turn fast — only the joint frontier charges turning against gaining). That theorem is the row's completion criterion |
 
 ## C — composition / selection (consume proofs, never invent physics)
 
@@ -185,17 +185,23 @@ function. The HTML dashboard mirrors this section as its `FNS` /
 | B2 | `CapWindow::TravelPrefix` · `CapBounds::TravelN` |
 | B3 | `CapWindow::ContactWindow` |
 | B4 | `CapWindow::ContactWindow` · `CapWindow::ZWindow` |
-| B5 | `CapAir::QueryVStar` · `CapAir::QueryPsiStar` · (admit-only reads of the A6/A7 surfaces) |
+| B5 | `CapAir::QueryVStar` · `CapAir::QueryPsiStar` · `CapBounds::HeadingChangeFeasibleUB` |
 | B6 | (the O(1) ceiling check √(s0²+900N), applied inline — the capair gates and the B13 bisection) |
-| B7 | (the pattern row: B0/B2 culls ahead of A11/A12 — demonstrated in `CapFaceSolve::SolveToFace`) |
+| B7 | `CapP2P::ClassifyTarget` |
 | B8 | `CapBoard::LossFeasibleArcs` |
 | B9 | `CapBoard::BestWorstBoard` |
+| B10 | `CapBounds::RideSpeedCeilingN` · `CapBounds::RideTravelPrefix` |
+| B11 | `CapBounds::MinRideTicks` |
 | B12 | (legacy pre-library form: the certified U_E computation in `SolverExitField.h`) |
 | B13 | `CapBounds::MinDepartSpeed` · `CapBounds::TravelN` |
 | B14 | `CapBounds::MinIncomingSpeed` · `CapBounds::BestPost2` |
-| B17 | (derives from A6/A8 certified reads — no dedicated function yet) |
+| B15 | `CapContact::CorridorCertificate` |
+| B16 | `CapSucc::FilterFaces` |
+| B17 | `CapBounds::CellOptimisticSpeedUB` |
 | B19 | (hash compare inside the legacy route-search path) |
 | B20 | (the groute incumbent-cutoff mechanism — legacy path) |
+| B21 | `CapBounds::RouteTicksLB` · `CapBounds::MinAirTicks` |
+| B22 | `CapBounds::MaxTotalTurnUB` · `CapBounds::HeadingAwareSpeedUB` · `CapBounds::HeadingChangeFeasibleUB` |
 | C0 | `CapLabel::Transition` (struct) · (emitters: the C7 chain in `CmdCapXfer`, the C6 loop in `CmdCapMat`) |
 | C1 | `CapLabel::SameCell` · `CapLabel::Dominates` |
 | C6 | (the capmat production loop in `CmdCapMat` over `CapRideReach::BuildRideReach` + `QueryTargetFast` + `CapLabel` emission) |
@@ -228,9 +234,37 @@ column; keyed by the dashboard chip ids):
 | end | `CapEnd::EarliestBoxCrossing` |
 | hoff | `CapHull::PlaneOffset` · `CapHull::PlaneOffsetHull` |
 | clipf | `CapFaceSolve::PredictContact` · `CapContact::ClipSegment` |
-| hlaw | `CapBounds::AccelBudget` · `CapBounds::MaxTurnUB` · `CapBounds::TurnGateTicks` · `CapBounds::TurnGatedTravelUB` |
+| hlaw | `CapBounds::AccelBudget` · `CapBounds::MaxTurnUB` · `CapBounds::TurnGateTicks` · `CapBounds::TurnGatedTravelUB` · `CapBounds::MaxTotalTurnUB` · `CapBounds::HeadingAwareSpeedUB` |
 
 ## Change log
+- 2026-08-24a (session 42): **THE B MARCH — eight rows close, B22
+  lands sound-partial, B18 is deliberately open.** User check-in
+  ("everything before C done?") answered honestly: A yes, B no —
+  then fixed. Closed with certified functions + falsifier gates:
+  B5 (the heading cull, 120k consistency), B7
+  (`CapP2P::ClassifyTarget`, EXCLUDED never contradicted, 25/25
+  witnesses), B10 (`RideSpeedCeilingN`/`RideTravelPrefix` — the
+  exact sweeps reach 100%/99% of the bounds with 0 violations:
+  measured TIGHT), B11 (`MinRideTicks` vs 50 A21 exacta at the
+  lattice contract, mean slack 1.2 ticks), B15
+  (`CorridorCertificate` — family certificates, 7,200 exact rolls,
+  0 contradictions), B16 (`CapSucc::FilterFaces` — never excludes a
+  face the exact chain boards, certified culls fire with right
+  reasons, 88% cull rate measured), B17 (`CellOptimisticSpeedUB`
+  vs all six exact V* surfaces), B21 (`RouteTicksLB` — h_cert no
+  longer zero; 0 violations, slack 3.1). B22 = SOUND v0.5
+  (`MaxTotalTurnUB`/`HeadingAwareSpeedUB`): 0 of 120k adversarial
+  schedules beat it; bites TOTALLY at short horizons (net-π at
+  1400 u/s in ≤8 ticks certified impossible) but not at N 20–40 —
+  the joint turn-gain frontier is the completion criterion, so the
+  row stays partial by its own honesty rule. B18 stays open BY
+  DESIGN (prune only if proven). Three lessons banked: exact-answer
+  comparisons must respect each instrument's own contract (A21's
+  96u, A12's 0.5u); a necessary-condition test can be masked by an
+  earlier one (the all-rising face was window-culled until the
+  face moved into range); arbitrary gate thresholds get replaced by
+  measured pinned floors (B21's 16). The B category: 21 of 23 rows
+  done, B22 sound-partial, B18 open-by-design.
 - 2026-08-23n (session 41): **THE FUNCTION INVENTORY + C9 CERTIFIED —
   composition opens with the frontier composer.** (1) User directive:
   the checklist shows every function related to a capability, and

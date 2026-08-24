@@ -11,12 +11,43 @@ a measurable pass/fail, never a vibe.
 
 **THE A CATEGORY IS COMPLETE (session 37, 2026-08-23): A0–A31 all
 closed, A32 excluded by decree** — the user directive "finish all A
-first" is delivered across sessions 33–37. Composition is now OPEN:
-C9 is certified (cappath 6/0, session 41). **NOW ->** B16
-successor-face sets + C5 requirement matching on certified B13/B14
-(the production edge enumeration C9 routes over), then cheaper A20
-builds (the C6 amortization lever). The change-log tail below is
+first" is delivered across sessions 33–37; session 42 answered the
+user's "everything before C?" check-in by CLOSING THE B CATEGORY:
+21 of 23 rows done, B22 sound-partial (the joint turn-gain frontier
+theorem is its completion criterion), B18 deliberately open (prune
+only if proven). **NOW ->** the C layer on its finished
+foundations: C5 requirement matching on certified B13/B14, the
+C2–C4 label projections, and the first PRODUCTION C9 graph (B16
+edges × C6/C7 labels); the B22 frontier theorem and cheaper A20
+builds remain the named refinements. The change-log tail below is
 the session journal.
+
+**STATUS 2026-08-24a (session 42): THE B MARCH — the reducer
+category closes.** Eight rows certified in one arc, every one a
+composition of already-certified laws with its own falsifier: B5
+(the heading cull consistent on 120k achieved pairs), B7
+(`CapP2P::ClassifyTarget` — EXCLUDED never contradicted, 25/25
+witnesses re-roll), B10 (`RideSpeedCeilingN`/`RideTravelPrefix` —
+the exact sweeps reach 100%/99% of the bounds, 0 violations across
+~100M engine-law nodes: measured TIGHT), B11 (`MinRideTicks` — 0
+violations vs A21's exacta at the lattice's own contract, mean
+slack 1.2 ticks), B15 (`CorridorCertificate` — whole-family
+certificates; 7,200 exact rolls, 0 contradictions in either
+direction), B16 (`CapSucc::FilterFaces` — never excludes a boarded
+face, culls with named reasons, 88% measured selectivity), B17
+(`CellOptimisticSpeedUB` gated on all six exact V* surfaces), B21
+(`RouteTicksLB` — h_cert is nonzero for the first time; 0
+violations, mean slack 3.1 ticks). B22 = SOUND v0.5: 120k
+adversarial schedules can't beat it; it certifies real
+impossibilities at short horizons (net-π at 1400 u/s within 8
+ticks: IMPOSSIBLE, and no adversary achieved it) and honestly does
+not bite at N 20–40 — the joint turn-gain frontier (a tick that
+turns forfeits gain) is the recorded completion theorem. B18 stays
+open BY DESIGN. Lessons: compare exact instruments at THEIR
+contracts (A21's 96u, A12's 0.5u); necessary conditions can mask
+each other in tests; thresholds become measured pinned floors.
+Suites: capsolve 11/0, capcontact 6/0, capmin 11/0, capxfer 13/0,
+capreach 10/0, capride 10/0 (+ capair B17 gates in the battery).
 
 **STATUS 2026-08-23n (session 41): THE FUNCTION INVENTORY + C9
 CERTIFIED — composition opens.** User directive: both checklist

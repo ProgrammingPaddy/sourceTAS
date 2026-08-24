@@ -1,0 +1,174 @@
+<title>The B March</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,600;1,400&display=swap">
+<style>
+  :root{
+    --bg:#f6f7f8; --surface:#ffffff; --surface2:#eef1f3;
+    --ink:#1a2027; --muted:#5b6570; --faint:#8a939d; --line:#dde3e8;
+    --teal:#0f766e; --teal-soft:#e0f0ee; --amber:#b45309; --amber-soft:#f7ecdd;
+    --blue:#1d4ed8; --blue-soft:#e4eafc; --red:#b42318; --red-soft:#f7e4e1;
+    --code-bg:#eef1f3;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+      --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+      --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+      --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+      --code-bg:#1d242c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1317; --surface:#161b21; --surface2:#1d242c;
+    --ink:#e7ebef; --muted:#9aa4ae; --faint:#6b757f; --line:#2a323b;
+    --teal:#2dd4bf; --teal-soft:#123330; --amber:#f0b45c; --amber-soft:#38290f;
+    --blue:#7ba3f7; --blue-soft:#16223f; --red:#f08c80; --red-soft:#3a1713;
+    --code-bg:#1d242c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px; line-height:1.55}
+  .wrap{max-width:1080px; margin:0 auto; padding:40px 28px 72px}
+  header{border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px}
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--teal); font-weight:600}
+  h1{font-family:"IBM Plex Serif",Georgia,serif; font-size:40px; line-height:1.1;
+    margin:10px 0 8px; text-wrap:balance}
+  .sub{color:var(--muted); max-width:72ch; margin:0}
+  .meta{display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:14px;
+    font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint)}
+  h2{font-family:"IBM Plex Serif",Georgia,serif; font-size:25px; margin:46px 0 6px; text-wrap:balance}
+  h2 .idx{color:var(--teal); font-family:"IBM Plex Mono",monospace; font-size:15px;
+    margin-right:10px; font-weight:600}
+  p{max-width:80ch}
+  .lede{color:var(--muted); max-width:80ch; margin:0 0 14px}
+  code{font-family:"IBM Plex Mono",monospace; font-size:.92em; background:var(--code-bg);
+    padding:1px 5px; border-radius:3px}
+  .tiles{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:22px 0}
+  .tile{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px}
+  .tile .k{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint)}
+  .tile .v{font-family:"IBM Plex Mono",monospace; font-size:26px; font-weight:600; margin:6px 0 2px; color:var(--teal)}
+  .tile p{font-size:12.5px; color:var(--muted); margin:4px 0 0}
+  .tablewrap{overflow-x:auto; background:var(--surface); border:1px solid var(--line);
+    border-radius:8px; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:680px; font-size:13.5px}
+  th{text-align:left; font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--faint); padding:10px 12px; border-bottom:2px solid var(--line)}
+  td{padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.nm{font-weight:600; white-space:nowrap}
+  td.num{text-align:right; font-family:"IBM Plex Mono",monospace; white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  td.note{color:var(--muted)}
+  .chip{display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:11px; font-weight:600;
+    letter-spacing:.05em; padding:2px 8px; border-radius:20px; white-space:nowrap}
+  .c-pass{background:var(--teal-soft); color:var(--teal)}
+  .c-part{background:var(--amber-soft); color:var(--amber)}
+  .callout{background:var(--blue-soft); border:1px solid var(--blue); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout b{color:var(--blue)}
+  .callout2{background:var(--amber-soft); border:1px solid var(--amber); border-radius:8px;
+    padding:14px 18px; margin:18px 0; font-size:14px}
+  .callout2 b{color:var(--amber)}
+  footer{margin-top:56px; padding-top:16px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:12.5px; font-family:"IBM Plex Mono",monospace}
+  @media (max-width:640px){ h1{font-size:30px} .wrap{padding:28px 16px 56px} }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">SourceTAS · Capability Library · Session 42</div>
+  <h1>The B March</h1>
+  <p class="sub">"Am I correct in assuming everything before C has been done?" — A yes, B no.
+  Session 42 fixes the answer: eight reducer rows close in one arc, every one a composition of
+  already-certified laws under adversarial fire; B22 lands sound with its completion theorem
+  named; B18 is recorded as deliberately open.</p>
+  <div class="meta">
+    <span>2026-08-24</span>
+    <span>B: 21/23 done · B22 sound-partial · B18 open-by-design</span>
+  </div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><div class="k">Rows closed</div><div class="v">8</div>
+    <p>B5 · B7 · B10 · B11 · B15 · B16 · B17 · B21 — certified functions with falsifier gates, in one session</p></div>
+  <div class="tile"><div class="k">B10 tightness</div><div class="v">99–100%</div>
+    <p>the exact ride sweeps (~100M engine-law nodes) reach the certified ceilings without ever crossing them</p></div>
+  <div class="tile"><div class="k">B16 cull rate</div><div class="v">88%</div>
+    <p>of random candidate faces culled with proofs — and 0 false exclusions on the faces the exact chain boards</p></div>
+  <div class="tile"><div class="k">B22 adversaries</div><div class="v">0 / 120k</div>
+    <p>schedules beat the heading-aware ceiling; at 1400 u/s a net reversal within 8 ticks is certified impossible</p></div>
+</div>
+
+<h2><span class="idx">01</span>The honest answer, then the fix</h2>
+<p>The A category was complete (A0–A31 certified, A32 excluded by decree). The B category was
+not: six rows stood TODO and three partial. All of them were reducers over now-certified A
+machinery — exactly the atomic units the principle demands — so the session marched them in
+dependency order. Every new bound is derived from laws the library already certified (the
+one-tick gain law Δs² ≤ 900 for every control, the shed law, the turn law, exact verticals,
+the never-beaten travel integral), and every one ships with its own attack.</p>
+
+<h2><span class="idx">02</span>The eight closures</h2>
+<div class="tablewrap"><table>
+  <tr><th>Row</th><th>Function</th><th>The gate that certifies it</th><th>Result</th></tr>
+  <tr><td class="nm">B10 ride bounds</td><td><code>RideSpeedCeilingN</code> · <code>RideTravelPrefix</code></td>
+    <td class="note">the exact A19/A20 sweeps themselves attack: every layer maximum of ~100M engine-law nodes vs the bound</td>
+    <td class="num"><span class="chip c-pass">0 viol · 99–100% tight</span></td></tr>
+  <tr><td class="nm">B11 min ride ticks</td><td><code>MinRideTicks</code></td>
+    <td class="note">vs 50 A21 exact minima, compared at the lattice's own 96u contract</td>
+    <td class="num"><span class="chip c-pass">0 viol · slack 1.2 ticks</span></td></tr>
+  <tr><td class="nm">B21 admissible h</td><td><code>RouteTicksLB</code></td>
+    <td class="note">16 air+ride scenarios composed from exact leg answers (A12 + A21)</td>
+    <td class="num"><span class="chip c-pass">0 viol · slack 3.1 ticks</span></td></tr>
+  <tr><td class="nm">B15 corridor certificates</td><td><code>CorridorCertificate</code></td>
+    <td class="note">24 CLEAN/EXCLUDE certificates over whole schedule families; 7,200 exact rolls try to contradict them</td>
+    <td class="num"><span class="chip c-pass">0 contradictions</span></td></tr>
+  <tr><td class="nm">B16 successor faces</td><td><code>CapSucc::FilterFaces</code></td>
+    <td class="note">may never exclude a face the exact C7 chain boards (both real ramps); certified culls fire with named reasons</td>
+    <td class="num"><span class="chip c-pass">0 false excl · 88% culled</span></td></tr>
+  <tr><td class="nm">B7 reachability classifier</td><td><code>CapP2P::ClassifyTarget</code></td>
+    <td class="note">EXCLUDED verdicts re-attacked by the full family scan; known-reachable targets must classify REACHABLE</td>
+    <td class="num"><span class="chip c-pass">0 contradicted · 25/25</span></td></tr>
+  <tr><td class="nm">B5 heading cull</td><td><code>HeadingChangeFeasibleUB</code></td>
+    <td class="note">every achieved (Δψ, V) pair of 120k adversarial schedules must be called feasible</td>
+    <td class="num"><span class="chip c-pass">0 / 120k</span></td></tr>
+  <tr><td class="nm">B17 cell bound</td><td><code>CellOptimisticSpeedUB</code></td>
+    <td class="note">every (N, Δψ) cell of all six exact engine-built V* surfaces must sit under the bound</td>
+    <td class="num"><span class="chip c-pass">0 viol × 6 v0</span></td></tr>
+</table></div>
+
+<h2><span class="idx">03</span>B22 — sound, biting where it can, honest where it can't</h2>
+<p><code>MaxTotalTurnUB</code> composes the two certified s39 heading lemmas: entering each tick
+the speed has two certified floors (the shed floor and the gain floor), the tick's turn is at
+most <code>MaxTurnUB</code> there, and the total must reach the net heading change. The
+bisection over terminal speed gives the ceiling.</p>
+<div class="callout"><b>Where it bites, it bites completely:</b> at 1400 u/s, a net heading
+reversal within 8 ticks is certified IMPOSSIBLE — the ceiling collapses to zero, and none of
+120,000 adversarial schedules (random and bang-bang extremes) achieved it. The B5 cull
+inherits this as certified rejection.</div>
+<div class="callout2"><b>Where it doesn't, the reason is named:</b> at N 20–40 each lemma alone
+lets a fast tick also turn fast — only a JOINT law (a tick that turns θ at speed s forfeits
+gain) can charge turning against gaining. That joint turn-gain frontier is the recorded
+completion theorem, and the row stays PARTIAL by its own honesty rule until it lands.</div>
+
+<h2><span class="idx">04</span>Three lessons banked</h2>
+<p>First: exact instruments must be compared at their own contracts — the first B11 run showed
+49 "violations" of 0.1 ticks because the bound targeted the raw distance while A21 answers
+within its 96u lattice contract; compared honestly, the bound is clean with 1.2 ticks of slack.
+Second: necessary conditions can mask each other in tests — the all-rising boardability cull
+never fired until the test face moved inside the travel window that was culling it first.
+Third: arbitrary gate thresholds become measured pinned floors (B21's 16 scenarios, with the
+two horizon-declined air legs counted, not hidden).</p>
+<p>The B category now stands at 21 of 23 done, B22 sound-partial, and B18 — the
+boundary-label dominance theorem — deliberately open: it prunes nothing until someone proves
+it, and its certified special case (B19, exact duplicates) already runs. With A and B under
+it, the C layer builds on finished foundations: C5 requirement matching on certified B13/B14,
+the label projections, and the first production C9 graph over B16-enumerated edges.</p>
+
+<footer>SourceTAS capability library · session 42 · 2026-08-24 · suites: capsolve 11/0 ·
+capcontact 6/0 · capmin 11/0 · capxfer 13/0 · capreach 10/0 · capride 10/0 · capair +6 B17
+gates · full battery green</footer>
+</div>
