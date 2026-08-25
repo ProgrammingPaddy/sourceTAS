@@ -22,6 +22,20 @@ edges × C6/C7 labels); the B22 frontier theorem and cheaper A20
 builds remain the named refinements. The change-log tail below is
 the session journal.
 
+**STATUS 2026-08-25a (session 43): THE FUNCTION BROWSER — the
+dashboard embeds the real code (user directive).**
+`Tools/gen_capability_code.py` extracts every capability function,
+struct, and nested method (plus the `Fn::` export bodies, the
+`Move::` engine-mirror implementations they forward to, and
+`MoveTick` itself), computes the intra-library call graph, and
+splices it into `Docs/CapabilityChecklist.html`: 183 entries, 6,240
+source lines, 137 call edges. Every function chip on the dashboard
+now opens the actual source (true file:line numbers); calls /
+called-by chips walk the graph. STANDING DUTY: rerun the generator
+whenever library sources change. Documentation-and-tooling session —
+no engine or suite code touched, so no battery run was required;
+the certified state remains session 42's (seventeen suites green).
+
 **STATUS 2026-08-24a (session 42): THE B MARCH — the reducer
 category closes.** Eight rows certified in one arc, every one a
 composition of already-certified laws with its own falsifier: B5

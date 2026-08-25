@@ -422,6 +422,16 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-25a (session 43): **the function browser — the dashboard
+  embeds the real code** (user directive). `Tools/
+  gen_capability_code.py` extracts every library function/struct/
+  method + the `Fn::`/`Move::` engine-mirror bodies + `MoveTick`,
+  computes the call graph, and splices them into the dashboard: 183
+  entries, 6,240 lines, 137 call edges, viewable with true
+  file:line numbers; every function chip opens its source;
+  calls/called-by chips walk the graph. STANDING DUTY: rerun the
+  generator when library sources change. Detail in the checklist
+  change log.
 - 2026-08-24a (session 42): **the B march — eight rows close with
   certified functions and falsifier gates** (B5, B7, B10, B11, B15,
   B16, B17, B21), **B22 lands sound-partial** (0 of 120k
