@@ -377,6 +377,21 @@ namespace {
 	bool g_open = true;   // the editor IS the tool - visible whenever the menu is
 	int  g_tab = 2;                   // 0 Project, 1 Record, 2 Run, 3 Targets, 4 Rendering
 	char g_name[64] = "untitled";
+	// The project's IDENTITY (session 45): the .tasproj filename it was
+	// loaded from / last saved to. Manual saves target THIS (or the
+	// browser selection in the Project tab) - never silently whatever the
+	// name box happens to hold; the box is save-as input only.
+	std::string g_current_file;
+	// Project-scoped geo (session 45, user directive): board targets +
+	// tagged faces travel WITH the project, keyed to its map. Mirrored
+	// here for the save path (so saving outside the map keeps the last
+	// known set) and applied to BspWorld the moment its map is loaded.
+	struct ProjGeo {
+		char map[64] = {};
+		std::vector<std::pair<int, int>> tags;
+		std::vector<BspWorld::BoardTarget> targets;
+		bool pending = false;   // loaded from a project, waiting for its map
+	} g_proj_geo;
 	StartState g_anchor;
 	std::vector<EditSegment> g_segs;
 	int g_sel = -1;                   // selected segment
@@ -5316,7 +5331,12 @@ namespace {
 	// v23: gen gains the DYNAMIC pitch recipe fields (pitch_turn, pitch_rate,
 	//      pitch_desc) appended at the gen block's tail; the summary header
 	//      gains the anchor (valid flag + origin) after the segment list.
-	constexpr uint32_t kProjVersion = 23;
+	// v24: PROJECT-SCOPED GEO appended after the segments (session 45, user
+	//      directive): the map's board targets + tagged faces travel with
+	//      the project - geo map name, tags, full targets. Loading a v24
+	//      project REPLACES the map's working set (the per-map .geo file
+	//      stays only as the live scratch between saves).
+	constexpr uint32_t kProjVersion = 24;
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -5520,17 +5540,92 @@ namespace {
 			}
 		}
 
+		// v24: project-scoped geo. When a map is loaded the LIVE set is the
+		// truth (refresh the mirror from it); saving outside a map writes the
+		// last known mirror so the geo is never silently lost.
+		{
+			BspWorld::Status ws = BspWorld::GetStatus();
+			if (ws.loaded) {
+				strncpy_s(g_proj_geo.map, ws.map, _TRUNCATE);
+				BspWorld::ExportGeo(&g_proj_geo.tags, &g_proj_geo.targets);
+			}
+			out.write(g_proj_geo.map, sizeof(g_proj_geo.map));
+			const uint32_t ntags = static_cast<uint32_t>(g_proj_geo.tags.size());
+			W(out, ntags);
+			for (const auto& t : g_proj_geo.tags) {
+				const int32_t b = t.first, p = t.second;
+				W(out, b);
+				W(out, p);
+			}
+			const uint32_t ntgt = static_cast<uint32_t>(g_proj_geo.targets.size());
+			W(out, ntgt);
+			for (const BspWorld::BoardTarget& t : g_proj_geo.targets) {
+				out.write(reinterpret_cast<const char*>(&t.pos), sizeof(float) * 3);
+				W(out, t.yaw);
+				W(out, t.pitch);
+				const uint8_t pl = t.pitch_lock ? 1 : 0, du = t.ducked ? 1 : 0;
+				W(out, pl);
+				W(out, du);
+				const int32_t b = t.brush, p = t.plane;
+				W(out, b);
+				W(out, p);
+			}
+		}
+
 		return static_cast<bool>(out);
 	}
 
-	bool SaveProject() {
+	// Saving (session 45): every save goes through an explicit TARGET. The
+	// name box never silently decides where a manual save lands - it only
+	// names NEW files through Save-as.
+	bool SaveProjectTo(const std::string& stem_in) {
 		const std::string dir = ProjectDir();
-		std::string base = SanitizeName(g_name);
+		std::string base = SanitizeName(stem_in);
 		if (dir.empty() || base.empty()) { g_status = "Invalid project name."; return false; }
 		const bool ok = WriteProjectFile(dir + "\\" + base + ".tasproj");
+		if (ok) {
+			g_current_file = base + ".tasproj";
+			strncpy_s(g_name, base.c_str(), _TRUNCATE);
+		}
 		g_status = ok ? ("Saved " + base + ".tasproj.") : "Write failed.";
 		RefreshFiles();
 		return ok;
+	}
+
+	// The manual save: the project's CURRENT identity first; only a
+	// never-saved project falls back to the name box (its first save IS a
+	// save-as).
+	bool SaveProjectCurrent() {
+		if (!g_current_file.empty()) {
+			std::string stem = g_current_file;
+			const size_t dot = stem.find_last_of('.');
+			if (dot != std::string::npos)
+				stem = stem.substr(0, dot);
+			return SaveProjectTo(stem);
+		}
+		return SaveProjectTo(g_name);
+	}
+
+	// Apply the loaded project's geo the moment its map is the loaded one
+	// (immediately when already there; else the per-frame poll fires it
+	// right after the map finishes loading).
+	void TryApplyProjectGeo() {
+		if (!g_proj_geo.pending || !g_proj_geo.map[0])
+			return;
+		BspWorld::Status ws = BspWorld::GetStatus();
+		if (!ws.loaded || _stricmp(ws.map, g_proj_geo.map) != 0)
+			return;
+		const int dropped = BspWorld::ImportGeo(g_proj_geo.tags,
+			g_proj_geo.targets);
+		g_proj_geo.pending = false;
+		if (dropped > 0)
+			g_status = FmtStr("Project geo applied: %d entrie(s) dropped "
+				"(map geometry changed since the save).", dropped);
+		else
+			g_status = FmtStr("Project geo applied: %d target(s), %d "
+				"tagged face(s).",
+				static_cast<int>(g_proj_geo.targets.size()),
+				static_cast<int>(g_proj_geo.tags.size()));
 	}
 
 	// Rolling crash backup: same format, fixed name, written quietly a couple
@@ -5916,6 +6011,42 @@ namespace {
 			segs.push_back(std::move(s));
 		}
 
+		// v24: project-scoped geo (targets + tagged faces, keyed to the
+		// project's map). Read fully before committing anything.
+		ProjGeo geo;
+		bool have_geo = false;
+		if (version >= 24) {
+			uint32_t ntags = 0;
+			bool ok2 = static_cast<bool>(
+				in.read(geo.map, sizeof(geo.map)))
+				&& R(in, ntags) && ntags <= 100000;
+			for (uint32_t i = 0; ok2 && i < ntags; ++i) {
+				int32_t b = 0, p = 0;
+				ok2 = R(in, b) && R(in, p);
+				if (ok2)
+					geo.tags.push_back({ b, p });
+			}
+			uint32_t ntgt = 0;
+			ok2 = ok2 && R(in, ntgt) && ntgt <= 100000;
+			for (uint32_t i = 0; ok2 && i < ntgt; ++i) {
+				BspWorld::BoardTarget t;
+				uint8_t pl = 0, du = 0;
+				int32_t b = 0, p = 0;
+				ok2 = static_cast<bool>(in.read(
+					reinterpret_cast<char*>(&t.pos), sizeof(float) * 3))
+					&& R(in, t.yaw) && R(in, t.pitch)
+					&& R(in, pl) && R(in, du) && R(in, b) && R(in, p);
+				if (ok2) {
+					t.pitch_lock = pl != 0;
+					t.ducked = du != 0;
+					t.brush = b;
+					t.plane = p;
+					geo.targets.push_back(t);
+				}
+			}
+			have_geo = ok2;
+		}
+
 		g_anchor = anchor;
 		g_air_cap = cap;
 		g_air_accel = accel;
@@ -5933,6 +6064,17 @@ namespace {
 		if (dot != std::string::npos)
 			stem = stem.substr(0, dot);
 		strncpy_s(g_name, stem.c_str(), _TRUNCATE);
+		g_current_file = filename;   // the loaded file IS the save target now
+
+		// The project's geo replaces the map's working set - immediately if
+		// its map is loaded, else as soon as it is (the Update poll).
+		if (have_geo && geo.map[0]) {
+			g_proj_geo = geo;
+			g_proj_geo.pending = true;
+			TryApplyProjectGeo();
+		} else {
+			g_proj_geo = ProjGeo();
+		}
 
 		g_status = "Loaded " + filename + ".";
 		MarkDirty();
@@ -6271,6 +6413,21 @@ namespace {
 	}
 
 	void DrawRunTab() {
+		// Quick save (session 45): saves the project under its CURRENT
+		// identity without leaving the tab; a never-saved project names
+		// itself from the Project tab's box on its first save.
+		{
+			char lab[192];
+			if (!g_current_file.empty())
+				Sfmt(lab, "Save run -> %s", g_current_file.c_str());
+			else
+				Sfmt(lab, "Save run -> %s.tasproj (new)",
+					SanitizeName(g_name).c_str());
+			if (ImGui::Button(lab))
+				SaveProjectCurrent();
+		}
+		ImGui::Separator();
+
 		// --- anchor + test play ------------------------------------------
 		Theme::Heading("Anchor & test play");
 		if (g_anchor.valid)
@@ -7491,6 +7648,22 @@ namespace {
 
 		ImGui::Separator();
 		ImGui::Text("Board targets: %d", BspWorld::TargetCount());
+		ImGui::SameLine();
+		if (ImGui::Button("Clear all targets")) {
+			BspWorld::ClearTargets();
+			g_sel_target = -1;
+		}
+		ImGui::SameLine();
+		if (BspWorld::CanUndoGeo()) {
+			if (ImGui::Button("Undo geo change")) {
+				BspWorld::UndoGeo();
+				g_sel_tag = -1;
+				g_sel_target = -1;
+			}
+			Theme::Help("Restores the tag+target set from before the last "
+				"destructive edit (remove, clear-all, or a project load "
+				"replacing the set). Eight levels, this session.");
+		}
 		ImGui::BeginChild("targets", ImVec2(0, 90), true);
 		for (int i = 0; i < BspWorld::TargetCount(); ++i) {
 			const BspWorld::BoardTarget* t = BspWorld::GetTarget(i);
@@ -7548,7 +7721,9 @@ namespace {
 				BspWorld::SaveGeo();
 		}
 
-		ImGui::TextDisabled("Tags and targets auto-save per map (Documents\\sourceTAS\\geometry).");
+		ImGui::TextDisabled("Tags and targets live WITH the project (saved into "
+			".tasproj; loading a project replaces this map's set). The per-map "
+			".geo file is only the live scratch between saves.");
 	}
 
 	void DrawRenderingTab() {
@@ -9265,15 +9440,48 @@ namespace {
 	}
 
 	void DrawProjectTab() {
+		// The save row (session 45): Save targets the SELECTED browser entry
+		// (or the current identity when nothing is selected) - never
+		// silently whatever the name box holds. The box + Save-as name NEW
+		// files. The button says exactly where the save will land.
+		if (!g_current_file.empty())
+			ImGui::Text("Current project: %s", g_current_file.c_str());
+		else
+			ImGui::TextDisabled("Current project: (never saved)");
+		const bool sel_ok = g_sel_file >= 0
+			&& g_sel_file < static_cast<int>(g_files.size());
+		char savelab[192];
+		if (sel_ok)
+			Sfmt(savelab, "Save -> %s", g_files[g_sel_file].name.c_str());
+		else if (!g_current_file.empty())
+			Sfmt(savelab, "Save -> %s", g_current_file.c_str());
+		else
+			Sfmt(savelab, "Save -> %s.tasproj (new)", SanitizeName(g_name).c_str());
+		if (ImGui::Button(savelab)) {
+			if (sel_ok) {
+				std::string stem = g_files[g_sel_file].name;
+				const size_t dot = stem.find_last_of('.');
+				if (dot != std::string::npos)
+					stem = stem.substr(0, dot);
+				SaveProjectTo(stem);
+			} else {
+				SaveProjectCurrent();
+			}
+		}
+		ImGui::SameLine();
 		ImGui::PushItemWidth(180);
 		ImGui::InputText("##projname", g_name, sizeof(g_name));
 		ImGui::PopItemWidth();
 		ImGui::SameLine();
-		if (ImGui::Button("Save project"))
-			SaveProject();
+		if (ImGui::Button("Save as"))
+			SaveProjectTo(g_name);
 		ImGui::SameLine();
 		if (ImGui::Button("Refresh list"))
 			RefreshFiles();
+		Theme::Help("Save overwrites the project selected in the list below "
+			"(or the current one when nothing is selected) and makes it "
+			"current. Save as writes the name in the box. Projects now "
+			"carry the map's board targets + tagged faces with them.");
 
 		const float itick = Prediction::LastDiag().interval_per_tick > 0.f
 			? Prediction::LastDiag().interval_per_tick : 0.015f;
@@ -9378,6 +9586,10 @@ void TasEditor::Update() {
 		// Rendering/UI prefs apply from the first frame, menu open or not.
 		LoadUiSettings();
 	}
+
+	// Project geo waiting for its map: applies the moment the map loads
+	// (guards are two cheap compares when nothing is pending).
+	TryApplyProjectGeo();
 
 	// Stage breadcrumbs through the WHOLE of Update: the 2026-08-05 freeze's
 	// last record was "endscene: editor update" with nothing finer - the hang

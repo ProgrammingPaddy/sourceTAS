@@ -288,9 +288,22 @@ void WorldDraw::Render() {
 	// churn drops several-fold for free.
 	{
 		static float s_last_ct = -1e9f;
+		static unsigned s_noclk_frame = 0;
 		const float ct = Prediction::CurTime();
-		if (ct == s_last_ct) { g_diag = d; return; }
-		s_last_ct = ct;
+		if (ct < 0.f) {
+			// Clock unavailable (the gpGlobals anchor is still resolving -
+			// see Prediction.cpp's self-healing block). The 2026-08-25 game
+			// update proved what a hard stop here does: EVERY in-world
+			// drawing died behind this one gate. Degrade to a bounded
+			// every-2nd-frame throttle instead - overlays still expire
+			// normally while the game runs, and the pause-overflow this
+			// gate protects against needs a frozen clock we cannot see
+			// anyway.
+			if ((++s_noclk_frame & 1)) { g_diag = d; return; }
+		} else {
+			if (ct == s_last_ct) { g_diag = d; return; }
+			s_last_ct = ct;
+		}
 	}
 
 	// Crash isolation: while the solver's HEAVY phases churn (search /

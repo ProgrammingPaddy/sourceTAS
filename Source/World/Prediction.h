@@ -149,6 +149,15 @@ namespace Prediction {
 		int                fault_count = 0;
 		unsigned long long last_fault_rva = 0;
 		unsigned long long last_fault_access = 0;
+		// Self-healing anchor resolution (session 45): how each anchor was
+		// found after the 2026-08-25 game update killed the pinned RVAs.
+		// helper: 0 unresolved / 1 pinned / 2 RTTI walk.
+		// gpg:    0 unresolved / 1 pinned seed / 2 value-shape scan.
+		int  helper_method = 0;
+		int  helper_candidates = 0;
+		int  gpg_method = 0;
+		int  gpg_candidates = 0;
+		bool gpg_confirmed = false;
 	};
 	Diag LastDiag();
 
