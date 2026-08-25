@@ -60,6 +60,11 @@ class DX9RenderMgr {
 		// Lazily initialises ImGui with the game's device, then draws a frame.
 		void RenderFrame(IDirect3DDevice9*);
 
+		// Re-assert the WndProc subclass on the device's authoritative window
+		// every frame (self-healing input hook, session 46d). Undoes a game
+		// re-subclass that silently kills input.
+		void EnsureInputHook(IDirect3DDevice9*);
+
 		// Called after 'ImGui_ImplDX9_Init' succeeds.
 		virtual void OnInitialize() {};
 

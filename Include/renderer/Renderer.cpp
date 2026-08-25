@@ -4,6 +4,8 @@
 #include <cstring>
 #include <vector>
 
+#include "../../Source/Menu/Breadcrumb.h"
+
 namespace {
 	// --- minimal x64 inline hook ----------------------------------------------
 	// Patch a function's first 12 bytes with `mov rax, detour; jmp rax`. The game
@@ -104,6 +106,16 @@ namespace {
 namespace DX9GenericHooks {
 	// Replacement 'WndProc' function for intercepting all window messages.
 	LRESULT STDMETHODCALLTYPE WndProc(HWND window, UINT message_type, WPARAM w_param, LPARAM l_param) {
+		// Liveness breadcrumb (session 46d): if this NEVER writes, our
+		// subclass is not receiving messages at all (wrong window, or the
+		// game bypasses DispatchMessage / uses raw input) - the decisive
+		// signal that separates "hook displaced" (fixable by re-hooking)
+		// from "proc never called" (needs polled input instead).
+		static long s_calls = 0;
+		if ((++s_calls & 0x7FF) == 1)
+			Breadcrumb::Note(Breadcrumb::SlotInput,
+				"wndproc ALIVE call#%ld msg=0x%03X", s_calls, message_type);
+
 		if (!renderer.OnInputMessage(message_type, w_param, l_param))
 			return true;
 
@@ -155,35 +167,18 @@ DX9RenderMgr::~DX9RenderMgr() {
 }
 
 void DX9RenderMgr::RenderFrame(IDirect3DDevice9* device) {
+	// SELF-HEALING INPUT HOOK (session 46d). The 2026-08-25 game update
+	// left the WndProc subclass reporting "hooked" while receiving ZERO
+	// messages (no menu, healthy journal): the game replaces its own
+	// WndProc after we install ours (a map/mode transition re-subclasses),
+	// so our proc is silently displaced. Re-assert our subclass EVERY frame
+	// against the device's authoritative focus window, chaining to whatever
+	// proc currently sits there - if the game displaces us, we win back the
+	// next frame. Cheap: a GetWindowLongPtr compare when already installed.
+	this->EnsureInputHook(device);
+
 	// ImGui needs the game's real device, which we first see here in EndScene.
 	if (!this->initialized) {
-		// THE AUTHORITATIVE INPUT WINDOW (session 46b): ask the game's own
-		// device for its focus window instead of trusting the injection-time
-		// EnumWindows guess. The guess is null when the game is alt-tabbed
-		// in fullscreen (hidden window) - exactly how injection happens -
-		// which left EndScene hooked but ALL input dead: "injected, no menu,
-		// no anything" with a perfectly healthy journal. If the guess and
-		// the device disagree (or the guess never hooked), re-target here.
-		D3DDEVICE_CREATION_PARAMETERS cp = {};
-		if (SUCCEEDED(device->GetCreationParameters(&cp)) && cp.hFocusWindow) {
-			const bool wrong_window = cp.hFocusWindow != this->window;
-			const bool never_hooked = this->WndProc == nullptr;
-			if (wrong_window || never_hooked) {
-				// Undo any hook on the guessed window first.
-				if (this->window && this->WndProc) {
-					SetWindowLongPtr(this->window, GWLP_WNDPROC,
-						LONG_PTR(this->WndProc));
-					this->WndProc = nullptr;
-				}
-				this->window = cp.hFocusWindow;
-				this->WndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
-					this->window, GWLP_WNDPROC,
-					LONG_PTR(&DX9GenericHooks::WndProc)));
-				if (this->WndProc)
-					this->window_source = 2;
-			}
-		}
-
 		if (!ImGui_ImplDX9_Init(this->window, device))
 			return;
 
@@ -201,6 +196,43 @@ void DX9RenderMgr::RenderFrame(IDirect3DDevice9* device) {
 	ImGui_ImplDX9_NewFrame();
 	this->OnEndScene();
 	ImGui::Render();
+}
+
+// Re-assert our WndProc subclass on the device's authoritative window,
+// chaining to whatever proc is currently installed. Idempotent: a no-op
+// once ours is in place and undisturbed. Called every frame from
+// RenderFrame so a game re-subclass is undone the next frame.
+void DX9RenderMgr::EnsureInputHook(IDirect3DDevice9* device) {
+	HWND target = this->window;
+	D3DDEVICE_CREATION_PARAMETERS cp = {};
+	if (device && SUCCEEDED(device->GetCreationParameters(&cp)) && cp.hFocusWindow)
+		target = cp.hFocusWindow;   // authoritative; may differ from the guess
+	if (!target)
+		return;
+
+	// Window changed under us: restore the old window's proc first.
+	if (target != this->window) {
+		if (this->window && this->WndProc)
+			SetWindowLongPtr(this->window, GWLP_WNDPROC, LONG_PTR(this->WndProc));
+		this->window = target;
+		this->WndProc = nullptr;
+	}
+
+	// Is OUR proc actually the current one? If not (never installed, or the
+	// game replaced it), (re)install and remember the displaced proc as the
+	// chain target so the game's own handling still runs.
+	WNDPROC cur = reinterpret_cast<WNDPROC>(GetWindowLongPtr(target, GWLP_WNDPROC));
+	if (cur != reinterpret_cast<WNDPROC>(&DX9GenericHooks::WndProc)) {
+		this->WndProc = cur;
+		SetWindowLongPtr(target, GWLP_WNDPROC, LONG_PTR(&DX9GenericHooks::WndProc));
+		this->window_source = 3;   // 3 = per-frame self-heal
+		static int s_rehooks = 0;
+		++s_rehooks;
+		Breadcrumb::Note(Breadcrumb::SlotCommand,
+			"rend: (re)hook #%d window=%p chain=%p",
+			s_rehooks, reinterpret_cast<void*>(target),
+			reinterpret_cast<void*>(cur));
+	}
 }
 
 bool DX9RenderMgr::Initialize(const HWND& window) {
