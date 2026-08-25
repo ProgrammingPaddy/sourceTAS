@@ -21,10 +21,13 @@
 // dominance is an OPEN THEOREM (handoff 9.2) - tangent_gap > 0 means
 // a lossy arrival genuinely out-carries every tangent arrival there.
 
+#include <math.h>
+
 #include <functional>
 #include <vector>
 
 #include "SolverAir.h"
+#include "SolverEnvelope.h"
 #include "SolverMove.h"
 #include "SolverRoute.h"
 #include "SolverSteer.h"
@@ -158,6 +161,305 @@ namespace Entrance {
 	// restricts the win condition to |dot| <= kTanEps (the explicit
 	// FastestTangent solve). Misses/contact-assisted strikes guide
 	// but never win.
+	// THE EXACTNESS LADDER (advisor 2026-08-19): spatial recovery is
+	// reported at these tolerances, coarse to fine - a benchmark
+	// curve, not a single hit/miss bit.
+	constexpr float kLadder[6] = { 32.f, 16.f, 8.f, 4.f, 2.f, 1.f };
+
+	// The ONE position/heading trade weight (units of u per radian),
+	// shared by the boundary search metric and the Gauss-Newton
+	// residual so the optimizer descends exactly what the search ranks
+	// (they were 250 and 200 - inconsistent).
+	constexpr float kThetaW = 250.f;
+
+	// ---- THE FIRST INTERVAL-SPECIFIC CERTIFIED CEILING ----
+	// (advisor 2026-08-19; status ADVISORY until gates B1-B7 pass.)
+	//
+	// At a fixed arrival tick T the pre-clip vertical component v_z is
+	// fixed and the certified gain law bounds horizontal speed by
+	// S = s_max(T). For a heading domain I_theta the RELAXED terminal
+	// set is
+	//     v-(s,theta) = (s cos theta, s sin theta, v_z),
+	//     0 <= s <= S,  theta in I_theta,  n.v- <= 0
+	// which is a SUPERSET of the reachable terminal states (it discards
+	// horizontal-displacement reachability and all control history), so
+	// its maximum post-board energy is a valid upper bound:
+	//     H*(D) <= U_board(I_theta).
+	//
+	// Writing h = |n_xy|, phi = atan2(n_y, n_x),
+	//     a(theta) = h cos(theta - phi),   b = n_z v_z,
+	//     d = n.v- = a s + b,
+	//     E = |v+|^2 + 2 g (z - zmin) = s^2 + v_z^2 - d^2 + P.
+	// For fixed a, E is CONVEX in s because |a| <= h <= 1 gives
+	// 1 - a^2 >= 0, so its maximum over the feasible speed interval can
+	// only occur at an endpoint: s = 0, s = S, or the approach boundary
+	// s = -b/a. That makes the relaxed maximum EXACT in closed form
+	// rather than a sampled approximation.
+
+	// Exact range of cos over the circular interval [lo, hi] (radians,
+	// hi may wrap past +pi). Getting this wrong is the one mistake that
+	// would make the bound UNSAFE rather than merely loose, so it is a
+	// separate, property-tested function.
+	inline void CosRange(float lo, float hi, float* cmin, float* cmax) {
+		const float kTwoPi = 6.28318531f;
+		float w = hi - lo;
+		while (w < 0.f) w += kTwoPi;
+		while (w > kTwoPi) w -= kTwoPi;
+		if (w >= kTwoPi - 1e-6f) {          // full circle
+			*cmin = -1.f;
+			*cmax = 1.f;
+			return;
+		}
+		const float c0 = cosf(lo);
+		const float c1 = cosf(lo + w);
+		*cmin = c0 < c1 ? c0 : c1;
+		*cmax = c0 > c1 ? c0 : c1;
+		// A multiple of 2pi inside the swept span reaches cos = +1;
+		// an odd multiple of pi reaches cos = -1. Find the first
+		// candidate at or after `lo` and test whether it lies within w.
+		const float k0 = ceilf(lo / kTwoPi);
+		if (k0 * kTwoPi - lo <= w + 1e-6f)
+			*cmax = 1.f;
+		const float k1 = ceilf((lo - 3.14159265f) / kTwoPi);
+		if (k1 * kTwoPi + 3.14159265f - lo <= w + 1e-6f)
+			*cmin = -1.f;
+	}
+
+	// The exact maximum of the relaxed set described above.
+	//
+	// GRAVITY PHASE (B7, 2026-08-19). The quantity production stores as
+	// H is measured on `end_state.vel`, i.e. AFTER FinishGravity, while
+	// v- is the PRE-clip velocity (post StartGravity + air wish). With
+	// the half-tick impulse G = gs*g*dt/2 and v+ = v- - n d:
+	//     v_end   = v+ - (0,0,G)
+	//     |v_end|^2 = s^2 + v_z^2 - d^2 - 2 G v_z + 2 G n_z d + G^2
+	//               = s^2 - d^2 + (v_z - G)^2 + 2 G n_z d.
+	// On an approaching arrival d <= 0, so for an UPWARD-facing normal
+	// (n_z >= 0, every surfable ramp) the cross term is <= 0 and may be
+	// dropped: the bound keeps its exact closed form with
+	//     base = (v_z - G)^2 + pot
+	// instead of v_z^2 + pot. Omitting G entirely UNDER-counted the true
+	// post-board energy by 2 G |v_z| - G^2 (~2.4k at v_z = -200), which
+	// is the direction that makes an upper bound unsafe. For a downward-
+	// facing normal the cross term is >= 0 and is added as an explicit
+	// conservative slack rather than dropped.
+	//
+	//   n        : unit face normal
+	//   vz       : pre-clip vertical component at the arrival tick
+	//   gimp     : G = gs * gravity * dt / 2, the half-tick impulse
+	//   smax     : certified horizontal-speed ceiling s_max(T)
+	//   th_lo/hi : the heading domain (circular interval)
+	//   pot      : 2 g (z_contact - zmin), the potential term the
+	//              stored H carries
+	//   arg      : optional maximizer, so B7 can push the analytical
+	//              argmax through the authoritative board helper
+
+	// The state that realizes the maximum. B7 exists because an
+	// optimizer that agrees on the NUMBER while disagreeing about the
+	// STATE would hide a semantic mismatch (velocity phase, gravity
+	// placement, normal convention) behind a coincidence.
+	struct UBoardArg {
+		float s = 0.f;      // horizontal speed at the maximizer
+		float a = 0.f;      // h cos(theta - phi) there
+		float d = 0.f;      // n . v- there
+		int   cand = -1;    // 0 = s.0, 1 = s.smax, 2 = approach boundary
+	};
+
+	inline float UBoardHeading(const Vec3& n, float vz, float gimp,
+	                           float smax, float th_lo, float th_hi,
+	                           float pot, UBoardArg* arg = nullptr) {
+		const float h = sqrtf(n.X * n.X + n.Y * n.Y);
+		const float b = n.Z * vz;
+		const float vze = vz - gimp;
+		float base = vze * vze + pot;
+		// n_z < 0: the dropped cross term 2 G n_z d is POSITIVE for an
+		// approaching arrival, so it must be added, not ignored.
+		if (n.Z < 0.f) {
+			const float dmax = fabsf(b) + smax * h;
+			base += 2.f * gimp * fabsf(n.Z) * dmax;
+		}
+		if (arg) {
+			arg->s = 0.f;
+			arg->a = 0.f;
+			arg->d = b;
+			arg->cand = -1;
+		}
+		if (h < 1e-5f) {
+			// Vertical normal: a == 0, so d == b for every arrival.
+			if (b > 0.f)
+				return -1e30f;
+			if (arg) {
+				arg->s = smax;
+				arg->cand = 1;
+			}
+			return smax * smax + base - b * b;
+		}
+		const float phi = atan2f(n.Y, n.X);
+		float cmin = -1.f, cmax = 1.f;
+		CosRange(th_lo - phi, th_hi - phi, &cmin, &cmax);
+		const float a_lo = h * cmin;
+		const float a_hi = h * cmax;
+		float best = -1e30f;
+		auto take = [&](float v, float s_at, float a_at, float d_at,
+			int cand) {
+			if (v <= best)
+				return;
+			best = v;
+			if (arg) {
+				arg->s = s_at;
+				arg->a = a_at;
+				arg->d = d_at;
+				arg->cand = cand;
+			}
+		};
+		// Candidate A: s = 0 (feasible only if the arrival is already
+		// approaching, i.e. b <= 0).
+		if (b <= 0.f)
+			take(base - b * b, 0.f, a_lo, b, 0);
+		// Candidate B: s = smax, with the feasible `a` that puts the
+		// normal component closest to zero from the approaching side.
+		{
+			const float a_star = smax > 1e-6f ? -b / smax : 0.f;
+			float a_use = a_star < a_hi ? a_star : a_hi;
+			if (a_use >= a_lo) {
+				const float d = a_use * smax + b;
+				if (d <= 1e-4f)
+					take(smax * smax + base - d * d, smax, a_use, d, 1);
+			}
+		}
+		// Candidate C: the approach boundary s = -b/a (zero clip loss).
+		// Needs sign(a) opposite to b and |a| >= |b|/smax so that
+		// s <= smax; among those, the SMALLEST |a| gives the largest s
+		// and hence the largest energy.
+		if (fabsf(b) > 1e-6f && smax > 1e-6f) {
+			const float need = fabsf(b) / smax;
+			float a_use = 0.f;
+			bool have = false;
+			if (b < 0.f) {                  // need a > 0
+				a_use = a_lo > need ? a_lo : need;
+				have = a_use <= a_hi && a_use > 0.f;
+			} else {                        // need a < 0
+				a_use = a_hi < -need ? a_hi : -need;
+				have = a_use >= a_lo && a_use < 0.f;
+			}
+			if (have) {
+				const float s = -b / a_use;
+				if (s >= 0.f && s <= smax + 1e-3f)
+					take(s * s + base, s, a_use, 0.f, 2);
+			}
+		}
+		return best;
+	}
+
+	// ---- PURE HELPERS, shared by production and the property gate
+	// (`airprops`) so a test can never drift from the implementation ----
+
+	// Scout-pool endpoint dedupe radius for an active tolerance. MUST be
+	// non-increasing in tol and MUST never exceed the historical 32u:
+	// a formula introduced for the fine-tolerance case silently loosened
+	// every coarse caller (Field::Build went to 115u with 3 slots).
+	inline float ScoutDedupe(float tol) {
+		float d = 4.f * tol;
+		if (d < 8.f) d = 8.f;
+		if (d > 32.f) d = 32.f;
+		return d;
+	}
+
+	// Curvature to-go: signed total sweep of the circle tangent to the
+	// current heading (local frame, velocity along +x) through the
+	// target at (lx, ly).
+	inline float ToGoSweep(float lx, float ly) {
+		return 2.f * atan2f(ly, lx);
+	}
+
+	// ...and its arc length, BOUNDED. Behind the target (ly -> 0,
+	// lx < 0) curvature -> 0 while |sweep| -> pi, so phi/kappa
+	// diverges - measured at 1.3e10, which swamped every other guidance
+	// term and made sidestepping look cheaper than turning. The arc can
+	// never be shorter than the chord nor longer than the half-circle
+	// through both points.
+	inline float ToGoArcLen(float lx, float ly) {
+		const float r2 = lx * lx + ly * ly;
+		const float chord = sqrtf(r2);
+		if (r2 <= 1e-3f)
+			return 0.f;
+		const float kap = 2.f * ly / r2;
+		const float phi = ToGoSweep(lx, ly);
+		float arc = fabsf(kap) > 1e-6f ? fabsf(phi / kap) : chord;
+		const float arc_max = 1.57079633f * chord;
+		if (arc < chord) arc = chord;
+		if (arc > arc_max) arc = arc_max;
+		return arc;
+	}
+
+	// Optional search-machinery tuning (advisor 2026-08-19). Defaults
+	// reproduce the production solve; airrec sweeps shoot_m to measure
+	// the recovery CURVE (the Level-B trigger is its shape).
+	struct RefTune {
+		// Sequential-shooting node ceiling: 0 = single-target shots
+		// only, 1 = +one free node (+node-time), 2 = +second node +
+		// outcome-space Gauss-Newton. Base seeds/frontier/deepen/
+		// scouts always run.
+		int shoot_m = 2;
+		// ACTIVE TOLERANCE CONTINUATION (advisor 2026-08-19): the
+		// finest positional tolerance this query actually wants. 0 =
+		// off (region/field semantics: stop at `radius`). When set,
+		// the refinement loop first maximizes value at `radius` as
+		// usual, THEN tightens the active tolerance down the kLadder
+		// rungs to this value, minimizing the residual at each rung -
+		// so the value contract never regresses and the exact-point
+		// rungs stop being reachable only by luck. Exact-point queries
+		// (humanexact, ladder, airrec) set it; cell/field queries
+		// (Build, fieldexact) must not.
+		float precision = 0.f;
+		// IMMUTABLE DEVELOPMENT SWITCH (advisor 2026-08-19): 0 = the
+		// legacy phased path (regression baseline), 1 = the anytime
+		// SCHEDULER path. Part of solver identity, never derived from
+		// the budget. The legacy path is removed once the scheduler's
+		// prefix/monotonicity/determinism/fairness gates are green.
+		// ------------------------------------------------------------
+		// CLASSIFICATION (advisor ruling 2026-08-19d). READ THIS BEFORE
+		// TREATING THE SCHEDULER AS AN UNFINISHED PREREQUISITE.
+		//
+		//   scheduler = 0  LEGACY RefSolve = the PRODUCTION local
+		//                  refinement engine. Not deprecated. Not
+		//                  scheduled for removal.
+		//   scheduler = 1  v0, scheduler = 2  v1 = an EXPERIMENTAL
+		//                  refinement-scheduler research path and the
+		//                  source of the scheduling laws now applied one
+		//                  level up (Entrance::RefineStep). It is NOT a
+		//                  production replacement requirement.
+		//
+		// Why: at EQUAL compute on the frozen AirRec L1 fixture, in
+		// BOUNDARY mode where n_dom = 1 - so heading coverage, weighted
+		// fairness, ScoutCheap and cross-domain starvation are all ruled
+		// out - legacy recovers 29/32 known-reachable problems and the
+		// scheduler 18/32. The deficit is inside the schedulerized
+		// method ladder. The full solver needs lazy monotone refinement;
+		// it does NOT need the local optimizer rewritten as that
+		// scheduler. See Docs/AirRecSpec.md sections 24-25.
+		//
+		// KNOWN LIMITATION of the experimental path: it never consults
+		// `shoot_m`, so any m-curve measured in scheduler mode is the
+		// same machinery run three times and is NOT an m0/m1/m2 result.
+		// ------------------------------------------------------------
+		int scheduler = 0;
+		// Second-stage exact-rollout depth of the MANDATORY COVERAGE
+		// action. 0 = ScoutCheap (closed form only, the default);
+		// 4 = the old full-price coverage shot, kept ONLY so the
+		// controlled comparison is reproducible without a recompile.
+		// A configuration choice, never a budget-derived one.
+		int cover_top = 0;
+		// BOUNDARY MODE (Layer-1 recoverability): non-null = solve the
+		// free-air boundary problem (S0, Q, T, theta) instead of a
+		// face strike. Points at {th_lo, th_hi} (radians, absolute).
+		// T is fixed = n_hint: schedules are exactly that long,
+		// scored on the tick-T residual; success = within `radius` of
+		// q with terminal heading inside the interval; H = terminal
+		// horizontal speed (the s_A* quantity).
+		const float* bnd_theta = nullptr;
+	};
+
 	struct RefResult {
 		bool  ok = false;
 		float H = -1e30f;
@@ -178,6 +480,97 @@ namespace Entrance {
 		int   tan_horizon = 0;
 		int   evals = 0;              // engine flights spent
 		int   contact_assisted = 0;   // clean-air-law rejections seen
+		// EXACTNESS LADDER (advisor 2026-08-19): closest clean-air
+		// strike to q over the whole search (any distance), its
+		// terminal heading, and the best replayed H per kLadder rung.
+		float strike_rmin = 1e30f;
+		float strike_rmin_th = 0.f;
+		float rung_E[6] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f,
+			-1e30f };
+		// PER-RUNG WITNESSES. A rung that can be reported but not
+		// handed back is only observable, never usable - it could
+		// neither be credited to a Rec nor banked. Each rung now
+		// carries the schedule that achieved it and its realized
+		// residual, so a tightened result is a first-class witness.
+		std::vector<signed char> rung_side[6];
+		std::vector<float> rung_cosa[6];
+		float rung_res[6] = { 1e30f, 1e30f, 1e30f, 1e30f, 1e30f,
+			1e30f };
+		// PER-INTERVAL heading coverage {L_i, hits, shots} about
+		// iv_ref (the closed-form arrival estimate). L_i = best
+		// in-radius witness whose terminal heading lies in interval i;
+		// hits = its witness count; shots = guided attempts targeted
+		// at it. hits == 0 means UNRESOLVED - never "unreachable"
+		// (estimates order, only certified bounds erase).
+		float iv_L[6] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f,
+			-1e30f };
+		int   iv_hits[6] = { 0, 0, 0, 0, 0, 0 };
+		int   iv_shots[6] = { 0, 0, 0, 0, 0, 0 };
+		float iv_ref = 0.f;
+		// PER-INTERVAL WITNESSES (stage 0 of ExitField, 2026-08-19):
+		// the best in-radius witness per heading interval. Same rule as
+		// the rung witnesses - a lane you cannot hand back is only
+		// observable, never usable - and these are the heading-diverse
+		// half of the BoardTransition frontier.
+		std::vector<signed char> iv_side[6];
+		std::vector<float> iv_cosa[6];
+		float iv_res[6] = { 1e30f, 1e30f, 1e30f, 1e30f, 1e30f, 1e30f };
+		float iv_th[6] = { 0, 0, 0, 0, 0, 0 };
+		// BOUNDARY MODE residuals (RefTune::bnd_theta): best tick-T
+		// outcome by the search metric rp + 250*rth, and its terminal
+		// horizontal speed.
+		// OBSERVABILITY for the property gate: how the budget was
+		// actually divided, which coordinate chart won, and the final
+		// active tolerance. Reported, never used to decide anything.
+		int   evals_cover = 0;    // the budget-INDEPENDENT prefix
+		int   evals_phase1 = 0;   // spent before the first tightening
+		int   win_chart = -1;     // 0 = chord, 1 = curvature, -1 = none
+		float tol_final = 0.f;
+		// THE ACTION TRACE: semantic content hashes, in execution
+		// order, for the prefix property. Bounded so a long solve
+		// cannot grow it without limit; the bound is a constant, not
+		// a budget-derived quantity.
+		std::vector<unsigned long long> trace;
+		// PROOF-CARRYING PRUNES: one row per certified domain
+		// elimination - the bound identity AND the incumbent witness
+		// that justified the comparison (advisor: L* is monotone, so
+		// a valid prune stays valid, but the constructive witness
+		// makes the future certificate auditable).
+		struct PruneRec {
+			int   domain = -1;
+			unsigned bound_id = 0;   // which ceiling + version
+			float U = 0.f;
+			float L_star = 0.f;
+			float eps = 0.f;
+			unsigned long long witness_id = 0;   // the L* witness
+		};
+		std::vector<PruneRec> prunes;
+		int sched_actions = 0;
+		int sched_m_used[3] = { 0, 0, 0 };
+		int sched_prec = 0;
+		int sched_deep = 0;
+		int sched_gn = 0;
+		// PER-DOMAIN DIAGNOSTIC (the advisor's first ask: largest
+		// tightening vs the old ceiling is NOT the same as spread
+		// BETWEEN domains, so the spread is measured directly).
+		float dom_U[6] = { 0, 0, 0, 0, 0, 0 };
+		float dom_L[6] = { 0, 0, 0, 0, 0, 0 };
+		int   dom_spent[6] = { 0, 0, 0, 0, 0, 0 };
+		int   dom_acts[6] = { 0, 0, 0, 0, 0, 0 };
+		int   dom_m2[6] = { 0, 0, 0, 0, 0, 0 };
+		// CHEAP COVERAGE (2026-08-19). The mandatory first touch of each
+		// heading domain is a distinct, much cheaper action than the
+		// guided shot it used to be; these record what that prefix
+		// actually costs so the operational efficiency claim is measured,
+		// not asserted.
+		int   sched_cover = 0;      // coverage actions executed
+		int   sched_cover_ev = 0;   // evals they consumed
+		int   dom_cover[6] = { 0, 0, 0, 0, 0, 0 };
+		// 0 = UNRESOLVED, 1 = PROVED_IRRELEVANT, 2 = PARTITIONED.
+		int   dom_state[6] = { 0, 0, 0, 0, 0, 0 };
+		float bnd_rp = 1e30f;
+		float bnd_rth = 1e30f;
+		float bnd_s = 0.f;
 	};
 	// on_strike (optional): called for EVERY clean-air face strike the
 	// search flies, wherever it lands - the caller may credit its
@@ -204,7 +597,178 @@ namespace Entrance {
 	                       on_strike = nullptr,
 	                   const std::vector<signed char>* seed_side
 	                       = nullptr,
-	                   const std::vector<float>* seed_cosa = nullptr);
+	                   const std::vector<float>* seed_cosa = nullptr,
+	                   const RefTune* tune = nullptr);
+
+	// ================= LAZY REFINEMENT: the operator-level anytime
+	// API (advisor ruling 2026-08-19d) =================
+	//
+	// The anytime contract lives HERE, one level above the local
+	// optimizer, not inside it. Sessions 12e-12k established that the
+	// two responsibilities were conflated:
+	//
+	//   local trajectory optimization  <- legacy RefSolve is strong at
+	//                                     this (29/32 known-reachable)
+	//   lazy monotone compute allocation <- this layer
+	//
+	// So a WHOLE fixed local solve is one atomic refinement action. The
+	// outer/global budget may execute the next action or stop; it may
+	// never alter an action's internal configuration. That is why
+	// `RefSolve(3000)` not being an action-prefix of `RefSolve(600)`
+	// does not matter: they are two DIFFERENT atomic actions, each
+	// immutably configured.
+	//
+	// The property the global solver actually needs is the sandwich
+	// getting monotonically stronger:
+	//     L_D <= H*_D <= U_D,  L only rises, U only falls.
+
+	// An immutable, versioned resolution level. Profiles are RESOLUTION
+	// levels, not truth levels: failing at the deepest profile still
+	// means UNRESOLVED unless a certified bound says otherwise.
+	struct RefProfile {
+		const char* name;
+		int      budget;      // engine flights, fixed
+		float    precision;   // tolerance target, fixed
+		int      shoot_m;     // machinery level, fixed
+		unsigned id;          // stable identity across runs
+	};
+
+	// The ladder, in execution order. Deliberately short and based on
+	// demonstrated behaviour; full-map profiling decides later what
+	// resolutions are actually useful.
+	const RefProfile* Profiles(int* count);
+
+	// Persistent per-query refinement state. Everything here is
+	// monotone by construction - see RefineStep.
+	// ONE REPLAYABLE BOARD CONTINUATION (ExitField stage 0, advisor
+	// 2026-08-19f). BestBoard is a projection; BoardTransition
+	// witnesses are the transition payload - a lower-energy board can
+	// win the route, so the composition API must not collapse to one
+	// max-energy witness. S_B is obtained by AUTHORITATIVE REPLAY of
+	// the witness (Air::FlyWishSchedule -> end_state); nothing cached
+	// here is state.
+	struct BoardTransition {
+		// Stable lane identity: 0x0001 winner, 0x0300 tangent,
+		// 0x0100+r exactness rung r, 0x0200+i heading interval i.
+		unsigned lane = 0;
+		float L = -1e30f;       // replayed post-board energy
+		float res = 1e30f;      // witness residual to q
+		float th = 0.f;         // terminal heading (diversity key)
+		std::vector<signed char> side;
+		std::vector<float> cosa;
+		int horizon = 0;
+	};
+
+	struct QueryState {
+		int   level = 0;        // profiles executed so far
+		int   evals = 0;        // cumulative engine flights
+		// ---- the lower bound: a REPLAYABLE witness, never an estimate
+		bool  has_L = false;
+		float L = -1e30f;
+		std::vector<signed char> wside;
+		std::vector<float> wcosa;
+		int   horizon = 0;
+		float L_res = 1e30f;    // the witness's residual to q
+		// ---- the CONTINUATION FRONTIER: distinct replayable board
+		// transitions, merged monotonically PER LANE (a lane once
+		// exposed is never lost; its L only rises). The headline L is
+		// the heatmap projection; THIS is what composes with ExitField.
+		std::vector<BoardTransition> transitions;
+		// ---- the certified upper bound
+		float U = 1e30f;
+		unsigned U_bound_id = 0;
+		// ---- status. UNRESOLVED is the only thing a failed search may
+		// conclude; PROVED_IRRELEVANT requires a certified bound and an
+		// incumbent, and is set only through MarkIrrelevant.
+		enum { UNRESOLVED = 0, PROVED_IRRELEVANT = 1 };
+		int   status = UNRESOLVED;
+		float irrel_Lstar = 0.f;
+		unsigned irrel_bound_id = 0;
+		// ---- audit trail: which profiles ran, in order
+		std::vector<unsigned> applied;
+	};
+
+	// The certified ceiling for a face-mode query over a heading
+	// interval, under the production recipe: the EXACT ballistic
+	// arrival-tick window, the FinishGravity phase term, and the
+	// acceptance-ball potential. Shared by RefSolve and the refinement
+	// layer precisely so the two can never drift.
+	inline float UCertifiedFace(const Vec3& n, const Vec3& epos,
+	                            const Vec3& evel, float gs,
+	                            const MoveParams& p, const Vec3& q,
+	                            float radius, float zmin, int k_cap,
+	                            float th_lo, float th_hi,
+	                            unsigned* bound_id) {
+		const float s0 = sqrtf(evel.X * evel.X + evel.Y * evel.Y);
+		const float zhi = q.Z + radius;
+		int k_lo = 1, k_hi = k_cap;
+		if (!Envelope::ZWindow(epos.Z, evel.Z, q.Z - radius, zhi, p,
+			k_cap, &k_lo, &k_hi, gs)) {
+			k_lo = 1;
+			k_hi = k_cap;
+		}
+		const float pot = 2.f * p.gravity * gs * (zhi - zmin);
+		const float gimp = 0.5f * p.gravity * gs * p.dt;
+		float u_speed = -1e30f, u_board = -1e30f;
+		for (int k = k_lo; k <= k_hi; ++k) {
+			const float sk = Envelope::SMax(s0, k, p);
+			const float vk = Envelope::VzAfter(evel.Z, k, p, gs);
+			const float ve = vk - gimp;
+			const float us = sk * sk + ve * ve + pot;
+			if (us > u_speed)
+				u_speed = us;
+			const float ub = UBoardHeading(n, vk, gimp, sk, th_lo,
+				th_hi, pot);
+			if (ub > u_board)
+				u_board = ub;
+		}
+		if (u_board > -1e29f && u_board < u_speed) {
+			if (bound_id) *bound_id = 0x55300002u;   // interval board
+			return u_board;
+		}
+		if (bound_id) *bound_id = 0x55300001u;       // broad energy
+		return u_speed;
+	}
+
+	// ONE ATOMIC REFINEMENT ACTION: run the next profile in full and
+	// merge its result monotonically. Returns false when the ladder is
+	// exhausted (nothing ran, nothing changed).
+	//
+	//   L_new = max(L_old, L_run)      - a better witness is never lost
+	//   U_new = min(U_old, U_certified) - a ceiling never loosens
+	//
+	// A profile that finds nothing leaves L untouched and the status
+	// UNRESOLVED. Search failure is NEVER physical impossibility.
+	bool RefineStep(QueryState* st, const PlayerState& entry,
+	                const World& w, const MoveParams& p,
+	                const Route::Graph& g, int face_idx, const Vec3& q,
+	                float radius, int n_hint, float zmin,
+	                const Steer::CtlState& entry_ctl
+	                    = Steer::CtlState());
+
+	// AUTHORITATIVE REPLAY of one BoardTransition: flies the witness
+	// through the exact engine and returns the full flight (end_state
+	// = S_B at the canonical post-board-tick boundary; pos/dot/tick =
+	// event metadata). hit && dot < 0 && struck_brush < 0 or the
+	// witness is VOID. This is the only sanctioned way to obtain S_B.
+	Air::Result ReplayBoardTransition(const BoardTransition& tr,
+	                                  const PlayerState& entry,
+	                                  const World& w,
+	                                  const MoveParams& p,
+	                                  const Route::Graph& g,
+	                                  int face_idx, const Vec3& q);
+
+	// The ONLY route to PROVED_IRRELEVANT: a certified ceiling that
+	// cannot beat an incumbent witness from elsewhere. Returns false
+	// (and changes nothing) when the inequality does not hold.
+	inline bool MarkIrrelevant(QueryState* st, float L_star) {
+		if (!st || st->U > L_star || st->U_bound_id == 0)
+			return false;
+		st->status = QueryState::PROVED_IRRELEVANT;
+		st->irrel_Lstar = L_star;
+		st->irrel_bound_id = st->U_bound_id;
+		return true;
+	}
 
 } // namespace Entrance
 } // namespace Solver

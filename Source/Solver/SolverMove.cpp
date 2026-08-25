@@ -806,6 +806,10 @@ namespace Solver {
 
 	// FUNCPROBE mirror: exactly the same code the tick runs, callable alone.
 	namespace Fn {
+		void WishFromInput(float yaw, float fmove, float smove,
+		                   float* wx, float* wy) {
+			::Solver::WishFromInput(yaw, fmove, smove, wx, wy);
+		}
 		void CategorizePosition(PlayerState& s, const World& w,
 		                        const MoveParams& p) {
 			::Solver::CategorizePosition(s, w, p, nullptr);
@@ -856,9 +860,16 @@ namespace Solver {
 		}
 	}
 
+	// OBSERVABILITY ONLY (session 20 search-architecture audit): a
+	// process-wide count of authoritative ticks executed. Touches no
+	// physics state and no control flow; the thirteen bitwise-replay
+	// suites are the no-drift proof.
+	long long g_movetick_count = 0;
+
 	void MoveTick(PlayerState& s, const World& w, const MoveParams& p,
 	              float /*pitch*/, float yaw, float fmove, float smove,
 	              float /*umove*/, int buttons, TickEvents* ev) {
+		g_movetick_count++;
 		if (ev)
 			*ev = TickEvents();
 

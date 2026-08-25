@@ -211,7 +211,7 @@ namespace Carve {
 				const float sv2 = Len2D(s.vel);
 				Strafe::TickLaw tl2 = Strafe::Law(p,
 					sv2 > 1.f ? sv2 : 1.f, 1.f, s.ducked);
-				const float w2 = tl2.TurnRad(0.f, 1.f);
+				const float w2 = tl2.TurnRad(Strafe::kPerp, 1.f);
 				const float d2 = WrapPi(arc_phi - arc_cur);
 				const float st = d2 > w2 ? w2
 					: (d2 < -w2 ? -w2 : d2);
@@ -250,7 +250,7 @@ namespace Carve {
 							fabsf(WrapPi(phi_t - hcur));
 						Strafe::TickLaw tl = Strafe::Law(p, s2dn,
 							1.f, s.ducked);
-						const float rate = tl.TurnRad(0.f, 1.f);
+						const float rate = tl.TurnRad(Strafe::kPerp, 1.f);
 						if (!term_latch && rate > 1e-5f
 							&& n_hit <= need / rate + 1.f)
 							term_latch = true;
@@ -345,7 +345,7 @@ namespace Carve {
 						if (t.have_field_arr && sv > 1.f) {
 							Strafe::TickLaw tl = Strafe::Law(p, sv,
 								1.f, s.ducked);
-							const float rate = tl.TurnRad(0.f, 1.f);
+							const float rate = tl.TurnRad(Strafe::kPerp, 1.f);
 							const float need = fabsf(WrapPi(
 								t.field_phi
 								- atan2f(s.vel.Y, s.vel.X)));
@@ -644,7 +644,7 @@ namespace Carve {
 								s.vel.X);
 							Strafe::TickLaw tl3 = Strafe::Law(p,
 								s2d, 1.f, s.ducked);
-							const float w3 = tl3.TurnRad(0.f, 1.f);
+							const float w3 = tl3.TurnRad(Strafe::kPerp, 1.f);
 							const float fan = w3 * 50.f;
 							float best_adot = FLT_MAX;
 							for (int ti = -8; ti <= 8; ++ti) {

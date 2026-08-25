@@ -184,6 +184,14 @@ namespace Carve {
 	};
 	extern std::vector<ExitRec>* g_exit_rec;
 
+	// STANDING LAW B-A (ExitField, 2026-08-19, Docs/ExitFieldSpec.md):
+	// for ALL ExitField work this cull is UNCERTIFIED ADVISORY - it may
+	// rank/order/defer reopenable work but may not terminate canonical
+	// ride execution, erase part of R_F(B), declare an exit impossible
+	// or support a global hard prune. The canonical executor
+	// (Ride::FlyRideSchedule) must not contain it at all. Its use
+	// INSIDE the legacy carve search below is grandfathered.
+	//
 	// THE DOOM CULL (wired 2026-08-17 after exitbench measured it:
 	// 99%+ of dead candidates caught at ~0 false kills): true when a
 	// separation state provably cannot reach the transfer's target

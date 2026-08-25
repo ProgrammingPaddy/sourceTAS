@@ -58,7 +58,7 @@ namespace Path {
 		// grows, so the late rate is the slowest - conservative).
 		const float s_late = Envelope::SMax(s0, n, p);
 		Strafe::TickLaw ll = Strafe::Law(p, s_late, 1.f, ducked);
-		const float wl = ll.TurnRad(0.f, 1.f);
+		const float wl = ll.TurnRad(Strafe::kPerp, 1.f);
 		int m = wl > 1e-5f
 			? static_cast<int>(fabsf(Steer::WrapPi(phi - psi)) / wl)
 				+ 1
@@ -73,7 +73,7 @@ namespace Path {
 		const float turn_b = Steer::WrapPi(phi - psi);
 		if (turn_a * turn_b < 0.f) {
 			Strafe::TickLaw le = Strafe::Law(p, s0, 1.f, ducked);
-			const float we = le.TurnRad(0.f, 1.f);
+			const float we = le.TurnRad(Strafe::kPerp, 1.f);
 			const int ta = we > 1e-5f
 				? static_cast<int>(fabsf(turn_a) / we) : n;
 			const int gap = static_cast<int>(
@@ -94,7 +94,7 @@ namespace Path {
 		for (int k = 0; k < n; ++k) {
 			const float tgt = k < n - m ? psi : phi;
 			Strafe::TickLaw lk = Strafe::Law(p, s, 1.f, ducked);
-			const float w = lk.TurnRad(0.f, 1.f);
+			const float w = lk.TurnRad(Strafe::kPerp, 1.f);
 			const float d = Steer::WrapPi(tgt - h);
 			h = Steer::WrapPi(h + (d > w ? w : (d < -w ? -w : d)));
 			x += cosf(h) * s * p.dt;
