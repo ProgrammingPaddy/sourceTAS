@@ -184,6 +184,14 @@ namespace {
 // Load Segoe UI at 16px and apply the graphite/pink theme once, right after
 // ImGui has its device but before the first frame builds the font atlas.
 void BasehookInterface::OnInitialize() {
+	// Final input-window verdict (session 46b): by now RenderFrame has had
+	// its chance to re-target the WndProc hook onto the device's own focus
+	// window. src 1 = enum guess, 2 = device re-target, 0 = INPUT DEAD.
+	Breadcrumb::Note(Breadcrumb::SlotCommand,
+		"rend: input window=%p src=%d %s",
+		reinterpret_cast<void*>(InputWindow()), window_source,
+		window_source ? "(hooked)" : "(DEAD - F8 will not work)");
+
 	ImGuiIO& io = ImGui::GetIO();
 	io.Fonts->Clear();
 	if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f))

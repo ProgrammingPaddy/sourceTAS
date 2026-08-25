@@ -157,6 +157,33 @@ DX9RenderMgr::~DX9RenderMgr() {
 void DX9RenderMgr::RenderFrame(IDirect3DDevice9* device) {
 	// ImGui needs the game's real device, which we first see here in EndScene.
 	if (!this->initialized) {
+		// THE AUTHORITATIVE INPUT WINDOW (session 46b): ask the game's own
+		// device for its focus window instead of trusting the injection-time
+		// EnumWindows guess. The guess is null when the game is alt-tabbed
+		// in fullscreen (hidden window) - exactly how injection happens -
+		// which left EndScene hooked but ALL input dead: "injected, no menu,
+		// no anything" with a perfectly healthy journal. If the guess and
+		// the device disagree (or the guess never hooked), re-target here.
+		D3DDEVICE_CREATION_PARAMETERS cp = {};
+		if (SUCCEEDED(device->GetCreationParameters(&cp)) && cp.hFocusWindow) {
+			const bool wrong_window = cp.hFocusWindow != this->window;
+			const bool never_hooked = this->WndProc == nullptr;
+			if (wrong_window || never_hooked) {
+				// Undo any hook on the guessed window first.
+				if (this->window && this->WndProc) {
+					SetWindowLongPtr(this->window, GWLP_WNDPROC,
+						LONG_PTR(this->WndProc));
+					this->WndProc = nullptr;
+				}
+				this->window = cp.hFocusWindow;
+				this->WndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(
+					this->window, GWLP_WNDPROC,
+					LONG_PTR(&DX9GenericHooks::WndProc)));
+				if (this->WndProc)
+					this->window_source = 2;
+			}
+		}
+
 		if (!ImGui_ImplDX9_Init(this->window, device))
 			return;
 
@@ -305,9 +332,17 @@ bool DX9RenderMgr::Initialize(const HWND& window) {
 	}
 
 	// Route window messages through us for menu toggling and input capture.
+	// NOTE (session 46b): `window` here is only the injection-time
+	// EnumWindows GUESS - it is null when the game is alt-tabbed in
+	// fullscreen (hidden window), which silently killed all input while
+	// EndScene kept running ("injected but no menu"). RenderFrame
+	// re-targets to the device's own focus window on the first EndScene,
+	// so this hook is best-effort only.
 	this->WndProc = reinterpret_cast<WNDPROC>(
 		SetWindowLongPtr(window, GWLP_WNDPROC, LONG_PTR(&DX9GenericHooks::WndProc))
 	);
+	if (this->window && this->WndProc)
+		this->window_source = 1;
 
 	return true;
 }

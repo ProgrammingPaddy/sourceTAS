@@ -36,6 +36,16 @@ class DX9RenderMgr {
 		// The original WndProc function from the specified window handle.
 		WNDPROC WndProc = nullptr;
 
+		// How the input window was found (session 46b diagnostics):
+		// 0 = never hooked (input DEAD - F8/menu unreachable),
+		// 1 = the injection-time EnumWindows guess,
+		// 2 = re-targeted to the device's own focus window at first
+		//     EndScene (the authoritative handle - the enum guess returns
+		//     null when the game is alt-tabbed in fullscreen, which is
+		//     exactly how injection happens).
+		int window_source = 0;
+		HWND InputWindow() const { return window; }
+
 		// The original Reset and EndScene functions.
 		Reset_t Reset = nullptr;
 		EndScene_t EndScene = nullptr;
