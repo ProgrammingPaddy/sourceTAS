@@ -7,6 +7,7 @@
 #include "../World/BspWorld.h"
 #include <cstrike/Definitions/Buttons.h>
 #include <cstrike/Definitions/Const.h>
+#include <cstrike/Interfaces/IVDebugOverlay.h>
 
 // Raw + leaked on purpose: the atexit destructor restored the vtable into
 // game memory that is already gone at process exit (crash.log 2026-07-25,
@@ -28,6 +29,12 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 	// Engine-command marshal drain: THIS is the game thread, the only safe
 	// place for connection transitions pushed by UI/render-thread code.
 	TasEditor::DrainEngineCmds();
+
+	// Debug-overlay marshal drain (session 46e): WorldDraw queues overlays on
+	// the render thread; THIS game thread makes the real engine calls, which
+	// the 2026-08-25 update made fatal to do from the render thread. Empty
+	// queue (drawing gated off / nothing pushed) = one lock peek + swap.
+	OverlayQueue::Drain();
 
 	// Autohop (server-style autobhop for HUMAN input), the sim JM_AutoBhop's
 	// exact button transform: while jump is HELD, the button is stripped by

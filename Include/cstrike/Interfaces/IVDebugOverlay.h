@@ -23,30 +23,37 @@ extern int  g_overlay_box_index;   // default 1
 extern int  g_overlay_line_index;  // default 3
 extern bool g_overlay_line_alpha;  // default false: call the 7-arg no-alpha form
 
+// OVERLAY MARSHAL (session 46e). The 2026-08-25 CS:S update made
+// submitting debug overlays from the RENDER thread (EndScene, where
+// WorldDraw runs) hang the game - confirmed by the master-gate bisect.
+// AddBoxOverlay/AddLineOverlay now ENQUEUE onto a thread-safe buffer;
+// OverlayQueue::Drain(), called from the CreateMove hook (the game /
+// overlay-expiry thread), makes the REAL engine vtable calls there.
+// Every debugoverlay->Add* caller across WorldDraw + BspWorld is
+// marshaled by this single chokepoint. Defined in WorldDraw.cpp.
+namespace OverlayQueue {
+	void PushBox(const Vector& origin, const Vector& mins, const Vector& maxs,
+	             const QAngle& orientation, int r, int g, int b, int a, float duration);
+	void PushLine(const Vector& origin, const Vector& dest,
+	              int r, int g, int b, bool noDepthTest, float duration, bool alpha);
+	// Game thread only: dispatch queued overlays to the engine vtable.
+	void Drain();
+}
+
 class IVDebugOverlay {
 public:
 	// Axis-aligned when 'orientation' is zero. The box spans
 	// [origin + mins, origin + maxs] and is rotated about 'origin'.
 	void AddBoxOverlay(const Vector& origin, const Vector& mins, const Vector& maxs,
 	                   const QAngle& orientation, int r, int g, int b, int a, float duration) {
-		GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&, const Vector&,
-		                           const QAngle&, int, int, int, int, float)>(this, g_overlay_box_index)
-			(this, origin, mins, maxs, orientation, r, g, b, a, duration);
+		OverlayQueue::PushBox(origin, mins, maxs, orientation, r, g, b, a, duration);
 	}
 
 	// A world-space line from 'origin' to 'dest'. Two forms exist across builds;
 	// g_overlay_line_alpha picks the 8-arg (explicit alpha) variant when needed.
 	void AddLineOverlay(const Vector& origin, const Vector& dest,
 	                    int r, int g, int b, bool noDepthTest, float duration) {
-		if (g_overlay_line_alpha) {
-			GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
-			                           int, int, int, int, bool, float)>(this, g_overlay_line_index)
-				(this, origin, dest, r, g, b, 255, noDepthTest, duration);
-		} else {
-			GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
-			                           int, int, int, bool, float)>(this, g_overlay_line_index)
-				(this, origin, dest, r, g, b, noDepthTest, duration);
-		}
+		OverlayQueue::PushLine(origin, dest, r, g, b, noDepthTest, duration, g_overlay_line_alpha);
 	}
 };
 

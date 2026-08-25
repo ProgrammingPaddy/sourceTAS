@@ -13,6 +13,103 @@
 #include <cstrike/Interfaces/IClientEntityList.h>
 #include <cstrike/Interfaces/IVDebugOverlay.h>
 
+// ============================================================================
+// OVERLAY MARSHAL (session 46e). Producer = render thread (WorldDraw /
+// BspWorld via debugoverlay->Add*, which enqueue here). Consumer = game
+// thread (OverlayQueue::Drain from the CreateMove hook, which makes the real
+// engine vtable calls). A CRITICAL_SECTION guards only the brief buffer
+// append / swap; the engine calls run OUTSIDE the lock, on the game thread,
+// under SEH. This removes ALL debug-overlay engine calls from the render
+// thread - the render-thread submission that the 2026-08-25 game update made
+// fatal.
+// ============================================================================
+namespace {
+	struct OvlCmd {
+		int    type;   // 0 = box, 1 = line (no-alpha), 2 = line (alpha)
+		Vector a, b, c;
+		QAngle ang;
+		int    r, g, bb, aa;
+		bool   noDepth;
+		float  dur;
+	};
+	CRITICAL_SECTION* OvlCS() {
+		static CRITICAL_SECTION cs;
+		static bool once = [] { InitializeCriticalSection(&cs); return true; }();
+		(void)once;
+		return &cs;
+	}
+	std::vector<OvlCmd> g_ovl_back;    // producer (render thread) appends
+	std::vector<OvlCmd> g_ovl_front;   // consumer (game thread) private after swap
+	const size_t kOvlCap = 20000;      // safety bound if the game thread stalls
+
+	// Raw vtable dispatch on the GAME thread, under SEH. POD-only inside the
+	// __try (no C++ unwinding): OvlCmd/Vector/QAngle are trivially copyable.
+	void OvlDrainSEH(const OvlCmd* cmds, size_t n) {
+		if (!debugoverlay)
+			return;
+		__try {
+			for (size_t i = 0; i < n; ++i) {
+				const OvlCmd& c = cmds[i];
+				if (c.type == 0) {
+					GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+						const Vector&, const QAngle&, int, int, int, int, float)>(
+						debugoverlay, g_overlay_box_index)(
+						debugoverlay, c.a, c.b, c.c, c.ang, c.r, c.g, c.bb, c.aa, c.dur);
+				} else if (c.type == 2) {
+					GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+						int, int, int, int, bool, float)>(
+						debugoverlay, g_overlay_line_index)(
+						debugoverlay, c.a, c.b, c.r, c.g, c.bb, 255, c.noDepth, c.dur);
+				} else {
+					GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+						int, int, int, bool, float)>(
+						debugoverlay, g_overlay_line_index)(
+						debugoverlay, c.a, c.b, c.r, c.g, c.bb, c.noDepth, c.dur);
+				}
+			}
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			// A single bad coord can't take down the game thread.
+		}
+	}
+}
+
+void OverlayQueue::PushBox(const Vector& o, const Vector& mn, const Vector& mx,
+                           const QAngle& ang, int r, int g, int b, int a, float dur) {
+	CRITICAL_SECTION* cs = OvlCS();
+	EnterCriticalSection(cs);
+	if (g_ovl_back.size() < kOvlCap) {
+		OvlCmd c;
+		c.type = 0; c.a = o; c.b = mn; c.c = mx; c.ang = ang;
+		c.r = r; c.g = g; c.bb = b; c.aa = a; c.noDepth = false; c.dur = dur;
+		g_ovl_back.push_back(c);
+	}
+	LeaveCriticalSection(cs);
+}
+
+void OverlayQueue::PushLine(const Vector& o, const Vector& d,
+                            int r, int g, int b, bool noDepth, float dur, bool alpha) {
+	CRITICAL_SECTION* cs = OvlCS();
+	EnterCriticalSection(cs);
+	if (g_ovl_back.size() < kOvlCap) {
+		OvlCmd c;
+		c.type = alpha ? 2 : 1; c.a = o; c.b = d; c.c = Vector(); c.ang = QAngle();
+		c.r = r; c.g = g; c.bb = b; c.aa = 255; c.noDepth = noDepth; c.dur = dur;
+		g_ovl_back.push_back(c);
+	}
+	LeaveCriticalSection(cs);
+}
+
+void OverlayQueue::Drain() {
+	CRITICAL_SECTION* cs = OvlCS();
+	EnterCriticalSection(cs);
+	g_ovl_front.swap(g_ovl_back);
+	g_ovl_back.clear();
+	LeaveCriticalSection(cs);
+	if (!g_ovl_front.empty())
+		OvlDrainSEH(g_ovl_front.data(), g_ovl_front.size());
+	g_ovl_front.clear();
+}
+
 namespace WorldDraw {
 	bool draw_master        = false;   // session 46c: default OFF, not persisted
 	bool draw_test_marker   = false;
@@ -389,14 +486,13 @@ void WorldDraw::Render() {
 			if (a < 0)   a = 0;
 			if (a > 255) a = 255;
 			const Vector maxs(kHullWidth, kHullWidth, height);
-			// FIRST engine overlay call of the frame - the one the
-			// 2026-08-25 update hangs on. Its own breadcrumb: a freeze
-			// with "wd: box0" as the last note = this AddBoxOverlay
-			// (i.e. the debug-overlay vtable call itself) never returned.
-			Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: box0 (first overlay)");
+			// First overlay of the frame. Since session 46e this only
+			// ENQUEUES (the real engine call happens on the game thread in
+			// OverlayQueue::Drain), so it can no longer hang here - the
+			// breadcrumb just marks the draw code reached the first submit.
+			Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: box0 (enqueue)");
 			debugoverlay->AddBoxOverlay(d.origin, kHullMins, maxs, kNoRotation,
 			                            255, 64, 64, a, g_dur_live);
-			Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: box0 ok");
 		}
 
 		// A single dot at the feet origin. Per tick this is the path vertex; when a
