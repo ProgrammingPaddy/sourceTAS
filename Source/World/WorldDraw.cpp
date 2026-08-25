@@ -3,6 +3,7 @@
 #include "Prediction.h"
 #include "BspWorld.h"
 #include "../Editor/TasEditor.h"
+#include "../Menu/Breadcrumb.h"
 
 #include <cstdint>
 #include <vector>
@@ -270,11 +271,36 @@ void WorldDraw::Render() {
 	Diagnostics d;
 	g_ovl_left = 2000;   // this frame's shared overlay budget
 
+	// Frames since injection (this counter IS the warm-up clock below).
+	static int s_frames_since_inject = 0;
+	if (s_frames_since_inject < (1 << 30))
+		s_frames_since_inject++;
+
 	d.interfaces_ready = (engine && debugoverlay && entitylist && clientdll);
 	if (!d.interfaces_ready) { g_diag = d; return; }
 
 	d.in_game = engine->IsInGame();
 	if (!d.in_game) { g_diag = d; return; }
+
+	// INJECTION WARM-UP (session 46). Injecting while ALREADY IN A SERVER
+	// froze the whole game inside this pass's first frames (breadcrumb
+	// 2026-08-25: "endscene: worlddraw" never returned; with queued
+	// rendering the game thread then blocks behind the render thread -
+	// task-manager kill, no crash record, the known "frozen game" family
+	// the thread-marshal lesson in TasEditor.h documents). That first
+	// in-game pass used to do EVERYTHING cold at once ON THE RENDER
+	// THREAD: the first netvar-tree walk, the whole BSP file read+parse,
+	// and the first mass overlay submission into an engine that expires
+	// the list on the game thread. Hold ALL in-world work for the first
+	// ~90 hooked frames after injection - by then injection transients
+	// are over and the engine is in a steady frame loop. Menu injections
+	// spend the warm-up at the menu (not in game) and feel nothing.
+	if (s_frames_since_inject < 90) { g_diag = d; return; }
+	// ...and ramp the overlay budget for the first drawing seconds so the
+	// initial submission burst into the game-thread-expired list stays
+	// small (steady state returns to the full budget).
+	if (s_frames_since_inject < 300)
+		g_ovl_left = 300;
 
 	// PAUSED GAME (ESC on a listen server) freezes curtime - and debug
 	// overlays EXPIRE against curtime, so a frozen clock means nothing ever
@@ -316,6 +342,12 @@ void WorldDraw::Render() {
 		g_diag = d;
 		return;
 	}
+
+	// Fine-grained stage breadcrumbs through the whole pass (session 46):
+	// this function froze the game once with only the coarse "endscene:
+	// worlddraw" note to go on - after any future freeze the SlotFrame
+	// line names the exact stage that never returned.
+	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: live overlays");
 
 	const float   duration = FrameDuration();
 	const QAngle  kNoRotation(0.f, 0.f, 0.f);
@@ -387,6 +419,8 @@ void WorldDraw::Render() {
 			}
 		}
 	}
+
+	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: editor line");
 
 	// (4) TAS editor run line (Phase 2): the simulated run drawn as an absolute
 	// polyline. The playhead is the edit boundary: ticks before it draw gray
@@ -629,7 +663,9 @@ void WorldDraw::Render() {
 
 	// (5) World geometry (1.1): brush wireframes from the map's BSP collision
 	// data, centered on the player. Self-guards and auto-loads on level change.
+	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: bsp render");
 	BspWorld::Render(d.origin, d.have_player, duration);
+	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: done");
 
 	g_diag = d;
 }
