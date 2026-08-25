@@ -7,6 +7,16 @@
 // strictly observational: it reads the player's networked origin/flags and
 // queues overlays. It never writes game state or touches movement/prediction.
 namespace WorldDraw {
+	// MASTER in-world drawing gate (session 46c). Default OFF and NOT
+	// persisted: every injection starts with zero overlay submission, so
+	// injecting can never freeze on the debug-overlay path (the 2026-08-25
+	// game update made the FIRST overlay call after injection hang the
+	// render thread - breadcrumb "wd: live overlays" with no "wd: done").
+	// Enable from the Rendering tab once in a steady frame loop; if
+	// enabling freezes, that isolates the overlay path with certainty and
+	// the finer breadcrumbs name the exact call.
+	extern bool draw_master;
+
 	// Menu-controlled toggles.
 	extern bool draw_test_marker;    // fixed world-origin marker (validates the call)
 	extern bool draw_player_box;     // local player's collision AABB

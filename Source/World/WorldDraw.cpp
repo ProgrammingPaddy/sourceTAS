@@ -14,6 +14,7 @@
 #include <cstrike/Interfaces/IVDebugOverlay.h>
 
 namespace WorldDraw {
+	bool draw_master        = false;   // session 46c: default OFF, not persisted
 	bool draw_test_marker   = false;
 	bool draw_player_box    = true;
 	bool draw_player_marker = true;
@@ -282,6 +283,12 @@ void WorldDraw::Render() {
 	d.in_game = engine->IsInGame();
 	if (!d.in_game) { g_diag = d; return; }
 
+	// MASTER GATE (session 46c): no overlay submission at all until the
+	// user arms it from the menu. Guarantees injection cannot freeze on
+	// the overlay path - the tool (menu/editor/recording) is fully usable
+	// with drawing off.
+	if (!draw_master) { g_diag = d; return; }
+
 	// INJECTION WARM-UP (session 46). Injecting while ALREADY IN A SERVER
 	// froze the whole game inside this pass's first frames (breadcrumb
 	// 2026-08-25: "endscene: worlddraw" never returned; with queued
@@ -382,8 +389,14 @@ void WorldDraw::Render() {
 			if (a < 0)   a = 0;
 			if (a > 255) a = 255;
 			const Vector maxs(kHullWidth, kHullWidth, height);
+			// FIRST engine overlay call of the frame - the one the
+			// 2026-08-25 update hangs on. Its own breadcrumb: a freeze
+			// with "wd: box0" as the last note = this AddBoxOverlay
+			// (i.e. the debug-overlay vtable call itself) never returned.
+			Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: box0 (first overlay)");
 			debugoverlay->AddBoxOverlay(d.origin, kHullMins, maxs, kNoRotation,
 			                            255, 64, 64, a, g_dur_live);
+			Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: box0 ok");
 		}
 
 		// A single dot at the feet origin. Per tick this is the path vertex; when a

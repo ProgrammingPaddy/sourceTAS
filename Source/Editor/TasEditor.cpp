@@ -7733,6 +7733,29 @@ namespace {
 			"through the panel; text and dropdown lists stay opaque so readings "
 			"stay crisp. Saved to ui.cfg with every other option on this tab.");
 
+		// MASTER in-world drawing gate (session 46c). OFF at every
+		// injection so the game can never freeze on the overlay path; the
+		// user arms it here once in a steady frame loop. Colored so its
+		// state reads at a glance.
+		if (WorldDraw::draw_master) {
+			if (Theme::Danger("In-world drawing: ON  (click to disable)"))
+				WorldDraw::draw_master = false;
+			ImGui::SameLine();
+			ImGui::TextColored(Theme::Success, "armed");
+		} else {
+			if (Theme::Accent("In-world drawing: OFF  (click to enable)"))
+				WorldDraw::draw_master = true;
+			ImGui::SameLine();
+			ImGui::TextColored(Theme::Warning, "disabled at inject (safe)");
+		}
+		Theme::Help("Master switch for ALL in-world overlays (hull, run "
+			"line, wireframes, targets). OFF at every injection since the "
+			"2026-08-25 game update, whose overlay path hangs the render "
+			"thread on the first call after injecting. Enable once you're "
+			"in a map and settled; if enabling freezes, that confirms the "
+			"overlay path and the breadcrumb journal names the exact call.");
+		ImGui::Separator();
+
 		Theme::Heading("Player & world");
 		ImGui::Checkbox("Test marker at world origin", &WorldDraw::draw_test_marker);
 		ImGui::SameLine();
