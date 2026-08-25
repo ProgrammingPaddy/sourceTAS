@@ -95,7 +95,10 @@ any particular solver architecture.
    proven irrelevant);
 2. exact output quantity / Pareto relation;
 3. exhaustive dense engine-exact surface;
-4. a visual report of the function (HTML, `Docs/reports/`);
+4. a visual report of the function (HTML; reports live OUTSIDE the
+   repo at `..\reports\` — sibling of the repo directory, moved
+   there by user directive 2026-08-25: report files are not commit
+   items);
 5. observed structure: monotonicity, symmetry, branches;
 6. proposed analytic law or low-dimensional interpolation;
 7. derivation / certified bounds;
@@ -422,6 +425,13 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-25b: **session reports moved OUT of the repo** (user
+  directive: report files are not commit items). All 24 files
+  (22 session HTMLs + 2 capair CSVs, 1.8 MB) now live at
+  `..\reports\` — the sibling of the repo directory
+  (`C:\Users\Connor\Documents\SourceTAS\reports\`). Moved, not
+  gitignored; `Docs/` itself stays. Historical change-log mentions
+  of `Docs/reports/...` refer to the old location by design.
 - 2026-08-25a (session 43): **the function browser — the dashboard
   embeds the real code** (user directive). `Tools/
   gen_capability_code.py` extracts every library function/struct/
