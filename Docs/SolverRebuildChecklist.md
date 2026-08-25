@@ -11,16 +11,44 @@ a measurable pass/fail, never a vibe.
 
 **THE A CATEGORY IS COMPLETE (session 37, 2026-08-23): A0–A31 all
 closed, A32 excluded by decree** — the user directive "finish all A
-first" is delivered across sessions 33–37; session 42 answered the
-user's "everything before C?" check-in by CLOSING THE B CATEGORY:
-21 of 23 rows done, B22 sound-partial (the joint turn-gain frontier
-theorem is its completion criterion), B18 deliberately open (prune
-only if proven). **NOW ->** the C layer on its finished
-foundations: C5 requirement matching on certified B13/B14, the
-C2–C4 label projections, and the first PRODUCTION C9 graph (B16
-edges × C6/C7 labels); the B22 frontier theorem and cheaper A20
-builds remain the named refinements. The change-log tail below is
+first" is delivered across sessions 33–37; session 42 closed the
+original B category; session 44 opened THE ALGEBRA MANDATE
+(advisor + user 2026-08-25): the mission is now a complete
+movement-engine algebra — 49 new rows (A33–A58, B23–B45), levels
+on every row, verify-then-accept as binding semantics #9, and the
+first tranche closed (A34/A35/A36/A37 + B22 v1.0 — the joint
+turn-gain frontier). **NOW ->** the advisor tranche in order: A40
+CategorizePosition package, A46 contact regions, A41–A43 the
+ground family, A47/A48 generic volumes, the braking/min-speed
+family, A50/A51 ride locus+inverse, A57/A58 Jacobians, then
+B23–B29 (near-free once the atoms exist). The C-layer composition
+work (C5, C2–C4, the production C9 graph) resumes AFTER the
+tranche per the advisor's ordering. The change-log tail below is
 the session journal.
+
+**STATUS 2026-08-25c (session 44): THE ALGEBRA MANDATE — the
+registry restructures; the joint turn-gain frontier lands.** The
+advisor's movement-physics audit reframed the library: atoms vs
+capabilities vs composites now explicit (LEVEL on every row);
+"A COMPLETE" scope-relativized; A33–A58 + B23–B45 opened; the
+user's parity restatement recorded as binding semantics #9
+(verify-then-accept). Closed this session: A34 (wish round trip
+9.5e-7), A35 (THE JOINT TURN-GAIN FRONTIER over the FULL control
+set — the engine budgets on uncapped wishspeed, partial wishes
+covered — 200k engine attacks, 0 violations, 99.7% tight;
+law-vs-kernel 0.0006 u/s; the exact turn peak bracketing the s39
+bound), A36 (inverse air law, turn + speed targets, 5,991 answers
+kernel-verified 100% — the first verify-then-accept capability),
+A37 (clamp atom, 216/216 bitwise incl. NaN rails), B22 v1.0
+(min(v0.5, frontier DP), 0/120k, short-N impossibilities
+inherited). THE PHYSICS FINDING: the exact frontier proves gentle
+carving is cheap (~8.6°/tick at 600 u/s for ~2 u/s of speed), so
+the 180°-at-speed corner is MEASURED SHALLOW at N 20–40 —
+adversaries reach 75% of the blind ceiling, so near-blind is
+near-truth; my earlier low-speed-reversal intuition (~300 u/s
+ceilings) was WRONG and the falsifier corrected it. A33 blocked on
+live engine access (the one mirror equivalence). capkern 12/0,
+capreach 11/0, full battery green.
 
 **STATUS 2026-08-25a (session 43): THE FUNCTION BROWSER — the
 dashboard embeds the real code (user directive).**

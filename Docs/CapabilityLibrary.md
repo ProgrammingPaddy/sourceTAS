@@ -88,6 +88,16 @@ any particular solver architecture.
    reproducible); floors only ever rise. First applied: the A11
    tail portfolio + the capp2p/capxfer floors (session 40 — the
    portfolio beat every individual configuration on every cell).
+9. **VERIFY-THEN-ACCEPT (user directive 2026-08-25, session 44):
+   perfect 1-to-1 engine parity is the minimum guarantee for
+   anything abstracted from engine code** — slower-and-always-right
+   beats faster-with-1%-error, always. Simplified or analytic
+   searches are admissible ONLY as candidate generators whose every
+   answer is verified against the exact engine law before
+   acceptance (a kernel/engine roll, or a certified bound with the
+   sound side proven); an unverified fast answer is never a result.
+   First applied: A36's inverse air law — every returned control is
+   kernel-rolled, and the suite gates 100% verification.
 
 ## The standard deliverables (every capability, every time)
 
@@ -425,6 +435,17 @@ deep-status and session-log record.
 
 ## Change log
 
+- 2026-08-25c (session 44): **THE ALGEBRA MANDATE** (advisor + user)
+  — the mission widens to a complete movement-engine algebra:
+  forward + inverse/preimage + min/max envelope + sensitivity +
+  certified interval, for every physical domain. Binding semantics
+  #9 (verify-then-accept) added; 49 new registry rows (A33–A58,
+  B23–B45); levels on every row; "A COMPLETE" scope-relativized.
+  First tranche closed: A34/A35/A36/A37 + B22 v1.0 — THE JOINT
+  TURN-GAIN FRONTIER delivered (200k engine attacks incl. partial
+  wishes, 0 violations, 99.7% tight) and the physics finding that
+  the 180°-at-speed corner is SHALLOW at practical horizons.
+  Detail in the checklist change log.
 - 2026-08-25b: **session reports moved OUT of the repo** (user
   directive: report files are not commit items). All 24 files
   (22 session HTMLs + 2 capair CSVs, 1.8 MB) now live at

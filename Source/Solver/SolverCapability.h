@@ -48,6 +48,7 @@
 // falsifier's random schedules exercise the same fact.)
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -6168,4 +6169,439 @@ namespace CapP2P {
 	}
 
 } // namespace CapP2P
+
+// ======================================================================
+// CAPAIR additions - registry A35 (one-tick reachable-velocity
+// locus) and A36 (one-tick inverse air law), session 44 - the first
+// tranche of THE ALGEBRA MANDATE (advisor 2026-08-25). A4 answers
+// (v, input) -> v'; A35 answers the whole set {v' : some legal
+// input} and its Pareto boundary - THE JOINT TURN-GAIN FRONTIER
+// max |v'| subject to |dpsi| >= theta - over the FULL legal control
+// rectangle: true wish cos c in [-1, 1] AND wishspeed w in
+// (0, maxspeed] (the engine uses the UNCAPPED w in the accel budget,
+// so partial wishes scale both the 30-cap and the budget - both
+// covered). The frontier is built as a certified OVER-approximation:
+// a dense (alpha, w) grid with outward Lipschitz margins per cell
+// (cells whose endpoint can reach ~0 speed grant every heading -
+// sound), and the suite attacks it with engine one-tick rolls
+// INCLUDING partial wishes. This is the law B22 was named
+// incomplete without: a tick that turns forfeits gain, exactly.
+namespace CapAir {
+
+	// The exact accel-law endpoint in the v-aligned frame (side +1;
+	// side -1 mirrors vy). Transcribed from KernelTick's arithmetic:
+	// capw = min(w, air_speed_cap); a = clamp(capw - s*c, 0,
+	// airaccelerate * w * dt * sf).
+	inline void OneTickEndpointW(const MoveParams& p, float s,
+	                             float sf, float w, float c,
+	                             float* vx, float* vy) {
+		float weff = w > p.maxspeed ? p.maxspeed : (w < 0.f ? 0.f : w);
+		const float capw = weff > p.air_speed_cap ? p.air_speed_cap
+			: weff;
+		const float add = capw - s * c;
+		float a = 0.f;
+		if (add > 0.f) {
+			const float budget = p.airaccelerate * weff * p.dt * sf;
+			a = add < budget ? add : budget;
+		}
+		const float c2 = 1.f - c * c;
+		const float sn = c2 > 0.f ? sqrtf(c2) : 0.f;
+		*vx = s + a * c;
+		*vy = a * sn;
+	}
+
+	// A35 worker: the certified (theta -> max |v'|) profile of the
+	// one-tick locus at speed s. profile[i] = certified UB on the
+	// endpoint speed over every legal control achieving |dpsi| >=
+	// i * (pi / (n_bins - 1)); -1 where no control (even with
+	// margins) reaches that heading change. witness_theta_out (LB):
+	// the largest EXACT law heading change seen on the grid.
+	inline void OneTickProfile(const MoveParams& p, float s, float sf,
+	                           int n_bins, float* profile,
+	                           float* witness_theta_out = nullptr) {
+		const int NA = 2048, NW = 256;
+		const float PI = 3.14159265f;
+		const float dth = PI / static_cast<float>(n_bins - 1);
+		std::vector<float> dep(static_cast<size_t>(n_bins), -1.f);
+		const float Bmax = p.airaccelerate * p.maxspeed * p.dt * sf;
+		const float ha = PI / static_cast<float>(NA);
+		const float hw = p.maxspeed / static_cast<float>(NW);
+		// per-cell endpoint displacement bound (outward margin):
+		// |dv'/dalpha| <= 2s + B (a and its direction both move),
+		// |dv'/dw| <= 1 + airaccelerate*dt*sf (cap and budget slopes)
+		const float dv = (2.f * s + Bmax) * ha * 0.5f
+			+ (1.f + p.airaccelerate * p.dt * sf) * hw * 0.5f;
+		float wit = 0.f;
+		for (int ia = 0; ia < NA; ++ia) {
+			const float al = (static_cast<float>(ia) + 0.5f) * ha;
+			const float c = cosf(al);
+			for (int iw = 1; iw <= NW; ++iw) {
+				const float w2 = static_cast<float>(iw) * hw;
+				float vx, vy;
+				OneTickEndpointW(p, s, sf, w2, c, &vx, &vy);
+				const float sp = sqrtf(vx * vx + vy * vy);
+				const float th = fabsf(atan2f(vy, vx));
+				if (th > wit)
+					wit = th;
+				const float sp_ub = sp + dv;
+				float th_ub;
+				if (sp - dv <= 1.f)
+					th_ub = PI; // can pass near zero: any heading
+				else
+					th_ub = th + dv / (sp - dv);
+				if (th_ub > PI)
+					th_ub = PI;
+				int bi = static_cast<int>(th_ub / dth);
+				if (bi > n_bins - 1)
+					bi = n_bins - 1;
+				if (sp_ub > dep[static_cast<size_t>(bi)])
+					dep[static_cast<size_t>(bi)] = sp_ub;
+			}
+		}
+		// the inert/coast control: theta 0 at speed s
+		if (s > dep[0])
+			dep[0] = s;
+		// a cell granting theta serves every requirement <= theta
+		float run = -1.f;
+		for (int i = n_bins - 1; i >= 0; --i) {
+			if (dep[static_cast<size_t>(i)] > run)
+				run = dep[static_cast<size_t>(i)];
+			profile[i] = run;
+		}
+		if (witness_theta_out)
+			*witness_theta_out = wit;
+	}
+
+	// A35: certified UB on the one-tick turn (any legal control),
+	// with the exact witness LB alongside - the bracket replaces the
+	// s39 geometric bound atan(B/(s-B)) with the true peak.
+	inline float MaxOneTickTurnUB2(const MoveParams& p, float s,
+	                               float sf,
+	                               float* witness_lb = nullptr) {
+		const int NB = 361;
+		float prof[NB];
+		float wit = 0.f;
+		OneTickProfile(p, s, sf, NB, prof, &wit);
+		if (witness_lb)
+			*witness_lb = wit;
+		const float dth = 3.14159265f / static_cast<float>(NB - 1);
+		int hi = -1;
+		for (int i = 0; i < NB; ++i)
+			if (prof[i] >= 0.f)
+				hi = i;
+		return hi < 0 ? 0.f : (static_cast<float>(hi) + 1.f) * dth;
+	}
+
+	// A35: the joint frontier as a single query (batch callers use
+	// CapBounds::TurnGainTable instead - this rebuilds the profile).
+	inline float FrontierSpeedUB1(const MoveParams& p, float s,
+	                              float sf, float theta) {
+		const int NB = 361;
+		float prof[NB];
+		OneTickProfile(p, s, sf, NB, prof);
+		const float PI = 3.14159265f;
+		if (theta <= 0.f)
+			return prof[0];
+		if (theta > PI)
+			theta = PI;
+		int bi = static_cast<int>(theta / PI
+			* static_cast<float>(NB - 1));
+		if (bi > NB - 1)
+			bi = NB - 1;
+		return prof[bi]; // -1 = certified one-tick infeasible
+	}
+
+	// A36: the one-tick INVERSE air law, turn-targeted (full
+	// wishspeed family). branch 0 = the gaining side of the turn
+	// peak (max speed'), branch 1 = the shedding side. Returns the
+	// STORED-basis control; theta/speed as the law computes them.
+	// VERIFY-THEN-ACCEPT is the caller's duty: every answer is meant
+	// to be kernel-rolled before use (the suite gates exactly that).
+	// DECLINEs (false) beyond the exact one-tick peak.
+	inline bool InverseOneTickTurn(const MoveParams& p, float s,
+	                               float sf, float theta_target,
+	                               int branch, int* side_out,
+	                               float* cosa_stored_out,
+	                               float* theta_law_out,
+	                               float* speed_law_out) {
+		const float PI = 3.14159265f;
+		const int sgn = theta_target >= 0.f ? 1 : -1;
+		const float tt = fabsf(theta_target);
+		auto thAt = [&](float al) {
+			float vx, vy;
+			OneTickEndpointW(p, s, sf, p.maxspeed, cosf(al), &vx,
+				&vy);
+			return atan2f(fabsf(vy), vx);
+		};
+		// theta(alpha) is NOT two-piece monotone at every speed: below
+		// the budget the full-backward wish jumps to pi (the
+		// reversal). Shape-agnostic: dense scan for every bracket
+		// where theta crosses the target, bisect inside each, then
+		// pick by branch - 0 = the max-speed' solution, 1 = the
+		// min-speed' one. Self-checking by construction; the caller
+		// still kernel-verifies (verify-then-accept).
+		const int NS2 = 1024;
+		float best_al = -1.f, best_sp = -1.f;
+		float prev_al = 0.f, prev_th = thAt(0.f);
+		for (int i2 = 1; i2 <= NS2; ++i2) {
+			const float al2 = PI * static_cast<float>(i2)
+				/ static_cast<float>(NS2);
+			const float th2 = thAt(al2);
+			const bool cross = (prev_th - tt) * (th2 - tt) <= 0.f
+				&& (prev_th != th2);
+			if (cross) {
+				float a0 = prev_al, a1 = al2;
+				float f0 = prev_th - tt;
+				for (int it = 0; it < 50; ++it) {
+					const float mid = 0.5f * (a0 + a1);
+					const float fm = thAt(mid) - tt;
+					if ((f0 <= 0.f) == (fm <= 0.f)) {
+						a0 = mid;
+						f0 = fm;
+					} else
+						a1 = mid;
+				}
+				const float alr = 0.5f * (a0 + a1);
+				if (fabsf(thAt(alr) - tt) <= 2e-3f + tt * 1e-3f) {
+					float vx2, vy2;
+					OneTickEndpointW(p, s, sf, p.maxspeed,
+						cosf(alr), &vx2, &vy2);
+					const float sp2 = sqrtf(vx2 * vx2
+						+ vy2 * vy2);
+					const bool better = best_al < 0.f
+						|| (branch == 0 ? sp2 > best_sp
+							: sp2 < best_sp);
+					if (better) {
+						best_al = alr;
+						best_sp = sp2;
+					}
+				}
+			}
+			prev_al = al2;
+			prev_th = th2;
+		}
+		if (best_al < 0.f)
+			return false; // beyond the peak, or no clean root
+		const float al = best_al;
+		float vx, vy;
+		OneTickEndpointW(p, s, sf, p.maxspeed, cosf(al), &vx, &vy);
+		if (side_out)
+			*side_out = Strafe::ToStoredSide(sgn);
+		if (cosa_stored_out)
+			*cosa_stored_out = Strafe::ToStoredWishCos(
+				Strafe::TrueWishCos(cosf(al)));
+		if (theta_law_out)
+			*theta_law_out = static_cast<float>(sgn)
+				* atan2f(fabsf(vy), vx);
+		if (speed_law_out)
+			*speed_law_out = sqrtf(vx * vx + vy * vy);
+		return true;
+	}
+
+	// A36: the one-tick inverse, speed-targeted - EXACT closed-form
+	// candidates from the two law branches (full wishspeed):
+	//   cap-limited:    |v'|^2 = s^2 + capw^2 - (s c)^2
+	//   budget-limited: |v'|^2 = s^2 + 2 s B c + B^2
+	// Each candidate is validated against its branch interval and
+	// evaluated through the exact law; returns the count (0-3).
+	inline int InverseOneTickSpeed(const MoveParams& p, float s,
+	                               float sf, float speed_target,
+	                               float* c_out, float* speed_law_out,
+	                               int max_out) {
+		const float capw = p.maxspeed > p.air_speed_cap
+			? p.air_speed_cap : p.maxspeed;
+		const float B = p.airaccelerate * p.maxspeed * p.dt * sf;
+		const float vt2 = speed_target * speed_target;
+		const float c_bl = s > 0.f ? (capw - B) / s : -2.f;
+		int n = 0;
+		auto offer = [&](float c) {
+			if (c < -1.f || c > 1.f || n >= max_out)
+				return;
+			float vx, vy;
+			OneTickEndpointW(p, s, sf, p.maxspeed, c, &vx, &vy);
+			c_out[n] = c;
+			speed_law_out[n] = sqrtf(vx * vx + vy * vy);
+			n++;
+		};
+		// cap branch: (s c)^2 = s^2 + capw^2 - vt^2, c in
+		// [max(-1, c_bl), capw/s]
+		const float rhs = s * s + capw * capw - vt2;
+		if (rhs >= 0.f && s > 0.f) {
+			const float cm = sqrtf(rhs) / s;
+			const float lo2 = c_bl > -1.f ? c_bl : -1.f;
+			const float hi2 = capw / s < 1.f ? capw / s : 1.f;
+			if (cm >= lo2 && cm <= hi2)
+				offer(cm);
+			if (-cm >= lo2 && -cm <= hi2 && cm > 0.f)
+				offer(-cm);
+		}
+		// budget branch: c = (vt^2 - s^2 - B^2) / (2 s B), c < c_bl
+		if (s > 0.f && B > 0.f) {
+			const float cb = (vt2 - s * s - B * B) / (2.f * s * B);
+			if (cb >= -1.f && cb < c_bl)
+				offer(cb);
+		}
+		return n;
+	}
+
+} // namespace CapAir
+
+// ======================================================================
+// CAPBOUNDS addition - registry B22 v1.0 (session 44): the
+// heading-aware speed ceiling COMPLETED by the joint turn-gain
+// frontier. The v0.5 two-lemma composition (kept intact - THE LEGO
+// RULE) could not bite at practical horizons because each lemma
+// alone lets a fast tick also turn fast; the A35 frontier charges
+// turning against gaining EXACTLY, so the N-tick DP below inherits
+// the bite. Soundness chain: (1) the per-tick frontier is a
+// certified over-approximation (grid + outward margins, engine
+// attacks in capkern); (2) g[S][theta] folds "any s <= S" with an
+// s-Lipschitz margin, rows running-maxed; (3) the DP credits each
+// real tick MORE turn than it achieved (ceil to the grid) and
+// charges the frontier at one grid step LESS (floor) - every real
+// schedule is dominated transition by transition. min() with v0.5
+// stays sound (both sound) and monotone (never worse than either).
+namespace CapBounds {
+
+	struct TurnGainTable {
+		float sf = 1.f;
+		float s_max = 2400.f;
+		int n_s = 241;    // 10 u/s speed rows
+		int n_th = 361;   // 0.5 deg turn bins over [0, pi]
+		std::vector<float> g; // [is*n_th+it]: certified max speed'
+		                      // from ANY s <= is*ds with one-tick
+		                      // turn >= it*dth; -1 infeasible
+		double build_ms = 0.0;
+	};
+
+	inline void BuildTurnGainTable(const MoveParams& p, float sf,
+	                               TurnGainTable* T) {
+		const auto t0 = std::chrono::steady_clock::now();
+		T->sf = sf;
+		T->g.assign(static_cast<size_t>(T->n_s)
+			* static_cast<size_t>(T->n_th), -1.f);
+		const float ds = T->s_max / static_cast<float>(T->n_s - 1);
+		// s-Lipschitz margin: |d v'max / ds| <= sqrt(2)
+		const float smarg = 0.7071f * ds;
+		std::vector<float> prof(static_cast<size_t>(T->n_th));
+		for (int is = 0; is < T->n_s; ++is) {
+			const float s = static_cast<float>(is) * ds;
+			CapAir::OneTickProfile(p, s, sf, T->n_th, prof.data());
+			for (int it = 0; it < T->n_th; ++it) {
+				float v = prof[static_cast<size_t>(it)];
+				if (v >= 0.f)
+					v += smarg;
+				float* cell = &T->g[static_cast<size_t>(is)
+					* static_cast<size_t>(T->n_th)
+					+ static_cast<size_t>(it)];
+				// running max over rows = "any s <= this row"
+				const float below = is > 0
+					? T->g[static_cast<size_t>(is - 1)
+						* static_cast<size_t>(T->n_th)
+						+ static_cast<size_t>(it)] : -1.f;
+				*cell = v > below ? v : below;
+			}
+		}
+		T->build_ms = std::chrono::duration<double, std::milli>(
+			std::chrono::steady_clock::now() - t0).count();
+	}
+
+	// B22 v1.0: the frontier DP - ONE run answers EVERY dpsi at this
+	// (s0, N): out_curve[it] = certified UB on terminal speed for any
+	// N-tick schedule with net |heading change| >= it * (pi/(n_th-1));
+	// 0 means certified IMPOSSIBLE. Returns the blind ceiling (also
+	// the cap applied to every curve entry).
+	inline float HeadingAwareSpeedUB2Curve(const MoveParams& p,
+	                                       const TurnGainTable& T,
+	                                       float s0, int N,
+	                                       float* out_curve) {
+		const float PI = 3.14159265f;
+		const float blind = sqrtf(s0 * s0
+			+ 900.f * static_cast<float>(N));
+		const int NT = T.n_th;
+		if (N <= 0 || blind > T.s_max) {
+			// the table cannot certify - decline to the blind ceiling
+			for (int t = 0; t < NT; ++t)
+				out_curve[t] = blind;
+			return blind;
+		}
+		const float ds = T.s_max / static_cast<float>(T.n_s - 1);
+		std::vector<float> dp(static_cast<size_t>(NT), -1.f);
+		std::vector<float> dp2(static_cast<size_t>(NT), -1.f);
+		dp[0] = s0;
+		auto glook = [&](float S, int it) {
+			int is = static_cast<int>(S / ds) + 1; // round S UP
+			if (is > T.n_s - 1)
+				is = T.n_s - 1;
+			return T.g[static_cast<size_t>(is)
+				* static_cast<size_t>(NT)
+				+ static_cast<size_t>(it)];
+		};
+		for (int i = 0; i < N; ++i) {
+			for (int t = 0; t < NT; ++t)
+				dp2[static_cast<size_t>(t)] = -1.f;
+			for (int t = 0; t < NT; ++t) {
+				const float S = dp[static_cast<size_t>(t)];
+				if (S < 0.f)
+					continue;
+				for (int k2 = 0; k2 < NT; ++k2) {
+					// credit k2 bins, charge the frontier at one
+					// bin less (adversary-dominating)
+					const int chg = k2 > 0 ? k2 - 1 : 0;
+					const float v = glook(S, chg);
+					if (v < 0.f)
+						break; // farther turns only harder
+					int t2 = t + k2;
+					if (t2 > NT - 1)
+						t2 = NT - 1;
+					if (v > dp2[static_cast<size_t>(t2)])
+						dp2[static_cast<size_t>(t2)] = v;
+				}
+			}
+			dp.swap(dp2);
+		}
+		// curve = suffix max of the final layer, capped at blind
+		float run = -1.f;
+		for (int t = NT - 1; t >= 0; --t) {
+			if (dp[static_cast<size_t>(t)] > run)
+				run = dp[static_cast<size_t>(t)];
+			float v = run < 0.f ? 0.f : run;
+			out_curve[t] = v < blind ? v : blind;
+		}
+		return blind;
+	}
+
+	// Single-query form of the above.
+	inline float HeadingAwareSpeedUB2(const MoveParams& p,
+	                                  const TurnGainTable& T,
+	                                  float s0, int N,
+	                                  float dpsi_abs) {
+		const float PI = 3.14159265f;
+		const int NT = T.n_th;
+		std::vector<float> curve(static_cast<size_t>(NT));
+		HeadingAwareSpeedUB2Curve(p, T, s0, N, curve.data());
+		if (dpsi_abs <= 0.f)
+			return curve[0];
+		if (dpsi_abs > PI)
+			dpsi_abs = PI;
+		int req = static_cast<int>(ceilf(dpsi_abs
+			/ (PI / static_cast<float>(NT - 1))));
+		if (req > NT - 1)
+			req = NT - 1;
+		return curve[static_cast<size_t>(req)];
+	}
+
+	// The production form: the portfolio min of the intact v0.5
+	// composition and the frontier DP - sound (both are), monotone
+	// (never worse than either constituent).
+	inline float HeadingAwareSpeedUBBest(const MoveParams& p,
+	                                     const TurnGainTable& T,
+	                                     float s0, int N,
+	                                     float dpsi_abs, float sf) {
+		const float a = HeadingAwareSpeedUB(p, s0, N, dpsi_abs, sf);
+		const float b = HeadingAwareSpeedUB2(p, T, s0, N, dpsi_abs);
+		return a < b ? a : b;
+	}
+
+} // namespace CapBounds
 } // namespace Solver
