@@ -7754,6 +7754,38 @@ namespace {
 			"thread on the first call after injecting. Enable once you're "
 			"in a map and settled; if enabling freezes, that confirms the "
 			"overlay path and the breadcrumb journal names the exact call.");
+		// Live queue diagnostics (session 46f): overlays are now submitted
+		// on the game thread via a queue - this readout says WHERE "no draw"
+		// breaks. pushed climbing = the draw code enqueues; drained climbing
+		// = the game thread dispatches to the engine; ready = the overlay
+		// interface resolved. All three moving but nothing on screen => the
+		// engine call succeeds but doesn't render (a different problem).
+		{
+			long op = 0, od = 0, ld = 0, fa = 0;
+			unsigned long long frva = 0;
+			bool ready = false;
+			WorldDraw::OverlayStats(&op, &od, &ld, &ready, &fa, &frva);
+			ImGui::TextColored(op > 0 ? Theme::Success : Theme::Muted,
+				"queue: pushed %ld", op);
+			ImGui::SameLine();
+			ImGui::TextColored(od > 0 ? Theme::Success : Theme::Muted,
+				"drained %ld (last %ld)", od, ld);
+			ImGui::SameLine();
+			ImGui::TextColored(ready ? Theme::Success : Theme::Error,
+				ready ? "engine: ready" : "engine: NULL");
+			// The decisive line: if the engine call faults, drained still
+			// climbs (SEH-swallowed) so the count alone can't tell "called
+			// but rejected" from "called and rendered". faults > 0 =>
+			// wrong overlay index/signature after the update.
+			if (fa > 0)
+				ImGui::TextColored(Theme::Error,
+					"ENGINE CALL FAULTS: %ld  (last @ engine.dll+0x%llX) - "
+					"overlay vtable call is wrong", fa, frva);
+			else
+				ImGui::TextColored(Theme::Success,
+					"engine-call faults: 0  (calls succeed - if still no "
+					"draw, it is a render-path change)");
+		}
 		ImGui::Separator();
 
 		Theme::Heading("Player & world");

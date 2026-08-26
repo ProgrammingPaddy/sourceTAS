@@ -38,6 +38,11 @@ namespace OverlayQueue {
 	              int r, int g, int b, bool noDepthTest, float duration, bool alpha);
 	// Game thread only: dispatch queued overlays to the engine vtable.
 	void Drain();
+	// Diagnostics: lifetime pushed/drained totals, last drain size, whether
+	// the engine overlay interface resolved, the engine-call fault count,
+	// and the last fault's engine.dll RVA.
+	void Stats(long* pushed, long* drained, long* last_drain, bool* overlay_ready,
+	           long* faults, unsigned long long* fault_rva);
 }
 
 class IVDebugOverlay {

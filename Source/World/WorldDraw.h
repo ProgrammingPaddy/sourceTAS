@@ -73,6 +73,14 @@ namespace WorldDraw {
 	// no-ops when out of game or when an interface is missing.
 	void Render();
 
+	// Overlay-marshal diagnostics (session 46f/g): lifetime pushed/drained
+	// totals, last drain size, engine-interface-ready, and the engine-call
+	// fault count + last fault RVA - forwarded from OverlayQueue for the
+	// menu readout.
+	void OverlayStats(long* pushed, long* drained, long* last_drain,
+	                  bool* overlay_ready, long* faults,
+	                  unsigned long long* fault_rva);
+
 	// Snapshot of the most recent Render(), surfaced in the menu so the overlay
 	// indices and netvar offsets can be verified in-game without a rebuild.
 	struct Diagnostics {

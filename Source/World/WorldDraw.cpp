@@ -41,35 +41,62 @@ namespace {
 	std::vector<OvlCmd> g_ovl_back;    // producer (render thread) appends
 	std::vector<OvlCmd> g_ovl_front;   // consumer (game thread) private after swap
 	const size_t kOvlCap = 20000;      // safety bound if the game thread stalls
+	// Diagnostics (session 46f): lifetime totals + last-drain size, so the
+	// menu/journal can say WHERE "no draw" breaks - enqueue, drain, or the
+	// engine call. volatile long; increments are cheap and racy-tolerant
+	// (these are counters, not control).
+	volatile long g_ovl_pushed = 0;
+	volatile long g_ovl_drained = 0;
+	volatile long g_ovl_last_drain = 0;
+	volatile long g_ovl_backlog = 0;
+	// Did the engine vtable call itself FAULT (session 46g)? If drained
+	// climbs but faults climb WITH it, the calls are being made but the
+	// engine rejects them (wrong index/signature after the update) - which
+	// looks identical to "no draw" because the fault is SEH-swallowed. The
+	// RVA localizes it inside engine.dll.
+	volatile long g_ovl_faults = 0;
+	volatile unsigned long long g_ovl_fault_rva = 0;
 
-	// Raw vtable dispatch on the GAME thread, under SEH. POD-only inside the
-	// __try (no C++ unwinding): OvlCmd/Vector/QAngle are trivially copyable.
+	long OvlFaultFilter(EXCEPTION_POINTERS* ep) {
+		g_ovl_faults++;
+		static uintptr_t base = reinterpret_cast<uintptr_t>(
+			GetModuleHandleA("engine.dll"));
+		const uintptr_t rip = reinterpret_cast<uintptr_t>(
+			ep->ExceptionRecord->ExceptionAddress);
+		g_ovl_fault_rva = (base && rip >= base) ? (rip - base) : rip;
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+
+	// One engine call, PER-CALL SEH (session 46g): a bad overlay is isolated
+	// (the rest of the drain still renders) and its fault is counted, not
+	// hidden. POD-only inside the __try (no C++ unwinding).
+	void OvlCallOne(const OvlCmd& c) {
+		__try {
+			if (c.type == 0) {
+				GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+					const Vector&, const QAngle&, int, int, int, int, float)>(
+					debugoverlay, g_overlay_box_index)(
+					debugoverlay, c.a, c.b, c.c, c.ang, c.r, c.g, c.bb, c.aa, c.dur);
+			} else if (c.type == 2) {
+				GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+					int, int, int, int, bool, float)>(
+					debugoverlay, g_overlay_line_index)(
+					debugoverlay, c.a, c.b, c.r, c.g, c.bb, 255, c.noDepth, c.dur);
+			} else {
+				GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+					int, int, int, bool, float)>(
+					debugoverlay, g_overlay_line_index)(
+					debugoverlay, c.a, c.b, c.r, c.g, c.bb, c.noDepth, c.dur);
+			}
+		} __except (OvlFaultFilter(GetExceptionInformation())) {
+		}
+	}
+
 	void OvlDrainSEH(const OvlCmd* cmds, size_t n) {
 		if (!debugoverlay)
 			return;
-		__try {
-			for (size_t i = 0; i < n; ++i) {
-				const OvlCmd& c = cmds[i];
-				if (c.type == 0) {
-					GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
-						const Vector&, const QAngle&, int, int, int, int, float)>(
-						debugoverlay, g_overlay_box_index)(
-						debugoverlay, c.a, c.b, c.c, c.ang, c.r, c.g, c.bb, c.aa, c.dur);
-				} else if (c.type == 2) {
-					GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
-						int, int, int, int, bool, float)>(
-						debugoverlay, g_overlay_line_index)(
-						debugoverlay, c.a, c.b, c.r, c.g, c.bb, 255, c.noDepth, c.dur);
-				} else {
-					GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
-						int, int, int, bool, float)>(
-						debugoverlay, g_overlay_line_index)(
-						debugoverlay, c.a, c.b, c.r, c.g, c.bb, c.noDepth, c.dur);
-				}
-			}
-		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			// A single bad coord can't take down the game thread.
-		}
+		for (size_t i = 0; i < n; ++i)
+			OvlCallOne(cmds[i]);
 	}
 }
 
@@ -82,6 +109,7 @@ void OverlayQueue::PushBox(const Vector& o, const Vector& mn, const Vector& mx,
 		c.type = 0; c.a = o; c.b = mn; c.c = mx; c.ang = ang;
 		c.r = r; c.g = g; c.bb = b; c.aa = a; c.noDepth = false; c.dur = dur;
 		g_ovl_back.push_back(c);
+		g_ovl_pushed++;
 	}
 	LeaveCriticalSection(cs);
 }
@@ -95,6 +123,7 @@ void OverlayQueue::PushLine(const Vector& o, const Vector& d,
 		c.type = alpha ? 2 : 1; c.a = o; c.b = d; c.c = Vector(); c.ang = QAngle();
 		c.r = r; c.g = g; c.bb = b; c.aa = 255; c.noDepth = noDepth; c.dur = dur;
 		g_ovl_back.push_back(c);
+		g_ovl_pushed++;
 	}
 	LeaveCriticalSection(cs);
 }
@@ -105,9 +134,24 @@ void OverlayQueue::Drain() {
 	g_ovl_front.swap(g_ovl_back);
 	g_ovl_back.clear();
 	LeaveCriticalSection(cs);
-	if (!g_ovl_front.empty())
+	const long n = static_cast<long>(g_ovl_front.size());
+	if (n > 0)
 		OvlDrainSEH(g_ovl_front.data(), g_ovl_front.size());
 	g_ovl_front.clear();
+	g_ovl_last_drain = n;
+	g_ovl_drained += n;
+	g_ovl_backlog = static_cast<long>(g_ovl_back.size());
+}
+
+void OverlayQueue::Stats(long* pushed, long* drained, long* last_drain,
+                         bool* overlay_ready, long* faults,
+                         unsigned long long* fault_rva) {
+	if (pushed)        *pushed = g_ovl_pushed;
+	if (drained)       *drained = g_ovl_drained;
+	if (last_drain)    *last_drain = g_ovl_last_drain;
+	if (overlay_ready) *overlay_ready = (debugoverlay != nullptr);
+	if (faults)        *faults = g_ovl_faults;
+	if (fault_rva)     *fault_rva = g_ovl_fault_rva;
 }
 
 namespace WorldDraw {
@@ -356,6 +400,13 @@ namespace {
 		if (duration > 0.30f) duration = 0.30f;   // cap ghosting if frames hitch hard
 		return duration;
 	}
+}
+
+void WorldDraw::OverlayStats(long* pushed, long* drained, long* last_drain,
+                             bool* overlay_ready, long* faults,
+                             unsigned long long* fault_rva) {
+	OverlayQueue::Stats(pushed, drained, last_drain, overlay_ready, faults,
+		fault_rva);
 }
 
 bool WorldDraw::OverlayTake(int count) {
