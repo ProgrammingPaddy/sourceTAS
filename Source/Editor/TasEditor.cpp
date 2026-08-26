@@ -7785,6 +7785,28 @@ namespace {
 				ImGui::TextColored(Theme::Success,
 					"engine-call faults: 0  (calls succeed - if still no "
 					"draw, it is a render-path change)");
+
+			// DECISIVE ISOLATION (session 46h): one big, bright, 60-second
+			// STATIC box at the player - removes every per-frame variable
+			// (short duration, camera-attached, re-submit timing). Goes
+			// through the same game-thread drain. If THIS does not appear,
+			// the engine simply is not rendering submitted debug overlays
+			// after the update (render-path change) and the fix is a
+			// different draw path, not our submission.
+			if (ImGui::Button("Spawn 60s test box at player") && debugoverlay) {
+				WorldDraw::Diagnostics wd = WorldDraw::LastDiagnostics();
+				const Vector at = wd.have_player ? wd.origin : Vector(0, 0, 0);
+				debugoverlay->AddBoxOverlay(at, Vector(-32.f, -32.f, 0.f),
+					Vector(32.f, 32.f, 72.f), QAngle(0.f, 0.f, 0.f),
+					0, 255, 0, 128, 60.f);
+				debugoverlay->AddLineOverlay(at,
+					Vector(at.X, at.Y, at.Z + 256.f), 255, 0, 255, false, 60.f);
+				g_status = "Spawned a 60s green test box + magenta line at "
+					"the player. If you don't see it, overlay RENDERING is "
+					"broken (not submission).";
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled("(needs drawing enabled so the queue drains)");
 		}
 		ImGui::Separator();
 
