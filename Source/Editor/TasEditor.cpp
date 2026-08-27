@@ -6487,7 +6487,7 @@ namespace {
 				if (cs >= 0)
 					g_sel = cs;
 			}
-			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 190), true,
+			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 214), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			const int last = g_total > 0 ? g_total - 1 : 0;
 			ImGui::TextDisabled("Run playhead");
@@ -6522,71 +6522,132 @@ namespace {
 				}
 			}
 
-			// Per-tick INPUT overrides at the playhead: pink = held this tick
-			// (read from the composed plan), * = overridden. Clicking flips that
-			// input on exactly this tick; clicking an overridden key removes the
-			// override again. Segment edits clear the segment's overrides.
+			// Per-tick editor at the playhead - EVERY tick in a run is editable
+			// (user directive, session 46). Two flavors sharing one UI:
+			//   RAW segments (imported recordings, baked, + Tick): the keys and
+			//   view angles write STRAIGHT INTO the stored frame - the frame IS
+			//   the tick, nothing to override.
+			//   Generated/solver segments: per-tick INPUT overrides on top of
+			//   the composed plan (* = overridden; second click removes it;
+			//   segment edits clear them). View comes from the generator.
 			const int seg = SegmentAtTick(g_cursor);
-			if (seg >= 0 && seg < static_cast<int>(g_segs.size()) && !g_segs[seg].raw
-				&& g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_frames.size())
-				&& g_cursor < Prediction::kMaxSimTicks) {
+			if (seg >= 0 && seg < static_cast<int>(g_segs.size())
+				&& seg < static_cast<int>(g_starts.size())) {
 				EditSegment& ks = g_segs[seg];
 				const int local = g_cursor - g_starts[seg];
 				static const int bits[6] = { OV_W, OV_A, OV_S, OV_D, OV_JUMP, OV_DUCK };
 				static const char* names[6] = { "W", "A", "S", "D", "Jump", "Crouch" };
-				int ci = -1;
-				for (int i = 0; i < static_cast<int>(ks.ovr.size()); ++i)
-					if (ks.ovr[i].tick == local) { ci = i; break; }
-				// Effective key state = natural keys with the overridden bits
-				// replaced. KEY level, not move floats: adding D on a tick that
-				// naturally holds A keeps BOTH pink (they null sidemove, exactly
-				// like holding both keys in game).
-				const uint8_t nat = g_nat_keys[g_cursor];
-				const int eff = (ci >= 0)
-					? ((nat & ~ks.ovr[ci].mask) | (ks.ovr[ci].value & ks.ovr[ci].mask))
-					: nat;
-				bool held[6];
-				for (int i = 0; i < 6; ++i)
-					held[i] = (eff & bits[i]) != 0;
-				ImGui::TextDisabled("Tick inputs");
-				Theme::Help("Every input's state at the playhead tick - pink = held. "
-					"Click to flip that input on exactly this tick (marked *); click "
-					"again to remove the override. Editing the segment's parameters "
-					"clears its per-tick overrides.");
-				for (int i = 0; i < 6; ++i) {
-					if (i) ImGui::SameLine();
-					const bool ovr_bit = ci >= 0 && (ks.ovr[ci].mask & bits[i]) != 0;
-					char lbl[16];
-					Sfmt(lbl, "%s%s##ov%d", names[i], ovr_bit ? "*" : "", i);
-					if (held[i]) {
-						ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
-						ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
-						ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
-						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-					}
-					const bool clicked = ImGui::SmallButton(lbl);
-					if (held[i])
-						ImGui::PopStyleColor(4);
-					if (!clicked)
-						continue;
-					if (ovr_bit) {
-						// Second click: back to what the segment does naturally.
-						ks.ovr[ci].mask &= ~bits[i];
-						ks.ovr[ci].value &= ~bits[i];
-						if (ks.ovr[ci].mask == 0) {
-							ks.ovr.erase(ks.ovr.begin() + ci);
-							ci = -1;
+				const bool raw_ok = ks.raw && local >= 0
+					&& local < static_cast<int>(ks.frames.size());
+				const bool gen_ok = !ks.raw && g_valid && g_cursor >= 0
+					&& g_cursor < static_cast<int>(g_frames.size())
+					&& g_cursor < Prediction::kMaxSimTicks;
+				if (raw_ok) {
+					// RAW: pink = what the stored frame does. A key click edits
+					// the frame's move floats / buttons in place; W|S and A|D
+					// are each one signed float, so holding one side releases
+					// the other (exactly what the data can express).
+					Frame& f = ks.frames[local];
+					const bool held[6] = {
+						f.forwardmove > 0.f, f.sidemove < 0.f,
+						f.forwardmove < 0.f, f.sidemove > 0.f,
+						(f.buttons & IN_JUMP) != 0, (f.buttons & IN_DUCK) != 0,
+					};
+					ImGui::TextDisabled("Tick inputs (raw frame)");
+					Theme::Help("This tick is a stored RAW frame - clicks write "
+						"straight into it. Pink = held; W/S and A/D are one "
+						"axis each, so pressing one side releases the other. "
+						"Yaw/pitch edit the frame's view (drag, or Ctrl+click "
+						"to type).");
+					for (int i = 0; i < 6; ++i) {
+						if (i) ImGui::SameLine();
+						char lbl[16];
+						Sfmt(lbl, "%s##rf%d", names[i], i);
+						if (held[i]) {
+							ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
+							ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
+							ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
+							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
 						}
-					} else {
-						if (ci < 0) {
-							ks.ovr.push_back({ local, 0, 0 });
-							ci = static_cast<int>(ks.ovr.size()) - 1;
+						const bool clicked = ImGui::SmallButton(lbl);
+						if (held[i])
+							ImGui::PopStyleColor(4);
+						if (!clicked)
+							continue;
+						switch (i) {
+						case 0: f.forwardmove = held[0] ? 0.f :  450.f; break;
+						case 1: f.sidemove    = held[1] ? 0.f : -450.f; break;
+						case 2: f.forwardmove = held[2] ? 0.f : -450.f; break;
+						case 3: f.sidemove    = held[3] ? 0.f :  450.f; break;
+						case 4: f.buttons ^= IN_JUMP; break;
+						case 5: f.buttons ^= IN_DUCK; break;
 						}
-						ks.ovr[ci].mask |= bits[i];
-						if (!held[i]) ks.ovr[ci].value |= bits[i];
-						else          ks.ovr[ci].value &= ~bits[i];
+						MarkDirty();
 					}
-					MarkDirty();
+					ImGui::PushItemWidth(96.f);
+					if (ImGui::DragFloat("yaw##rawy", &f.viewangles[1],
+						0.05f, 0.f, 0.f, "%.2f"))
+						MarkDirty();
+					ImGui::SameLine();
+					if (ImGui::DragFloat("pitch##rawp", &f.viewangles[0],
+						0.05f, -89.f, 89.f, "%.2f"))
+						MarkDirty();
+					ImGui::PopItemWidth();
+				} else if (gen_ok) {
+					int ci = -1;
+					for (int i = 0; i < static_cast<int>(ks.ovr.size()); ++i)
+						if (ks.ovr[i].tick == local) { ci = i; break; }
+					// Effective key state = natural keys with the overridden bits
+					// replaced. KEY level, not move floats: adding D on a tick that
+					// naturally holds A keeps BOTH pink (they null sidemove, exactly
+					// like holding both keys in game).
+					const uint8_t nat = g_nat_keys[g_cursor];
+					const int eff = (ci >= 0)
+						? ((nat & ~ks.ovr[ci].mask) | (ks.ovr[ci].value & ks.ovr[ci].mask))
+						: nat;
+					bool held[6];
+					for (int i = 0; i < 6; ++i)
+						held[i] = (eff & bits[i]) != 0;
+					ImGui::TextDisabled("Tick inputs");
+					Theme::Help("Every input's state at the playhead tick - pink = held. "
+						"Click to flip that input on exactly this tick (marked *); click "
+						"again to remove the override. Editing the segment's parameters "
+						"clears its per-tick overrides.");
+					for (int i = 0; i < 6; ++i) {
+						if (i) ImGui::SameLine();
+						const bool ovr_bit = ci >= 0 && (ks.ovr[ci].mask & bits[i]) != 0;
+						char lbl[16];
+						Sfmt(lbl, "%s%s##ov%d", names[i], ovr_bit ? "*" : "", i);
+						if (held[i]) {
+							ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
+							ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
+							ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
+							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+						}
+						const bool clicked = ImGui::SmallButton(lbl);
+						if (held[i])
+							ImGui::PopStyleColor(4);
+						if (!clicked)
+							continue;
+						if (ovr_bit) {
+							// Second click: back to what the segment does naturally.
+							ks.ovr[ci].mask &= ~bits[i];
+							ks.ovr[ci].value &= ~bits[i];
+							if (ks.ovr[ci].mask == 0) {
+								ks.ovr.erase(ks.ovr.begin() + ci);
+								ci = -1;
+							}
+						} else {
+							if (ci < 0) {
+								ks.ovr.push_back({ local, 0, 0 });
+								ci = static_cast<int>(ks.ovr.size()) - 1;
+							}
+							ks.ovr[ci].mask |= bits[i];
+							if (!held[i]) ks.ovr[ci].value |= bits[i];
+							else          ks.ovr[ci].value &= ~bits[i];
+						}
+						MarkDirty();
+					}
 				}
 			}
 			ImGui::EndChild();
@@ -6595,7 +6656,7 @@ namespace {
 			// Stats for the tick the playhead sits on, in a narrow box so the
 			// scrub sliders keep most of the row's width.
 			ImGui::SameLine();
-			ImGui::BeginChild("cursorstats", ImVec2(0, 190), true,
+			ImGui::BeginChild("cursorstats", ImVec2(0, 214), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
 				const Prediction::SimState& st = g_states[g_cursor];
@@ -6699,6 +6760,31 @@ namespace {
 				s.gen.yaw_rate = 0.f;                  // pure max-gain line
 			}
 			InsertSegment(s);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("+ Tick")) {
+			// One editable RAW tick (user directive, session 46): a 1-frame raw
+			// segment, edited with the same per-tick controls as the timeline
+			// scrub (keys + yaw/pitch write into the frame). Seed the view from
+			// the tick just before the insertion point so nothing snaps; a run
+			// with no composed frames yet falls back to the anchor's view.
+			EditSegment s;
+			s.raw = true;
+			Frame f = {};
+			f.viewangles[0] = g_anchor.pitch;
+			f.viewangles[1] = g_anchor.yaw;
+			int before = 0;   // global tick the new segment will start at
+			const int upto = (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size()))
+				? g_sel + 1 : static_cast<int>(g_segs.size());
+			for (int k = 0; k < upto; ++k)
+				before += g_segs[k].Ticks();
+			if (before > 0 && before - 1 < static_cast<int>(g_frames.size())) {
+				f.viewangles[0] = g_frames[before - 1].viewangles[0];
+				f.viewangles[1] = g_frames[before - 1].viewangles[1];
+			}
+			s.frames.push_back(f);
+			InsertSegment(std::move(s));
+			g_status = "Added a raw tick - edit it in the Cursor box (keys + view).";
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("+ Solver segment")) {
