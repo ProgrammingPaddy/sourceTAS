@@ -5117,6 +5117,7 @@ namespace {
 		X("hotkeys_armed", RecordPanel::HotkeysArmed()) \
 		X("freecam_speed", g_fc_speed) \
 		X("freecam_smooth", g_fc_smooth) \
+		X("draw_master",   WorldDraw::draw_master) \
 		X("test_marker",   WorldDraw::draw_test_marker) \
 		X("player_box",    WorldDraw::draw_player_box) \
 		X("feet_marker",   WorldDraw::draw_player_marker) \

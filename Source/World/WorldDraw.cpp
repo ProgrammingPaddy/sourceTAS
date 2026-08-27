@@ -161,7 +161,11 @@ namespace WorldDraw {
 	// not (session 46i).
 	volatile long game_tick = 0;
 
-	bool draw_master        = false;   // session 46c: default OFF, not persisted
+	// Session 46j: default ON + persisted ("draw_master" in STAS_UI_PREFS).
+	// It began life as the 46c freeze-bisect kill switch; the game-thread
+	// overlay marshal (46e) fixed that freeze, so now it's just the normal
+	// user toggle. Warm-up + budget ramp still gate the first frames.
+	bool draw_master        = true;
 	bool draw_test_marker   = false;
 	bool draw_player_box    = true;
 	bool draw_player_marker = true;
@@ -353,57 +357,43 @@ namespace {
 		       v.Z > -kMax && v.Z < kMax;
 	}
 
-	// PLAYER-ATTACHED overlays (hull, origin dot, live prediction) use the
-	// RAW per-frame interval: they track a moving entity, and any lifetime
+	// PLAYER-ATTACHED overlays (hull, origin dot, live prediction) use a
+	// tick-sized lifetime: they track a moving entity, and any lifetime
 	// stretching leaves visible trails on it ("ghosting on the active player
-	// hitbox"). Refreshed by FrameDuration each frame.
+	// hitbox"). Refreshed by FrameDuration each submission.
 	float g_dur_live = 0.03f;
 
-	// Adaptive overlay lifetime. A fixed duration leaves a moving "ghost trail":
-	// stale copies from previous positions stay alive while the player moves, and
-	// stacked translucent copies read as a solid box. A static overlay hides this
-	// because its copies overlap exactly - which is why the world-origin marker
-	// looked clean. Measuring the render interval and keeping each overlay alive
-	// ~one frame means exactly one instance renders per frame at any framerate:
-	// crisp tracking, no ghosting, no flicker.
+	// Overlay lifetimes, TICK-BASED (session 46j). Overlays are submitted
+	// once per GAME TICK (the game_tick throttle) and expire against the
+	// engine's curtime - so a lifetime shorter than one tick leaves a dark
+	// gap before the next tick's replacement lands: the user-reported
+	// "CRT flicker". The old version sized lifetimes from the RENDER frame
+	// interval (~3-10 ms at high fps), which was right when submission was
+	// per-render-frame and is exactly wrong now. Lifetime = tick interval
+	// x margin: consecutive submissions OVERLAP briefly (~1/3 tick) instead
+	// of gapping - steady image, and on a moving hull the two copies sit
+	// only one tick of movement apart (~7 u at full speed): crisp, no trail.
 	float FrameDuration() {
-		static LARGE_INTEGER freq = {};
-		static LARGE_INTEGER last = {};
-		if (freq.QuadPart == 0)
-			QueryPerformanceFrequency(&freq);
-
-		LARGE_INTEGER now;
-		QueryPerformanceCounter(&now);
-
-		float dt = 0.f;
-		if (last.QuadPart != 0 && freq.QuadPart != 0)
-			dt = static_cast<float>(now.QuadPart - last.QuadPart) / static_cast<float>(freq.QuadPart);
-		last = now;
+		float tick = Prediction::LastDiag().interval_per_tick;
+		if (tick <= 0.f || tick > 0.1f)
+			tick = 0.015f;   // 66-tick default until a sim measures it
 
 		float scale = WorldDraw::overlay_life_scale;
 		if (scale < 0.5f) scale = 0.5f;
 		if (scale > 6.0f) scale = 6.0f;
 
-		// Player-attached lifetime: raw interval only.
-		g_dur_live = (dt > 0.f) ? dt * scale : 0.03f;
-		if (g_dur_live < 0.01f) g_dur_live = 0.01f;
+		// Player-attached lifetime: one tick + overlap margin, slider
+		// deliberately NOT applied (stretching this one draws trails).
+		g_dur_live = tick * 1.35f;
+		if (g_dur_live < 0.02f) g_dur_live = 0.02f;
 		if (g_dur_live > 0.20f) g_dur_live = 0.20f;
 
-		// Static-drawing lifetime: the MAX of the last few intervals, so a
-		// spiky frame (solver work slices, sims landing unevenly) doesn't
-		// strand the editor line - flicker-resistant without trailing, since
-		// those drawings don't move between frames.
-		static float hist[8] = {};
-		static int hi = 0;
-		hist[hi] = dt;
-		hi = (hi + 1) & 7;
-		float base = dt;
-		for (int i = 0; i < 8; ++i)
-			if (hist[i] > base) base = hist[i];
-
-		float duration = (base > 0.f) ? base * scale : 0.03f;
-		if (duration < 0.01f) duration = 0.01f;   // survive to the next frame's draw
-		if (duration > 0.30f) duration = 0.30f;   // cap ghosting if frames hitch hard
+		// Static drawings (run line, markers, tags) don't move between
+		// submissions, so extra lifetime just adds flicker resistance
+		// against render/solver hitches; the slider scales it.
+		float duration = tick * (scale > 1.35f ? scale : 1.35f);
+		if (duration < 0.02f) duration = 0.02f;
+		if (duration > 0.40f) duration = 0.40f;
 		return duration;
 	}
 }
