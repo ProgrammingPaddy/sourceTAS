@@ -5,6 +5,7 @@
 #include "../Menu/Breadcrumb.h"
 #include "../Menu/RecordPanel.h"
 #include "../World/BspWorld.h"
+#include "../World/WorldDraw.h"
 #include <cstrike/Definitions/Buttons.h>
 #include <cstrike/Definitions/Const.h>
 #include <cstrike/Interfaces/IVDebugOverlay.h>
@@ -29,6 +30,11 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 	// Engine-command marshal drain: THIS is the game thread, the only safe
 	// place for connection transitions pushed by UI/render-thread code.
 	TasEditor::DrainEngineCmds();
+
+	// One real command = one game tick: the reliable cadence WorldDraw
+	// throttles its overlay submission on (session 46i - the self-healed
+	// engine clock stalls for the tool after the update).
+	WorldDraw::game_tick++;
 
 	// Debug-overlay marshal drain (session 46e): WorldDraw queues overlays on
 	// the render thread; THIS game thread makes the real engine calls, which

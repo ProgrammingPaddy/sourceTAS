@@ -7733,81 +7733,15 @@ namespace {
 			"through the panel; text and dropdown lists stay opaque so readings "
 			"stay crisp. Saved to ui.cfg with every other option on this tab.");
 
-		// MASTER in-world drawing gate (session 46c). OFF at every
-		// injection so the game can never freeze on the overlay path; the
-		// user arms it here once in a steady frame loop. Colored so its
-		// state reads at a glance.
-		if (WorldDraw::draw_master) {
-			if (Theme::Danger("In-world drawing: ON  (click to disable)"))
-				WorldDraw::draw_master = false;
-			ImGui::SameLine();
-			ImGui::TextColored(Theme::Success, "armed");
-		} else {
-			if (Theme::Accent("In-world drawing: OFF  (click to enable)"))
-				WorldDraw::draw_master = true;
-			ImGui::SameLine();
-			ImGui::TextColored(Theme::Warning, "disabled at inject (safe)");
-		}
+		// The master in-world drawing switch stays a plain functional
+		// control here; its diagnostics + test tools live in the Debug tab
+		// (session 46i cleanup, user request).
+		ImGui::Checkbox("Enable in-world drawing", &WorldDraw::draw_master);
 		Theme::Help("Master switch for ALL in-world overlays (hull, run "
 			"line, wireframes, targets). OFF at every injection since the "
-			"2026-08-25 game update, whose overlay path hangs the render "
-			"thread on the first call after injecting. Enable once you're "
-			"in a map and settled; if enabling freezes, that confirms the "
-			"overlay path and the breadcrumb journal names the exact call.");
-		// Live queue diagnostics (session 46f): overlays are now submitted
-		// on the game thread via a queue - this readout says WHERE "no draw"
-		// breaks. pushed climbing = the draw code enqueues; drained climbing
-		// = the game thread dispatches to the engine; ready = the overlay
-		// interface resolved. All three moving but nothing on screen => the
-		// engine call succeeds but doesn't render (a different problem).
-		{
-			long op = 0, od = 0, ld = 0, fa = 0;
-			unsigned long long frva = 0;
-			bool ready = false;
-			WorldDraw::OverlayStats(&op, &od, &ld, &ready, &fa, &frva);
-			ImGui::TextColored(op > 0 ? Theme::Success : Theme::Muted,
-				"queue: pushed %ld", op);
-			ImGui::SameLine();
-			ImGui::TextColored(od > 0 ? Theme::Success : Theme::Muted,
-				"drained %ld (last %ld)", od, ld);
-			ImGui::SameLine();
-			ImGui::TextColored(ready ? Theme::Success : Theme::Error,
-				ready ? "engine: ready" : "engine: NULL");
-			// The decisive line: if the engine call faults, drained still
-			// climbs (SEH-swallowed) so the count alone can't tell "called
-			// but rejected" from "called and rendered". faults > 0 =>
-			// wrong overlay index/signature after the update.
-			if (fa > 0)
-				ImGui::TextColored(Theme::Error,
-					"ENGINE CALL FAULTS: %ld  (last @ engine.dll+0x%llX) - "
-					"overlay vtable call is wrong", fa, frva);
-			else
-				ImGui::TextColored(Theme::Success,
-					"engine-call faults: 0  (calls succeed - if still no "
-					"draw, it is a render-path change)");
-
-			// DECISIVE ISOLATION (session 46h): one big, bright, 60-second
-			// STATIC box at the player - removes every per-frame variable
-			// (short duration, camera-attached, re-submit timing). Goes
-			// through the same game-thread drain. If THIS does not appear,
-			// the engine simply is not rendering submitted debug overlays
-			// after the update (render-path change) and the fix is a
-			// different draw path, not our submission.
-			if (ImGui::Button("Spawn 60s test box at player") && debugoverlay) {
-				WorldDraw::Diagnostics wd = WorldDraw::LastDiagnostics();
-				const Vector at = wd.have_player ? wd.origin : Vector(0, 0, 0);
-				debugoverlay->AddBoxOverlay(at, Vector(-32.f, -32.f, 0.f),
-					Vector(32.f, 32.f, 72.f), QAngle(0.f, 0.f, 0.f),
-					0, 255, 0, 128, 60.f);
-				debugoverlay->AddLineOverlay(at,
-					Vector(at.X, at.Y, at.Z + 256.f), 255, 0, 255, false, 60.f);
-				g_status = "Spawned a 60s green test box + magenta line at "
-					"the player. If you don't see it, overlay RENDERING is "
-					"broken (not submission).";
-			}
-			ImGui::SameLine();
-			ImGui::TextDisabled("(needs drawing enabled so the queue drains)");
-		}
+			"2026-08-25 game update (safe default - the update made the old "
+			"render-thread overlay path freeze); enable once you're in a "
+			"map. Overlay diagnostics + the test box are in the Debug tab.");
 		ImGui::Separator();
 
 		Theme::Heading("Player & world");
@@ -9516,6 +9450,77 @@ namespace {
 		ImGui::TextDisabled("Playback capture + sim export + params all land in Documents\\sourceTAS\\solver\\.");
 	}
 
+	// DEBUG tab (session 46i, user request): all dev diagnostics + probe
+	// buttons in one place so the working tabs stay uncluttered.
+	void DrawDebugTab() {
+		Theme::Heading("Engine anchors");
+		ImGui::TextDisabled("Self-healing RVA/clock resolution after a game "
+			"update (session 45). Green = found their footing.");
+		{
+			const Prediction::Diag pd = Prediction::LastDiag();
+			const bool helper_ok = pd.helper_method != 0;
+			ImGui::TextColored(helper_ok ? Theme::Success : Theme::Error,
+				helper_ok ? (pd.helper_method == 1
+					? "move helper: ok (pinned RVA)"
+					: "move helper: ok (RTTI self-heal)")
+				: "move helper: UNRESOLVED - sim/lookahead disabled");
+			if (pd.helper_method == 2 && pd.helper_candidates != 1) {
+				ImGui::SameLine();
+				ImGui::TextColored(Theme::Warning, "(%d candidates)",
+					pd.helper_candidates);
+			}
+			const bool clock_ok = pd.gpg_confirmed;
+			ImGui::TextColored(clock_ok ? Theme::Success : Theme::Warning,
+				clock_ok ? (pd.gpg_method == 1
+					? "game clock: ok (pinned seed)"
+					: "game clock: ok (self-heal scan)")
+				: "game clock: resolving... (join a map)");
+			Theme::Help("After a game update these re-derive themselves at "
+				"runtime; red means the self-heal failed and "
+				"Tools/derive_client_rvas.py needs a pass.");
+		}
+
+		Theme::Heading("In-world overlay marshal");
+		ImGui::TextDisabled("Overlays are queued on the render thread and "
+			"submitted on the game thread (the update made render-thread "
+			"submission freeze). This says where any 'no draw' breaks.");
+		{
+			long op = 0, od = 0, ld = 0, fa = 0;
+			unsigned long long frva = 0;
+			bool ready = false;
+			WorldDraw::OverlayStats(&op, &od, &ld, &ready, &fa, &frva);
+			ImGui::TextColored(op > 0 ? Theme::Success : Theme::Muted,
+				"queue: pushed %ld", op);
+			ImGui::SameLine();
+			ImGui::TextColored(od > 0 ? Theme::Success : Theme::Muted,
+				"drained %ld (last %ld)", od, ld);
+			ImGui::SameLine();
+			ImGui::TextColored(ready ? Theme::Success : Theme::Error,
+				ready ? "engine: ready" : "engine: NULL");
+			if (fa > 0)
+				ImGui::TextColored(Theme::Error,
+					"ENGINE CALL FAULTS: %ld  (last @ engine.dll+0x%llX)",
+					fa, frva);
+			else
+				ImGui::TextColored(Theme::Success,
+					"engine-call faults: 0  (calls succeed)");
+
+			if (ImGui::Button("Spawn 60s test box at player") && debugoverlay) {
+				WorldDraw::Diagnostics wd = WorldDraw::LastDiagnostics();
+				const Vector at = wd.have_player ? wd.origin : Vector(0, 0, 0);
+				debugoverlay->AddBoxOverlay(at, Vector(-32.f, -32.f, 0.f),
+					Vector(32.f, 32.f, 72.f), QAngle(0.f, 0.f, 0.f),
+					0, 255, 0, 128, 60.f);
+				debugoverlay->AddLineOverlay(at,
+					Vector(at.X, at.Y, at.Z + 256.f), 255, 0, 255, false, 60.f);
+				g_status = "Spawned a 60s green test box + magenta line at "
+					"the player.";
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled("(needs in-world drawing enabled - Rendering tab)");
+		}
+	}
+
 	void DrawProjectTab() {
 		// The save row (session 45): Save targets the SELECTED browser entry
 		// (or the current identity when nothing is selected) - never
@@ -10336,11 +10341,12 @@ void DrawWindowImpl() {
 
 	// Tab row (selected = pink accent).
 	const char* tabs[] = { "Project", "Record", "Run", "Targets", "Server",
-	                       "Map Solve", "Rendering" };
-	for (int i = 0; i < 7; ++i) {
+	                       "Map Solve", "Rendering", "Debug" };
+	const int kNumTabs = 8;
+	for (int i = 0; i < kNumTabs; ++i) {
 		if (Theme::Tab(tabs[i], g_tab == i, ImVec2(104, 0)))
 			g_tab = i;
-		if (i < 6)
+		if (i < kNumTabs - 1)
 			ImGui::SameLine();
 	}
 	ImGui::Spacing();
@@ -10357,7 +10363,8 @@ void DrawWindowImpl() {
 	case 3: DrawTargetsTab(); break;
 	case 4: DrawServerTab(); break;
 	case 5: DrawMapSolveTab(); break;
-	default: DrawRenderingTab(); break;
+	case 6: DrawRenderingTab(); break;
+	default: DrawDebugTab(); break;
 	}
 	ImGui::EndChild();
 	ImGui::PopStyleColor();

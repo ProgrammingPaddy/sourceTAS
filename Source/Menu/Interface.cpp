@@ -391,40 +391,9 @@ void RecordPanel::Draw() {
 	ImGui::TextDisabled("binds: click the key button, press a key (Esc clears)");
 	Theme::Help("Hotkeys work with the menu closed; F8 toggles the menu. Binds save "
 		"to binds.cfg the moment you set them and load again on every restart.");
-	// (The old dev-diagnostics section lived here - retired 2026-08-12: the
-	// overlay indices have been pinned since Phase 1a and the readouts were
-	// duplicated by the crash journal + solver gates probe.)
-
-	// Engine-anchor health (session 45). The 2026-08-25 game update broke
-	// the pinned RVAs: prediction died behind its own sanity check and the
-	// frozen clock blacked out every in-world overlay. Both anchors now
-	// resolve themselves (RTTI walk / clock-shape scan) - this readout is
-	// the one-look confirmation they found their footing after any update.
-	{
-		GroupLine("Engine anchors");
-		const Prediction::Diag pd = Prediction::LastDiag();
-		const bool helper_ok = pd.helper_method != 0;
-		ImGui::TextColored(helper_ok ? Theme::Success : Theme::Error,
-			helper_ok ? (pd.helper_method == 1
-				? "move helper: ok (pinned RVA)"
-				: "move helper: ok (RTTI self-heal)")
-			: "move helper: UNRESOLVED - sim/lookahead disabled");
-		if (pd.helper_method == 2 && pd.helper_candidates != 1) {
-			ImGui::SameLine();
-			ImGui::TextColored(Theme::Warning, "(%d candidates)",
-				pd.helper_candidates);
-		}
-		const bool clock_ok = pd.gpg_confirmed;
-		ImGui::TextColored(clock_ok ? Theme::Success : Theme::Warning,
-			clock_ok ? (pd.gpg_method == 1
-				? "game clock: ok (pinned seed)"
-				: "game clock: ok (self-heal scan)")
-			: "game clock: resolving... (join a map; overlays throttle "
-			  "until confirmed)");
-		Theme::Help("After a game update these re-derive themselves at "
-			"runtime; red here means the self-heal failed and the RVA "
-			"derivation tool needs a pass (Tools/derive_client_rvas.py).");
-	}
+	// (Dev diagnostics - engine-anchor health, overlay queue, the test box -
+	// live in the editor's Debug tab since session 46i, to keep this panel
+	// uncluttered.)
 }
 
 void BasehookInterface::OnEndScene() {

@@ -155,6 +155,12 @@ void OverlayQueue::Stats(long* pushed, long* drained, long* last_drain,
 }
 
 namespace WorldDraw {
+	// Bumped once per real client command by the CreateMove hook (game
+	// thread); read by Render (render thread) to submit overlays exactly
+	// once per game tick. Reliable where the self-healed engine clock is
+	// not (session 46i).
+	volatile long game_tick = 0;
+
 	bool draw_master        = false;   // session 46c: default OFF, not persisted
 	bool draw_test_marker   = false;
 	bool draw_player_box    = true;
@@ -457,34 +463,24 @@ void WorldDraw::Render() {
 	if (s_frames_since_inject < 300)
 		g_ovl_left = 300;
 
-	// PAUSED GAME (ESC on a listen server) freezes curtime - and debug
-	// overlays EXPIRE against curtime, so a frozen clock means nothing ever
-	// expires while we submit thousands per frame. The engine's overlay list
-	// then grows until its hard overflow terminates the process (2026-08-06:
-	// death inside the worlddraw section ~10 s after ESC; the earlier
-	// on-screen overflow warning + hitch were the same mechanism during
-	// brief pauses). Submit ONLY when curtime advances: exactly one
-	// submission per expiry cycle - what is already drawn stays visible
-	// between ticks precisely because nothing expires, and high-fps overlay
-	// churn drops several-fold for free.
+	// SUBMIT ONCE PER GAME TICK (session 46i). WorldDraw runs on the render
+	// thread, which can spin many frames per game tick; enqueuing every
+	// render frame would flood the game-thread drain (and, when the game is
+	// paused and overlays never expire, overflow the engine's overlay list -
+	// the 2026-08-06 crash). The throttle used to key on Prediction::
+	// CurTime(), but after the 2026-08-25 update that clock read stalls for
+	// the tool (even while the engine's own curtime advances), so it fired
+	// exactly once and then blocked forever - the "hull flashes for one
+	// frame then vanishes" bug. The reliable tick signal is the GAME THREAD
+	// itself: CreateMove bumps game_tick once per real command. Enqueue only
+	// when it advances - refreshes overlays every tick while running, and
+	// pauses naturally when the game stops generating commands (no drain
+	// either, so no overflow).
 	{
-		static float s_last_ct = -1e9f;
-		static unsigned s_noclk_frame = 0;
-		const float ct = Prediction::CurTime();
-		if (ct < 0.f) {
-			// Clock unavailable (the gpGlobals anchor is still resolving -
-			// see Prediction.cpp's self-healing block). The 2026-08-25 game
-			// update proved what a hard stop here does: EVERY in-world
-			// drawing died behind this one gate. Degrade to a bounded
-			// every-2nd-frame throttle instead - overlays still expire
-			// normally while the game runs, and the pause-overflow this
-			// gate protects against needs a frozen clock we cannot see
-			// anyway.
-			if ((++s_noclk_frame & 1)) { g_diag = d; return; }
-		} else {
-			if (ct == s_last_ct) { g_diag = d; return; }
-			s_last_ct = ct;
-		}
+		static long s_last_tick = -0x7fffffff;
+		const long t = game_tick;
+		if (t == s_last_tick) { g_diag = d; return; }
+		s_last_tick = t;
 	}
 
 	// Crash isolation: while the solver's HEAVY phases churn (search /

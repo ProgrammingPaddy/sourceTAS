@@ -7,6 +7,12 @@
 // strictly observational: it reads the player's networked origin/flags and
 // queues overlays. It never writes game state or touches movement/prediction.
 namespace WorldDraw {
+	// Game-tick counter (session 46i): bumped once per real command by the
+	// CreateMove hook (game thread), read by Render to throttle overlay
+	// submission to one batch per tick - reliable where the self-healed
+	// engine clock is not.
+	extern volatile long game_tick;
+
 	// MASTER in-world drawing gate (session 46c). Default OFF and NOT
 	// persisted: every injection starts with zero overlay submission, so
 	// injecting can never freeze on the debug-overlay path (the 2026-08-25
