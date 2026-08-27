@@ -31,15 +31,12 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 	// place for connection transitions pushed by UI/render-thread code.
 	TasEditor::DrainEngineCmds();
 
-	// One real command = one game tick: the reliable cadence WorldDraw
-	// throttles its overlay submission on (session 46i - the self-healed
-	// engine clock stalls for the tool after the update).
-	WorldDraw::game_tick++;
-
-	// Debug-overlay marshal drain (session 46e): WorldDraw queues overlays on
-	// the render thread; THIS game thread makes the real engine calls, which
-	// the 2026-08-25 update made fatal to do from the render thread. Empty
-	// queue (drawing gated off / nothing pushed) = one lock peek + swap.
+	// Fallback overlay drain. The main in-world pass drains itself
+	// (WorldDraw::SubmitFrame, the OverrideView hook); this catches overlays
+	// pushed from the render thread between passes - the Debug tab's test
+	// box - so they still land on the game thread, the only thread the
+	// 2026-08-25 update lets make engine overlay calls. Empty queue = one
+	// lock peek + swap.
 	OverlayQueue::Drain();
 
 	// Autohop (server-style autobhop for HUMAN input), the sim JM_AutoBhop's
@@ -131,6 +128,13 @@ namespace {
 	void* ViewThunk(void* thisptr, void* a, void* b, void* c) {
 		void* const r = reinterpret_cast<GenFn>(g_view_original)(thisptr, a, b, c);
 		TasEditor::ViewSlotSample(kViewSlot, a);
+		// The in-world draw pass lives HERE (session 46k): game thread, once
+		// per rendered frame, before the engine draws that frame - so what we
+		// sample is exactly what this frame shows, and one-frame overlay
+		// lifetimes replace all the cadence/lifetime guessing (the 46i-46j
+		// strobe/flash saga). After the freecam sample, so a freecam view
+		// override is already applied.
+		WorldDraw::SubmitFrame();
 		return r;
 	}
 }

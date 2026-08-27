@@ -5122,7 +5122,6 @@ namespace {
 		X("player_box",    WorldDraw::draw_player_box) \
 		X("feet_marker",   WorldDraw::draw_player_marker) \
 		X("hull_alpha",    WorldDraw::player_box_alpha) \
-		X("overlay_life",  WorldDraw::overlay_life_scale) \
 		X("tag_end_speed", WorldDraw::tag_seg_end_speed) \
 		X("tag_cur_speed", WorldDraw::tag_cursor_speed) \
 		X("tag_end_eff",   WorldDraw::tag_seg_end_eff) \
@@ -7739,10 +7738,10 @@ namespace {
 		// (session 46i cleanup, user request).
 		ImGui::Checkbox("Enable in-world drawing", &WorldDraw::draw_master);
 		Theme::Help("Master switch for ALL in-world overlays (hull, run "
-			"line, wireframes, targets). OFF at every injection since the "
-			"2026-08-25 game update (safe default - the update made the old "
-			"render-thread overlay path freeze); enable once you're in a "
-			"map. Overlay diagnostics + the test box are in the Debug tab.");
+			"line, wireframes, targets). On by default and remembered; if "
+			"drawing ever freezes the game again, turning this off isolates "
+			"the overlay path completely. Overlay diagnostics + the test "
+			"box are in the Debug tab.");
 		ImGui::Separator();
 
 		Theme::Heading("Player & world");
@@ -7753,8 +7752,6 @@ namespace {
 		ImGui::Checkbox("Feet marker", &WorldDraw::draw_player_marker);
 		IntRow("Hull alpha", &WorldDraw::player_box_alpha, 0, 160);
 		Theme::Help("Fill opacity of the drawn hull; 0 draws wireframe only.");
-		FloatRow("Overlay lifetime", &WorldDraw::overlay_life_scale, 0.5f, 4.f, "%.2f", 0.05f, 0.2f);
-		Theme::Help("Multiplier of the frame time each overlay stays alive.");
 		ImGui::Checkbox("Speed tag: segment end", &WorldDraw::tag_seg_end_speed);
 		ImGui::SameLine();
 		ImGui::Checkbox("Speed tag: playhead", &WorldDraw::tag_cursor_speed);
@@ -7763,10 +7760,10 @@ namespace {
 		ImGui::Checkbox("Tag: time at segment end", &WorldDraw::tag_seg_end_time);
 		ImGui::SameLine();
 		ImGui::Checkbox("Tag: time at playhead", &WorldDraw::tag_cursor_time);
-		ImGui::Checkbox("Pause in-world draws while the solver works (crash isolation)",
+		ImGui::Checkbox("Pause in-world draws while the solver works",
 			&WorldDraw::pause_draw_busy);
-		Theme::Help("Lines/hulls vanish during search+verify+correction. If the "
-			"silent crashes stop with this ON, the engine overlay race is confirmed.");
+		Theme::Help("Lines/hulls vanish during search+verify+correction so the "
+			"frame budget goes to the search. Purely a performance valve.");
 
 		Theme::Heading("Live prediction",
 			"Predicted path drawn from the live player state every frame.");
@@ -9482,9 +9479,18 @@ namespace {
 		}
 
 		Theme::Heading("In-world overlay marshal");
-		ImGui::TextDisabled("Overlays are queued on the render thread and "
-			"submitted on the game thread (the update made render-thread "
-			"submission freeze). This says where any 'no draw' breaks.");
+		ImGui::TextDisabled("The draw pass runs frame-aligned on the game "
+			"thread (OverrideView hook) and every overlay lives one frame "
+			"(session 46k). This says where any 'no draw' breaks.");
+		ImGui::Checkbox("Duration-0 overlays (engine one-frame idiom)",
+			&WorldDraw::overlay_zero_life);
+		Theme::Help("Two ways to make an overlay live exactly one frame. OFF "
+			"(default): a 2 ms lifetime the next frame's clock advance "
+			"expires. ON: submit with duration 0, the engine's own "
+			"one-frame-overlay convention. Flip this in-game if elements "
+			"vanish entirely (epsilon expired too early) or leave "
+			"trails/stack up (epsilon outlives frames) - whichever mode "
+			"looks right is the keeper.");
 		{
 			long op = 0, od = 0, ld = 0, fa = 0;
 			unsigned long long frva = 0;
@@ -9518,7 +9524,8 @@ namespace {
 					"the player.";
 			}
 			ImGui::SameLine();
-			ImGui::TextDisabled("(needs in-world drawing enabled - Rendering tab)");
+			ImGui::TextDisabled("(needs to be in a map - the game thread "
+				"makes the calls)");
 		}
 	}
 

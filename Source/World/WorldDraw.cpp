@@ -1,4 +1,4 @@
-#include "WorldDraw.h"
+﻿#include "WorldDraw.h"
 #include "NetVars.h"
 #include "Prediction.h"
 #include "BspWorld.h"
@@ -14,14 +14,16 @@
 #include <cstrike/Interfaces/IVDebugOverlay.h>
 
 // ============================================================================
-// OVERLAY MARSHAL (session 46e). Producer = render thread (WorldDraw /
-// BspWorld via debugoverlay->Add*, which enqueue here). Consumer = game
-// thread (OverlayQueue::Drain from the CreateMove hook, which makes the real
-// engine vtable calls). A CRITICAL_SECTION guards only the brief buffer
-// append / swap; the engine calls run OUTSIDE the lock, on the game thread,
-// under SEH. This removes ALL debug-overlay engine calls from the render
-// thread - the render-thread submission that the 2026-08-25 game update made
-// fatal.
+// OVERLAY QUEUE (session 46e, retargeted 46k). All debugoverlay->Add* calls
+// enqueue here; Drain makes the real engine vtable calls, each under per-call
+// SEH with fault counting. Since 46k the whole draw pass runs on the GAME
+// thread (SubmitFrame from the OverrideView hook), so producer and consumer
+// are usually the same thread and Drain follows Render immediately - the
+// queue survives as the fault-isolation layer and as the thread-safe path
+// for the few render-thread producers left (the Debug tab's test box). The
+// CRITICAL_SECTION guards only the brief append/swap; engine calls run
+// outside it. Render-thread engine calls stay banned - the 2026-08-25 game
+// update made them freeze the game.
 // ============================================================================
 namespace {
 	struct OvlCmd {
@@ -155,12 +157,6 @@ void OverlayQueue::Stats(long* pushed, long* drained, long* last_drain,
 }
 
 namespace WorldDraw {
-	// Bumped once per real client command by the CreateMove hook (game
-	// thread); read by Render (render thread) to submit overlays exactly
-	// once per game tick. Reliable where the self-healed engine clock is
-	// not (session 46i).
-	volatile long game_tick = 0;
-
 	// Session 46j: default ON + persisted ("draw_master" in STAS_UI_PREFS).
 	// It began life as the 46c freeze-bisect kill switch; the game-thread
 	// overlay marshal (46e) fixed that freeze, so now it's just the normal
@@ -172,9 +168,14 @@ namespace WorldDraw {
 	bool draw_prediction    = false;
 
 	int   player_box_alpha   = 30;    // low: mostly wireframe, never reads as solid
-	float overlay_life_scale = 1.5f;  // ~one frame of lifetime (see FrameDuration)
+	bool  overlay_zero_life  = false; // Debug tab: duration-0 engine idiom (see header)
 	bool  show_replay_hud    = true;
-	bool  pause_draw_busy    = true;  // crash isolation: no overlays while solving
+	bool  pause_draw_busy    = true;  // perf valve: no overlays while solving
+
+	// Once-per-present latch: SubmitFrame takes it, OnPresent (EndScene)
+	// releases it, so reflection/portal extra view passes within one frame
+	// don't double-submit.
+	volatile long g_frame_submitted = 0;
 
 	int   pred_ticks       = 66;      // ~1s at 66-tick
 	bool  pred_live_input  = true;    // reflect what you're actually pressing
@@ -357,44 +358,30 @@ namespace {
 		       v.Z > -kMax && v.Z < kMax;
 	}
 
-	// PLAYER-ATTACHED overlays (hull, origin dot, live prediction) use a
-	// tick-sized lifetime: they track a moving entity, and any lifetime
-	// stretching leaves visible trails on it ("ghosting on the active player
-	// hitbox"). Refreshed by FrameDuration each submission.
-	float g_dur_live = 0.03f;
+	// Player-attached overlays share the same one-frame lifetime as
+	// everything else now; kept as a separate variable only because the
+	// emitters read it by name.
+	float g_dur_live = 0.f;
 
-	// Overlay lifetimes, TICK-BASED (session 46j). Overlays are submitted
-	// once per GAME TICK (the game_tick throttle) and expire against the
-	// engine's curtime - so a lifetime shorter than one tick leaves a dark
-	// gap before the next tick's replacement lands: the user-reported
-	// "CRT flicker". The old version sized lifetimes from the RENDER frame
-	// interval (~3-10 ms at high fps), which was right when submission was
-	// per-render-frame and is exactly wrong now. Lifetime = tick interval
-	// x margin: consecutive submissions OVERLAP briefly (~1/3 tick) instead
-	// of gapping - steady image, and on a moving hull the two copies sit
-	// only one tick of movement apart (~7 u at full speed): crisp, no trail.
+	// Overlay lifetime, FRAME-ALIGNED (session 46k). Submission happens
+	// once per rendered frame (SubmitFrame via the OverrideView hook),
+	// added BEFORE the engine draws that frame's overlays - so the only
+	// correct lifetime is "this frame, then gone": drawn exactly once,
+	// purged before the next frame's fresh batch. Anything longer overlaps
+	// the next batch (double-drawn translucent hulls = the black flashes;
+	// offset copies = misplaced elements); anything keyed to a clock we
+	// guess at gaps or stacks (the whole 46i-46j strobe saga). Two ways to
+	// say "one frame" to the engine, switchable in-game from the Debug tab:
+	//   epsilon (default) - end time = now + 2 ms: alive for this frame's
+	//     draw (curtime is constant within a frame), expired by the next
+	//     frame's clock advance whenever the frame time exceeds 2 ms
+	//     (i.e. anything under ~500 fps).
+	//   duration 0 - the Source "one frame overlay" idiom (drawn once,
+	//     purged after the pass), if this engine build still honors it.
 	float FrameDuration() {
-		float tick = Prediction::LastDiag().interval_per_tick;
-		if (tick <= 0.f || tick > 0.1f)
-			tick = 0.015f;   // 66-tick default until a sim measures it
-
-		float scale = WorldDraw::overlay_life_scale;
-		if (scale < 0.5f) scale = 0.5f;
-		if (scale > 6.0f) scale = 6.0f;
-
-		// Player-attached lifetime: one tick + overlap margin, slider
-		// deliberately NOT applied (stretching this one draws trails).
-		g_dur_live = tick * 1.35f;
-		if (g_dur_live < 0.02f) g_dur_live = 0.02f;
-		if (g_dur_live > 0.20f) g_dur_live = 0.20f;
-
-		// Static drawings (run line, markers, tags) don't move between
-		// submissions, so extra lifetime just adds flicker resistance
-		// against render/solver hitches; the slider scales it.
-		float duration = tick * (scale > 1.35f ? scale : 1.35f);
-		if (duration < 0.02f) duration = 0.02f;
-		if (duration > 0.40f) duration = 0.40f;
-		return duration;
+		const float d = WorldDraw::overlay_zero_life ? 0.f : 0.002f;
+		g_dur_live = d;
+		return d;
 	}
 }
 
@@ -410,6 +397,40 @@ bool WorldDraw::OverlayTake(int count) {
 		return false;
 	g_ovl_left -= count;
 	return true;
+}
+
+namespace {
+	// SEH shell for the whole in-world pass (POD frame only). A fault in
+	// sampling/enqueue/drain becomes a logged report, not a dead game.
+	bool GuardedSubmit(int* code) {
+		__try {
+			WorldDraw::Render();
+			OverlayQueue::Drain();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			*code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
+}
+
+// Called from the OverrideView hook: game thread, once per rendered frame,
+// before the engine draws it (see the header for why that alignment is the
+// whole design). The latch collapses extra view passes within one frame.
+void WorldDraw::SubmitFrame() {
+	if (InterlockedExchange(&g_frame_submitted, 1))
+		return;
+	static int s_reported = 0;
+	int code = 0;
+	if (!GuardedSubmit(&code) && s_reported < 3) {
+		s_reported++;
+		TasEditor::NoteExternalFault("WorldDraw::SubmitFrame", code);
+	}
+}
+
+// Called from the EndScene hook (render thread) once per present.
+void WorldDraw::OnPresent() {
+	InterlockedExchange(&g_frame_submitted, 0);
 }
 
 void WorldDraw::Render() {
@@ -453,32 +474,14 @@ void WorldDraw::Render() {
 	if (s_frames_since_inject < 300)
 		g_ovl_left = 300;
 
-	// SUBMIT ONCE PER GAME TICK (session 46i). WorldDraw runs on the render
-	// thread, which can spin many frames per game tick; enqueuing every
-	// render frame would flood the game-thread drain (and, when the game is
-	// paused and overlays never expire, overflow the engine's overlay list -
-	// the 2026-08-06 crash). The throttle used to key on Prediction::
-	// CurTime(), but after the 2026-08-25 update that clock read stalls for
-	// the tool (even while the engine's own curtime advances), so it fired
-	// exactly once and then blocked forever - the "hull flashes for one
-	// frame then vanishes" bug. The reliable tick signal is the GAME THREAD
-	// itself: CreateMove bumps game_tick once per real command. Enqueue only
-	// when it advances - refreshes overlays every tick while running, and
-	// pauses naturally when the game stops generating commands (no drain
-	// either, so no overflow).
-	{
-		static long s_last_tick = -0x7fffffff;
-		const long t = game_tick;
-		if (t == s_last_tick) { g_diag = d; return; }
-		s_last_tick = t;
-	}
+	// (No cadence throttle: this runs once per rendered frame by
+	// construction - SubmitFrame's once-per-present latch - and every
+	// overlay lives ~one frame, so the paused-game overflow the old
+	// per-tick throttle guarded against can't accumulate either.)
 
-	// Crash isolation: while the solver's HEAVY phases churn (search /
-	// verify / batch), submit NOTHING. The engine expires its overlay list
-	// on the game thread while we add from the render hook; if the silent
-	// heap-corruption crashes stop with this pause active, that race is
-	// confirmed (then the real fix is game-thread submission). Brief
-	// corrections don't pause - a stalled one used to blank the world.
+	// Perf valve: while the solver's HEAVY phases churn (search / verify /
+	// batch), submit nothing - the frame budget belongs to the search.
+	// Brief corrections don't pause; a stalled one used to blank the world.
 	if (pause_draw_busy && TasEditor::SearchHeavy()) {
 		g_diag = d;
 		return;
@@ -488,7 +491,7 @@ void WorldDraw::Render() {
 	// this function froze the game once with only the coarse "endscene:
 	// worlddraw" note to go on - after any future freeze the SlotFrame
 	// line names the exact stage that never returned.
-	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: live overlays");
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: live overlays");
 
 	const float   duration = FrameDuration();
 	const QAngle  kNoRotation(0.f, 0.f, 0.f);
@@ -527,7 +530,7 @@ void WorldDraw::Render() {
 			// ENQUEUES (the real engine call happens on the game thread in
 			// OverlayQueue::Drain), so it can no longer hang here - the
 			// breadcrumb just marks the draw code reached the first submit.
-			Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: box0 (enqueue)");
+			Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: box0 (enqueue)");
 			debugoverlay->AddBoxOverlay(d.origin, kHullMins, maxs, kNoRotation,
 			                            255, 64, 64, a, g_dur_live);
 		}
@@ -566,7 +569,7 @@ void WorldDraw::Render() {
 		}
 	}
 
-	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: editor line");
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: editor line");
 
 	// (4) TAS editor run line (Phase 2): the simulated run drawn as an absolute
 	// polyline. The playhead is the edit boundary: ticks before it draw gray
@@ -809,9 +812,9 @@ void WorldDraw::Render() {
 
 	// (5) World geometry (1.1): brush wireframes from the map's BSP collision
 	// data, centered on the player. Self-guards and auto-loads on level change.
-	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: bsp render");
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: bsp render");
 	BspWorld::Render(d.origin, d.have_player, duration);
-	Breadcrumb::Note(Breadcrumb::SlotFrame, "wd: done");
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: done");
 
 	g_diag = d;
 }

@@ -170,15 +170,6 @@ namespace {
 			return false;
 		}
 	}
-	bool GuardedWorldDrawRender(int* code) {
-		__try {
-			WorldDraw::Render();
-			return true;
-		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			*code = static_cast<int>(GetExceptionCode());
-			return false;
-		}
-	}
 }
 
 // Load Segoe UI at 16px and apply the graphite/pink theme once, right after
@@ -398,23 +389,22 @@ void RecordPanel::Draw() {
 
 void BasehookInterface::OnEndScene() {
 
-	// Editor sim orchestration + in-world overlays run every frame, independent
-	// of the menu. Both self-guard when out of game - and both run under
-	// hook-level SEH so a fault becomes a logged report, not a dead game
-	// (transient: the next frame tries again; the log has the evidence).
+	// Editor sim orchestration runs every frame, independent of the menu; it
+	// self-guards when out of game and runs under hook-level SEH so a fault
+	// becomes a logged report, not a dead game (transient: the next frame
+	// tries again; the log has the evidence). The in-world draw pass no
+	// longer lives here (session 46k): it runs on the GAME thread from the
+	// OverrideView hook, frame-aligned; this hook only releases its
+	// once-per-present latch.
 	{
-		static int upd_reported = 0, wd_reported = 0;
+		static int upd_reported = 0;
 		int code = 0;
 		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: editor update");
 		if (!GuardedEditorUpdate(&code) && upd_reported < 3) {
 			upd_reported++;
 			TasEditor::NoteExternalFault("TasEditor::Update", code);
 		}
-		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: worlddraw");
-		if (!GuardedWorldDrawRender(&code) && wd_reported < 3) {
-			wd_reported++;
-			TasEditor::NoteExternalFault("WorldDraw::Render", code);
-		}
+		WorldDraw::OnPresent();
 		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: hud + menu");
 	}
 

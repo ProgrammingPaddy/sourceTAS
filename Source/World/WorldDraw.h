@@ -7,20 +7,12 @@
 // strictly observational: it reads the player's networked origin/flags and
 // queues overlays. It never writes game state or touches movement/prediction.
 namespace WorldDraw {
-	// Game-tick counter (session 46i): bumped once per real command by the
-	// CreateMove hook (game thread), read by Render to throttle overlay
-	// submission to one batch per tick - reliable where the self-healed
-	// engine clock is not.
-	extern volatile long game_tick;
-
-	// MASTER in-world drawing gate (session 46c). Default OFF and NOT
-	// persisted: every injection starts with zero overlay submission, so
-	// injecting can never freeze on the debug-overlay path (the 2026-08-25
-	// game update made the FIRST overlay call after injection hang the
-	// render thread - breadcrumb "wd: live overlays" with no "wd: done").
-	// Enable from the Rendering tab once in a steady frame loop; if
-	// enabling freezes, that isolates the overlay path with certainty and
-	// the finer breadcrumbs name the exact call.
+	// MASTER in-world drawing gate. Born as the 46c freeze-bisect kill
+	// switch (the 2026-08-25 update made render-thread overlay calls hang
+	// the game); the game-thread submission architecture removed that
+	// hazard, so since 46j it's a normal user toggle - default ON and
+	// persisted ("draw_master" in STAS_UI_PREFS). If drawing ever freezes
+	// again, turning it off still isolates the overlay path completely.
 	extern bool draw_master;
 
 	// Menu-controlled toggles.
@@ -31,8 +23,13 @@ namespace WorldDraw {
 
 	// Menu-controlled tuning.
 	extern int   player_box_alpha;   // hull fill alpha; 0 = wireframe only
-	extern float overlay_life_scale; // overlay lifetime as a multiple of frame time
 	extern bool  show_replay_hud;    // status HUD while a run replays
+	// Debug-tab experiment switch (session 46k): overlays are frame-aligned
+	// (submitted per rendered frame, meant to live exactly one frame). OFF =
+	// epsilon lifetime (purged by the next frame's clock advance); ON = the
+	// engine's duration-0 "one frame" idiom. Flip it in-game if elements
+	// ever vanish entirely or leave trails - no rebuild needed.
+	extern bool  overlay_zero_life;
 	// Crash-isolation switch: skip ALL overlay submission while the solver
 	// machinery runs. The engine walks/expires its overlay list on the game
 	// thread while we submit from the render hook - a probabilistic race that
@@ -75,8 +72,21 @@ namespace WorldDraw {
 	extern bool  pred_jump;          // override: hold IN_JUMP
 	extern bool  pred_duck;          // override: hold IN_DUCK
 
-	// Queue overlays for whatever is enabled. Safe to call every frame; it
-	// no-ops when out of game or when an interface is missing.
+	// FRAME-ALIGNED submission (session 46k). SubmitFrame runs the whole
+	// in-world pass - sample state, enqueue overlays, drain the queue into
+	// the engine - and is called from the OverrideView hook: game thread,
+	// once per rendered frame, BEFORE the engine draws that frame. Sampling
+	// and rendering are therefore the same frame on the same thread (no
+	// stale-position frames, no cross-thread engine calls), and each batch
+	// lives ~one frame, so exactly one copy of everything is ever alive
+	// (no strobe gaps, no overlap flashes). Extra OverrideView calls within
+	// one frame (reflection views) are collapsed by a once-per-present
+	// latch that OnPresent (the EndScene hook) resets.
+	void SubmitFrame();
+	void OnPresent();
+
+	// The pass body (called by SubmitFrame under its SEH shell). No-ops
+	// when out of game or when an interface is missing.
 	void Render();
 
 	// Overlay-marshal diagnostics (session 46f/g): lifetime pushed/drained

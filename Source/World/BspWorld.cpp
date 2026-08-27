@@ -1,4 +1,4 @@
-#include "BspWorld.h"
+﻿#include "BspWorld.h"
 #include "../Menu/Breadcrumb.h"
 #include "WorldDraw.h"
 
@@ -1025,14 +1025,14 @@ bool BspWorld::LoadCurrentMap() {
 
 	char last_error[256] = "no candidates tried";
 	for (const std::string& path : candidates) {
-		Breadcrumb::Note(Breadcrumb::SlotFrame, "bsp: parse %.100s",
+		Breadcrumb::Note(Breadcrumb::SlotWorld, "bsp: parse %.100s",
 			path.c_str());
 		if (LoadFromFile(path)) {
-			Breadcrumb::Note(Breadcrumb::SlotFrame, "bsp: parse ok, geo");
+			Breadcrumb::Note(Breadcrumb::SlotWorld, "bsp: parse ok, geo");
 			g_level = level;
 			strncpy_s(g_status.map, level.c_str(), _TRUNCATE);
 			LoadGeo();   // restore this map's tags + board targets
-			Breadcrumb::Note(Breadcrumb::SlotFrame, "bsp: load complete");
+			Breadcrumb::Note(Breadcrumb::SlotWorld, "bsp: load complete");
 			return true;
 		}
 		strncpy_s(last_error, g_status.error, _TRUNCATE);
@@ -1240,10 +1240,10 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 			if (!geo.empty())
 				has_geo = GetFileAttributesA(geo.c_str()) != INVALID_FILE_ATTRIBUTES;
 			if (draw_wireframe || has_geo) {
-				Breadcrumb::Note(Breadcrumb::SlotFrame,
+				Breadcrumb::Note(Breadcrumb::SlotWorld,
 					"bsp: autoload begin (%s)", level.c_str());
 				LoadCurrentMap();
-				Breadcrumb::Note(Breadcrumb::SlotFrame,
+				Breadcrumb::Note(Breadcrumb::SlotWorld,
 					"bsp: autoload end (%s)",
 					g_status.loaded ? "loaded" : g_status.error);
 			}

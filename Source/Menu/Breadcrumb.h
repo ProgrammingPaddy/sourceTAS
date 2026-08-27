@@ -22,6 +22,7 @@ namespace Breadcrumb {
 		SlotUpdate  = 3,   // last stage reached INSIDE TasEditor::Update
 		SlotGame    = 4,   // game thread: CreateMove enter/exit
 		SlotPred    = 5,   // game thread: FinishMove hook stages
+		SlotWorld   = 6,   // game thread: in-world draw pass (WorldDraw/BSP stages)
 		SlotCount
 	};
 
