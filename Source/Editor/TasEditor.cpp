@@ -20,6 +20,7 @@
 #include <shlobj.h>
 
 #include <cstrike/sdk.h>
+#include <cstrike/Classes/IClientEntity.h>   // interpolated-origin read (46y)
 
 #include "../World/NetVars.h"
 #include <cstrike/Interfaces/IEngineTrace.h>
@@ -524,6 +525,11 @@ namespace {
 	std::vector<Vector> g_demo_line;
 	std::string g_demo_line_name;
 	std::vector<std::string> g_demo_csvs;   // browser list (*.csv filenames)
+	// Full rows (parallel to g_demo_line) + the anchor-picker selection
+	// (46y): pick any point on the demo and start the TAS from it.
+	struct DemoRow { float sim; Vector pos; float pitch, yaw; };
+	std::vector<DemoRow> g_demo_rows;
+	int g_demo_mark = 0;   // selected row, drawn as a gold in-world mark
 
 	bool g_dirty = false;
 	unsigned long long g_dirty_ms = 0;
@@ -9284,14 +9290,19 @@ namespace {
 				g_demo_csvs.push_back(fd.cFileName);
 		} while (FindNextFileA(h, &fd));
 		FindClose(h);
-		// The lab writes two files per demo: <name>.csv (the FULL capture,
-		// pre-run idle included) and <name>_run.csv (the trimmed run slice -
-		// the one worth drawing). Run slices sort first.
+		// Files per demo: <name>_smooth.csv (46y - the dense INTERPOLATED
+		// per-frame track, full line fidelity), <name>_run.csv (the lab's
+		// trimmed run slice of the raw snapshots) and <name>.csv (the full
+		// raw snapshot capture). Smooth first, then run slices.
+		auto rank = [](const std::string& n) {
+			if (n.find("_smooth.csv") != std::string::npos) return 0;
+			if (n.find("_run.csv") != std::string::npos) return 1;
+			return 2;
+		};
 		std::sort(g_demo_csvs.begin(), g_demo_csvs.end(),
-			[](const std::string& a, const std::string& b) {
-				const bool ra = a.find("_run.csv") != std::string::npos;
-				const bool rb = b.find("_run.csv") != std::string::npos;
-				if (ra != rb) return ra;
+			[&rank](const std::string& a, const std::string& b) {
+				const int ra = rank(a), rb = rank(b);
+				if (ra != rb) return ra < rb;
 				return a < b;
 			});
 	}
@@ -9304,15 +9315,23 @@ namespace {
 			return false;
 		}
 		std::vector<Vector> pts;
+		std::vector<DemoRow> rows;
 		char line[512];
 		bool header = true;
 		while (fgets(line, sizeof(line), f)) {
 			if (header) { header = false; continue; }   // "sim,tick,x,y,z,..."
-			float sim = 0.f, x = 0.f, y = 0.f, z = 0.f;
+			float sim = 0.f, x = 0.f, y = 0.f, z = 0.f, pi = 0.f, ya = 0.f;
 			int tick = 0;
-			if (sscanf_s(line, "%f,%d,%f,%f,%f", &sim, &tick, &x, &y, &z) == 5) {
+			if (sscanf_s(line, "%f,%d,%f,%f,%f,%f,%f",
+				&sim, &tick, &x, &y, &z, &pi, &ya) >= 5) {
 				pts.push_back(Vector(x, y, z));
-				if (pts.size() >= 200000)
+				DemoRow r;
+				r.sim = sim;
+				r.pos = Vector(x, y, z);
+				r.pitch = pi;
+				r.yaw = ya;
+				rows.push_back(r);
+				if (pts.size() >= 400000)
 					break;   // safety bound
 			}
 		}
@@ -9322,6 +9341,8 @@ namespace {
 			return false;
 		}
 		g_demo_line.swap(pts);
+		g_demo_rows.swap(rows);
+		g_demo_mark = 0;
 		g_demo_line_name = name;
 		g_status = "Demo line: " + name + " ("
 			+ std::to_string(g_demo_line.size()) + " points).";
@@ -9346,6 +9367,22 @@ namespace {
 		char  g_status[256] = "idle";
 		struct Row { float sim; Vector pos; float pitch, yaw; };
 		std::vector<Row> g_rows;
+		// DENSE track (46y): the engine's INTERPOLATED origin per render
+		// frame - the smooth path the demo viewer actually sees, for
+		// full-fidelity reference lines. The raw snapshot rows above stay
+		// the solver's ground truth (a TV demo only CARRIES the runner at
+		// its snapshot rate; everything between is the engine's interp).
+		std::vector<Row> g_rows_dense;
+
+		// Guarded interpolated-origin read (vtable call on a demo entity).
+		bool InterpOrigin(void* ent, Vector* out) {
+			__try {
+				*out = reinterpret_cast<IClientEntity*>(ent)->GetAbsOrigin();
+				return true;
+			} __except (EXCEPTION_EXECUTE_HANDLER) {
+				return false;
+			}
+		}
 
 		// ALL offsets resolve from the DT_CSPlayer root (capture fix round
 		// 3): the walker recursion from the player class is the PROVEN path
@@ -9461,30 +9498,35 @@ namespace {
 				name = name.substr(cut + 1);
 			const std::string dir = SolverDir() + "\\demo_traces";
 			CreateDirectoryA(dir.c_str(), nullptr);
-			const std::string path = dir + "\\" + name + ".csv";
-			FILE* o = nullptr;
-			if (fopen_s(&o, path.c_str(), "w") != 0 || !o) {
-				g_rows.clear();
-				return;
-			}
-			fprintf(o, "sim,tick,x,y,z,pitch,yaw,hspeed\n");
-			for (size_t i = 0; i < g_rows.size(); ++i) {
-				const Row& r = g_rows[i];
-				float hs = 0.f;
-				if (i > 0) {
-					const float dt = r.sim - g_rows[i - 1].sim;
-					if (dt > 1e-6f) {
-						const float dx = r.pos.X - g_rows[i - 1].pos.X;
-						const float dy = r.pos.Y - g_rows[i - 1].pos.Y;
-						hs = sqrtf(dx * dx + dy * dy) / dt;
+			auto WriteTrace = [](const std::string& path,
+			                     const std::vector<Row>& rows) {
+				FILE* o = nullptr;
+				if (fopen_s(&o, path.c_str(), "w") != 0 || !o)
+					return;
+				fprintf(o, "sim,tick,x,y,z,pitch,yaw,hspeed\n");
+				for (size_t i = 0; i < rows.size(); ++i) {
+					const Row& r = rows[i];
+					float hs = 0.f;
+					if (i > 0) {
+						const float dt = r.sim - rows[i - 1].sim;
+						if (dt > 1e-6f) {
+							const float dx = r.pos.X - rows[i - 1].pos.X;
+							const float dy = r.pos.Y - rows[i - 1].pos.Y;
+							hs = sqrtf(dx * dx + dy * dy) / dt;
+						}
 					}
+					fprintf(o, "%.6f,%d,%.3f,%.3f,%.3f,%.2f,%.2f,%.1f\n",
+						r.sim, static_cast<int>(r.sim / 0.015f + 0.5f),
+						r.pos.X, r.pos.Y, r.pos.Z, r.pitch, r.yaw, hs);
 				}
-				fprintf(o, "%.6f,%d,%.3f,%.3f,%.3f,%.2f,%.2f,%.1f\n",
-					r.sim, static_cast<int>(r.sim / 0.015f + 0.5f),
-					r.pos.X, r.pos.Y, r.pos.Z, r.pitch, r.yaw, hs);
-			}
-			fclose(o);
+				fclose(o);
+			};
+			WriteTrace(dir + "\\" + name + ".csv", g_rows);
+			// The dense interpolated track (46y): the full-fidelity line.
+			if (!g_rows_dense.empty())
+				WriteTrace(dir + "\\" + name + "_smooth.csv", g_rows_dense);
 			g_rows.clear();
+			g_rows_dense.clear();
 		}
 
 		void Launch();
@@ -9678,6 +9720,46 @@ namespace {
 					"capturing %d/%d - %d rows", g_idx + 1,
 					static_cast<int>(g_queue.size()),
 					static_cast<int>(g_rows.size()));
+			float eye_pitch = 0.f, eye_yaw = 0.f;
+			if (OffEye() > 0) {
+				const float* ang = reinterpret_cast<float*>(
+					static_cast<char*>(target) + OffEye());
+				eye_pitch = ang[0];
+				eye_yaw = ang[1];
+			}
+			// Dense per-frame row (46y): interpolated origin, deduped by
+			// distance so idle stretches don't bloat the file. The GetAbsOrigin
+			// vtable slot has never been exercised on this build, so every
+			// sample is VALIDATED against the trusted netvar origin (they can
+			// only differ by the interp window's travel) - a wrong slot
+			// returning plausible garbage produces zero rows, never a junk
+			// file.
+			if (OffOrigin() > 0 && g_rows_dense.size() < 400000) {
+				const Vector net_pos = *reinterpret_cast<Vector*>(
+					static_cast<char*>(target) + OffOrigin());
+				Vector ip;
+				if (InterpOrigin(target, &ip)) {
+					const float vx = ip.X - net_pos.X, vy = ip.Y - net_pos.Y,
+						vz = ip.Z - net_pos.Z;
+					const bool sane = ip.X == ip.X && ip.Y == ip.Y && ip.Z == ip.Z
+						&& vx * vx + vy * vy + vz * vz < 512.f * 512.f;
+					bool fresh = sane && (g_rows_dense.empty()
+						|| [&] {
+							const Vector& lp = g_rows_dense.back().pos;
+							const float dx = ip.X - lp.X, dy = ip.Y - lp.Y,
+								dz = ip.Z - lp.Z;
+							return dx * dx + dy * dy + dz * dz >= 0.0625f;
+						}());
+					if (fresh) {
+						Row r;
+						r.sim = sim;
+						r.pos = ip;
+						r.pitch = eye_pitch;
+						r.yaw = eye_yaw;
+						g_rows_dense.push_back(r);
+					}
+				}
+			}
 			if (sim > g_last_sim + 1e-6f) {
 				g_last_sim = sim;
 				g_stagnant = 0;
@@ -9687,14 +9769,8 @@ namespace {
 					? *reinterpret_cast<Vector*>(static_cast<char*>(target)
 						+ OffOrigin())
 					: Vector();
-				r.pitch = 0.f;
-				r.yaw = 0.f;
-				if (OffEye() > 0) {
-					const float* ang = reinterpret_cast<float*>(
-						static_cast<char*>(target) + OffEye());
-					r.pitch = ang[0];
-					r.yaw = ang[1];
-				}
+				r.pitch = eye_pitch;
+				r.yaw = eye_yaw;
 				g_rows.push_back(r);
 			} else if (++g_stagnant > 1200) {
 				// ~15-20s frozen: the cut demo idled out at its end. Stop
@@ -9764,6 +9840,8 @@ namespace {
 			ImGui::SameLine();
 			if (ImGui::Button("Clear line##dt")) {
 				g_demo_line.clear();
+				g_demo_rows.clear();
+				g_demo_mark = 0;
 				g_demo_line_name.clear();
 				s_demo_note[0] = 0;
 			}
@@ -9792,11 +9870,15 @@ namespace {
 				ImGui::TextDisabled("(none - run the capture queue above, "
 					"then Refresh)");
 			for (int i = 0; i < static_cast<int>(g_demo_csvs.size()); ++i) {
+				const bool is_smooth =
+					g_demo_csvs[i].find("_smooth.csv") != std::string::npos;
 				const bool is_run =
 					g_demo_csvs[i].find("_run.csv") != std::string::npos;
 				char row[320];
 				Sfmt(row, "%s   [%s]##dtrace%d", g_demo_csvs[i].c_str(),
-					is_run ? "run slice" : "full capture", i);
+					is_smooth ? "smooth per-frame"
+					          : is_run ? "run slice (snapshots)"
+					                   : "full capture (snapshots)", i);
 				if (ImGui::Selectable(row, s_demo_sel == i))
 					s_demo_sel = i;
 				// Double-click a row = load it (no separate button needed).
@@ -9807,6 +9889,54 @@ namespace {
 			}
 			ImGui::EndChild();
 			PassWheel();
+
+			// ANCHOR FROM THE DEMO (46y): pick any point on the loaded line
+			// (gold in-world mark) and start the TAS from it - position and
+			// view from the row, velocity from the slope across the nearest
+			// rows whose sim time differs (smooth files repeat sim between
+			// snapshots).
+			if (!g_demo_rows.empty()) {
+				const int last = static_cast<int>(g_demo_rows.size()) - 1;
+				if (g_demo_mark < 0) g_demo_mark = 0;
+				if (g_demo_mark > last) g_demo_mark = last;
+				ImGui::PushItemWidth(kSliderW);
+				ImGui::SliderInt("##demomark", &g_demo_mark, 0, last);
+				ImGui::PopItemWidth();
+				ImGui::SameLine();
+				ImGui::TextDisabled("demo point (gold in-world mark)");
+				const DemoRow& dr = g_demo_rows[g_demo_mark];
+				Vector vel(0.f, 0.f, 0.f);
+				{
+					int a = g_demo_mark, b = g_demo_mark;
+					while (a > 0 && g_demo_rows[a].sim >= dr.sim - 1e-6f) a--;
+					while (b < last && g_demo_rows[b].sim <= dr.sim + 1e-6f) b++;
+					const float dt = g_demo_rows[b].sim - g_demo_rows[a].sim;
+					if (dt > 1e-4f) {
+						vel.X = (g_demo_rows[b].pos.X - g_demo_rows[a].pos.X) / dt;
+						vel.Y = (g_demo_rows[b].pos.Y - g_demo_rows[a].pos.Y) / dt;
+						vel.Z = (g_demo_rows[b].pos.Z - g_demo_rows[a].pos.Z) / dt;
+					}
+				}
+				ImGui::Text("pos %.1f %.1f %.1f   yaw %.1f   pitch %.1f   speed %.0f u/s",
+					dr.pos.X, dr.pos.Y, dr.pos.Z, dr.yaw, dr.pitch, Speed2D(vel));
+				if (ImGui::Button("Set anchor from demo point")) {
+					g_anchor.valid = true;
+					g_anchor.origin = dr.pos;
+					g_anchor.velocity = vel;
+					g_anchor.pitch = dr.pitch;
+					g_anchor.yaw = dr.yaw;
+					g_anchor.ducked = false;
+					g_anchor.stamina = 0.f;
+					MarkDirty();
+					g_status = "Anchor set from the demo point - the run now "
+						"starts on the demo's path.";
+				}
+				Theme::Help("Sets the RUN ANCHOR to this demo point (position "
+					"+ view from the row, velocity from the trace slope), so "
+					"the TAS simulates from exactly there - build segments "
+					"against the demo and test play from its line. Duck state "
+					"is not captured (assumed standing).");
+			}
 		}
 
 		SubHeading("Consistent start (solve anchor)");
@@ -11008,6 +11138,14 @@ bool TasEditor::GetDemoLine(const Vector** pts, int* count) {
 		return false;
 	if (pts) *pts = g_demo_line.data();
 	if (count) *count = static_cast<int>(g_demo_line.size());
+	return true;
+}
+
+bool TasEditor::GetDemoMark(Vector* out) {
+	if (!g_open || g_demo_rows.empty()
+		|| g_demo_mark < 0 || g_demo_mark >= static_cast<int>(g_demo_rows.size()))
+		return false;
+	if (out) *out = g_demo_rows[g_demo_mark].pos;
 	return true;
 }
 

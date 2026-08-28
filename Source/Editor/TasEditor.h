@@ -116,6 +116,9 @@ namespace TasEditor {
 	// run/sim state so it draws even with no line of our own; false when no
 	// trace is loaded or the editor is closed.
 	bool GetDemoLine(const Vector** pts, int* count);
+	// The anchor picker's selected demo point (drawn as a gold in-world
+	// mark). False when no trace is loaded or the editor is closed.
+	bool GetDemoMark(Vector* out);
 	// The editor's measured physics bounds for contact detection (gravity
 	// u/s^2 and the max per-tick air-accel add u/s) - so the live prediction
 	// line's analyzer uses the same calibrated numbers as the run line's.

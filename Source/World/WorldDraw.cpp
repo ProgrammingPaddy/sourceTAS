@@ -648,6 +648,14 @@ void WorldDraw::Render() {
 	// reference polyline - loaded from the Map Solve tab, independent of the
 	// run's own line (it draws with no sim at all).
 	if (show_demo_line) {
+		// The anchor picker's selected demo point: a gold mark on the line.
+		Vector mk;
+		if (TasEditor::GetDemoMark(&mk) && FiniteWorldPoint(mk) && OverlayTake(2)) {
+			debugoverlay->AddBoxOverlay(mk, Vector(-2.f, -2.f, 0.f),
+				Vector(2.f, 2.f, 6.f), kNoRotation, 255, 210, 60, 220, duration);
+			debugoverlay->AddLineOverlay(mk,
+				Vector(mk.X, mk.Y, mk.Z + 48.f), 255, 210, 60, false, duration);
+		}
 		const Vector* dl = nullptr;
 		int dn = 0;
 		if (TasEditor::GetDemoLine(&dl, &dn) && dn > 1) {
