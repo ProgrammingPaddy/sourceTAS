@@ -111,6 +111,11 @@ namespace TasEditor {
 		int board_event_count;
 	};
 	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
+	// The loaded demo-trace reference line (a DemoCap solver\demo_traces CSV:
+	// the spectated runner's per-snapshot feet positions). Independent of the
+	// run/sim state so it draws even with no line of our own; false when no
+	// trace is loaded or the editor is closed.
+	bool GetDemoLine(const Vector** pts, int* count);
 	// The editor's measured physics bounds for contact detection (gravity
 	// u/s^2 and the max per-tick air-accel add u/s) - so the live prediction
 	// line's analyzer uses the same calibrated numbers as the run line's.

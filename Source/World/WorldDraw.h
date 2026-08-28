@@ -25,6 +25,8 @@ namespace WorldDraw {
 	// colored by how much of the arrival speed the impact clipped.
 	extern bool show_hitmarkers_pred;   // on the live prediction line
 	extern bool show_hitmarkers_run;    // on the editor run line
+	// Demo trace reference line (46w): a loaded DemoCap trace drawn violet.
+	extern bool show_demo_line;
 
 	// Menu-controlled tuning.
 	extern int   player_box_alpha;   // hull fill alpha; 0 = wireframe only

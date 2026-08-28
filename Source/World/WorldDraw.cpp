@@ -170,6 +170,7 @@ namespace WorldDraw {
 	bool draw_prediction    = false;
 	bool show_hitmarkers_pred = true;   // session 46n: board-contact crosses
 	bool show_hitmarkers_run  = true;
+	bool show_demo_line       = true;   // session 46w: demo-trace reference line
 
 	int   player_box_alpha   = 30;    // low: mostly wireframe, never reads as solid
 	bool  overlay_zero_life  = false; // Debug tab: duration-0 engine idiom (see header)
@@ -643,6 +644,33 @@ void WorldDraw::Render() {
 	// (green = at/above the min-eff threshold, orange = below); other future
 	// segments blue; boundary markers white; ghost hull at the cursor tick.
 	// Decimated so long runs stay within the overlay system's budget.
+	// DEMO TRACE LINE (46w): a captured expert run drawn as a violet
+	// reference polyline - loaded from the Map Solve tab, independent of the
+	// run's own line (it draws with no sim at all).
+	if (show_demo_line) {
+		const Vector* dl = nullptr;
+		int dn = 0;
+		if (TasEditor::GetDemoLine(&dl, &dn) && dn > 1) {
+			const int dstride = dn > 400 ? dn / 400 : 1;
+			Vector dprev = dl[0];
+			bool dprev_ok = FiniteWorldPoint(dprev);
+			for (int i = 1; i < dn; ++i) {
+				if (i != dn - 1 && (i % dstride) != 0)
+					continue;
+				const Vector dp = dl[i];
+				if (!FiniteWorldPoint(dp))
+					break;
+				if (!OverlayTake(1))
+					break;
+				if (dprev_ok)
+					debugoverlay->AddLineOverlay(dprev, dp, 190, 140, 255,
+						false, duration);
+				dprev = dp;
+				dprev_ok = true;
+			}
+		}
+	}
+
 	TasEditor::DrawData ed;
 	if (TasEditor::GetDrawData(ed)) {
 		if (ed.anchor.valid && FiniteWorldPoint(ed.anchor.origin))

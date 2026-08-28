@@ -518,6 +518,13 @@ namespace {
 	int  g_coast_from = -1;            // sim tick coast begins (-1 = disabled)
 	std::vector<Vector> g_coast_path;  // peeled coast origins (draw only)
 
+	// DEMO TRACE LINE (46w): a DemoCap trace CSV (solver\demo_traces -
+	// sim,tick,x,y,z,... rows captured off real demo playback) loaded as an
+	// in-world reference line. Draw-only; independent of the run/sim.
+	std::vector<Vector> g_demo_line;
+	std::string g_demo_line_name;
+	std::vector<std::string> g_demo_csvs;   // browser list (*.csv filenames)
+
 	bool g_dirty = false;
 	unsigned long long g_dirty_ms = 0;
 	bool g_sim_requested = false;
@@ -5414,6 +5421,7 @@ namespace {
 		X("pred_path",     WorldDraw::draw_prediction) \
 		X("hitmark_pred",  WorldDraw::show_hitmarkers_pred) \
 		X("hitmark_run",   WorldDraw::show_hitmarkers_run) \
+		X("demo_line",     WorldDraw::show_demo_line) \
 		X("pred_live",     WorldDraw::pred_live_input) \
 		X("pred_bhop",     WorldDraw::pred_autobhop) \
 		X("pred_ticks",    WorldDraw::pred_ticks) \
@@ -8303,6 +8311,10 @@ namespace {
 		ImGui::Checkbox("Hitmarkers: prediction line", &WorldDraw::show_hitmarkers_pred);
 		ImGui::SameLine();
 		ImGui::Checkbox("Hitmarkers: run line", &WorldDraw::show_hitmarkers_run);
+		ImGui::Checkbox("Demo trace line", &WorldDraw::show_demo_line);
+		Theme::Help("The demo trace loaded on the Map Solve tab, drawn as a "
+			"violet in-world reference line (the captured runner's feet "
+			"positions).");
 		Theme::Help("A cross where the line first contacts a surface after "
 			"being airborne - the ramp-board dial-in aid. Green = clean board "
 			"(little speed clipped), amber = scrubbed, red = hard hit; the "
@@ -9259,6 +9271,54 @@ namespace {
 	std::mutex g_cmdq_mu;
 	std::vector<std::string> g_cmdq;
 
+	// ---- DEMO TRACE LINES (46w): browse + load DemoCap CSVs --------------
+	void RefreshDemoTraces() {
+		g_demo_csvs.clear();
+		const std::string dir = SolverDir() + "\\demo_traces";
+		WIN32_FIND_DATAA fd;
+		HANDLE h = FindFirstFileA((dir + "\\*.csv").c_str(), &fd);
+		if (h == INVALID_HANDLE_VALUE)
+			return;
+		do {
+			if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+				g_demo_csvs.push_back(fd.cFileName);
+		} while (FindNextFileA(h, &fd));
+		FindClose(h);
+		std::sort(g_demo_csvs.begin(), g_demo_csvs.end());
+	}
+
+	bool LoadDemoTrace(const std::string& name) {
+		const std::string path = SolverDir() + "\\demo_traces\\" + name;
+		FILE* f = nullptr;
+		if (fopen_s(&f, path.c_str(), "r") != 0 || !f) {
+			g_status = "Couldn't open " + name + ".";
+			return false;
+		}
+		std::vector<Vector> pts;
+		char line[512];
+		bool header = true;
+		while (fgets(line, sizeof(line), f)) {
+			if (header) { header = false; continue; }   // "sim,tick,x,y,z,..."
+			float sim = 0.f, x = 0.f, y = 0.f, z = 0.f;
+			int tick = 0;
+			if (sscanf_s(line, "%f,%d,%f,%f,%f", &sim, &tick, &x, &y, &z) == 5) {
+				pts.push_back(Vector(x, y, z));
+				if (pts.size() >= 200000)
+					break;   // safety bound
+			}
+		}
+		fclose(f);
+		if (pts.size() < 2) {
+			g_status = name + ": no usable rows.";
+			return false;
+		}
+		g_demo_line.swap(pts);
+		g_demo_line_name = name;
+		g_status = "Demo line: " + name + " ("
+			+ std::to_string(g_demo_line.size()) + " points).";
+		return true;
+	}
+
 	// ---- DEMO TRACE CAPTURE (rebuild checklist M5.3) ---------------------
 	// The cut expert demos are TV-style: democmdinfo carries no camera and
 	// the runner exists only as a networked entity - so the ENGINE decodes
@@ -9659,6 +9719,44 @@ namespace {
 		}
 		ImGui::SameLine();
 		ImGui::TextUnformatted(DemoCap::g_status);
+
+		SubHeading("Demo trace lines");
+		ImGui::TextDisabled("A captured trace drawn in-world as a reference "
+			"line (the spectated runner's feet positions per snapshot).");
+		{
+			static int s_demo_sel = -1;
+			static bool s_demo_scanned = false;
+			if (!s_demo_scanned) {
+				s_demo_scanned = true;
+				RefreshDemoTraces();
+			}
+			if (ImGui::Button("Refresh##dt"))
+				RefreshDemoTraces();
+			ImGui::SameLine();
+			if (ImGui::Button("Load selected##dt") && s_demo_sel >= 0
+				&& s_demo_sel < static_cast<int>(g_demo_csvs.size()))
+				LoadDemoTrace(g_demo_csvs[s_demo_sel]);
+			ImGui::SameLine();
+			if (ImGui::Button("Clear line##dt")) {
+				g_demo_line.clear();
+				g_demo_line_name.clear();
+			}
+			if (!g_demo_line_name.empty()) {
+				ImGui::SameLine();
+				ImGui::TextDisabled("loaded: %s (%d pts)",
+					g_demo_line_name.c_str(),
+					static_cast<int>(g_demo_line.size()));
+			}
+			ImGui::BeginChild("demotraces", ImVec2(0, 90), true);
+			if (g_demo_csvs.empty())
+				ImGui::TextDisabled("(none - run the capture queue above, "
+					"then Refresh)");
+			for (int i = 0; i < static_cast<int>(g_demo_csvs.size()); ++i)
+				if (ImGui::Selectable(g_demo_csvs[i].c_str(), s_demo_sel == i))
+					s_demo_sel = i;
+			ImGui::EndChild();
+			PassWheel();
+		}
 
 		SubHeading("Consistent start (solve anchor)");
 		if (g_solve_anchor_valid || LoadSolveAnchorFile())
@@ -10852,6 +10950,14 @@ void TasEditor::TeleportToAnchor() {
 	g_tp_check = true;
 	g_tp_ms = GetTickCount64();
 	g_status = "Teleported (needs sv_cheats 1); measuring the landing...";
+}
+
+bool TasEditor::GetDemoLine(const Vector** pts, int* count) {
+	if (!g_open || g_demo_line.size() < 2)
+		return false;
+	if (pts) *pts = g_demo_line.data();
+	if (count) *count = static_cast<int>(g_demo_line.size());
+	return true;
 }
 
 void TasEditor::ContactTuning(float* gravity, float* max_add) {
