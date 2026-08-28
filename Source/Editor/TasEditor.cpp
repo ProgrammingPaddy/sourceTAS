@@ -5022,6 +5022,62 @@ namespace {
 		return true;
 	}
 
+	// SEGMENT ADJUST (session 46p, user spec): move the BOUNDARY between an
+	// adjacent pair tick by tick while the pair's TOTAL stays constant - one
+	// segment eats into the other, replacing the eaten span with its own
+	// content. Solver segments carry a solved schedule and prestrafe
+	// segments size themselves (the duration snap), so neither is eligible.
+	bool SegAdjustable(const EditSegment& s) {
+		if (s.raw)
+			return !s.frames.empty();
+		return !s.is_solver && !s.gen.prestrafe;
+	}
+
+	// Rebalance pair (i, i+1) so the FIRST has want_first ticks (clamped to
+	// leave both sides >= 1). Content rules: a generated segment just
+	// re-lengths (its closed loop recomputes; per-tick overrides clear, the
+	// standing edit rule). A RAW segment growing extends by HOLDING its edge
+	// frame (last frame when growing at its end, first frame when growing at
+	// its start); shrinking drops the eaten frames.
+	void ApplySegAdjust(int i, int want_first) {
+		if (i < 0 || i + 1 >= static_cast<int>(g_segs.size()))
+			return;
+		EditSegment& a = g_segs[i];
+		EditSegment& b = g_segs[i + 1];
+		if (!SegAdjustable(a) || !SegAdjustable(b))
+			return;
+		const int ta = a.Ticks(), tb = b.Ticks();
+		const int total = ta + tb;
+		if (total < 2)
+			return;
+		if (want_first < 1) want_first = 1;
+		if (want_first > total - 1) want_first = total - 1;
+		const int delta = want_first - ta;
+		if (delta == 0)
+			return;
+		// First of the pair: its END moves.
+		if (a.raw) {
+			if (delta > 0)
+				a.frames.insert(a.frames.end(), delta, a.frames.back());
+			else
+				a.frames.resize(want_first);
+		} else {
+			a.gen.ticks = want_first;
+			a.ovr.clear();
+		}
+		// Second of the pair: its START moves.
+		if (b.raw) {
+			if (delta > 0)
+				b.frames.erase(b.frames.begin(), b.frames.begin() + delta);
+			else
+				b.frames.insert(b.frames.begin(), -delta, b.frames.front());
+		} else {
+			b.gen.ticks = total - want_first;
+			b.ovr.clear();
+		}
+		MarkDirty();
+	}
+
 	void InsertSegment(EditSegment segment) {
 		const int at = (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) ? g_sel + 1
 			: static_cast<int>(g_segs.size());
@@ -6577,7 +6633,7 @@ namespace {
 				if (cs >= 0)
 					g_sel = cs;
 			}
-			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 190), true,
+			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 236), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			const int last = g_total > 0 ? g_total - 1 : 0;
 			ImGui::TextDisabled("Run playhead");
@@ -6609,6 +6665,83 @@ namespace {
 					if (ImGui::SliderInt("##cursorseg", &local, 0, e - b - 1))
 						g_cursor = b + local;
 					ImGui::PopItemWidth();
+				}
+			}
+
+			// SEGMENT ADJUST (session 46p, user spec): one slider that moves
+			// the boundary between the selected segment and a neighbor, tick
+			// by tick, keeping the pair's total constant. Slide LEFT = the
+			// pair's first segment shrinks and the second grows over the
+			// vacated ticks; slide RIGHT = the first extends and eats the
+			// second's start. The mode buttons pick the pair; default is
+			// "to next", or "to previous" when the last segment is selected.
+			if (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())
+				&& g_segs.size() >= 2) {
+				const int nseg = static_cast<int>(g_segs.size());
+				static int s_adj_for_sel = -1;
+				static int s_adj_mode = 1;        // 0 = previous pair, 1 = next pair
+				static int s_adj_drag_first = -1; // pair pinned while dragging
+				if (s_adj_for_sel != g_sel && s_adj_drag_first < 0) {
+					s_adj_for_sel = g_sel;
+					s_adj_mode = (g_sel == nseg - 1) ? 0 : 1;
+				}
+				const bool can_prev = g_sel > 0;
+				const bool can_next = g_sel < nseg - 1;
+				if (s_adj_mode == 0 && !can_prev) s_adj_mode = 1;
+				if (s_adj_mode == 1 && !can_next) s_adj_mode = 0;
+
+				ImGui::TextDisabled("Segment adjust");
+				auto ModeBtn = [&](const char* lbl, int mode, bool can) {
+					ImGui::SameLine();
+					const bool active = (s_adj_mode == mode);
+					if (active) {
+						ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
+						ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
+						ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
+						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+					} else if (!can) {
+						const ImVec4 dim(0.16f, 0.16f, 0.18f, 1.0f);
+						ImGui::PushStyleColor(ImGuiCol_Button, dim);
+						ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
+						ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
+						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
+					}
+					if (ImGui::SmallButton(lbl) && can && s_adj_drag_first < 0)
+						s_adj_mode = mode;
+					if (active || !can)
+						ImGui::PopStyleColor(4);
+				};
+				ModeBtn("adjust to previous", 0, can_prev);
+				ModeBtn("adjust to next", 1, can_next);
+
+				int first = (s_adj_mode == 0) ? g_sel - 1 : g_sel;
+				if (s_adj_drag_first >= 0)
+					first = s_adj_drag_first;   // never retarget mid-drag
+				if (first >= 0 && first + 1 < nseg) {
+					EditSegment& A = g_segs[first];
+					EditSegment& B = g_segs[first + 1];
+					if (!SegAdjustable(A) || !SegAdjustable(B)) {
+						ImGui::TextDisabled("(#%d/#%d not adjustable - solver/"
+							"prestrafe segments size themselves)", first, first + 1);
+						s_adj_drag_first = -1;
+					} else {
+						const int ta = A.Ticks(), tb = B.Ticks();
+						const int total = ta + tb;
+						if (total >= 2) {
+							ImGui::SameLine();
+							ImGui::TextDisabled("#%d %d : %d #%d",
+								first, ta, tb, first + 1);
+							int v = ta;
+							ImGui::PushItemWidth(-1);
+							const bool moved =
+								ImGui::SliderInt("##segadjust", &v, 1, total - 1);
+							const bool held = ImGui::IsItemActive();
+							ImGui::PopItemWidth();
+							if (moved && v != ta)
+								ApplySegAdjust(first, v);
+							s_adj_drag_first = held ? first : -1;
+						}
+					}
 				}
 			}
 
@@ -6708,7 +6841,7 @@ namespace {
 			// Stats for the tick the playhead sits on, in a narrow box so the
 			// scrub sliders keep most of the row's width.
 			ImGui::SameLine();
-			ImGui::BeginChild("cursorstats", ImVec2(0, 190), true,
+			ImGui::BeginChild("cursorstats", ImVec2(0, 236), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
 				const Prediction::SimState& st = g_states[g_cursor];
