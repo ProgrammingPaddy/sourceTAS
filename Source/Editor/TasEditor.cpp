@@ -196,6 +196,8 @@ namespace {
 		                              //     with ASYMMETRIC dwell (left ticks != right)
 		                              //     so the mean path bends by dwell, view stays
 		                              //     pure max-gain; yaw_rate = tick skew
+		                              // 5 = PINNED EXIT (46s): the segment ALWAYS ends
+		                              //     with the view exactly on pin_yaw
 		float yaw_rate = 0.f;         // deg/tick, screen sign (+ = right); mode 2/3: bias
 		int   opt_dir = 1;            // mode 2 direction / mode 3 first side (+1 A, -1 D)
 		int   opt_period = 8;         // mode 3: ticks per strafe side
@@ -230,6 +232,12 @@ namespace {
 		// rate is continuous through the cut instead of snapping. In optimal
 		// modes any wish stays max-gain, so the blend costs almost no speed.
 		int   smooth_ticks = 0;
+
+		// ---- PINNED EXIT (mode 5, session 46s, .tasproj v26) --------------
+		// The absolute view yaw the segment ENDS on - satisfied EXACTLY at
+		// the final tick whatever the duration; the physics does the rest.
+		float pin_yaw = 0.f;
+		bool  pin_const = false;   // false = optimal turn calc; true = constant rate
 
 		// ---- PRESTRAFE recipe (deterministic startzone exit) --------------
 		// WA ground accel -> jump + release the ground key -> steerable optimal
@@ -830,6 +838,66 @@ namespace {
 			// comes entirely from the asymmetric strafe dwell (below), so the
 			// bias never tilts the view here.
 			yaw = HeadingDeg(vel, lastYaw);
+		} else if (g.yaw_mode == 5) {
+			// PINNED EXIT (46s): the segment ALWAYS ends with the view exactly
+			// on pin_yaw - the R=1 step lands on the pin by construction, so
+			// the guarantee holds at any duration. Closed-loop O(1) per tick;
+			// no solver anywhere.
+			//   CONSTANT: the remaining turn (from the last emitted yaw)
+			//   re-spread uniformly over the remaining ticks - one even arc,
+			//   by definition (completeness mode, not a loss claim).
+			//   OPTIMAL: ride the natural max-gain curl and force only the
+			//   REMAINDER. The forced-turn schedule is NOT uniform: the
+			//   per-tick losses are not identical separable terms (user
+			//   correction, 46s) - turning capacity depends on speed, and
+			//   prior gain moves the speed - so each tick takes a SHARE of
+			//   the remaining turn weighted by its natural-turn capacity
+			//   atan(cap/v) against the projected capacity of the remaining
+			//   ticks (speed projected at the plan's per-tick add; the sum
+			//   closed-form via  d/du[u*atan(c/u) + (c/2)ln(u^2+c^2)] =
+			//   atan(c/u)). Turning happens while it is cheap (slow), the
+			//   estimate self-corrects every tick through the closed loop,
+			//   and with negligible add it degrades to the uniform spread.
+			//   When the natural curl reaches the pin early, HOLD it and keep
+			//   riding - the post-reach ticks are the diminishing-efficiency
+			//   tail the pin allows.
+			const int rem = (g.ticks - t) > 0 ? (g.ticks - t) : 1;
+			if (g.pin_const) {
+				if (rem <= 1)
+					return NormYaw(g.pin_yaw);
+				return NormYaw(lastYaw
+					+ NormYaw(g.pin_yaw - lastYaw) / static_cast<float>(rem));
+			}
+			const float h = HeadingDeg(vel, lastYaw);
+			const float d = NormYaw(g.pin_yaw - h);
+			// Turn side fixed by the ENTRY view (shortest arc). Once the
+			// natural line is past the pin, d flips against that side - hold.
+			// (Entry view and heading can straddle a pin sitting between
+			// them; that degenerates to holding the pin immediately, which is
+			// the right call for a turn that small.)
+			const float d0 = NormYaw(g.pin_yaw - entryYaw);
+			if (rem <= 1 || (d0 >= 0.f) != (d >= 0.f) || fabsf(d) < 0.05f)
+				return NormYaw(g.pin_yaw);
+			float share = 1.f / static_cast<float>(rem);
+			const float v = Speed2D(vel);
+			const float cap = g_plan_cap;
+			const float add = g_plan_accel;   // per-tick speed add at max gain
+			if (add > 0.01f && cap > 0.01f) {
+				const float v0 = (v > 1.f) ? v : 1.f;
+				const float v1 = v0 + add * static_cast<float>(rem);
+				auto Gi = [cap](float u) {
+					return u * atan2f(cap, u) + 0.5f * cap * logf(u * u + cap * cap);
+				};
+				const float S = (Gi(v1) - Gi(v0)) / add;   // sum of capacities
+				const float w0 = atan2f(cap, v0);          // this tick's capacity
+				if (S > w0)
+					share = w0 / S;
+				if (share < 1.f / static_cast<float>(rem))
+					share = 1.f / static_cast<float>(rem);   // never lazier than uniform
+				if (share > 1.f)
+					share = 1.f;
+			}
+			return NormYaw(h + d * share);
 		}
 		return NormYaw(yaw);
 	}
@@ -1112,6 +1180,12 @@ namespace {
 				const int cycle = pA + pD;
 				const int phase = ((t % cycle) + cycle) % cycle;
 				smove = (phase < pA) ? -450.f : 450.f;   // A for pA ticks, then D
+			}
+			else if (g.yaw_mode == 5) {
+				// Pinned exit: strafe INTO the turn (+ yaw = left = A), held
+				// through the post-reach ride.
+				const int pside = (NormYaw(g.pin_yaw - g_pv_entry_yaw) >= 0.f) ? 1 : -1;
+				smove = (pside > 0) ? -450.f : 450.f;
 			}
 		}
 
@@ -5566,8 +5640,9 @@ namespace {
 	//      the project - geo map name, tags, full targets. Loading a v24
 	//      project REPLACES the map's working set (the per-map .geo file
 	//      stays only as the live scratch between saves).
-	constexpr uint32_t kProjVersion = 25;   // v25: reserved (snap-board, removed
-	                                        // 46o - the loader drops type 3)
+	constexpr uint32_t kProjVersion = 26;   // v26: pinned-exit fields (v25:
+	                                        // reserved - snap-board, removed
+	                                        // 46o; the loader drops type 3)
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -5594,6 +5669,7 @@ namespace {
 		if (s.gen.yaw_mode == 2) return s.gen.opt_dir > 0 ? 6 : 7;
 		if (s.gen.yaw_mode == 3) return 8;
 		if (s.gen.yaw_mode == 4) return 9;
+		if (s.gen.yaw_mode == 5) return 11;
 		return 0;
 	}
 	const char* SegKindName(uint8_t code) {
@@ -5608,6 +5684,7 @@ namespace {
 		case 8: return "OPTIMAL straight";
 		case 9: return "OPTIMAL straight-skew";
 		case 10: return "SNAP BOARD";
+		case 11: return "PINNED EXIT";
 		default: return "MOVE";
 		}
 	}
@@ -5735,6 +5812,9 @@ namespace {
 				W(out, g.pitch_turn);        // v23
 				W(out, g.pitch_rate);        // v23
 				W(out, g.pitch_desc);        // v23
+				W(out, g.pin_yaw);           // v26
+				const uint8_t pinc = g.pin_const ? 1 : 0;
+				W(out, pinc);                // v26
 
 				const uint32_t novr = static_cast<uint32_t>(s.ovr.size());
 				W(out, novr);
@@ -5875,7 +5955,9 @@ namespace {
 	void SanitizeGen(GenParams& g) {
 		if (g.ticks < 1) g.ticks = 1;
 		if (g.ticks > 100000) g.ticks = 100000;
-		if (g.yaw_mode < 1 || g.yaw_mode > 4) g.yaw_mode = 2;
+		if (g.yaw_mode < 1 || g.yaw_mode > 5) g.yaw_mode = 2;
+		if (!(g.pin_yaw == g.pin_yaw)) g.pin_yaw = 0.f;   // NaN guard
+		g.pin_yaw = NormYaw(g.pin_yaw);
 		g.opt_dir = (g.opt_dir < 0) ? -1 : 1;
 		if (g.opt_period < 1) g.opt_period = 1;
 		if (g.opt_period > 128) g.opt_period = 128;
@@ -6059,6 +6141,12 @@ namespace {
 		if (version >= 23
 			&& (!R(in, g.pitch_turn) || !R(in, g.pitch_rate) || !R(in, g.pitch_desc)))
 			return false;
+		if (version >= 26) {   // pinned exit (mode 5)
+			uint8_t pinc = 0;
+			if (!R(in, g.pin_yaw) || !R(in, pinc))
+				return false;
+			g.pin_const = pinc != 0;
+		}
 		g.key_w = kw != 0; g.key_a = ka != 0; g.key_s = ks != 0; g.key_d = kd != 0;
 		g.auto_key = autok != 0;
 		g.no_w_air = noW != 0;
@@ -7028,6 +7116,9 @@ namespace {
 					s.solver.target, s.solver.solved ? "" : " (unsolved)");
 			} else if (s.gen.prestrafe) {
 				strcpy_s(kind, "PRESTRAFE");
+			} else if (s.gen.yaw_mode == 5) {
+				Sfmt(kind, "PIN ->%.1f%s", s.gen.pin_yaw,
+					s.gen.pin_const ? " const" : "");
 			} else if (s.gen.yaw_mode == 2) {
 				Sfmt(kind, "OPTIMAL %s", s.gen.opt_dir > 0 ? "left(A)" : "right(D)");
 			} else if (s.gen.yaw_mode == 3) {
@@ -7807,18 +7898,37 @@ namespace {
 				// max-gain strafes whose net path holds its heading, mode 3) -
 				// the direction selector picks which, so straight-sync lives in
 				// optimal like every other max-gain path.
-				if (g.yaw_mode < 1 || g.yaw_mode > 4)
+				if (g.yaw_mode < 1 || g.yaw_mode > 5)
 					g.yaw_mode = 2;
 				// Optimal strafe leftmost - it's the default (user rule 46p).
-				int vmode = (g.yaw_mode == 1) ? 1 : 0;
-				static const char* kViewModes[] = { "Optimal strafe", "Turn rate" };
-				if (ChoiceRow("View mode", &vmode, kViewModes, 2)) {
-					g.yaw_mode = (vmode == 1) ? 1 : ((g.yaw_mode == 3 || g.yaw_mode == 4) ? g.yaw_mode : 2);
+				int vmode = (g.yaw_mode == 1) ? 1 : (g.yaw_mode == 5) ? 2 : 0;
+				static const char* kViewModes[] = { "Optimal strafe", "Turn rate", "Pinned exit" };
+				if (ChoiceRow("View mode", &vmode, kViewModes, 3)) {
+					g.yaw_mode = (vmode == 1) ? 1 : (vmode == 2) ? 5
+						: ((g.yaw_mode == 3 || g.yaw_mode == 4) ? g.yaw_mode : 2);
 					ch = true;
 				}
 				if (vmode == 1) {
 					ch |= FloatRow("View turn", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
 					Theme::Help("- turns left, + turns right, 0 holds the view still.");
+				} else if (vmode == 2) {
+					// PINNED EXIT (46s): duration is the whole knob - the
+					// segment guarantees the exit view itself.
+					ch |= FloatRow("Exit yaw", &g.pin_yaw, -180.f, 180.f, "%.2f deg", 0.1f, 5.f);
+					Theme::Help("The absolute view yaw this segment ENDS on - "
+						"satisfied EXACTLY at the final tick, whatever the "
+						"duration. Optimal rides the natural max-gain curl and "
+						"forces only the remainder, weighting the turn toward "
+						"the ticks where turning is cheap (lower speed - prior "
+						"gain raises the cost of later turning); reaching early "
+						"holds the yaw and keeps riding. Constant spreads one "
+						"uniform view rate across the segment.");
+					int pc = g.pin_const ? 1 : 0;
+					static const char* kPinCalc[] = { "Optimal", "Constant rate" };
+					if (ChoiceRow("Turn calculation", &pc, kPinCalc, 2)) {
+						g.pin_const = (pc == 1);
+						ch = true;
+					}
 				} else {
 					// Optimal: Left / Right / Straight (view-tilt) / Straight (skew).
 					int dir_idx = (g.yaw_mode == 4) ? 3 : (g.yaw_mode == 3) ? 2 : ((g.opt_dir > 0) ? 0 : 1);
