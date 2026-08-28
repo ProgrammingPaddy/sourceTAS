@@ -841,27 +841,21 @@ namespace {
 			// bias never tilts the view here.
 			yaw = HeadingDeg(vel, lastYaw);
 		} else if (g.yaw_mode == 5) {
-			// PINNED EXIT (46u rework). The 46t version branched from the
-			// HEADING (snapping the view off the entry yaw) and false-latched
-			// "reached" whenever entry view and heading disagreed about the
-			// turn side, freezing the view on the pin and spinning the wish
-			// out of the gaining hemisphere - the reported instant snap +
-			// speed tank. Now built on the shipped kind-0 machinery:
-			//   CONSTANT: the remaining turn (from the last emitted yaw)
-			//   re-spread uniformly - one even arc, from the entry view by
-			//   construction. Completeness mode, not a loss claim.
-			//   OPTIMAL: drive the HEADING toward the pin exactly like the
-			//   total-heading steering (want re-derived each tick -> self-
-			//   correcting; desired per-tick rate = want/rem; bias CLAMPED
-			//   +-20 deg/tick around the natural max-gain line, so the wish
-			//   can never leave the gaining hemisphere - no braking, ever).
-			//   An ENTRY BLEND leaves from the starting view (the first few
-			//   ticks ease the view from entryYaw onto the drive line), and
-			//   an EXIT WELD blends the view onto the pin over the last few
-			//   ticks (the solver-measured cheap way to make the exit exact).
-			//   Overshoot self-corrects: want flips sign and the drive leans
-			//   the other way - the post-reach ride oscillates gently around
-			//   the pin heading at near-max gain.
+			// PINNED EXIT (46v, user spec): ONE strafe, no entry or exit
+			// blends. The start is a known vector (the entry velocity
+			// direction), the end a known direction (the pin) - a single-term
+			// solve: the per-tick turn rate that spreads the remaining angle
+			// over the remaining ticks, re-derived every tick so the closed
+			// loop self-corrects. This IS the shipped total-heading drive
+			// with an absolute target: view = max-gain line for that
+			// curvature (bias clamped +-20 deg/tick around natural, so the
+			// wish stays in the gaining hemisphere), side FIXED at entry -
+			// the key never flips; an overshoot leans the view back on the
+			// same strafe. The final tick emits the pin exactly (the
+			// segment's defining guarantee; the step is at most a few
+			// degrees, the view's natural offset off the heading).
+			//   CONSTANT: one uniform view arc from the entry view instead -
+			//   completeness mode.
 			const int rem = (g.ticks - t) > 0 ? (g.ticks - t) : 1;
 			if (g.pin_const) {
 				if (rem <= 1)
@@ -873,32 +867,15 @@ namespace {
 				return NormYaw(g.pin_yaw);
 			const float h = HeadingDeg(vel, lastYaw);
 			const float want = NormYaw(g.pin_yaw - h);
-			const int dir = (want >= 0.f) ? 1 : -1;
-			const float th_des = (dir >= 0 ? want : -want) / static_cast<float>(rem);
+			const int dir = (NormYaw(g.pin_yaw - entryHeading) >= 0.f) ? 1 : -1;
+			const float th_des = static_cast<float>(dir) * want
+				/ static_cast<float>(rem);
 			const float v2 = Speed2D(vel);
 			const float th_nat = Deg(atan2f(g_plan_cap, (v2 > 1.f) ? v2 : 1.f));
 			float bias = th_des - th_nat;
 			if (bias < -20.f) bias = -20.f;
 			if (bias > 20.f) bias = 20.f;
-			float line = NormYaw(h + static_cast<float>(dir) * bias);
-			// Entry blend: t=0 emits the starting view EXACTLY, easing onto
-			// the drive line (brief off-line wish if the entry view is far
-			// from the heading - the price of leaving from the real view).
-			const int eb = (g.ticks / 4 < 6) ? g.ticks / 4 : 6;
-			if (t < eb && eb > 0) {
-				const float w = static_cast<float>(t) / static_cast<float>(eb);
-				line = NormYaw(entryYaw + NormYaw(line - entryYaw) * w);
-			}
-			// Exit weld: exact on the pin at the final tick.
-			const int xb = (g.ticks / 3 < 8) ? g.ticks / 3 : 8;
-			const int from = g.ticks - 1 - xb;
-			if (t >= from && g.ticks - 1 > from) {
-				float w = static_cast<float>(t - from)
-					/ static_cast<float>(g.ticks - 1 - from);
-				if (w > 1.f) w = 1.f;
-				line = NormYaw(line + NormYaw(g.pin_yaw - line) * w);
-			}
-			return line;
+			return NormYaw(h + static_cast<float>(dir) * bias);
 		}
 		return NormYaw(yaw);
 	}
@@ -1183,13 +1160,12 @@ namespace {
 				smove = (phase < pA) ? -450.f : 450.f;   // A for pA ticks, then D
 			}
 			else if (g.yaw_mode == 5) {
-				// Pinned exit: auto A/D from the CURRENT turn direction (46u -
-				// the drive self-corrects, so the key must follow it), with a
-				// small deadband so arrival doesn't flicker the key per tick.
-				const float h5 = HeadingDeg(prev.velocity, g_pv_last_yaw);
-				const float want5 = NormYaw(g.pin_yaw - h5);
-				if (t == 0 || fabsf(want5) > 1.5f)
-					g_pv_pin_side = (want5 >= 0.f) ? 1 : -1;
+				// Pinned exit (46v): ONE strafe - the side is fixed at entry
+				// from pin vs entry heading and never flips; corrections come
+				// from the view alone.
+				if (t == 0)
+					g_pv_pin_side = (NormYaw(g.pin_yaw - g_pv_entry_heading) >= 0.f)
+						? 1 : -1;
 				smove = (g_pv_pin_side > 0) ? -450.f : 450.f;
 			}
 		}
@@ -7920,14 +7896,14 @@ namespace {
 					// PINNED EXIT (46s): duration is the whole knob - the
 					// segment guarantees the exit view itself.
 					ch |= FloatRow("Exit yaw", &g.pin_yaw, -180.f, 180.f, "%.2f deg", 0.1f, 5.f);
-					Theme::Help("The absolute view yaw this segment ENDS on - "
-						"satisfied EXACTLY at the final tick, whatever the "
-						"duration. Optimal rides the natural max-gain curl and "
-						"forces only the remainder, weighting the turn toward "
-						"the ticks where turning is cheap (lower speed - prior "
-						"gain raises the cost of later turning); reaching early "
-						"holds the yaw and keeps riding. Constant spreads one "
-						"uniform view rate across the segment.");
+					Theme::Help("The view yaw this segment ENDS on - satisfied "
+						"exactly at the final tick, whatever the duration. ONE "
+						"strafe, no blends: Optimal turns the heading from the "
+						"entry direction to the pin at the single rate the tick "
+						"count implies, riding the max-gain line for that "
+						"curvature (re-derived each tick, so it self-corrects; "
+						"the side key never flips). Constant spreads one "
+						"uniform VIEW rate across the segment instead.");
 					int pc = g.pin_const ? 1 : 0;
 					static const char* kPinCalc[] = { "Optimal", "Constant rate" };
 					if (ChoiceRow("Turn calculation", &pc, kPinCalc, 2)) {
