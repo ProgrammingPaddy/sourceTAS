@@ -5117,9 +5117,11 @@ namespace {
 	// (*moved_low says which); *held reports an active drag.
 	bool DualBoundarySlider(int total, int* b1, int* b2, bool* moved_low,
 	                        bool* held) {
-		const float w = ImGui::GetContentRegionAvailWidth();
-		// Exactly one frame tall - the same as SliderInt - so the adjust row
-		// keeps one height no matter how many handles it shows (46r).
+		// Same width AND height as SliderInt under PushItemWidth(-1), so
+		// toggling between one and two handles never changes the bar (46s).
+		ImGui::PushItemWidth(-1);
+		const float w = ImGui::CalcItemWidth();
+		ImGui::PopItemWidth();
 		const float h = ImGui::GetTextLineHeight()
 			+ ImGui::GetStyle().FramePadding.y * 2.f;
 		const ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -6723,7 +6725,7 @@ namespace {
 				if (cs >= 0)
 					g_sel = cs;
 			}
-			ImGui::BeginChild("cursorctl", ImVec2(-420.f, 220), true,
+			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 244), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			const int last = g_total > 0 ? g_total - 1 : 0;
 			ImGui::TextDisabled("Run playhead - tick %d / %d", g_cursor, g_total);
@@ -6732,12 +6734,12 @@ namespace {
 			ImGui::PopItemWidth();
 
 			if (ImGui::Button("|<")) g_cursor = 0;
-			ImGui::SameLine(); if (ImGui::Button("<seg")) TasEditor::StepSegment(-1);
+			ImGui::SameLine(); if (ImGui::Button("<")) TasEditor::StepSegment(-1);
 			ImGui::SameLine(); if (ImGui::Button("-10")) TasEditor::StepCursor(-10);
 			ImGui::SameLine(); if (ImGui::Button("-1")) TasEditor::StepCursor(-1);
 			ImGui::SameLine(); if (ImGui::Button("+1")) TasEditor::StepCursor(1);
 			ImGui::SameLine(); if (ImGui::Button("+10")) TasEditor::StepCursor(10);
-			ImGui::SameLine(); if (ImGui::Button("seg>")) TasEditor::StepSegment(1);
+			ImGui::SameLine(); if (ImGui::Button(">")) TasEditor::StepSegment(1);
 			ImGui::SameLine(); if (ImGui::Button(">|")) g_cursor = last;
 
 			// Selected-segment scrubber, two-way tied to the playhead. ALWAYS
@@ -6871,9 +6873,13 @@ namespace {
 			// single-tick clear beneath those - anchored right of the stats
 			// text, past the widest stat line, so nothing ever collides.
 			ImGui::SameLine();
-			ImGui::BeginChild("cursorstats", ImVec2(0, 220), true,
+			ImGui::BeginChild("cursorstats", ImVec2(0, 244), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			const int seg = SegmentAtTick(g_cursor);
+			// Line order matters (46s): the first five lines are SHORT and sit
+			// beside the tick-input cluster; the wide lines (pos, yaw, gain)
+			// come after the cluster's vertical extent, so nothing collides in
+			// the original-width box.
 			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
 				const Prediction::SimState& st = g_states[g_cursor];
 				const bool air = (st.flags & FL_ONGROUND) == 0;
@@ -6884,19 +6890,18 @@ namespace {
 					+ st.velocity.Y * st.velocity.Y + vz * vz);
 				ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.f, 1.f),
 					"tick %d  seg %d", g_cursor, seg);
-				ImGui::Text("t %.3f s   %s%s", g_cursor * interval,
-					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " + duck" : "");
+				ImGui::Text("t %.3f s %s%s", g_cursor * interval,
+					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " +d" : "");
+				ImGui::Text("speed %.1f", g_speed[g_cursor]);
+				ImGui::Text("3D %.1f  vz %+.0f", sp3, vz);
+				if (g_maxgain[g_cursor] > 0.001f)
+					ImGui::Text("eff %.2f%%", g_eff[g_cursor] * 100.f);
+				else
+					ImGui::Text("eff - (not air)");
 				ImGui::Text("pos %.1f %.1f %.1f", st.origin.X, st.origin.Y, st.origin.Z);
-				ImGui::Text("speed %.1f   vz %+.0f", g_speed[g_cursor], vz);
-				ImGui::Text("3D speed %.1f", sp3);
 				ImGui::Text("yaw %.2f   pitch %.2f",
 					g_frames[g_cursor].viewangles[1], g_frames[g_cursor].viewangles[0]);
-				if (g_maxgain[g_cursor] > 0.001f) {
-					ImGui::Text("gain %+.2f   max %+.2f", g_gain[g_cursor], g_maxgain[g_cursor]);
-					ImGui::Text("eff %.2f%%", g_eff[g_cursor] * 100.f);
-				} else {
-					ImGui::Text("gain %+.2f (not air)", g_gain[g_cursor]);
-				}
+				ImGui::Text("gain %+.2f   max %+.2f", g_gain[g_cursor], g_maxgain[g_cursor]);
 			} else {
 				ImGui::TextDisabled("stats appear after a sim runs");
 			}
@@ -6910,7 +6915,7 @@ namespace {
 				EditSegment& ks = g_segs[seg];
 				const int local = g_cursor - g_starts[seg];
 				static const int bits[6] = { OV_W, OV_A, OV_S, OV_D, OV_JUMP, OV_DUCK };
-				static const char* names[6] = { "W", "A", "S", "D", "Jump", "Crouch" };
+				static const char* names[6] = { "W", "A", "S", "D", "Jump", "Duck" };
 				const bool raw_ok = ks.raw && local >= 0
 					&& local < static_cast<int>(ks.frames.size());
 				const bool gen_ok = !ks.raw && g_valid && g_cursor >= 0
@@ -6919,10 +6924,10 @@ namespace {
 				if (raw_ok || gen_ok) {
 					const float bh = ImGui::GetTextLineHeight()
 						+ ImGui::GetStyle().FramePadding.y * 2.f;
-					const float bx = 224.f;
+					const float bx = 166.f;   // past the five short stat lines
 					const float row0 = 6.f;
-					const float row1 = row0 + bh + 4.f;
-					const float row2 = row1 + bh + 4.f;
+					const float row1 = row0 + bh + 2.f;
+					const float row2 = row1 + bh + 2.f;
 					int ci = -1;
 					for (int i = 0; i < static_cast<int>(ks.ovr.size()); ++i)
 						if (ks.ovr[i].tick == local) { ci = i; break; }
@@ -6945,8 +6950,8 @@ namespace {
 					}
 					for (int i = 0; i < 6; ++i) {
 						const bool top = i < 4;
-						const float w = top ? 30.f : 64.f;
-						const float x = top ? bx + i * 34.f : bx + (i - 4) * 68.f;
+						const float w = top ? 24.f : 50.f;
+						const float x = top ? bx + i * 26.f : bx + (i - 4) * 52.f;
 						ImGui::SetCursorPos(ImVec2(x, top ? row0 : row1));
 						char lbl[16];
 						const bool ovr_bit = gen_ok && ci >= 0
@@ -6996,8 +7001,8 @@ namespace {
 					if (gen_ok && ci >= 0) {
 						ImGui::SetCursorPos(ImVec2(bx, row2 + 3.f));
 						ImGui::TextColored(Theme::Pink, "OVR");
-						ImGui::SetCursorPos(ImVec2(bx + 36.f, row2));
-						if (ImGui::Button("clear##tkovr", ImVec2(96.f, bh))) {
+						ImGui::SetCursorPos(ImVec2(bx + 34.f, row2));
+						if (ImGui::Button("clear##tkovr", ImVec2(68.f, bh))) {
 							ks.ovr.erase(ks.ovr.begin() + ci);
 							MarkDirty();
 						}
@@ -8015,17 +8020,8 @@ namespace {
 
 		}
 
-		const float sim_ms = Prediction::LastDiag().sim_ms;
-		const char* sim_state =
-			g_dirty ? "line update queued - it recomputes by itself, nothing to do" :
-			g_sim_requested ? "recomputing the line..." :
-			g_sim_fault ? "SIM FAULTED (recovered - see prediction diagnostics)" :
-			g_valid ? "line up to date" : "no sim yet";
-		if (g_valid && sim_ms > 0.f)
-			ImGui::Text("Sim: %s   (%.1f ms/pass - %s)", sim_state, sim_ms,
-				sim_ms < 8.f ? "live preview" : "throttled for length");
-		else
-			ImGui::Text("Sim: %s", sim_state);
+		// (The sim-state line lives in the Debug tab since 46s - the run tab's
+		// status strip already says READY/NO SIM at a glance.)
 	}
 
 	void DrawTargetsTab() {
@@ -9945,6 +9941,21 @@ namespace {
 			Theme::Help("After a game update these re-derive themselves at "
 				"runtime; red means the self-heal failed and "
 				"Tools/derive_client_rvas.py needs a pass.");
+		}
+
+		Theme::Heading("Editor sim");
+		{
+			const float sim_ms = Prediction::LastDiag().sim_ms;
+			const char* sim_state =
+				g_dirty ? "line update queued - it recomputes by itself, nothing to do" :
+				g_sim_requested ? "recomputing the line..." :
+				g_sim_fault ? "SIM FAULTED (recovered - see prediction diagnostics)" :
+				g_valid ? "line up to date" : "no sim yet";
+			if (g_valid && sim_ms > 0.f)
+				ImGui::Text("Sim: %s   (%.1f ms/pass - %s)", sim_state, sim_ms,
+					sim_ms < 8.f ? "live preview" : "throttled for length");
+			else
+				ImGui::Text("Sim: %s", sim_state);
 		}
 
 		Theme::Heading("In-world overlay marshal");
