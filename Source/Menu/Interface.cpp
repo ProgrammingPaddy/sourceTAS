@@ -290,6 +290,12 @@ void RecordPanel::Draw() {
 			"and rewrites its file on disk.");
 	}
 
+}
+
+// The keybinds tab (session 46m, user request): every hotkey command with
+// its bind button, plus the arm switch and autohop toggle that gate them -
+// split out of the Record panel so the run library stays uncluttered.
+void RecordPanel::DrawBinds() {
 	Theme::Heading("Actions & hotkeys");
 	ImGui::Checkbox("Arm hotkeys", &g_hotkeys_armed);
 	Theme::Help("Master switch for every bound hotkey. Disarm before typing in "

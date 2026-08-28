@@ -373,9 +373,52 @@ namespace {
 		return s;
 	}
 
+	// The W/A/S/D/Jump/Crouch button row for a RAW frame - the exact look of
+	// the per-tick override row (pink = held), but clicks write straight into
+	// the frame: W|S and A|D are one signed move float each, so pressing one
+	// side releases the other (exactly what the data can express). Used by
+	// the Cursor box and the raw segment's tick editor.
+	bool RawKeyButtons(Frame& f, const char* id) {
+		static const char* names[6] = { "W", "A", "S", "D", "Jump", "Crouch" };
+		const bool held[6] = {
+			f.forwardmove > 0.f, f.sidemove < 0.f,
+			f.forwardmove < 0.f, f.sidemove > 0.f,
+			(f.buttons & IN_JUMP) != 0, (f.buttons & IN_DUCK) != 0,
+		};
+		bool changed = false;
+		ImGui::PushID(id);
+		for (int i = 0; i < 6; ++i) {
+			if (i) ImGui::SameLine();
+			char lbl[16];
+			Sfmt(lbl, "%s##rk%d", names[i], i);
+			if (held[i]) {
+				ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
+				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
+				ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+			}
+			const bool clicked = ImGui::SmallButton(lbl);
+			if (held[i])
+				ImGui::PopStyleColor(4);
+			if (!clicked)
+				continue;
+			switch (i) {
+			case 0: f.forwardmove = held[0] ? 0.f :  450.f; break;
+			case 1: f.sidemove    = held[1] ? 0.f : -450.f; break;
+			case 2: f.forwardmove = held[2] ? 0.f : -450.f; break;
+			case 3: f.sidemove    = held[3] ? 0.f :  450.f; break;
+			case 4: f.buttons ^= IN_JUMP; break;
+			case 5: f.buttons ^= IN_DUCK; break;
+			}
+			changed = true;
+		}
+		ImGui::PopID();
+		return changed;
+	}
+
 	// ---------------------------------------------------------------- state --
 	bool g_open = true;   // the editor IS the tool - visible whenever the menu is
-	int  g_tab = 2;                   // 0 Project, 1 Record, 2 Run, 3 Targets, 4 Rendering
+	int  g_tab = 2;                   // index into the editor tab row (default Run)
 	char g_name[64] = "untitled";
 	// The project's IDENTITY (session 45): the .tasproj filename it was
 	// loaded from / last saved to. Manual saves target THIS (or the
@@ -6487,7 +6530,7 @@ namespace {
 				if (cs >= 0)
 					g_sel = cs;
 			}
-			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 214), true,
+			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 190), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			const int last = g_total > 0 ? g_total - 1 : 0;
 			ImGui::TextDisabled("Run playhead");
@@ -6543,56 +6586,18 @@ namespace {
 					&& g_cursor < static_cast<int>(g_frames.size())
 					&& g_cursor < Prediction::kMaxSimTicks;
 				if (raw_ok) {
-					// RAW: pink = what the stored frame does. A key click edits
-					// the frame's move floats / buttons in place; W|S and A|D
-					// are each one signed float, so holding one side releases
-					// the other (exactly what the data can express).
-					Frame& f = ks.frames[local];
-					const bool held[6] = {
-						f.forwardmove > 0.f, f.sidemove < 0.f,
-						f.forwardmove < 0.f, f.sidemove > 0.f,
-						(f.buttons & IN_JUMP) != 0, (f.buttons & IN_DUCK) != 0,
-					};
+					// RAW: the same key row as everywhere else, writing straight
+					// into the stored frame. View editing lives in the Selected
+					// segment panel (pitch row + inherited-relative yaw slider) -
+					// NO extra widgets here, this box's layout stays fixed.
 					ImGui::TextDisabled("Tick inputs (raw frame)");
 					Theme::Help("This tick is a stored RAW frame - clicks write "
 						"straight into it. Pink = held; W/S and A/D are one "
 						"axis each, so pressing one side releases the other. "
-						"Yaw/pitch edit the frame's view (drag, or Ctrl+click "
-						"to type).");
-					for (int i = 0; i < 6; ++i) {
-						if (i) ImGui::SameLine();
-						char lbl[16];
-						Sfmt(lbl, "%s##rf%d", names[i], i);
-						if (held[i]) {
-							ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
-							ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
-							ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
-							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
-						}
-						const bool clicked = ImGui::SmallButton(lbl);
-						if (held[i])
-							ImGui::PopStyleColor(4);
-						if (!clicked)
-							continue;
-						switch (i) {
-						case 0: f.forwardmove = held[0] ? 0.f :  450.f; break;
-						case 1: f.sidemove    = held[1] ? 0.f : -450.f; break;
-						case 2: f.forwardmove = held[2] ? 0.f : -450.f; break;
-						case 3: f.sidemove    = held[3] ? 0.f :  450.f; break;
-						case 4: f.buttons ^= IN_JUMP; break;
-						case 5: f.buttons ^= IN_DUCK; break;
-						}
+						"The tick's view angles are edited in the Selected "
+						"segment section below.");
+					if (RawKeyButtons(ks.frames[local], "cursorraw"))
 						MarkDirty();
-					}
-					ImGui::PushItemWidth(96.f);
-					if (ImGui::DragFloat("yaw##rawy", &f.viewangles[1],
-						0.05f, 0.f, 0.f, "%.2f"))
-						MarkDirty();
-					ImGui::SameLine();
-					if (ImGui::DragFloat("pitch##rawp", &f.viewangles[0],
-						0.05f, -89.f, 89.f, "%.2f"))
-						MarkDirty();
-					ImGui::PopItemWidth();
 				} else if (gen_ok) {
 					int ci = -1;
 					for (int i = 0; i < static_cast<int>(ks.ovr.size()); ++i)
@@ -6656,7 +6661,7 @@ namespace {
 			// Stats for the tick the playhead sits on, in a narrow box so the
 			// scrub sliders keep most of the row's width.
 			ImGui::SameLine();
-			ImGui::BeginChild("cursorstats", ImVec2(0, 214), true,
+			ImGui::BeginChild("cursorstats", ImVec2(0, 190), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
 				const Prediction::SimState& st = g_states[g_cursor];
@@ -6764,10 +6769,12 @@ namespace {
 		ImGui::SameLine();
 		if (ImGui::Button("+ Tick")) {
 			// One editable RAW tick (user directive, session 46): a 1-frame raw
-			// segment, edited with the same per-tick controls as the timeline
-			// scrub (keys + yaw/pitch write into the frame). Seed the view from
-			// the tick just before the insertion point so nothing snaps; a run
-			// with no composed frames yet falls back to the anchor's view.
+			// segment, edited with the per-tick controls (key row in the Cursor
+			// box; pitch + inherited-relative yaw in the segment panel). The
+			// view INHERITS from the last segment before the insertion point -
+			// the composed frames when a sim exists, the previous raw segment's
+			// stored frame otherwise - or the run anchor when it's the first
+			// thing added.
 			EditSegment s;
 			s.raw = true;
 			Frame f = {};
@@ -6781,6 +6788,11 @@ namespace {
 			if (before > 0 && before - 1 < static_cast<int>(g_frames.size())) {
 				f.viewangles[0] = g_frames[before - 1].viewangles[0];
 				f.viewangles[1] = g_frames[before - 1].viewangles[1];
+			} else if (upto > 0 && g_segs[upto - 1].raw
+				&& !g_segs[upto - 1].frames.empty()) {
+				const Frame& pf = g_segs[upto - 1].frames.back();
+				f.viewangles[0] = pf.viewangles[0];
+				f.viewangles[1] = pf.viewangles[1];
 			}
 			s.frames.push_back(f);
 			InsertSegment(std::move(s));
@@ -7617,27 +7629,38 @@ namespace {
 				}
 			} else {
 				EditSegment& s = g_segs[g_sel];
-				ImGui::Text("Raw segment: %d frames. Fine-tune the playhead tick:", static_cast<int>(s.frames.size()));
 				const int base = (g_sel < static_cast<int>(g_starts.size())) ? g_starts[g_sel] : 0;
 				const int local = g_cursor - base;
+				ImGui::Text("Raw segment: %d frame(s) - editing tick %d (the playhead).",
+					static_cast<int>(s.frames.size()), local);
 				if (local >= 0 && local < static_cast<int>(s.frames.size())) {
 					Frame& f = s.frames[local];
-					bool ch = false;
-					ImGui::PushItemWidth(120);
-					ch |= ImGui::InputFloat("Yaw##tick", &f.viewangles[1], 0.1f, 5.f, 2);
-					ImGui::SameLine();
-					ch |= ImGui::InputFloat("Pitch##tick", &f.viewangles[0], 0.1f, 5.f, 2);
-					ch |= ImGui::InputFloat("Fwd##tick", &f.forwardmove, 10.f, 100.f, 0);
-					ImGui::SameLine();
-					ch |= ImGui::InputFloat("Side##tick", &f.sidemove, 10.f, 100.f, 0);
-					bool jump = (f.buttons & IN_JUMP) != 0;
-					bool duck = (f.buttons & IN_DUCK) != 0;
-					if (ImGui::Checkbox("Jump##tick", &jump)) { f.buttons = jump ? (f.buttons | IN_JUMP) : (f.buttons & ~IN_JUMP); ch = true; }
-					ImGui::SameLine();
-					if (ImGui::Checkbox("Duck##tick", &duck)) { f.buttons = duck ? (f.buttons | IN_DUCK) : (f.buttons & ~IN_DUCK); ch = true; }
-					ImGui::PopItemWidth();
-					if (ch)
+					// Same key row as the Cursor box / override editor.
+					if (RawKeyButtons(f, "segraw"))
 						MarkDirty();
+					// Pitch: the exact control normal segments use.
+					if (FloatRow("Pitch value", &f.viewangles[0], -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1))
+						MarkDirty();
+					// Yaw: a full-360 slider RELATIVE to the inherited view (the
+					// view entering this tick - previous tick's yaw, or the run
+					// anchor at tick 0). 0 (the slider's zero button included)
+					// returns exactly to the inherited view.
+					const int gt = base + local;
+					float inh = g_anchor.yaw;
+					if (gt > 0) {
+						if (gt - 1 < static_cast<int>(g_frames.size()))
+							inh = g_frames[gt - 1].viewangles[1];
+						else if (local > 0)
+							inh = s.frames[local - 1].viewangles[1];
+					}
+					float delta = NormYaw(f.viewangles[1] - inh);
+					if (FloatRow("Yaw offset", &delta, -180.f, 180.f, "%.2f deg", 0.1f, 5.f, 2)) {
+						f.viewangles[1] = NormYaw(inh + delta);
+						MarkDirty();
+					}
+					Theme::Help("Offset from the inherited view (yaw entering this "
+						"tick: the previous tick's, or the run anchor's at tick 0). "
+						"The 0 button snaps back to the inherited view exactly.");
 				} else {
 					ImGui::TextDisabled("(playhead is outside this segment)");
 				}
@@ -7739,8 +7762,13 @@ namespace {
 			BspWorld::ClearTargets();
 			g_sel_target = -1;
 		}
-		ImGui::SameLine();
+		// SameLine INSIDE the conditional: when there is nothing to undo, a
+		// dangling SameLine used to attach the NEXT item - the targets list
+		// box - to this button row, so the box sat beside the buttons until
+		// the first add/remove made the undo button appear (user report). The
+		// box now always sits under the buttons, like the tagged-faces UI.
 		if (BspWorld::CanUndoGeo()) {
+			ImGui::SameLine();
 			if (ImGui::Button("Undo geo change")) {
 				BspWorld::UndoGeo();
 				g_sel_tag = -1;
@@ -10435,8 +10463,8 @@ void DrawWindowImpl() {
 
 	// Tab row (selected = pink accent).
 	const char* tabs[] = { "Project", "Record", "Run", "Targets", "Server",
-	                       "Map Solve", "Rendering", "Debug" };
-	const int kNumTabs = 8;
+	                       "Map Solve", "Rendering", "Keybinds", "Debug" };
+	const int kNumTabs = 9;
 	for (int i = 0; i < kNumTabs; ++i) {
 		if (Theme::Tab(tabs[i], g_tab == i, ImVec2(104, 0)))
 			g_tab = i;
@@ -10458,6 +10486,7 @@ void DrawWindowImpl() {
 	case 4: DrawServerTab(); break;
 	case 5: DrawMapSolveTab(); break;
 	case 6: DrawRenderingTab(); break;
+	case 7: RecordPanel::DrawBinds(); break;
 	default: DrawDebugTab(); break;
 	}
 	ImGui::EndChild();
