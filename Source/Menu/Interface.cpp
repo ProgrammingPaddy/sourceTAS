@@ -333,8 +333,10 @@ void RecordPanel::Draw() {
 			ImGui::Spacing();
 			col = 0;   // playback group starts its own 2-up block
 		}
+		// Natural spacing (46r): without bind buttons beside them, the wide
+		// fixed column offset read as a hole - pairs now sit snugly.
 		if (col % 2 == 1)
-			ImGui::SameLine(392.f);
+			ImGui::SameLine();
 		col++;
 		if (CommandButton(g_commands[i]))
 			g_commands[i].execute();

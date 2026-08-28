@@ -5069,6 +5069,12 @@ namespace {
 		const int delta = want_first - ta;
 		if (delta == 0)
 			return;
+		// Overrides are anchored to their RELATIVE tick in the segment (user
+		// rule 46r): they ride the content, and die ONLY when their position
+		// is eaten. First of the pair: end moves, so a shrink eats overrides
+		// past the new length. Second: start moves, so its overrides SHIFT by
+		// the delta (content slides), and a start-eat removes the ones whose
+		// positions were consumed.
 		// First of the pair: its END moves.
 		if (a.raw) {
 			if (delta > 0)
@@ -5078,6 +5084,11 @@ namespace {
 		} else {
 			KeepPerTickSteering(a.gen, ta, want_first);
 			a.gen.ticks = want_first;
+			if (delta < 0)
+				a.ovr.erase(
+					std::remove_if(a.ovr.begin(), a.ovr.end(),
+						[want_first](const InputOvr& o) { return o.tick >= want_first; }),
+					a.ovr.end());
 		}
 		// Second of the pair: its START moves.
 		if (b.raw) {
@@ -5088,6 +5099,13 @@ namespace {
 		} else {
 			KeepPerTickSteering(b.gen, tb, total - want_first);
 			b.gen.ticks = total - want_first;
+			if (delta > 0)
+				b.ovr.erase(
+					std::remove_if(b.ovr.begin(), b.ovr.end(),
+						[delta](const InputOvr& o) { return o.tick < delta; }),
+					b.ovr.end());
+			for (InputOvr& o : b.ovr)
+				o.tick -= delta;   // content slid by -delta (grow = negative)
 		}
 		MarkDirty();
 	}
@@ -5100,7 +5118,10 @@ namespace {
 	bool DualBoundarySlider(int total, int* b1, int* b2, bool* moved_low,
 	                        bool* held) {
 		const float w = ImGui::GetContentRegionAvailWidth();
-		const float h = 22.f;
+		// Exactly one frame tall - the same as SliderInt - so the adjust row
+		// keeps one height no matter how many handles it shows (46r).
+		const float h = ImGui::GetTextLineHeight()
+			+ ImGui::GetStyle().FramePadding.y * 2.f;
 		const ImVec2 pos = ImGui::GetCursorScreenPos();
 		ImGui::InvisibleButton("##segadj2", ImVec2(w, h));
 		const bool active = ImGui::IsItemActive();
@@ -6702,10 +6723,10 @@ namespace {
 				if (cs >= 0)
 					g_sel = cs;
 			}
-			ImGui::BeginChild("cursorctl", ImVec2(-286.f, 236), true,
+			ImGui::BeginChild("cursorctl", ImVec2(-420.f, 220), true,
 				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			const int last = g_total > 0 ? g_total - 1 : 0;
-			ImGui::TextDisabled("Run playhead");
+			ImGui::TextDisabled("Run playhead - tick %d / %d", g_cursor, g_total);
 			ImGui::PushItemWidth(-1);
 			ImGui::SliderInt("##cursorall", &g_cursor, 0, last);
 			ImGui::PopItemWidth();
@@ -6733,13 +6754,13 @@ namespace {
 					int local = g_cursor - b;
 					if (local < 0) local = 0;
 					if (local > e - b - 1) local = e - b - 1;
-					ImGui::TextDisabled("Segment #%d scrub - tick %d / %d", g_sel, local, e - b);
+					ImGui::TextDisabled("Segment #%d - tick %d / %d", g_sel, local, e - b);
 					ImGui::PushItemWidth(-1);
 					if (ImGui::SliderInt("##cursorseg", &local, 0, e - b - 1))
 						g_cursor = b + local;
 					ImGui::PopItemWidth();
 				} else {
-					ImGui::TextDisabled("Segment scrub");
+					ImGui::TextDisabled("Segment");
 					int zero = 0;
 					ImGui::PushItemWidth(-1);
 					ImGui::SliderInt("##cursorseg", &zero, 0, 0, "");
@@ -6773,8 +6794,8 @@ namespace {
 					&& SegAdjustable(g_segs[sel]) && SegAdjustable(g_segs[sel + 1]);
 
 				ImGui::TextDisabled("Segment adjust");
+				// Toggles + counts on their OWN row under the label (46r).
 				auto SideBtn = [&](const char* lbl, bool* on, bool can) {
-					ImGui::SameLine();
 					const bool lit = *on && can;
 					if (lit) {
 						ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
@@ -6794,6 +6815,7 @@ namespace {
 						ImGui::PopStyleColor(4);
 				};
 				SideBtn("to previous", &s_adj_prev, prev_ok);
+				ImGui::SameLine();
 				SideBtn("to next", &s_adj_next, next_ok);
 
 				const bool use_prev = s_adj_prev && prev_ok;
@@ -6841,15 +6863,48 @@ namespace {
 				s_adj_pin = held ? sel : -1;
 			}
 
-			// Per-tick editor at the playhead - EVERY tick in a run is editable
-			// (user directive, session 46). Two flavors sharing one UI:
-			//   RAW segments (imported recordings, baked, + Tick): the keys and
-			//   view angles write STRAIGHT INTO the stored frame - the frame IS
-			//   the tick, nothing to override.
-			//   Generated/solver segments: per-tick INPUT overrides on top of
-			//   the composed plan (* = overridden; second click removes it;
-			//   segment edits clear them). View comes from the generator.
+			ImGui::EndChild();
+			PassWheel();
+
+			// Stats for the playhead tick + the TICK INPUT cluster (46r, user
+			// mockup): W A S D on top, Jump/Crouch beneath, override flag +
+			// single-tick clear beneath those - anchored right of the stats
+			// text, past the widest stat line, so nothing ever collides.
+			ImGui::SameLine();
+			ImGui::BeginChild("cursorstats", ImVec2(0, 220), true,
+				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			const int seg = SegmentAtTick(g_cursor);
+			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
+				const Prediction::SimState& st = g_states[g_cursor];
+				const bool air = (st.flags & FL_ONGROUND) == 0;
+				const float interval = Prediction::LastDiag().interval_per_tick > 0.f
+					? Prediction::LastDiag().interval_per_tick : 0.015f;
+				const float vz = st.velocity.Z;
+				const float sp3 = sqrtf(st.velocity.X * st.velocity.X
+					+ st.velocity.Y * st.velocity.Y + vz * vz);
+				ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.f, 1.f),
+					"tick %d  seg %d", g_cursor, seg);
+				ImGui::Text("t %.3f s   %s%s", g_cursor * interval,
+					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " + duck" : "");
+				ImGui::Text("pos %.1f %.1f %.1f", st.origin.X, st.origin.Y, st.origin.Z);
+				ImGui::Text("speed %.1f   vz %+.0f", g_speed[g_cursor], vz);
+				ImGui::Text("3D speed %.1f", sp3);
+				ImGui::Text("yaw %.2f   pitch %.2f",
+					g_frames[g_cursor].viewangles[1], g_frames[g_cursor].viewangles[0]);
+				if (g_maxgain[g_cursor] > 0.001f) {
+					ImGui::Text("gain %+.2f   max %+.2f", g_gain[g_cursor], g_maxgain[g_cursor]);
+					ImGui::Text("eff %.2f%%", g_eff[g_cursor] * 100.f);
+				} else {
+					ImGui::Text("gain %+.2f (not air)", g_gain[g_cursor]);
+				}
+			} else {
+				ImGui::TextDisabled("stats appear after a sim runs");
+			}
+
+			// The tick-input cluster: RAW ticks edit the stored frame in
+			// place; generated/solver ticks toggle per-tick overrides. Fixed
+			// child-local positions (frame-height buttons, x past the ~210 px
+			// worst-case pos line).
 			if (seg >= 0 && seg < static_cast<int>(g_segs.size())
 				&& seg < static_cast<int>(g_starts.size())) {
 				EditSegment& ks = g_segs[seg];
@@ -6861,58 +6916,64 @@ namespace {
 				const bool gen_ok = !ks.raw && g_valid && g_cursor >= 0
 					&& g_cursor < static_cast<int>(g_frames.size())
 					&& g_cursor < Prediction::kMaxSimTicks;
-				if (raw_ok) {
-					// RAW: the same key row as everywhere else, writing straight
-					// into the stored frame. View editing lives in the Selected
-					// segment panel (pitch row + inherited-relative yaw slider) -
-					// NO extra widgets here, this box's layout stays fixed.
-					ImGui::TextDisabled("Tick inputs (raw frame)");
-					Theme::Help("This tick is a stored RAW frame - clicks write "
-						"straight into it. Pink = held; W/S and A/D are one "
-						"axis each, so pressing one side releases the other. "
-						"The tick's view angles are edited in the Selected "
-						"segment section below.");
-					if (RawKeyButtons(ks.frames[local], "cursorraw"))
-						MarkDirty();
-				} else if (gen_ok) {
+				if (raw_ok || gen_ok) {
+					const float bh = ImGui::GetTextLineHeight()
+						+ ImGui::GetStyle().FramePadding.y * 2.f;
+					const float bx = 224.f;
+					const float row0 = 6.f;
+					const float row1 = row0 + bh + 4.f;
+					const float row2 = row1 + bh + 4.f;
 					int ci = -1;
 					for (int i = 0; i < static_cast<int>(ks.ovr.size()); ++i)
 						if (ks.ovr[i].tick == local) { ci = i; break; }
-					// Effective key state = natural keys with the overridden bits
-					// replaced. KEY level, not move floats: adding D on a tick that
-					// naturally holds A keeps BOTH pink (they null sidemove, exactly
-					// like holding both keys in game).
-					const uint8_t nat = g_nat_keys[g_cursor];
-					const int eff = (ci >= 0)
-						? ((nat & ~ks.ovr[ci].mask) | (ks.ovr[ci].value & ks.ovr[ci].mask))
-						: nat;
+					Frame* rf = raw_ok ? &ks.frames[local] : nullptr;
 					bool held[6];
-					for (int i = 0; i < 6; ++i)
-						held[i] = (eff & bits[i]) != 0;
-					ImGui::TextDisabled("Tick inputs");
-					Theme::Help("Every input's state at the playhead tick - pink = held. "
-						"Click to flip that input on exactly this tick (marked *); click "
-						"again to remove the override. Overrides PERSIST through segment "
-						"edits; the segment panel's Clear-overrides button is the only "
-						"thing that removes them.");
+					if (raw_ok) {
+						held[0] = rf->forwardmove > 0.f;
+						held[1] = rf->sidemove < 0.f;
+						held[2] = rf->forwardmove < 0.f;
+						held[3] = rf->sidemove > 0.f;
+						held[4] = (rf->buttons & IN_JUMP) != 0;
+						held[5] = (rf->buttons & IN_DUCK) != 0;
+					} else {
+						const uint8_t nat = g_nat_keys[g_cursor];
+						const int eff = (ci >= 0)
+							? ((nat & ~ks.ovr[ci].mask) | (ks.ovr[ci].value & ks.ovr[ci].mask))
+							: nat;
+						for (int i = 0; i < 6; ++i)
+							held[i] = (eff & bits[i]) != 0;
+					}
 					for (int i = 0; i < 6; ++i) {
-						if (i) ImGui::SameLine();
-						const bool ovr_bit = ci >= 0 && (ks.ovr[ci].mask & bits[i]) != 0;
+						const bool top = i < 4;
+						const float w = top ? 30.f : 64.f;
+						const float x = top ? bx + i * 34.f : bx + (i - 4) * 68.f;
+						ImGui::SetCursorPos(ImVec2(x, top ? row0 : row1));
 						char lbl[16];
-						Sfmt(lbl, "%s%s##ov%d", names[i], ovr_bit ? "*" : "", i);
+						const bool ovr_bit = gen_ok && ci >= 0
+							&& (ks.ovr[ci].mask & bits[i]) != 0;
+						Sfmt(lbl, "%s%s##tk%d", names[i], ovr_bit ? "*" : "", i);
 						if (held[i]) {
 							ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
 							ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
 							ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
 							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
 						}
-						const bool clicked = ImGui::Button(lbl);
+						const bool clicked = ImGui::Button(lbl, ImVec2(w, bh));
 						if (held[i])
 							ImGui::PopStyleColor(4);
 						if (!clicked)
 							continue;
-						if (ovr_bit) {
-							// Second click: back to what the segment does naturally.
+						if (raw_ok) {
+							switch (i) {
+							case 0: rf->forwardmove = held[0] ? 0.f :  450.f; break;
+							case 1: rf->sidemove    = held[1] ? 0.f : -450.f; break;
+							case 2: rf->forwardmove = held[2] ? 0.f : -450.f; break;
+							case 3: rf->sidemove    = held[3] ? 0.f :  450.f; break;
+							case 4: rf->buttons ^= IN_JUMP; break;
+							case 5: rf->buttons ^= IN_DUCK; break;
+							}
+						} else if (ovr_bit) {
+							// Second click: back to what the segment does.
 							ks.ovr[ci].mask &= ~bits[i];
 							ks.ovr[ci].value &= ~bits[i];
 							if (ks.ovr[ci].mask == 0) {
@@ -6930,41 +6991,18 @@ namespace {
 						}
 						MarkDirty();
 					}
+					// Override flag + single-tick clear (generated/solver only:
+					// a raw frame IS its tick, nothing to override).
+					if (gen_ok && ci >= 0) {
+						ImGui::SetCursorPos(ImVec2(bx, row2 + 3.f));
+						ImGui::TextColored(Theme::Pink, "OVR");
+						ImGui::SetCursorPos(ImVec2(bx + 36.f, row2));
+						if (ImGui::Button("clear##tkovr", ImVec2(96.f, bh))) {
+							ks.ovr.erase(ks.ovr.begin() + ci);
+							MarkDirty();
+						}
+					}
 				}
-			}
-			ImGui::EndChild();
-			PassWheel();
-
-			// Stats for the tick the playhead sits on, in a narrow box so the
-			// scrub sliders keep most of the row's width.
-			ImGui::SameLine();
-			ImGui::BeginChild("cursorstats", ImVec2(0, 236), true,
-				ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-			if (g_valid && g_cursor >= 0 && g_cursor < static_cast<int>(g_states.size())) {
-				const Prediction::SimState& st = g_states[g_cursor];
-				const bool air = (st.flags & FL_ONGROUND) == 0;
-				const float interval = Prediction::LastDiag().interval_per_tick > 0.f
-					? Prediction::LastDiag().interval_per_tick : 0.015f;
-				const float vz = st.velocity.Z;
-				const float sp3 = sqrtf(st.velocity.X * st.velocity.X
-					+ st.velocity.Y * st.velocity.Y + vz * vz);
-				ImGui::TextColored(ImVec4(0.7f, 0.85f, 1.f, 1.f),
-					"Cursor - tick %d, seg %d", g_cursor, seg);
-				ImGui::Text("t %.3f s   %s%s", g_cursor * interval,
-					air ? "air" : "ground", (st.flags & FL_DUCKING) ? " + duck" : "");
-				ImGui::Text("pos %.1f %.1f %.1f", st.origin.X, st.origin.Y, st.origin.Z);
-				ImGui::Text("speed %.1f   vz %+.0f", g_speed[g_cursor], vz);
-				ImGui::Text("3D speed %.1f", sp3);
-				ImGui::Text("yaw %.2f   pitch %.2f",
-					g_frames[g_cursor].viewangles[1], g_frames[g_cursor].viewangles[0]);
-				if (g_maxgain[g_cursor] > 0.001f) {
-					ImGui::Text("gain %+.2f   max %+.2f", g_gain[g_cursor], g_maxgain[g_cursor]);
-					ImGui::Text("eff %.2f%%", g_eff[g_cursor] * 100.f);
-				} else {
-					ImGui::Text("gain %+.2f (not air)", g_gain[g_cursor]);
-				}
-			} else {
-				ImGui::TextDisabled("stats appear after a sim runs");
 			}
 			ImGui::EndChild();
 			PassWheel();
@@ -7436,7 +7474,7 @@ namespace {
 						"CALIBRATING: solution %d/%d  round %d ... (log writes when done)",
 						g_batch.idx + 1, static_cast<int>(g_search.results.size()), g_batch.round);
 					ImGui::SameLine();
-					if (ImGui::SmallButton("abort##calib"))
+					if (ImGui::Button("abort##calib"))
 						FinishBatch(true);
 				} else {
 					if (g_search.seg == g_sel && g_search.done && !g_search.results.empty()
@@ -7536,17 +7574,21 @@ namespace {
 						s.gen.pitch_val = 20.f;   // measured straight-flight base
 					ch = true;
 				}
-				if (s.gen.pitch_mode == PM_Const) {
-					ch |= FloatRow("Pitch value", &s.gen.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
-				} else if (s.gen.pitch_mode == PM_Follow) {
-					ch |= FloatRow("Pitch multiplier", &s.gen.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
-				} else {
-					ch |= FloatRow("Base pitch", &s.gen.pitch_val, -30.f, 85.f, "%.1f deg", 0.1f, 5.f, 1);
-					ch |= FloatRow("Turn coupling", &s.gen.pitch_turn, 0.f, 20.f, "%.1f deg", 0.1f, 1.f, 1);
-					ch |= FloatRow("Descent follow", &s.gen.pitch_desc, 0.f, 1.5f, "%.2f", 0.01f, 0.1f);
-					ch |= FloatRow("Response", &s.gen.pitch_rate, 0.05f, 4.f, "%.2f deg/tick", 0.05f, 0.2f);
-					Theme::Help("The dynamic pitch recipe, measured from your recorded "
-						"runs - see the tooltips on a normal segment's pitch rows.");
+				// Sliders tucked behind a dropdown, closed by default (46r).
+				if (ImGui::TreeNode("pitch settings##sv")) {
+					if (s.gen.pitch_mode == PM_Const) {
+						ch |= FloatRow("Pitch value", &s.gen.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
+					} else if (s.gen.pitch_mode == PM_Follow) {
+						ch |= FloatRow("Pitch multiplier", &s.gen.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
+					} else {
+						ch |= FloatRow("Base pitch", &s.gen.pitch_val, -30.f, 85.f, "%.1f deg", 0.1f, 5.f, 1);
+						ch |= FloatRow("Turn coupling", &s.gen.pitch_turn, 0.f, 20.f, "%.1f deg", 0.1f, 1.f, 1);
+						ch |= FloatRow("Descent follow", &s.gen.pitch_desc, 0.f, 1.5f, "%.2f", 0.01f, 0.1f);
+						ch |= FloatRow("Response", &s.gen.pitch_rate, 0.05f, 4.f, "%.2f deg/tick", 0.05f, 0.2f);
+						Theme::Help("The dynamic pitch recipe, measured from your recorded "
+							"runs - see the tooltips on a normal segment's pitch rows.");
+					}
+					ImGui::TreePop();
 				}
 				if (ch)
 					MarkDirty();
@@ -7890,27 +7932,31 @@ namespace {
 					"dominant human pattern - carving = looking down the ramp), sinks "
 					"toward the fall line while descending, and never moves faster "
 					"than the response limit. All sliders, no solving.");
-				if (g.pitch_mode == PM_Const) {
-					ch |= FloatRow("Pitch value", &g.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
-				} else if (g.pitch_mode == PM_Follow) {
-					ch |= FloatRow("Pitch multiplier", &g.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
-				} else {
-					ch |= FloatRow("Base pitch", &g.pitch_val, -30.f, 85.f, "%.1f deg", 0.1f, 5.f, 1);
-					Theme::Help("Pitch while flying straight, + = down. Your runs sat "
-						"around +8..+27 when not turning.");
-					ch |= FloatRow("Turn coupling", &g.pitch_turn, 0.f, 20.f, "%.1f deg", 0.1f, 1.f, 1);
-					Theme::Help("Extra down-pitch per deg/tick of yaw rate. Your runs "
-						"looked +20..+48 deeper while carving than while straight; "
-						"typical strafe rates ~2-4 deg/tick make 8 a good middle.");
-					ch |= FloatRow("Descent follow", &g.pitch_desc, 0.f, 1.5f, "%.2f", 0.01f, 0.1f);
-					Theme::Help("How much of the falling trajectory's slope is added "
-						"while descending (watching the landing). 0 = ignore the "
-						"fall, 1 = look straight down the fall line. Rising never "
-						"pitches up - the runs never did.");
-					ch |= FloatRow("Response", &g.pitch_rate, 0.05f, 4.f, "%.2f deg/tick", 0.05f, 0.2f);
-					Theme::Help("Rate limit toward the target. Your runs moved the "
-						"pitch under ~1 deg/tick 90% of the time, ~1.7 at the 99th "
-						"percentile.");
+				// Sliders tucked behind a dropdown, closed by default (46r).
+				if (ImGui::TreeNode("pitch settings##gen")) {
+					if (g.pitch_mode == PM_Const) {
+						ch |= FloatRow("Pitch value", &g.pitch_val, -89.f, 89.f, "%.1f deg", 0.1f, 5.f, 1);
+					} else if (g.pitch_mode == PM_Follow) {
+						ch |= FloatRow("Pitch multiplier", &g.pitch_mult, -2.f, 2.f, "%.2f", 0.05f, 0.2f);
+					} else {
+						ch |= FloatRow("Base pitch", &g.pitch_val, -30.f, 85.f, "%.1f deg", 0.1f, 5.f, 1);
+						Theme::Help("Pitch while flying straight, + = down. Your runs sat "
+							"around +8..+27 when not turning.");
+						ch |= FloatRow("Turn coupling", &g.pitch_turn, 0.f, 20.f, "%.1f deg", 0.1f, 1.f, 1);
+						Theme::Help("Extra down-pitch per deg/tick of yaw rate. Your runs "
+							"looked +20..+48 deeper while carving than while straight; "
+							"typical strafe rates ~2-4 deg/tick make 8 a good middle.");
+						ch |= FloatRow("Descent follow", &g.pitch_desc, 0.f, 1.5f, "%.2f", 0.01f, 0.1f);
+						Theme::Help("How much of the falling trajectory's slope is added "
+							"while descending (watching the landing). 0 = ignore the "
+							"fall, 1 = look straight down the fall line. Rising never "
+							"pitches up - the runs never did.");
+						ch |= FloatRow("Response", &g.pitch_rate, 0.05f, 4.f, "%.2f deg/tick", 0.05f, 0.2f);
+						Theme::Help("Rate limit toward the target. Your runs moved the "
+							"pitch under ~1 deg/tick 90% of the time, ~1.7 at the 99th "
+							"percentile.");
+					}
+					ImGui::TreePop();
 				}
 
 				if (ch) {
