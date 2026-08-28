@@ -9382,14 +9382,15 @@ namespace {
 		return 0;
 	}
 
-	// Convert the loaded demo trace into EDITABLE raw segments (46z). A TV
-	// demo carries NO inputs, so this is a stated RECONSTRUCTION: the view
-	// stream is the trace's (lerped to tick cadence; exact at snapshots),
-	// the strafe key follows the view's turn direction, and W/jump/duck are
-	// unrecoverable (left empty). The engine sim therefore DRIFTS from the
-	// demo's path - the point is an editable, testable skeleton ON the
-	// demo's line: anchored at its start, corrected with the raw tick
-	// editor / segment adjust / per-tick overrides.
+	// LOAD RUN FROM THE DEMO POINT (46z3, user workflow): the demo cursor is
+	// the SYNC POINT, like lining audio up with video. The anchor is set to
+	// the cursor row (position + view + slope velocity) and ONE raw segment
+	// carries the demo's moves from that tick straight through - view angles
+	// lerped to tick cadence, strafe key from the view's turn direction. No
+	// splitting, no gap compensation, no replacing anything: the run line
+	// simply starts ON the demo line and runs alongside it. (A TV demo holds
+	// no W/jump/duck data, so downstream drift is expected - edit from
+	// there.)
 	void ConvertDemoToRun() {
 		if (g_demo_rows.size() < 2) {
 			g_status = "Load a demo trace first.";
@@ -9397,70 +9398,14 @@ namespace {
 		}
 		float interval = Prediction::LastDiag().interval_per_tick;
 		if (interval <= 0.f) interval = 0.015f;
-		const bool was_empty = g_segs.empty();
 		const int nrows = static_cast<int>(g_demo_rows.size());
-		std::vector<EditSegment> made;
-		EditSegment cur;
-		cur.raw = true;
-		auto CloseSeg = [&]() {
-			if (cur.frames.size() >= 4)   // gap fragments are noise
-				made.push_back(cur);
-			cur = EditSegment();
-			cur.raw = true;
-		};
-		// Conversion starts AT THE GOLD DEMO POINT (46z2) - a trace usually
-		// opens with idle + a teleport into the start zone, and the run the
-		// user wants begins at that landing, not at row 0.
 		int start_row = g_demo_mark;
 		if (start_row < 0) start_row = 0;
-		if (start_row >= nrows - 1) start_row = 0;
-		int total_ticks = 0;
-		float prev_yaw = g_demo_rows[start_row].yaw;
-		float tt = g_demo_rows[start_row].sim;
-		int k = start_row;
-		while (total_ticks < 20000) {
-			while (k + 1 < nrows && g_demo_rows[k + 1].sim <= tt + 1e-6f)
-				k++;
-			if (k + 1 >= nrows)
-				break;
-			const DemoRow& a = g_demo_rows[k];
-			const DemoRow& b = g_demo_rows[k + 1];
-			const float gx = b.pos.X - a.pos.X, gy = b.pos.Y - a.pos.Y,
-				gz = b.pos.Z - a.pos.Z;
-			if (b.sim - a.sim > 0.5f
-				|| gx * gx + gy * gy + gz * gz > 300.f * 300.f) {
-				// Teleport / demo seek: close the segment, resume after it.
-				CloseSeg();
-				k++;
-				tt = b.sim;
-				prev_yaw = b.yaw;
-				continue;
-			}
-			const float span = b.sim - a.sim;
-			const float w = (span > 1e-6f)
-				? Clampf((tt - a.sim) / span, 0.f, 1.f) : 0.f;
-			const float yaw = NormYaw(a.yaw + NormYaw(b.yaw - a.yaw) * w);
-			const float pitch = a.pitch + (b.pitch - a.pitch) * w;
-			Frame f = {};
-			f.viewangles[0] = pitch;
-			f.viewangles[1] = yaw;
-			const float dy = NormYaw(yaw - prev_yaw);
-			f.sidemove = (dy > 0.03f) ? -450.f : (dy < -0.03f) ? 450.f : 0.f;
-			cur.frames.push_back(f);
-			prev_yaw = yaw;
-			tt += interval;
-			total_ticks++;
-		}
-		CloseSeg();
-		if (made.empty()) {
-			g_status = "Nothing to convert (trace too short).";
-			return;
-		}
-		if (was_empty) {
-			// Fresh project: the run starts where the conversion does - the
-			// gold demo point (velocity from the first differing-sim slope,
-			// like the anchor picker).
-			const DemoRow& r0 = g_demo_rows[start_row];
+		if (start_row >= nrows - 1) start_row = nrows - 2;
+
+		// The sync: anchor = the demo cursor.
+		const DemoRow& r0 = g_demo_rows[start_row];
+		{
 			Vector vel(0.f, 0.f, 0.f);
 			int bb = start_row;
 			while (bb + 1 < nrows && g_demo_rows[bb].sim <= r0.sim + 1e-6f)
@@ -9479,18 +9424,43 @@ namespace {
 			g_anchor.ducked = false;
 			g_anchor.stamina = 0.f;
 		}
-		int frames_total = 0;
-		for (const EditSegment& s : made)
-			frames_total += static_cast<int>(s.frames.size());
-		for (EditSegment& s : made)
-			g_segs.push_back(std::move(s));
+
+		EditSegment seg;
+		seg.raw = true;
+		float prev_yaw = r0.yaw;
+		float tt = r0.sim;
+		int k = start_row;
+		while (static_cast<int>(seg.frames.size()) < 20000) {
+			while (k + 1 < nrows && g_demo_rows[k + 1].sim <= tt + 1e-6f)
+				k++;
+			if (k + 1 >= nrows)
+				break;
+			const DemoRow& a = g_demo_rows[k];
+			const DemoRow& b = g_demo_rows[k + 1];
+			const float span = b.sim - a.sim;
+			const float w = (span > 1e-6f)
+				? Clampf((tt - a.sim) / span, 0.f, 1.f) : 0.f;
+			const float yaw = NormYaw(a.yaw + NormYaw(b.yaw - a.yaw) * w);
+			const float pitch = a.pitch + (b.pitch - a.pitch) * w;
+			Frame f = {};
+			f.viewangles[0] = pitch;
+			f.viewangles[1] = yaw;
+			const float dy = NormYaw(yaw - prev_yaw);
+			f.sidemove = (dy > 0.03f) ? -450.f : (dy < -0.03f) ? 450.f : 0.f;
+			seg.frames.push_back(f);
+			prev_yaw = yaw;
+			tt += interval;
+		}
+		if (seg.frames.size() < 2) {
+			g_status = "Trace too short past the demo point.";
+			return;
+		}
+		const int nticks = static_cast<int>(seg.frames.size());
+		g_segs.push_back(std::move(seg));
 		g_sel = static_cast<int>(g_segs.size()) - 1;
 		MarkDirty();
-		g_status = FmtStr("Demo converted from point %d: %d raw segment(s), "
-			"%d ticks%s. Inputs are RECONSTRUCTED (view + strafe side) - "
-			"expect drift; correct with the tick editor.",
-			start_row, static_cast<int>(made.size()), frames_total,
-			was_empty ? "; anchor set from that point" : "");
+		g_status = FmtStr("Run loaded from demo point %d: %d ticks, anchor "
+			"synced to the line.", start_row, nticks);
 	}
 
 	// ---- DEMO TRACE CAPTURE (rebuild checklist M5.3) ---------------------
@@ -10089,27 +10059,30 @@ namespace {
 					g_anchor.ducked = false;
 					g_anchor.stamina = 0.f;
 					MarkDirty();
-					g_status = "Anchor set from the demo point - the run now "
-						"starts on the demo's path.";
+					g_status = "Anchor set from the demo point.";
 				}
-				Theme::Help("Sets the RUN ANCHOR to this demo point (position "
-					"+ view from the row, velocity from the trace slope), so "
-					"the TAS simulates from exactly there - build segments "
-					"against the demo and test play from its line. Duck state "
-					"is not captured (assumed standing).");
 				ImGui::SameLine();
-				if (ImGui::Button("Convert to editable run"))
+				if (ImGui::Button("Teleport to demo point") && engine) {
+					char cmd[192];
+					if (g_freecam)
+						Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
+							dr.pos.X, dr.pos.Y, dr.pos.Z);
+					else
+						Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+							dr.pos.X, dr.pos.Y, dr.pos.Z, dr.pitch, dr.yaw);
+					engine->ClientCmd_Unrestricted(cmd);
+					g_status = "Teleported to the demo point (needs sv_cheats 1).";
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Load run from demo point"))
 					ConvertDemoToRun();
-				Theme::Help("Builds RAW tick segments starting AT THE GOLD "
-					"DEMO POINT: view angles lerped to tick cadence (exact at "
-					"snapshots), strafe key from the view's turn direction. A "
-					"TV demo carries NO inputs, so W/jump/duck are "
-					"unrecoverable and the sim WILL drift from the demo's "
-					"path - this is an editable skeleton on the demo's line, "
-					"not a faithful replay. Segments split at teleports/seeks; "
-					"on an empty project the anchor is set from the point too. "
-					"Use the tp buttons to land the point on a teleport exit "
-					"first.");
+				Theme::Help("The demo point is the SYNC POINT. Set anchor pins "
+					"the run's start there; Teleport puts YOU there; Load run "
+					"sets the anchor AND adds one raw segment carrying the "
+					"demo's moves (view + strafe keys) from that tick on - the "
+					"run line starts on the demo line and runs alongside it. A "
+					"TV demo holds no W/jump/duck data, so expect drift "
+					"downstream; edit from there.");
 			}
 		}
 
