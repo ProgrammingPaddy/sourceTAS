@@ -203,6 +203,38 @@ bool& RecordPanel::AutohopEnabled() {
 	return g_autohop;
 }
 
+namespace {
+	// One styled command button, shared by the Record tab's action grid and
+	// the Keybinds tab's bind grid: accent for the two headline actions,
+	// danger for the E-stop, dimmed no-op when unavailable. Returns true
+	// when clicked while available.
+	bool CommandButton(TasCommand& command) {
+		const bool available = command.available();
+		const bool primary = available
+			&& (std::strcmp(command.name, "Start Recording") == 0
+				|| std::strcmp(command.name, "Play Selected Recording") == 0);
+		const bool danger = available
+			&& std::strcmp(command.name, "Emergency Stop") == 0;
+		bool clicked = false;
+		if (!available) {
+			const ImVec4 dim(0.16f, 0.16f, 0.18f, 1.0f);
+			ImGui::PushStyleColor(ImGuiCol_Button, dim);
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
+			clicked = ImGui::Button(command.name, ImVec2(230, 0));
+			ImGui::PopStyleColor(4);
+		} else if (primary) {
+			clicked = Theme::Accent(command.name, ImVec2(230, 0));
+		} else if (danger) {
+			clicked = Theme::Danger(command.name, ImVec2(230, 0));
+		} else {
+			clicked = ImGui::Button(command.name, ImVec2(230, 0));
+		}
+		return clicked && available;
+	}
+}
+
 // The recording / run controls, drawn as a tab inside the editor window.
 void RecordPanel::Draw() {
 	// --- state + status --------------------------------------------------
@@ -291,6 +323,22 @@ void RecordPanel::Draw() {
 			"and rewrites its file on disk.");
 	}
 
+	// Recording & playback ACTIONS live here (user rule 46p); their key
+	// binds live on the Keybinds tab. Indices 0..7 = the Recording and
+	// Playback & control groups of the command table.
+	Theme::Heading("Actions");
+	int col = 0;
+	for (int i = 0; i <= 7 && i < kCommandCount; ++i) {
+		if (i == 5) {
+			ImGui::Spacing();
+			col = 0;   // playback group starts its own 2-up block
+		}
+		if (col % 2 == 1)
+			ImGui::SameLine(392.f);
+		col++;
+		if (CommandButton(g_commands[i]))
+			g_commands[i].execute();
+	}
 }
 
 // The keybinds tab (session 46m, user request): every hotkey command with
@@ -353,30 +401,7 @@ void RecordPanel::DrawBinds() {
 		if (col % 2 == 1)
 			ImGui::SameLine(392.f);
 		col++;
-		const bool available = command.available();
-		// Accent (pink) for the two headline actions; neutral otherwise.
-		const bool primary = available
-			&& (std::strcmp(command.name, "Start Recording") == 0
-				|| std::strcmp(command.name, "Play Selected Recording") == 0);
-		const bool danger = available && std::strcmp(command.name, "Emergency Stop") == 0;
-
-		bool clicked = false;
-		if (!available) {
-			const ImVec4 dim(0.16f, 0.16f, 0.18f, 1.0f);
-			ImGui::PushStyleColor(ImGuiCol_Button, dim);
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
-			ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
-			clicked = ImGui::Button(command.name, ImVec2(230, 0));
-			ImGui::PopStyleColor(4);
-		} else if (primary) {
-			clicked = Theme::Accent(command.name, ImVec2(230, 0));
-		} else if (danger) {
-			clicked = Theme::Danger(command.name, ImVec2(230, 0));
-		} else {
-			clicked = ImGui::Button(command.name, ImVec2(230, 0));
-		}
-		if (clicked && available)
+		if (CommandButton(command))
 			command.execute();
 
 		ImGui::SameLine();

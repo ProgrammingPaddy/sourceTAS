@@ -401,7 +401,7 @@ namespace {
 				ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
 				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
 			}
-			const bool clicked = ImGui::SmallButton(lbl);
+			const bool clicked = ImGui::Button(lbl);
 			if (held[i])
 				ImGui::PopStyleColor(4);
 			if (!clicked)
@@ -5033,12 +5033,26 @@ namespace {
 		return !s.is_solver && !s.gen.prestrafe;
 	}
 
+	// A length change on a TOTAL-heading optimal segment (bias_kind 0 spreads
+	// its whole turn over the tick count) re-spreads the SAME total over a
+	// different length and visibly bends the existing path - the reported
+	// "back propagating" adjust behavior, the same length-dependence the
+	// split re-fit exists for. Scale the total so the PER-TICK rate stays
+	// what it was: trimming keeps the turn achieved so far, extending
+	// continues the same steering - exactly what holding the inputs longer
+	// does in game. Every other mode is length-independent per tick.
+	void KeepPerTickSteering(GenParams& g, int old_ticks, int new_ticks) {
+		if (g.yaw_mode == 2 && g.bias_kind == 0 && old_ticks > 0)
+			g.yaw_rate *= static_cast<float>(new_ticks) / static_cast<float>(old_ticks);
+	}
+
 	// Rebalance pair (i, i+1) so the FIRST has want_first ticks (clamped to
 	// leave both sides >= 1). Content rules: a generated segment just
-	// re-lengths (its closed loop recomputes; per-tick overrides clear, the
-	// standing edit rule). A RAW segment growing extends by HOLDING its edge
-	// frame (last frame when growing at its end, first frame when growing at
-	// its start); shrinking drops the eaten frames.
+	// re-lengths (its closed loop recomputes; per-tick overrides PERSIST -
+	// user rule 46p - and length-dependent steering is re-scaled above). A
+	// RAW segment growing extends by HOLDING its edge frame (last frame when
+	// growing at its end, first frame when growing at its start); shrinking
+	// drops the eaten frames.
 	void ApplySegAdjust(int i, int want_first) {
 		if (i < 0 || i + 1 >= static_cast<int>(g_segs.size()))
 			return;
@@ -5062,8 +5076,8 @@ namespace {
 			else
 				a.frames.resize(want_first);
 		} else {
+			KeepPerTickSteering(a.gen, ta, want_first);
 			a.gen.ticks = want_first;
-			a.ovr.clear();
 		}
 		// Second of the pair: its START moves.
 		if (b.raw) {
@@ -5072,10 +5086,66 @@ namespace {
 			else
 				b.frames.insert(b.frames.begin(), -delta, b.frames.front());
 		} else {
+			KeepPerTickSteering(b.gen, tb, total - want_first);
 			b.gen.ticks = total - want_first;
-			b.ovr.clear();
 		}
 		MarkDirty();
+	}
+
+	// Dual-handle tick slider for SEGMENT ADJUST: two grabs on one track
+	// marking the selected segment's boundaries inside the [prev|sel|next]
+	// span. Grabs can't pass each other (every segment keeps >= 1 tick); the
+	// selected span fills pink between them. Returns true when a grab moved
+	// (*moved_low says which); *held reports an active drag.
+	bool DualBoundarySlider(int total, int* b1, int* b2, bool* moved_low,
+	                        bool* held) {
+		const float w = ImGui::GetContentRegionAvailWidth();
+		const float h = 22.f;
+		const ImVec2 pos = ImGui::GetCursorScreenPos();
+		ImGui::InvisibleButton("##segadj2", ImVec2(w, h));
+		const bool active = ImGui::IsItemActive();
+		*held = active;
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const ImGuiStyle& st = ImGui::GetStyle();
+		const float x0 = pos.x + 5.f, x1 = pos.x + w - 5.f;
+		auto tick2x = [&](int t) {
+			return x0 + (x1 - x0) * (static_cast<float>(t) / static_cast<float>(total));
+		};
+		dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h),
+			ImGui::ColorConvertFloat4ToU32(st.Colors[ImGuiCol_FrameBg]),
+			st.FrameRounding);
+		dl->AddRectFilled(ImVec2(tick2x(*b1), pos.y + 3.f),
+			ImVec2(tick2x(*b2), pos.y + h - 3.f),
+			ImGui::ColorConvertFloat4ToU32(
+				ImVec4(Theme::Pink.x, Theme::Pink.y, Theme::Pink.z, 0.35f)));
+		bool changed = false;
+		static int s_grab = -1;   // one adjust slider ever on screen
+		if (active) {
+			const float mx = ImGui::GetIO().MousePos.x;
+			int v = static_cast<int>((mx - x0) / (x1 - x0)
+				* static_cast<float>(total) + 0.5f);
+			if (s_grab < 0)
+				s_grab = (fabsf(mx - tick2x(*b1)) <= fabsf(mx - tick2x(*b2))) ? 0 : 1;
+			if (s_grab == 0) {
+				if (v < 1) v = 1;
+				if (v > *b2 - 1) v = *b2 - 1;
+				if (v != *b1) { *b1 = v; changed = true; *moved_low = true; }
+			} else {
+				if (v < *b1 + 1) v = *b1 + 1;
+				if (v > total - 1) v = total - 1;
+				if (v != *b2) { *b2 = v; changed = true; *moved_low = false; }
+			}
+		} else {
+			s_grab = -1;
+		}
+		const ImU32 gc = ImGui::ColorConvertFloat4ToU32(
+			st.Colors[ImGuiCol_SliderGrabActive]);
+		for (int gi = 0; gi < 2; ++gi) {
+			const float gx = tick2x(gi == 0 ? *b1 : *b2);
+			dl->AddRectFilled(ImVec2(gx - 4.f, pos.y + 2.f),
+				ImVec2(gx + 4.f, pos.y + h - 2.f), gc, st.GrabRounding);
+		}
+		return changed;
 	}
 
 	void InsertSegment(EditSegment segment) {
@@ -6576,8 +6646,17 @@ namespace {
 	}
 
 	void DrawRunTab() {
-		// Quick save (session 45): saves the project under its CURRENT
-		// identity without leaving the tab; a never-saved project names
+		// --- run controls: save + anchor + test play ---------------------
+		Theme::Heading("Run controls");
+		if (g_anchor.valid)
+			ImGui::Text("Anchor: %.1f %.1f %.1f   yaw %.1f   vel %.0f u/s%s",
+				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
+				g_anchor.yaw, Speed2D(g_anchor.velocity), g_anchor.ducked ? "   (ducked)" : "");
+		else
+			ImGui::TextColored(Theme::Warning, "No anchor - capture one to simulate.");
+
+		// Quick save first in the row (session 45 + 46p placement): saves
+		// under the project's CURRENT identity; a never-saved project names
 		// itself from the Project tab's box on its first save.
 		{
 			char lab[192];
@@ -6589,17 +6668,7 @@ namespace {
 			if (ImGui::Button(lab))
 				SaveProjectCurrent();
 		}
-		ImGui::Separator();
-
-		// --- anchor + test play ------------------------------------------
-		Theme::Heading("Anchor & test play");
-		if (g_anchor.valid)
-			ImGui::Text("Anchor: %.1f %.1f %.1f   yaw %.1f   vel %.0f u/s%s",
-				g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
-				g_anchor.yaw, Speed2D(g_anchor.velocity), g_anchor.ducked ? "   (ducked)" : "");
-		else
-			ImGui::TextColored(Theme::Warning, "No anchor - capture one to simulate.");
-
+		ImGui::SameLine();
 		if (ImGui::Button("Capture anchor from player")) {
 			StartState s;
 			if (Prediction::CaptureStartState(s)) {
@@ -6641,21 +6710,25 @@ namespace {
 			ImGui::SliderInt("##cursorall", &g_cursor, 0, last);
 			ImGui::PopItemWidth();
 
-			if (ImGui::SmallButton("|<")) g_cursor = 0;
-			ImGui::SameLine(); if (ImGui::SmallButton("<seg")) TasEditor::StepSegment(-1);
-			ImGui::SameLine(); if (ImGui::SmallButton("-10")) TasEditor::StepCursor(-10);
-			ImGui::SameLine(); if (ImGui::SmallButton("-1")) TasEditor::StepCursor(-1);
-			ImGui::SameLine(); if (ImGui::SmallButton("+1")) TasEditor::StepCursor(1);
-			ImGui::SameLine(); if (ImGui::SmallButton("+10")) TasEditor::StepCursor(10);
-			ImGui::SameLine(); if (ImGui::SmallButton("seg>")) TasEditor::StepSegment(1);
-			ImGui::SameLine(); if (ImGui::SmallButton(">|")) g_cursor = last;
+			if (ImGui::Button("|<")) g_cursor = 0;
+			ImGui::SameLine(); if (ImGui::Button("<seg")) TasEditor::StepSegment(-1);
+			ImGui::SameLine(); if (ImGui::Button("-10")) TasEditor::StepCursor(-10);
+			ImGui::SameLine(); if (ImGui::Button("-1")) TasEditor::StepCursor(-1);
+			ImGui::SameLine(); if (ImGui::Button("+1")) TasEditor::StepCursor(1);
+			ImGui::SameLine(); if (ImGui::Button("+10")) TasEditor::StepCursor(10);
+			ImGui::SameLine(); if (ImGui::Button("seg>")) TasEditor::StepSegment(1);
+			ImGui::SameLine(); if (ImGui::Button(">|")) g_cursor = last;
 
-			// Selected-segment scrubber, two-way tied to the playhead: dragging
-			// here moves the global playhead inside the segment, and moving the
-			// playhead any other way is reflected straight back here.
-			if (g_sel >= 0 && g_sel < static_cast<int>(g_starts.size())) {
-				const int b = g_starts[g_sel];
-				int e = (g_sel + 1 < static_cast<int>(g_starts.size())) ? g_starts[g_sel + 1] : g_total;
+			// Selected-segment scrubber, two-way tied to the playhead. ALWAYS
+			// drawn (inert placeholder without a selection) so the box's rows
+			// never reflow - the 46p "things get pushed down" complaint.
+			{
+				int b = 0, e = 0;
+				if (g_sel >= 0 && g_sel < static_cast<int>(g_starts.size())) {
+					b = g_starts[g_sel];
+					e = (g_sel + 1 < static_cast<int>(g_starts.size()))
+						? g_starts[g_sel + 1] : g_total;
+				}
 				if (e > b) {
 					int local = g_cursor - b;
 					if (local < 0) local = 0;
@@ -6665,36 +6738,45 @@ namespace {
 					if (ImGui::SliderInt("##cursorseg", &local, 0, e - b - 1))
 						g_cursor = b + local;
 					ImGui::PopItemWidth();
+				} else {
+					ImGui::TextDisabled("Segment scrub");
+					int zero = 0;
+					ImGui::PushItemWidth(-1);
+					ImGui::SliderInt("##cursorseg", &zero, 0, 0, "");
+					ImGui::PopItemWidth();
 				}
 			}
 
-			// SEGMENT ADJUST (session 46p, user spec): one slider that moves
-			// the boundary between the selected segment and a neighbor, tick
-			// by tick, keeping the pair's total constant. Slide LEFT = the
-			// pair's first segment shrinks and the second grows over the
-			// vacated ticks; slide RIGHT = the first extends and eats the
-			// second's start. The mode buttons pick the pair; default is
-			// "to next", or "to previous" when the last segment is selected.
-			if (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())
-				&& g_segs.size() >= 2) {
+			// SEGMENT ADJUST (46p, reworked per user): the side toggles are
+			// INDEPENDENT - each trades the selected segment's ticks with that
+			// neighbor. Both on = one track with TWO grabs (the segment's two
+			// boundaries) that can't pass each other, so every segment keeps
+			// >= 1 tick. Slide a boundary left = the earlier segment shrinks
+			// and the later grows over the vacated ticks; right = the earlier
+			// extends and eats the later's start. Totals conserved. Defaults:
+			// every available side on; the row never reflows.
+			{
 				const int nseg = static_cast<int>(g_segs.size());
-				static int s_adj_for_sel = -1;
-				static int s_adj_mode = 1;        // 0 = previous pair, 1 = next pair
-				static int s_adj_drag_first = -1; // pair pinned while dragging
-				if (s_adj_for_sel != g_sel && s_adj_drag_first < 0) {
-					s_adj_for_sel = g_sel;
-					s_adj_mode = (g_sel == nseg - 1) ? 0 : 1;
+				static int  s_adj_for_sel = -1;
+				static bool s_adj_prev = true, s_adj_next = true;
+				static int  s_adj_pin = -1;   // selection pinned while dragging
+				const int sel = (s_adj_pin >= 0 && s_adj_pin < nseg) ? s_adj_pin : g_sel;
+				const bool sel_ok = sel >= 0 && sel < nseg;
+				if (sel_ok && s_adj_for_sel != sel && s_adj_pin < 0) {
+					s_adj_for_sel = sel;
+					s_adj_prev = sel > 0;
+					s_adj_next = sel < nseg - 1;
 				}
-				const bool can_prev = g_sel > 0;
-				const bool can_next = g_sel < nseg - 1;
-				if (s_adj_mode == 0 && !can_prev) s_adj_mode = 1;
-				if (s_adj_mode == 1 && !can_next) s_adj_mode = 0;
+				const bool prev_ok = sel_ok && sel > 0
+					&& SegAdjustable(g_segs[sel - 1]) && SegAdjustable(g_segs[sel]);
+				const bool next_ok = sel_ok && sel < nseg - 1
+					&& SegAdjustable(g_segs[sel]) && SegAdjustable(g_segs[sel + 1]);
 
 				ImGui::TextDisabled("Segment adjust");
-				auto ModeBtn = [&](const char* lbl, int mode, bool can) {
+				auto SideBtn = [&](const char* lbl, bool* on, bool can) {
 					ImGui::SameLine();
-					const bool active = (s_adj_mode == mode);
-					if (active) {
+					const bool lit = *on && can;
+					if (lit) {
 						ImGui::PushStyleColor(ImGuiCol_Button, Theme::Pink);
 						ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::PinkHi);
 						ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
@@ -6706,43 +6788,57 @@ namespace {
 						ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
 						ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
 					}
-					if (ImGui::SmallButton(lbl) && can && s_adj_drag_first < 0)
-						s_adj_mode = mode;
-					if (active || !can)
+					if (ImGui::Button(lbl) && can && s_adj_pin < 0)
+						*on = !*on;
+					if (lit || !can)
 						ImGui::PopStyleColor(4);
 				};
-				ModeBtn("adjust to previous", 0, can_prev);
-				ModeBtn("adjust to next", 1, can_next);
+				SideBtn("to previous", &s_adj_prev, prev_ok);
+				SideBtn("to next", &s_adj_next, next_ok);
 
-				int first = (s_adj_mode == 0) ? g_sel - 1 : g_sel;
-				if (s_adj_drag_first >= 0)
-					first = s_adj_drag_first;   // never retarget mid-drag
-				if (first >= 0 && first + 1 < nseg) {
-					EditSegment& A = g_segs[first];
-					EditSegment& B = g_segs[first + 1];
-					if (!SegAdjustable(A) || !SegAdjustable(B)) {
-						ImGui::TextDisabled("(#%d/#%d not adjustable - solver/"
-							"prestrafe segments size themselves)", first, first + 1);
-						s_adj_drag_first = -1;
-					} else {
-						const int ta = A.Ticks(), tb = B.Ticks();
-						const int total = ta + tb;
-						if (total >= 2) {
-							ImGui::SameLine();
-							ImGui::TextDisabled("#%d %d : %d #%d",
-								first, ta, tb, first + 1);
-							int v = ta;
-							ImGui::PushItemWidth(-1);
-							const bool moved =
-								ImGui::SliderInt("##segadjust", &v, 1, total - 1);
-							const bool held = ImGui::IsItemActive();
-							ImGui::PopItemWidth();
-							if (moved && v != ta)
-								ApplySegAdjust(first, v);
-							s_adj_drag_first = held ? first : -1;
-						}
+				const bool use_prev = s_adj_prev && prev_ok;
+				const bool use_next = s_adj_next && next_ok;
+				const int tp = use_prev ? g_segs[sel - 1].Ticks() : 0;
+				const int ts = sel_ok ? g_segs[sel].Ticks() : 0;
+				const int tn = use_next ? g_segs[sel + 1].Ticks() : 0;
+				ImGui::SameLine();
+				if (use_prev && use_next)
+					ImGui::TextDisabled("%d / %d / %d", tp, ts, tn);
+				else if (use_prev)
+					ImGui::TextDisabled("%d / %d", tp, ts);
+				else if (use_next)
+					ImGui::TextDisabled("%d / %d", ts, tn);
+				else
+					ImGui::TextDisabled("-");
+
+				bool held = false;
+				if (use_prev && use_next && ts >= 1) {
+					int b1 = tp, b2 = tp + ts;
+					bool low = false;
+					if (DualBoundarySlider(tp + ts + tn, &b1, &b2, &low, &held)) {
+						if (low)
+							ApplySegAdjust(sel - 1, b1);
+						else
+							ApplySegAdjust(sel, b2 - tp);
 					}
+				} else if (use_prev || use_next) {
+					const int first = use_prev ? sel - 1 : sel;
+					const int total = use_prev ? tp + ts : ts + tn;
+					int v = use_prev ? tp : ts;
+					ImGui::PushItemWidth(-1);
+					const bool moved =
+						ImGui::SliderInt("##segadjust", &v, 1, total - 1, "");
+					held = ImGui::IsItemActive();
+					ImGui::PopItemWidth();
+					if (moved)
+						ApplySegAdjust(first, v);
+				} else {
+					int zero = 0;   // inert slider-shaped blank: height stays put
+					ImGui::PushItemWidth(-1);
+					ImGui::SliderInt("##segadjustoff", &zero, 0, 0, "");
+					ImGui::PopItemWidth();
 				}
+				s_adj_pin = held ? sel : -1;
 			}
 
 			// Per-tick editor at the playhead - EVERY tick in a run is editable
@@ -6796,8 +6892,9 @@ namespace {
 					ImGui::TextDisabled("Tick inputs");
 					Theme::Help("Every input's state at the playhead tick - pink = held. "
 						"Click to flip that input on exactly this tick (marked *); click "
-						"again to remove the override. Editing the segment's parameters "
-						"clears its per-tick overrides.");
+						"again to remove the override. Overrides PERSIST through segment "
+						"edits; the segment panel's Clear-overrides button is the only "
+						"thing that removes them.");
 					for (int i = 0; i < 6; ++i) {
 						if (i) ImGui::SameLine();
 						const bool ovr_bit = ci >= 0 && (ks.ovr[ci].mask & bits[i]) != 0;
@@ -6809,7 +6906,7 @@ namespace {
 							ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::PinkHi);
 							ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
 						}
-						const bool clicked = ImGui::SmallButton(lbl);
+						const bool clicked = ImGui::Button(lbl);
 						if (held[i])
 							ImGui::PopStyleColor(4);
 						if (!clicked)
@@ -7052,6 +7149,20 @@ namespace {
 		// --- selected segment parameters ----------------------------------
 		if (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) {
 			Theme::Heading("Selected segment");
+			// Per-tick overrides persist through every segment edit (user rule
+			// 46p); this button is the one and only way to shed them.
+			if (!g_segs[g_sel].raw && !g_segs[g_sel].ovr.empty()) {
+				char cl[64];
+				Sfmt(cl, "Clear overrides (%d)##segovr",
+					static_cast<int>(g_segs[g_sel].ovr.size()));
+				if (ImGui::Button(cl)) {
+					g_segs[g_sel].ovr.clear();
+					MarkDirty();
+				}
+				Theme::Help("Removes every per-tick input override on this "
+					"segment. Nothing else touches them - they survive "
+					"parameter edits, segment adjust, and duration changes.");
+			}
 			if (g_segs[g_sel].is_solver && !g_segs[g_sel].raw) {
 				EditSegment& s = g_segs[g_sel];
 				// Target & mode on the left, search gates + probe on the right -
@@ -7112,10 +7223,8 @@ namespace {
 				Theme::Help("The model is airborne-only - a grounded start needs this "
 					"first-tick hop to leave the floor.");
 				ImGui::SameLine();
-				if (ImGui::Checkbox("Hold crouch", &s.gen.duck)) {
-					s.ovr.clear();
-					MarkDirty();
-				}
+				if (ImGui::Checkbox("Hold crouch", &s.gen.duck))
+					MarkDirty();   // overrides persist (user rule 46p)
 				Theme::Help("Hold duck for the whole segment. Off by default; the engine "
 					"sim carries the smaller hull and duck physics through the solve.");
 				ImGui::EndChild();
@@ -7415,8 +7524,14 @@ namespace {
 				// Pitch still applies (static, trajectory-follow, or the human
 				// recipe, exactly as in normal segments).
 				bool ch = false;
-				static const char* kPitchModesSv[] = { "Constant", "Follow trajectory", "Dynamic" };
-				if (ChoiceRow("Pitch", &s.gen.pitch_mode, kPitchModesSv, 3)) {
+				// Display order puts the DEFAULT (Dynamic) leftmost without
+				// touching the stored PM_ codes (user rule 46p).
+				static const char* kPitchModesSv[] = { "Dynamic", "Constant", "Follow trajectory" };
+				int pm_disp = (s.gen.pitch_mode == PM_Dynamic) ? 0
+					: (s.gen.pitch_mode == PM_Const) ? 1 : 2;
+				if (ChoiceRow("Pitch", &pm_disp, kPitchModesSv, 3)) {
+					s.gen.pitch_mode = (pm_disp == 0) ? PM_Dynamic
+						: (pm_disp == 1) ? PM_Const : PM_Follow;
 					if (s.gen.pitch_mode == PM_Dynamic && s.gen.pitch_val == 0.f)
 						s.gen.pitch_val = 20.f;   // measured straight-flight base
 					ch = true;
@@ -7647,13 +7762,14 @@ namespace {
 				// optimal like every other max-gain path.
 				if (g.yaw_mode < 1 || g.yaw_mode > 4)
 					g.yaw_mode = 2;
-				int vmode = (g.yaw_mode == 1) ? 0 : 1;
-				static const char* kViewModes[] = { "Turn rate", "Optimal strafe" };
+				// Optimal strafe leftmost - it's the default (user rule 46p).
+				int vmode = (g.yaw_mode == 1) ? 1 : 0;
+				static const char* kViewModes[] = { "Optimal strafe", "Turn rate" };
 				if (ChoiceRow("View mode", &vmode, kViewModes, 2)) {
-					g.yaw_mode = (vmode == 0) ? 1 : ((g.yaw_mode == 3 || g.yaw_mode == 4) ? g.yaw_mode : 2);
+					g.yaw_mode = (vmode == 1) ? 1 : ((g.yaw_mode == 3 || g.yaw_mode == 4) ? g.yaw_mode : 2);
 					ch = true;
 				}
-				if (vmode == 0) {
+				if (vmode == 1) {
 					ch |= FloatRow("View turn", &g.yaw_rate, -15.f, 15.f, "%+.2f deg/tick", 0.05f, 0.5f);
 					Theme::Help("- turns left, + turns right, 0 holds the view still.");
 				} else {
@@ -7754,8 +7870,14 @@ namespace {
 				// ground+air arc too). DYNAMIC is the default: the human recipe
 				// measured from the recorded runs.
 				SubHeading("Pitch");
-				static const char* kPitchModes[] = { "Constant", "Follow trajectory", "Dynamic" };
-				if (ChoiceRow("##pitchmode", &g.pitch_mode, kPitchModes, 3)) {
+				// Display order puts the DEFAULT (Dynamic) leftmost without
+				// touching the stored PM_ codes (user rule 46p).
+				static const char* kPitchModes[] = { "Dynamic", "Constant", "Follow trajectory" };
+				int pm_disp = (g.pitch_mode == PM_Dynamic) ? 0
+					: (g.pitch_mode == PM_Const) ? 1 : 2;
+				if (ChoiceRow("##pitchmode", &pm_disp, kPitchModes, 3)) {
+					g.pitch_mode = (pm_disp == 0) ? PM_Dynamic
+						: (pm_disp == 1) ? PM_Const : PM_Follow;
 					// Old segments switched onto DYNAMIC with an untouched 0
 					// base: seed the measured straight-flight base (visible +
 					// editable; new segments already default to it).
@@ -7792,10 +7914,9 @@ namespace {
 				}
 
 				if (ch) {
-					// Segment edits overwrite the per-tick input overrides (the
-					// override is a tweak of ONE composed plan, not a promise
-					// that survives re-planning).
-					g_segs[g_sel].ovr.clear();
+					// Per-tick overrides PERSIST through segment edits (user
+					// rule 46p) - the panel's Clear-overrides button is the
+					// only thing that removes them.
 					// A prestrafe recipe is a whole-segment behavior - never
 					// auto-split it; other gen edits keep the forward-only split.
 					const int start = (g_sel < static_cast<int>(g_starts.size())) ? g_starts[g_sel] : 0;
