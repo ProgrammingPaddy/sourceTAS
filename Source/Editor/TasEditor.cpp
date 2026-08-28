@@ -9284,7 +9284,16 @@ namespace {
 				g_demo_csvs.push_back(fd.cFileName);
 		} while (FindNextFileA(h, &fd));
 		FindClose(h);
-		std::sort(g_demo_csvs.begin(), g_demo_csvs.end());
+		// The lab writes two files per demo: <name>.csv (the FULL capture,
+		// pre-run idle included) and <name>_run.csv (the trimmed run slice -
+		// the one worth drawing). Run slices sort first.
+		std::sort(g_demo_csvs.begin(), g_demo_csvs.end(),
+			[](const std::string& a, const std::string& b) {
+				const bool ra = a.find("_run.csv") != std::string::npos;
+				const bool rb = b.find("_run.csv") != std::string::npos;
+				if (ra != rb) return ra;
+				return a < b;
+			});
 	}
 
 	bool LoadDemoTrace(const std::string& name) {
@@ -9726,20 +9735,37 @@ namespace {
 		{
 			static int s_demo_sel = -1;
 			static bool s_demo_scanned = false;
+			static char s_demo_note[192] = "";
 			if (!s_demo_scanned) {
 				s_demo_scanned = true;
 				RefreshDemoTraces();
 			}
-			if (ImGui::Button("Refresh##dt"))
+			auto DoLoad = [&](int idx) {
+				if (idx < 0 || idx >= static_cast<int>(g_demo_csvs.size())) {
+					Sfmt(s_demo_note, "select a trace in the list first");
+					return;
+				}
+				if (LoadDemoTrace(g_demo_csvs[idx]))
+					Sfmt(s_demo_note, "loaded %s (%d points)",
+						g_demo_line_name.c_str(),
+						static_cast<int>(g_demo_line.size()));
+				else
+					Sfmt(s_demo_note, "load FAILED: %s", g_status.c_str());
+			};
+			if (ImGui::Button("Refresh##dt")) {
 				RefreshDemoTraces();
+				s_demo_sel = -1;
+				Sfmt(s_demo_note, "%d trace(s) found",
+					static_cast<int>(g_demo_csvs.size()));
+			}
 			ImGui::SameLine();
-			if (ImGui::Button("Load selected##dt") && s_demo_sel >= 0
-				&& s_demo_sel < static_cast<int>(g_demo_csvs.size()))
-				LoadDemoTrace(g_demo_csvs[s_demo_sel]);
+			if (ImGui::Button("Load selected##dt"))
+				DoLoad(s_demo_sel);
 			ImGui::SameLine();
 			if (ImGui::Button("Clear line##dt")) {
 				g_demo_line.clear();
 				g_demo_line_name.clear();
+				s_demo_note[0] = 0;
 			}
 			if (!g_demo_line_name.empty()) {
 				ImGui::SameLine();
@@ -9747,13 +9773,38 @@ namespace {
 					g_demo_line_name.c_str(),
 					static_cast<int>(g_demo_line.size()));
 			}
-			ImGui::BeginChild("demotraces", ImVec2(0, 90), true);
+			if (s_demo_note[0])
+				ImGui::TextDisabled("%s", s_demo_note);
+			// A loaded line that CANNOT render right now says why, in place.
+			if (!g_demo_line.empty()) {
+				if (!WorldDraw::show_demo_line)
+					ImGui::TextColored(Theme::Warning,
+						"line loaded but its toggle is OFF (Rendering tab: Demo trace line)");
+				else if (!WorldDraw::draw_master)
+					ImGui::TextColored(Theme::Warning,
+						"line loaded but in-world drawing is OFF (Rendering tab)");
+				else if (!engine || !engine->IsInGame())
+					ImGui::TextColored(Theme::Warning,
+						"line loaded - it draws in-world once you're in a map");
+			}
+			ImGui::BeginChild("demotraces", ImVec2(0, 104), true);
 			if (g_demo_csvs.empty())
 				ImGui::TextDisabled("(none - run the capture queue above, "
 					"then Refresh)");
-			for (int i = 0; i < static_cast<int>(g_demo_csvs.size()); ++i)
-				if (ImGui::Selectable(g_demo_csvs[i].c_str(), s_demo_sel == i))
+			for (int i = 0; i < static_cast<int>(g_demo_csvs.size()); ++i) {
+				const bool is_run =
+					g_demo_csvs[i].find("_run.csv") != std::string::npos;
+				char row[320];
+				Sfmt(row, "%s   [%s]##dtrace%d", g_demo_csvs[i].c_str(),
+					is_run ? "run slice" : "full capture", i);
+				if (ImGui::Selectable(row, s_demo_sel == i))
 					s_demo_sel = i;
+				// Double-click a row = load it (no separate button needed).
+				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+					s_demo_sel = i;
+					DoLoad(i);
+				}
+			}
 			ImGui::EndChild();
 			PassWheel();
 		}
