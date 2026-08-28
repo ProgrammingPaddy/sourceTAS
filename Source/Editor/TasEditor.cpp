@@ -9349,6 +9349,39 @@ namespace {
 		return true;
 	}
 
+	// Is there a GAP (teleport / demo seek / interp snap) between demo rows
+	// i and i+1? Same rule the line-split and the converter use.
+	bool DemoGapAt(int i) {
+		if (i < 0 || i + 1 >= static_cast<int>(g_demo_rows.size()))
+			return false;
+		const DemoRow& a = g_demo_rows[i];
+		const DemoRow& b = g_demo_rows[i + 1];
+		const float dx = b.pos.X - a.pos.X, dy = b.pos.Y - a.pos.Y,
+			dz = b.pos.Z - a.pos.Z;
+		return b.sim - a.sim > 0.5f
+			|| dx * dx + dy * dy + dz * dz > 300.f * 300.f;
+	}
+
+	// Jump the demo mark to the LANDING row of the next/previous gap - the
+	// spot a teleport drops the runner, which is where anchors want to live
+	// (user 46z2: scrubbing through thousands of idle rows to find a
+	// teleport exit was hunting a needle).
+	int DemoGapJump(int from, int dir) {
+		const int n = static_cast<int>(g_demo_rows.size());
+		if (n < 2)
+			return from;
+		if (dir > 0) {
+			for (int i = (from < 0 ? 0 : from); i + 1 < n; ++i)
+				if (DemoGapAt(i))
+					return i + 1;
+			return n - 1;
+		}
+		for (int i = from - 2; i >= 0; --i)
+			if (DemoGapAt(i))
+				return i + 1;
+		return 0;
+	}
+
 	// Convert the loaded demo trace into EDITABLE raw segments (46z). A TV
 	// demo carries NO inputs, so this is a stated RECONSTRUCTION: the view
 	// stream is the trace's (lerped to tick cadence; exact at snapshots),
@@ -9375,10 +9408,16 @@ namespace {
 			cur = EditSegment();
 			cur.raw = true;
 		};
+		// Conversion starts AT THE GOLD DEMO POINT (46z2) - a trace usually
+		// opens with idle + a teleport into the start zone, and the run the
+		// user wants begins at that landing, not at row 0.
+		int start_row = g_demo_mark;
+		if (start_row < 0) start_row = 0;
+		if (start_row >= nrows - 1) start_row = 0;
 		int total_ticks = 0;
-		float prev_yaw = g_demo_rows[0].yaw;
-		float tt = g_demo_rows[0].sim;
-		int k = 0;
+		float prev_yaw = g_demo_rows[start_row].yaw;
+		float tt = g_demo_rows[start_row].sim;
+		int k = start_row;
 		while (total_ticks < 20000) {
 			while (k + 1 < nrows && g_demo_rows[k + 1].sim <= tt + 1e-6f)
 				k++;
@@ -9418,11 +9457,12 @@ namespace {
 			return;
 		}
 		if (was_empty) {
-			// Fresh project: the run starts where the demo does (velocity
-			// from the first differing-sim slope, like the anchor picker).
-			const DemoRow& r0 = g_demo_rows[0];
+			// Fresh project: the run starts where the conversion does - the
+			// gold demo point (velocity from the first differing-sim slope,
+			// like the anchor picker).
+			const DemoRow& r0 = g_demo_rows[start_row];
 			Vector vel(0.f, 0.f, 0.f);
-			int bb = 0;
+			int bb = start_row;
 			while (bb + 1 < nrows && g_demo_rows[bb].sim <= r0.sim + 1e-6f)
 				bb++;
 			const float dt0 = g_demo_rows[bb].sim - r0.sim;
@@ -9446,11 +9486,11 @@ namespace {
 			g_segs.push_back(std::move(s));
 		g_sel = static_cast<int>(g_segs.size()) - 1;
 		MarkDirty();
-		g_status = FmtStr("Demo converted: %d raw segment(s), %d ticks%s. "
-			"Inputs are RECONSTRUCTED (view + strafe side) - expect drift; "
-			"correct with the tick editor.",
-			static_cast<int>(made.size()), frames_total,
-			was_empty ? "; anchor set from the demo start" : "");
+		g_status = FmtStr("Demo converted from point %d: %d raw segment(s), "
+			"%d ticks%s. Inputs are RECONSTRUCTED (view + strafe side) - "
+			"expect drift; correct with the tick editor.",
+			start_row, static_cast<int>(made.size()), frames_total,
+			was_empty ? "; anchor set from that point" : "");
 	}
 
 	// ---- DEMO TRACE CAPTURE (rebuild checklist M5.3) ---------------------
@@ -10008,6 +10048,23 @@ namespace {
 				ImGui::PopItemWidth();
 				ImGui::SameLine();
 				ImGui::TextDisabled("demo point (gold in-world mark)");
+				// Mark navigation (46z2): teleport landings ARE the gaps the
+				// line splits at - jump straight to them, fine-step around.
+				if (ImGui::Button("|< tp")) g_demo_mark = DemoGapJump(g_demo_mark, -1);
+				ImGui::SameLine();
+				if (ImGui::Button("-10##dm")) g_demo_mark -= 10;
+				ImGui::SameLine();
+				if (ImGui::Button("-1##dm")) g_demo_mark -= 1;
+				ImGui::SameLine();
+				if (ImGui::Button("+1##dm")) g_demo_mark += 1;
+				ImGui::SameLine();
+				if (ImGui::Button("+10##dm")) g_demo_mark += 10;
+				ImGui::SameLine();
+				if (ImGui::Button("tp >|")) g_demo_mark = DemoGapJump(g_demo_mark, 1);
+				ImGui::SameLine();
+				ImGui::TextDisabled("tp = jump to the next/previous teleport landing");
+				if (g_demo_mark < 0) g_demo_mark = 0;
+				if (g_demo_mark > last) g_demo_mark = last;
 				const DemoRow& dr = g_demo_rows[g_demo_mark];
 				Vector vel(0.f, 0.f, 0.f);
 				{
@@ -10043,14 +10100,16 @@ namespace {
 				ImGui::SameLine();
 				if (ImGui::Button("Convert to editable run"))
 					ConvertDemoToRun();
-				Theme::Help("Builds RAW tick segments from the whole trace: "
-					"view angles lerped to tick cadence (exact at snapshots), "
-					"strafe key from the view's turn direction. A TV demo "
-					"carries NO inputs, so W/jump/duck are unrecoverable and "
-					"the sim WILL drift from the demo's path - this is an "
-					"editable skeleton on the demo's line, not a faithful "
-					"replay. Segments split at teleports/seeks; on an empty "
-					"project the anchor is set from the demo start.");
+				Theme::Help("Builds RAW tick segments starting AT THE GOLD "
+					"DEMO POINT: view angles lerped to tick cadence (exact at "
+					"snapshots), strafe key from the view's turn direction. A "
+					"TV demo carries NO inputs, so W/jump/duck are "
+					"unrecoverable and the sim WILL drift from the demo's "
+					"path - this is an editable skeleton on the demo's line, "
+					"not a faithful replay. Segments split at teleports/seeks; "
+					"on an empty project the anchor is set from the point too. "
+					"Use the tp buttons to land the point on a teleport exit "
+					"first.");
 			}
 		}
 
