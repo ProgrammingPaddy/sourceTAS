@@ -670,7 +670,13 @@ void WorldDraw::Render() {
 					break;
 				if (!OverlayTake(1))
 					break;
-				if (dprev_ok)
+				// GAP SPLIT (46z): teleports, demo seeks, and interp snaps
+				// produce giant chords (spawn -> run start etc.) - break the
+				// polyline instead of drawing them.
+				const float gx = dp.X - dprev.X, gy = dp.Y - dprev.Y,
+					gz = dp.Z - dprev.Z;
+				const bool gap = gx * gx + gy * gy + gz * gz > 300.f * 300.f;
+				if (dprev_ok && !gap)
 					debugoverlay->AddLineOverlay(dprev, dp, 190, 140, 255,
 						false, duration);
 				dprev = dp;

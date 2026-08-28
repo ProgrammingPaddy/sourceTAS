@@ -9349,6 +9349,110 @@ namespace {
 		return true;
 	}
 
+	// Convert the loaded demo trace into EDITABLE raw segments (46z). A TV
+	// demo carries NO inputs, so this is a stated RECONSTRUCTION: the view
+	// stream is the trace's (lerped to tick cadence; exact at snapshots),
+	// the strafe key follows the view's turn direction, and W/jump/duck are
+	// unrecoverable (left empty). The engine sim therefore DRIFTS from the
+	// demo's path - the point is an editable, testable skeleton ON the
+	// demo's line: anchored at its start, corrected with the raw tick
+	// editor / segment adjust / per-tick overrides.
+	void ConvertDemoToRun() {
+		if (g_demo_rows.size() < 2) {
+			g_status = "Load a demo trace first.";
+			return;
+		}
+		float interval = Prediction::LastDiag().interval_per_tick;
+		if (interval <= 0.f) interval = 0.015f;
+		const bool was_empty = g_segs.empty();
+		const int nrows = static_cast<int>(g_demo_rows.size());
+		std::vector<EditSegment> made;
+		EditSegment cur;
+		cur.raw = true;
+		auto CloseSeg = [&]() {
+			if (cur.frames.size() >= 4)   // gap fragments are noise
+				made.push_back(cur);
+			cur = EditSegment();
+			cur.raw = true;
+		};
+		int total_ticks = 0;
+		float prev_yaw = g_demo_rows[0].yaw;
+		float tt = g_demo_rows[0].sim;
+		int k = 0;
+		while (total_ticks < 20000) {
+			while (k + 1 < nrows && g_demo_rows[k + 1].sim <= tt + 1e-6f)
+				k++;
+			if (k + 1 >= nrows)
+				break;
+			const DemoRow& a = g_demo_rows[k];
+			const DemoRow& b = g_demo_rows[k + 1];
+			const float gx = b.pos.X - a.pos.X, gy = b.pos.Y - a.pos.Y,
+				gz = b.pos.Z - a.pos.Z;
+			if (b.sim - a.sim > 0.5f
+				|| gx * gx + gy * gy + gz * gz > 300.f * 300.f) {
+				// Teleport / demo seek: close the segment, resume after it.
+				CloseSeg();
+				k++;
+				tt = b.sim;
+				prev_yaw = b.yaw;
+				continue;
+			}
+			const float span = b.sim - a.sim;
+			const float w = (span > 1e-6f)
+				? Clampf((tt - a.sim) / span, 0.f, 1.f) : 0.f;
+			const float yaw = NormYaw(a.yaw + NormYaw(b.yaw - a.yaw) * w);
+			const float pitch = a.pitch + (b.pitch - a.pitch) * w;
+			Frame f = {};
+			f.viewangles[0] = pitch;
+			f.viewangles[1] = yaw;
+			const float dy = NormYaw(yaw - prev_yaw);
+			f.sidemove = (dy > 0.03f) ? -450.f : (dy < -0.03f) ? 450.f : 0.f;
+			cur.frames.push_back(f);
+			prev_yaw = yaw;
+			tt += interval;
+			total_ticks++;
+		}
+		CloseSeg();
+		if (made.empty()) {
+			g_status = "Nothing to convert (trace too short).";
+			return;
+		}
+		if (was_empty) {
+			// Fresh project: the run starts where the demo does (velocity
+			// from the first differing-sim slope, like the anchor picker).
+			const DemoRow& r0 = g_demo_rows[0];
+			Vector vel(0.f, 0.f, 0.f);
+			int bb = 0;
+			while (bb + 1 < nrows && g_demo_rows[bb].sim <= r0.sim + 1e-6f)
+				bb++;
+			const float dt0 = g_demo_rows[bb].sim - r0.sim;
+			if (dt0 > 1e-4f) {
+				vel.X = (g_demo_rows[bb].pos.X - r0.pos.X) / dt0;
+				vel.Y = (g_demo_rows[bb].pos.Y - r0.pos.Y) / dt0;
+				vel.Z = (g_demo_rows[bb].pos.Z - r0.pos.Z) / dt0;
+			}
+			g_anchor.valid = true;
+			g_anchor.origin = r0.pos;
+			g_anchor.velocity = vel;
+			g_anchor.pitch = r0.pitch;
+			g_anchor.yaw = r0.yaw;
+			g_anchor.ducked = false;
+			g_anchor.stamina = 0.f;
+		}
+		int frames_total = 0;
+		for (const EditSegment& s : made)
+			frames_total += static_cast<int>(s.frames.size());
+		for (EditSegment& s : made)
+			g_segs.push_back(std::move(s));
+		g_sel = static_cast<int>(g_segs.size()) - 1;
+		MarkDirty();
+		g_status = FmtStr("Demo converted: %d raw segment(s), %d ticks%s. "
+			"Inputs are RECONSTRUCTED (view + strafe side) - expect drift; "
+			"correct with the tick editor.",
+			static_cast<int>(made.size()), frames_total,
+			was_empty ? "; anchor set from the demo start" : "");
+	}
+
 	// ---- DEMO TRACE CAPTURE (rebuild checklist M5.3) ---------------------
 	// The cut expert demos are TV-style: democmdinfo carries no camera and
 	// the runner exists only as a networked entity - so the ENGINE decodes
@@ -9936,6 +10040,17 @@ namespace {
 					"the TAS simulates from exactly there - build segments "
 					"against the demo and test play from its line. Duck state "
 					"is not captured (assumed standing).");
+				ImGui::SameLine();
+				if (ImGui::Button("Convert to editable run"))
+					ConvertDemoToRun();
+				Theme::Help("Builds RAW tick segments from the whole trace: "
+					"view angles lerped to tick cadence (exact at snapshots), "
+					"strafe key from the view's turn direction. A TV demo "
+					"carries NO inputs, so W/jump/duck are unrecoverable and "
+					"the sim WILL drift from the demo's path - this is an "
+					"editable skeleton on the demo's line, not a faithful "
+					"replay. Segments split at teleports/seeks; on an empty "
+					"project the anchor is set from the demo start.");
 			}
 		}
 
