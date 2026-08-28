@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../World/Prediction.h"
+#include "../World/Contact.h"
 
 // Phase 2: the TAS authoring layer. An edited run is an absolute StartState
 // anchor plus an ordered list of segments; each segment is either raw per-tick
@@ -97,8 +98,17 @@ namespace TasEditor {
 		// states above; draw-only. Empty unless the toggle is on.
 		const Vector* coast;                  // per-tick origins after the run end
 		int coast_count;                      // 0 = none
+		// Board events from the run's contact analysis (session 46n): every
+		// AIR -> SURFACE transition, already filtered of trigger impulses.
+		// WorldDraw renders these as hitmarkers.
+		const Contact::BoardEvent* board_events;
+		int board_event_count;
 	};
 	bool GetDrawData(DrawData& out);          // false when closed or no sim yet
+	// The editor's measured physics bounds for contact detection (gravity
+	// u/s^2 and the max per-tick air-accel add u/s) - so the live prediction
+	// line's analyzer uses the same calibrated numbers as the run line's.
+	void ContactTuning(float* gravity, float* max_add);
 	// True while the solver machinery hitches frames (search/verify/batch/
 	// correction) - overlay lifetimes pin longer so the 3D draws don't flicker.
 	bool SearchBusy();

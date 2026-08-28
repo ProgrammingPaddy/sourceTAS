@@ -2,9 +2,11 @@
 #include "NetVars.h"
 #include "Prediction.h"
 #include "BspWorld.h"
+#include "Contact.h"
 #include "../Editor/TasEditor.h"
 #include "../Menu/Breadcrumb.h"
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include <windows.h>
@@ -166,6 +168,8 @@ namespace WorldDraw {
 	bool draw_player_box    = true;
 	bool draw_player_marker = true;
 	bool draw_prediction    = false;
+	bool show_hitmarkers_pred = true;   // session 46n: board-contact crosses
+	bool show_hitmarkers_run  = true;
 
 	int   player_box_alpha   = 30;    // low: mostly wireframe, never reads as solid
 	bool  overlay_zero_life  = false; // Debug tab: duration-0 engine idiom (see header)
@@ -356,6 +360,47 @@ namespace {
 		       v.X > -kMax && v.X < kMax &&
 		       v.Y > -kMax && v.Y < kMax &&
 		       v.Z > -kMax && v.Z < kMax;
+	}
+
+	// Hitmarker (session 46n): an X drawn IN the contact plane plus a short
+	// normal spike, colored by the fraction of arrival speed the clip ate -
+	// green = clean board, amber = scrubbed, red = hard hit. Caller pays the
+	// overlay budget (3 lines).
+	void DrawHitmarker(const Contact::BoardEvent& e, float dur) {
+		if (!FiniteWorldPoint(e.pos))
+			return;
+		const float frac = (e.arrive_speed > 1.f) ? e.clip_loss / e.arrive_speed : 0.f;
+		int r, g, b;
+		if (frac < 0.02f)      { r = 70;  g = 255; b = 120; }
+		else if (frac < 0.08f) { r = 255; g = 200; b = 60;  }
+		else                   { r = 255; g = 70;  b = 70;  }
+		// Two tangents spanning the contact plane.
+		const Vector n = e.normal;
+		const Vector up = (n.Z > -0.9f && n.Z < 0.9f) ? Vector(0.f, 0.f, 1.f)
+		                                              : Vector(1.f, 0.f, 0.f);
+		Vector t1(n.Y * up.Z - n.Z * up.Y,
+		          n.Z * up.X - n.X * up.Z,
+		          n.X * up.Y - n.Y * up.X);
+		const float l1 = sqrtf(t1.X * t1.X + t1.Y * t1.Y + t1.Z * t1.Z);
+		if (l1 < 1e-4f)
+			return;
+		t1 = Vector(t1.X / l1, t1.Y / l1, t1.Z / l1);
+		const Vector t2(n.Y * t1.Z - n.Z * t1.Y,
+		                n.Z * t1.X - n.X * t1.Z,
+		                n.X * t1.Y - n.Y * t1.X);
+		const float h = 9.f;
+		const Vector p = e.pos;
+		debugoverlay->AddLineOverlay(
+			Vector(p.X - (t1.X + t2.X) * h, p.Y - (t1.Y + t2.Y) * h, p.Z - (t1.Z + t2.Z) * h),
+			Vector(p.X + (t1.X + t2.X) * h, p.Y + (t1.Y + t2.Y) * h, p.Z + (t1.Z + t2.Z) * h),
+			r, g, b, false, dur);
+		debugoverlay->AddLineOverlay(
+			Vector(p.X - (t1.X - t2.X) * h, p.Y - (t1.Y - t2.Y) * h, p.Z - (t1.Z - t2.Z) * h),
+			Vector(p.X + (t1.X - t2.X) * h, p.Y + (t1.Y - t2.Y) * h, p.Z + (t1.Z - t2.Z) * h),
+			r, g, b, false, dur);
+		debugoverlay->AddLineOverlay(p,
+			Vector(p.X + n.X * 7.f, p.Y + n.Y * 7.f, p.Z + n.Z * 7.f),
+			r, g, b, false, dur);
 	}
 
 	// Player-attached overlays share the same one-frame lifetime as
@@ -566,6 +611,27 @@ void WorldDraw::Render() {
 						                             120, 170, 200, false, g_dur_live);
 				prev = p;
 			}
+
+			// Hitmarkers on the prediction line (session 46n): where the
+			// predicted path makes contact after being airborne - the
+			// ramp-board dial-in aid. Face-matched contacts and ground
+			// landings only (a face-unknown residual here could be a booster
+			// impulse - the look-ahead doesn't record trigger events).
+			if (show_hitmarkers_pred) {
+				static Prediction::SimState st[257];
+				const int nst = Prediction::GetPathStates(st, 257);
+				if (nst >= 2) {
+					float grav = 800.f, madd = 70.f;
+					TasEditor::ContactTuning(&grav, &madd);
+					Contact::BoardEvent hv[16];
+					const int ne = Contact::Analyze(st, nst,
+						Prediction::LastDiag().interval_per_tick, grav, madd,
+						hv, 16);
+					for (int i = 0; i < ne; ++i)
+						if ((hv[i].face_known || hv[i].grounded) && OverlayTake(3))
+							DrawHitmarker(hv[i], g_dur_live);
+				}
+			}
 		}
 	}
 
@@ -582,6 +648,16 @@ void WorldDraw::Render() {
 		if (ed.anchor.valid && FiniteWorldPoint(ed.anchor.origin))
 			debugoverlay->AddBoxOverlay(ed.anchor.origin, Vector(-3.f, -3.f, 0.f), Vector(3.f, 3.f, 8.f),
 			                            kNoRotation, 60, 255, 60, 140, duration);
+
+		// Hitmarkers on the run line (session 46n): the editor's board events,
+		// already filtered of trigger impulses by the contact stage.
+		if (show_hitmarkers_run && ed.board_events) {
+			for (int i = 0; i < ed.board_event_count; ++i) {
+				const Contact::BoardEvent& e = ed.board_events[i];
+				if ((e.face_known || e.grounded) && OverlayTake(3))
+					DrawHitmarker(e, duration);
+			}
+		}
 
 		// Ceiling division: count 401..799 used to floor to stride 1 (no
 		// decimation), exhausting the overlay budget at ~400 points - the

@@ -75,6 +75,9 @@ namespace {
 
 	// Live look-ahead output.
 	Vector g_path[257];
+	// Full per-tick states for the look-ahead (session 46n): origin alone
+	// can't feed contact detection - the analyzer needs velocity + flags.
+	Prediction::SimState g_path_states[257];
 	int    g_path_count = 0;
 
 	// Origin of the newest REAL command's movedata (basis diagnostic: lets the
@@ -499,6 +502,19 @@ namespace {
 							*reinterpret_cast<Vector*>(pb2 + g_off.velocity) = Vector(0.f, 0.f, 0.f);
 						}
 					}
+				}
+
+				// Full state capture for contact detection (after the trigger
+				// block, so a teleport's zeroed velocity is what gets stored).
+				{
+					Prediction::SimState ss;
+					ss.origin = g_path[i];
+					char* pb3 = reinterpret_cast<char*>(player);
+					if (g_off.velocity)
+						ss.velocity = *reinterpret_cast<Vector*>(pb3 + g_off.velocity);
+					if (g_off.flags)
+						ss.flags = *reinterpret_cast<int*>(pb3 + g_off.flags);
+					g_path_states[i] = ss;
 				}
 			}
 
@@ -1309,6 +1325,14 @@ void Prediction::Install() {
 
 void Prediction::GetPath(std::vector<Vector>& out) {
 	out.assign(g_path, g_path + g_path_count);
+}
+
+int Prediction::GetPathStates(SimState* out, int cap) {
+	int n = g_path_count;
+	if (n > cap) n = cap;
+	for (int i = 0; i < n; ++i)
+		out[i] = g_path_states[i];
+	return n;
 }
 
 // FUNCTION-LEVEL DIFFERENTIAL FUZZ: read arbitrary probe states, run each

@@ -20,6 +20,11 @@ namespace WorldDraw {
 	extern bool draw_player_box;     // local player's collision AABB
 	extern bool draw_player_marker;  // single dot at the player's feet origin
 	extern bool draw_prediction;     // predicted path for a held input (Phase 1b)
+	// Hitmarkers (session 46n): a cross drawn where a line makes contact
+	// with a surface after being airborne (from the contact analyzer),
+	// colored by how much of the arrival speed the impact clipped.
+	extern bool show_hitmarkers_pred;   // on the live prediction line
+	extern bool show_hitmarkers_run;    // on the editor run line
 
 	// Menu-controlled tuning.
 	extern int   player_box_alpha;   // hull fill alpha; 0 = wireframe only

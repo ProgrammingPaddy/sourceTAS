@@ -88,6 +88,9 @@ namespace Prediction {
 
 	// Live look-ahead path (per-tick feet origins) for drawing.
 	void GetPath(std::vector<Vector>& out);
+	// Same look-ahead as full per-tick states (origin/velocity/flags), for
+	// contact detection on the live prediction line. Returns ticks copied.
+	int GetPathStates(SimState* out, int cap);
 
 	// --- editor simulation (async request -> next prediction pass) ----------
 	bool RequestSim(const StartState& anchor, int ticks, SimFrameFn provider);
