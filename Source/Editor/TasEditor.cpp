@@ -620,6 +620,8 @@ namespace {
 	float g_pv_entry_heading = 0.f;   // velocity heading at segment entry (opt modes)
 	bool  g_pv_prev_jump = false;
 	float g_pv_pitch = 0.f;           // HUMAN pitch: eased value carried per tick
+	int   g_pv_pin_side = 1;          // pinned exit: current auto A/D side (latched
+	                                  // through a small deadband near arrival)
 	// Prestrafe walk state: segment-entry origin (the ray + jump distance are
 	// measured from here), the tick the air phase actually started at (strafe
 	// alternation split), the tick the ground CARVE began (-1 = still in the
@@ -839,28 +841,27 @@ namespace {
 			// bias never tilts the view here.
 			yaw = HeadingDeg(vel, lastYaw);
 		} else if (g.yaw_mode == 5) {
-			// PINNED EXIT (46s): the segment ALWAYS ends with the view exactly
-			// on pin_yaw - the R=1 step lands on the pin by construction, so
-			// the guarantee holds at any duration. Closed-loop O(1) per tick;
-			// no solver anywhere.
+			// PINNED EXIT (46u rework). The 46t version branched from the
+			// HEADING (snapping the view off the entry yaw) and false-latched
+			// "reached" whenever entry view and heading disagreed about the
+			// turn side, freezing the view on the pin and spinning the wish
+			// out of the gaining hemisphere - the reported instant snap +
+			// speed tank. Now built on the shipped kind-0 machinery:
 			//   CONSTANT: the remaining turn (from the last emitted yaw)
-			//   re-spread uniformly over the remaining ticks - one even arc,
-			//   by definition (completeness mode, not a loss claim).
-			//   OPTIMAL: ride the natural max-gain curl and force only the
-			//   REMAINDER. The forced-turn schedule is NOT uniform: the
-			//   per-tick losses are not identical separable terms (user
-			//   correction, 46s) - turning capacity depends on speed, and
-			//   prior gain moves the speed - so each tick takes a SHARE of
-			//   the remaining turn weighted by its natural-turn capacity
-			//   atan(cap/v) against the projected capacity of the remaining
-			//   ticks (speed projected at the plan's per-tick add; the sum
-			//   closed-form via  d/du[u*atan(c/u) + (c/2)ln(u^2+c^2)] =
-			//   atan(c/u)). Turning happens while it is cheap (slow), the
-			//   estimate self-corrects every tick through the closed loop,
-			//   and with negligible add it degrades to the uniform spread.
-			//   When the natural curl reaches the pin early, HOLD it and keep
-			//   riding - the post-reach ticks are the diminishing-efficiency
-			//   tail the pin allows.
+			//   re-spread uniformly - one even arc, from the entry view by
+			//   construction. Completeness mode, not a loss claim.
+			//   OPTIMAL: drive the HEADING toward the pin exactly like the
+			//   total-heading steering (want re-derived each tick -> self-
+			//   correcting; desired per-tick rate = want/rem; bias CLAMPED
+			//   +-20 deg/tick around the natural max-gain line, so the wish
+			//   can never leave the gaining hemisphere - no braking, ever).
+			//   An ENTRY BLEND leaves from the starting view (the first few
+			//   ticks ease the view from entryYaw onto the drive line), and
+			//   an EXIT WELD blends the view onto the pin over the last few
+			//   ticks (the solver-measured cheap way to make the exit exact).
+			//   Overshoot self-corrects: want flips sign and the drive leans
+			//   the other way - the post-reach ride oscillates gently around
+			//   the pin heading at near-max gain.
 			const int rem = (g.ticks - t) > 0 ? (g.ticks - t) : 1;
 			if (g.pin_const) {
 				if (rem <= 1)
@@ -868,36 +869,36 @@ namespace {
 				return NormYaw(lastYaw
 					+ NormYaw(g.pin_yaw - lastYaw) / static_cast<float>(rem));
 			}
-			const float h = HeadingDeg(vel, lastYaw);
-			const float d = NormYaw(g.pin_yaw - h);
-			// Turn side fixed by the ENTRY view (shortest arc). Once the
-			// natural line is past the pin, d flips against that side - hold.
-			// (Entry view and heading can straddle a pin sitting between
-			// them; that degenerates to holding the pin immediately, which is
-			// the right call for a turn that small.)
-			const float d0 = NormYaw(g.pin_yaw - entryYaw);
-			if (rem <= 1 || (d0 >= 0.f) != (d >= 0.f) || fabsf(d) < 0.05f)
+			if (rem <= 1)
 				return NormYaw(g.pin_yaw);
-			float share = 1.f / static_cast<float>(rem);
-			const float v = Speed2D(vel);
-			const float cap = g_plan_cap;
-			const float add = g_plan_accel;   // per-tick speed add at max gain
-			if (add > 0.01f && cap > 0.01f) {
-				const float v0 = (v > 1.f) ? v : 1.f;
-				const float v1 = v0 + add * static_cast<float>(rem);
-				auto Gi = [cap](float u) {
-					return u * atan2f(cap, u) + 0.5f * cap * logf(u * u + cap * cap);
-				};
-				const float S = (Gi(v1) - Gi(v0)) / add;   // sum of capacities
-				const float w0 = atan2f(cap, v0);          // this tick's capacity
-				if (S > w0)
-					share = w0 / S;
-				if (share < 1.f / static_cast<float>(rem))
-					share = 1.f / static_cast<float>(rem);   // never lazier than uniform
-				if (share > 1.f)
-					share = 1.f;
+			const float h = HeadingDeg(vel, lastYaw);
+			const float want = NormYaw(g.pin_yaw - h);
+			const int dir = (want >= 0.f) ? 1 : -1;
+			const float th_des = (dir >= 0 ? want : -want) / static_cast<float>(rem);
+			const float v2 = Speed2D(vel);
+			const float th_nat = Deg(atan2f(g_plan_cap, (v2 > 1.f) ? v2 : 1.f));
+			float bias = th_des - th_nat;
+			if (bias < -20.f) bias = -20.f;
+			if (bias > 20.f) bias = 20.f;
+			float line = NormYaw(h + static_cast<float>(dir) * bias);
+			// Entry blend: t=0 emits the starting view EXACTLY, easing onto
+			// the drive line (brief off-line wish if the entry view is far
+			// from the heading - the price of leaving from the real view).
+			const int eb = (g.ticks / 4 < 6) ? g.ticks / 4 : 6;
+			if (t < eb && eb > 0) {
+				const float w = static_cast<float>(t) / static_cast<float>(eb);
+				line = NormYaw(entryYaw + NormYaw(line - entryYaw) * w);
 			}
-			return NormYaw(h + d * share);
+			// Exit weld: exact on the pin at the final tick.
+			const int xb = (g.ticks / 3 < 8) ? g.ticks / 3 : 8;
+			const int from = g.ticks - 1 - xb;
+			if (t >= from && g.ticks - 1 > from) {
+				float w = static_cast<float>(t - from)
+					/ static_cast<float>(g.ticks - 1 - from);
+				if (w > 1.f) w = 1.f;
+				line = NormYaw(line + NormYaw(g.pin_yaw - line) * w);
+			}
+			return line;
 		}
 		return NormYaw(yaw);
 	}
@@ -1182,10 +1183,14 @@ namespace {
 				smove = (phase < pA) ? -450.f : 450.f;   // A for pA ticks, then D
 			}
 			else if (g.yaw_mode == 5) {
-				// Pinned exit: strafe INTO the turn (+ yaw = left = A), held
-				// through the post-reach ride.
-				const int pside = (NormYaw(g.pin_yaw - g_pv_entry_yaw) >= 0.f) ? 1 : -1;
-				smove = (pside > 0) ? -450.f : 450.f;
+				// Pinned exit: auto A/D from the CURRENT turn direction (46u -
+				// the drive self-corrects, so the key must follow it), with a
+				// small deadband so arrival doesn't flicker the key per tick.
+				const float h5 = HeadingDeg(prev.velocity, g_pv_last_yaw);
+				const float want5 = NormYaw(g.pin_yaw - h5);
+				if (t == 0 || fabsf(want5) > 1.5f)
+					g_pv_pin_side = (want5 >= 0.f) ? 1 : -1;
+				smove = (g_pv_pin_side > 0) ? -450.f : 450.f;
 			}
 		}
 
