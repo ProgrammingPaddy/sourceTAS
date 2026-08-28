@@ -32,6 +32,12 @@ namespace TasEditor {
 	void Undo();
 	void Redo();
 
+	// Teleport the player to the run's anchor (the Run tab button and the
+	// "Editor: Teleport To Anchor" hotkey share this; needs sv_cheats 1).
+	// AnchorValid gates the bind's availability.
+	bool AnchorValid();
+	void TeleportToAnchor();
+
 	// Crosshair pick (also bound to a hotkey): acts per the Targets tab's mode -
 	// tag/untag the aimed surf face, or place a board target where the hull
 	// would rest on the aimed surface. While the freecam is active the ray and

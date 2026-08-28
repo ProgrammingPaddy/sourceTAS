@@ -53,6 +53,7 @@ namespace {
 		{ "Editor: Prev Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(-1); } },
 		{ "Editor: Next Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(1); } },
 		{ "Editor: Pick At Crosshair", 0, [] { return true; }, [] { TasEditor::PickAtCrosshair(); } },
+		{ "Editor: Teleport To Anchor", 0, [] { return TasEditor::AnchorValid(); }, [] { TasEditor::TeleportToAnchor(); } },
 		{ "Freecam Toggle", 0, [] { return true; }, [] { TasEditor::ToggleFreecam(); } },
 		{ "Toggle Autohop", 0, [] { return true; }, [] { g_autohop = !g_autohop; } },
 		{ "Toggle Coast Line", 0, [] { return true; }, [] { TasEditor::ToggleCoastLine(); } },
@@ -334,7 +335,7 @@ void RecordPanel::DrawBinds() {
 	auto GroupOf = [](int i) -> const char* {
 		if (i <= 4)  return "Recording";
 		if (i <= 7)  return "Playback & control";
-		if (i <= 12) return "Editor navigation";
+		if (i <= 13) return "Editor navigation";
 		return "Toggles";
 	};
 

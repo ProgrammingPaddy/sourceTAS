@@ -314,34 +314,9 @@ namespace {
 		float  model_err = 0.f;
 	};
 
-	// SNAP-BOARD segment (session 46n, user spec): between solver and manual.
-	// Alternating MAX-GAIN strafes (2 or 3, no rate search anywhere) whose
-	// PHASE RATIOS are the user's one steering control - re-weighting them
-	// bends the ballistic path left/right, walking the contact point along
-	// the landing face. The segment's LENGTH is never set by hand: it snaps
-	// itself to the tick the path first contacts a surface (closed loop from
-	// the contact analyzer, the same settle pattern as the prestrafe duration
-	// snap). Landing view: the yaw blends onto the ZERO-LOSS CARRY heading
-	// (arrival velocity projected onto the contact face) over the last ticks
-	// before impact; the post-clip RIDE yaw is computed for the handoff (the
-	// "+ Segment" default after a snap continues as an optimal ride).
-	struct SnapData {
-		int   tag = -1;            // tagged-face index: the intended landing face
-		int   strafes = 2;         // alternating phases (2 or 3)
-		int   side0 = 1;           // first phase's key (+1 = A/left, -1 = D/right)
-		float weights[3] = { 1.f, 1.f, 1.f };   // phase ratios (normalized by sum)
-		int   blend = 8;           // ticks before contact blending onto the carry yaw
-		int   ticks_cur = 90;      // current length: contact tick + 1 once measured
-		                           // (grows automatically while no contact is found)
-		// Closed-loop results from the last sim's contact analysis (persisted
-		// so a loaded project re-sims from the same shape).
-		uint8_t have_contact = 0;  // a board event landed inside the segment
-		uint8_t on_face = 0;       // ...and it hit the CHOSEN face
-		float carry_yaw = 0.f;     // zero-loss carry heading at impact (blend target)
-		float ride_yaw = 0.f;      // post-clip velocity heading (ride handoff)
-		float arrive_speed2d = 0.f;   // display: 2D speed entering the impact
-		float clip_loss = 0.f;        // display: u/s the board clip removed
-	};
+	// (The v25 snap-board segment lived here for one session - removed on
+	// user verdict 46o; the loader still consumes and drops type-3 segments
+	// from any project saved during that session.)
 
 	// Per-tick INPUT override bits (any input, not just jump): mask says which
 	// inputs this tick overrides, value carries the forced state for those bits.
@@ -357,17 +332,14 @@ namespace {
 	struct EditSegment {
 		bool raw = false;             // raw = explicit per-tick frames
 		bool is_solver = false;       // solver-driven strafe route
-		bool is_snap = false;         // snap-board (ratio-steered, contact-snapped)
 		GenParams gen;                // pitch/duck settings shared by all kinds
 		SolverData solver;
-		SnapData snap;
 		std::vector<Frame> frames;
-		// Per-tick input overrides for generated/solver/snap segments: flip a
-		// single tick's key/jump/crouch without baking. Segment edits clear them.
+		// Per-tick input overrides for generated/solver segments: flip a single
+		// tick's key/jump/crouch without baking. Segment edits clear them.
 		std::vector<InputOvr> ovr;
 		int Ticks() const {
 			if (raw) return static_cast<int>(frames.size());
-			if (is_snap) return snap.ticks_cur;
 			if (is_solver) return solver.solved ? solver.ticks : 0;
 			return gen.ticks;
 		}
@@ -574,8 +546,6 @@ namespace {
 	struct PlanSeg {
 		int start; int ticks; bool raw; int raw_off; GenParams gen;
 		bool solver; SolverData sdata;
-		bool snap; SnapData sn;
-		int snap_b1; int snap_b2;   // phase boundaries (local ticks) from the ratios
 	};
 	struct PlanOvr { int seg; int local; int mask; int value; };
 
@@ -943,33 +913,6 @@ namespace {
 			else
 				yaw = NormYaw(g_pv_last_yaw - sd.rates[k]);
 			smove = (side > 0) ? -450.f : 450.f;   // +1 = A (left), -1 = D (right)
-		} else if (ps.snap) {
-			// SNAP BOARD: alternating pure max-gain strafes - the view rides
-			// the velocity heading (the solver's own bias-0 optimal
-			// expression), phases split at the plan's ratio boundaries. Over
-			// the last `blend` ticks before the measured contact the yaw
-			// blends onto the CARRY heading (zero-loss arrival direction from
-			// the last analysis), so the tick of impact lands with the view
-			// already carrying - the "both: carry at impact, ride after"
-			// choice; the ride half is the next segment's handoff default.
-			const SnapData& sd = ps.sn;
-			const int side = (t < ps.snap_b1) ? sd.side0
-			               : (t < ps.snap_b2) ? -sd.side0 : sd.side0;
-			float ay = HeadingDeg(prev.velocity, g_pv_last_yaw);
-			if (sd.have_contact) {
-				const int contact_local = ps.ticks - 1;   // the snap: end = contact
-				const int bl = (sd.blend < 1) ? 1 : sd.blend;
-				const int from = contact_local - bl;
-				if (t >= from && contact_local > from) {
-					float w = static_cast<float>(t - from)
-					        / static_cast<float>(contact_local - from);
-					if (w > 1.f) w = 1.f;
-					ay = NormYaw(ay + NormYaw(sd.carry_yaw - ay) * w);
-				}
-			}
-			yaw = ay;
-			fmove = 0.f;
-			smove = (side > 0) ? -450.f : 450.f;
 		} else if (g.prestrafe) {
 			// PRESTRAFE v3 (user spec 2026-08-06): TWO RECIPES, sliders, NO
 			// solvers - "the final location is all that matters, the path is
@@ -1109,7 +1052,7 @@ namespace {
 				}
 				if (Nseg < 0 && g_pv_seg + 1 < g_plan_count) {
 					const PlanSeg& nx = g_plan[g_pv_seg + 1];
-					if (!nx.raw && !nx.solver && !nx.snap && !nx.gen.prestrafe && nx.gen.smooth_ticks > 0) {
+					if (!nx.raw && !nx.solver && !nx.gen.prestrafe && nx.gen.smooth_ticks > 0) {
 						const int before = nx.gen.smooth_ticks / 2;
 						if (tick >= nx.start - before) {   // tail before a smoothed seg
 							Bstart = nx.start; Pseg = g_pv_seg; Nseg = g_pv_seg + 1;
@@ -1122,8 +1065,8 @@ namespace {
 				const bool pN = (Nseg >= 0) && g_plan[Nseg].gen.prestrafe;
 				if (Nseg >= 0 && W > 0 && Pseg >= 0 && !pP && !pN) {
 					const int before = W / 2;
-					const float yawP = (g_plan[Pseg].solver || g_plan[Pseg].raw || g_plan[Pseg].snap)
-						? g_pv_last_yaw   // solver/raw/snap neighbor: hold its last view
+					const float yawP = (g_plan[Pseg].solver || g_plan[Pseg].raw)
+						? g_pv_last_yaw   // solver/raw neighbor: hold its last view
 						: GenSegYaw(g_plan[Pseg].gen, tick - g_plan[Pseg].start,
 							prev.velocity, g_pv_last_yaw, g_pv_entry_yaw, g_pv_entry_heading);
 					const float yawN = GenSegYaw(g_plan[Nseg].gen, tick - g_plan[Nseg].start,
@@ -1275,39 +1218,10 @@ namespace {
 			p.raw_off = raw_off;
 			p.solver = s.is_solver && s.solver.solved;
 			p.sdata = s.solver;
-			p.snap = s.is_snap;
-			p.sn = s.snap;
 
 			int ticks = s.Ticks();
 			if (start + ticks > Prediction::kMaxSimTicks)
 				ticks = Prediction::kMaxSimTicks - start;
-
-			// Snap-board phase boundaries: the ratio weights split the current
-			// (contact-snapped) length; every active phase keeps >= 2 ticks so
-			// a slammed slider can't erase a strafe entirely.
-			p.snap_b1 = ticks;
-			p.snap_b2 = ticks;
-			if (s.is_snap && ticks > 0) {
-				const SnapData& sd = s.snap;
-				auto wclamp = [](float w) { return w < 0.05f ? 0.05f : w; };
-				const float w1 = wclamp(sd.weights[0]);
-				const float w2 = wclamp(sd.weights[1]);
-				const float w3 = (sd.strafes >= 3) ? wclamp(sd.weights[2]) : 0.f;
-				const float sum = w1 + w2 + w3;
-				int b1 = static_cast<int>(static_cast<float>(ticks) * (w1 / sum) + 0.5f);
-				if (b1 < 2) b1 = 2;
-				if (b1 > ticks - 2) b1 = ticks - 2;
-				if (b1 < 0) b1 = 0;
-				int b2 = ticks;
-				if (sd.strafes >= 3) {
-					b2 = b1 + static_cast<int>(static_cast<float>(ticks) * (w2 / sum) + 0.5f);
-					if (b2 < b1 + 2) b2 = b1 + 2;
-					if (b2 > ticks - 2) b2 = ticks - 2;
-					if (b2 < b1) b2 = b1;
-				}
-				p.snap_b1 = b1;
-				p.snap_b2 = b2;
-			}
 			if (s.raw && ticks > 0) {
 				memcpy(&g_plan_raw[raw_off], s.frames.data(), sizeof(Frame) * ticks);
 				raw_off += ticks;
@@ -3692,9 +3606,8 @@ namespace {
 	}
 
 	// ---- CONTACT ANALYSIS (session 46n) ----------------------------------
-	// Runs when a sim lands: board events for the hitmarker suite, plus the
-	// snap-board segments' closed loop (length snaps to the contact tick;
-	// carry/ride yaws recomputed from the measured arrival).
+	// Runs when a sim lands: board events for the hitmarker suite (and any
+	// future consumer of the contact capability).
 	std::vector<Contact::BoardEvent> g_contacts;
 	void ContactStage() {
 		g_contacts.clear();
@@ -3720,66 +3633,6 @@ namespace {
 			if (!trig)
 				g_contacts.push_back(ev[i]);
 		}
-
-		// SNAP closed loop (machine refinement, same settle pattern as the
-		// prestrafe duration snap - g_machine_edit is set, so no undo steps).
-		static int settle = 0;
-		bool changed = false;
-		for (int k = 0; k < static_cast<int>(g_segs.size()); ++k) {
-			EditSegment& s = g_segs[k];
-			if (!s.is_snap || k >= static_cast<int>(g_starts.size()))
-				continue;
-			const int start = g_starts[k];
-			if (start >= static_cast<int>(g_states.size()))
-				continue;   // this sim never reached the segment
-			SnapData& sd = s.snap;
-			const int end = start + sd.ticks_cur;
-			const Contact::BoardEvent* hit = nullptr;
-			for (const Contact::BoardEvent& e : g_contacts) {
-				if (e.tick >= start && e.tick < end) { hit = &e; break; }
-				if (e.tick >= end) break;
-			}
-			int want = sd.ticks_cur;
-			if (hit && hit->tick >= 1) {
-				want = hit->tick - start + 1;   // the snap: end AT the contact tick
-				sd.have_contact = 1;
-				int tb = -1, tp = -1;
-				sd.on_face = (sd.tag >= 0 && BspWorld::GetTag(sd.tag, &tb, &tp)
-					&& hit->face_known && hit->brush == tb && hit->plane == tp) ? 1 : 0;
-				// CARRY: arrival velocity (with the impact tick's gravity)
-				// projected onto the contact plane - the zero-loss heading the
-				// view blends onto. RIDE: the post-clip velocity heading, the
-				// handoff a following optimal-ride segment starts from.
-				const Prediction::SimState& s0 = g_states[hit->tick - 1];
-				const Prediction::SimState& s1 = g_states[hit->tick];
-				const Vector vp(s0.velocity.X, s0.velocity.Y,
-				                s0.velocity.Z - g_gravity * interval);
-				const Vector& nrm = hit->normal;
-				const float into = vp.X * nrm.X + vp.Y * nrm.Y + vp.Z * nrm.Z;
-				const Vector vc(vp.X - nrm.X * into, vp.Y - nrm.Y * into,
-				                vp.Z - nrm.Z * into);
-				if (vc.X * vc.X + vc.Y * vc.Y > 0.01f)
-					sd.carry_yaw = Deg(atan2f(vc.Y, vc.X));
-				if (s1.velocity.X * s1.velocity.X + s1.velocity.Y * s1.velocity.Y > 0.01f)
-					sd.ride_yaw = Deg(atan2f(s1.velocity.Y, s1.velocity.X));
-				sd.arrive_speed2d = hit->arrive_speed2d;
-				sd.clip_loss = hit->clip_loss;
-			} else {
-				sd.have_contact = 0;
-				sd.on_face = 0;
-				// No contact inside the window: grow the flight and try again
-				// (capped so a snap can't eat the whole sim budget).
-				want = sd.ticks_cur + sd.ticks_cur / 2 + 4;
-				if (want > 300) want = 300;
-			}
-			if (want < 6) want = 6;   // room for the phase minimums
-			if (want != sd.ticks_cur) {
-				sd.ticks_cur = want;
-				changed = true;
-			}
-		}
-		if (changed && settle < 10) { settle++; MarkDirty(); }
-		else if (!changed) settle = 0;
 	}
 
 	// Everything that runs when a sim lands, with a stage marker so a fault
@@ -5169,16 +5022,6 @@ namespace {
 		return true;
 	}
 
-	bool TagItemGetter(void*, int index, const char** out_text) {
-		static char buffer[128];
-		int brush = -1, plane = -1;
-		if (!BspWorld::GetTag(index, &brush, &plane))
-			return false;
-		Sfmt(buffer, "#%d  brush %d  plane %d", index, brush, plane);
-		*out_text = buffer;
-		return true;
-	}
-
 	void InsertSegment(EditSegment segment) {
 		const int at = (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())) ? g_sel + 1
 			: static_cast<int>(g_segs.size());
@@ -5574,7 +5417,8 @@ namespace {
 	//      the project - geo map name, tags, full targets. Loading a v24
 	//      project REPLACES the map's working set (the per-map .geo file
 	//      stays only as the live scratch between saves).
-	constexpr uint32_t kProjVersion = 25;   // v25: snap-board segments
+	constexpr uint32_t kProjVersion = 25;   // v25: reserved (snap-board, removed
+	                                        // 46o - the loader drops type 3)
 
 	template <typename T>
 	void W(std::ofstream& o, const T& v) { o.write(reinterpret_cast<const char*>(&v), sizeof(T)); }
@@ -5597,7 +5441,6 @@ namespace {
 	uint8_t SegKindCode(const EditSegment& s) {
 		if (s.raw) return 1;
 		if (s.is_solver) return s.solver.applied_ride ? 4 : (s.solver.solved ? 3 : 2);
-		if (s.is_snap) return 10;
 		if (s.gen.prestrafe) return 5;
 		if (s.gen.yaw_mode == 2) return s.gen.opt_dir > 0 ? 6 : 7;
 		if (s.gen.yaw_mode == 3) return 8;
@@ -5701,7 +5544,7 @@ namespace {
 		const uint32_t nsegs = static_cast<uint32_t>(g_segs.size());
 		W(out, nsegs);
 		for (const EditSegment& s : g_segs) {
-			const uint8_t type = s.raw ? 1 : (s.is_solver ? 2 : (s.is_snap ? 3 : 0));
+			const uint8_t type = s.raw ? 1 : (s.is_solver ? 2 : 0);
 			W(out, type);
 			if (s.raw) {
 				const uint32_t n = static_cast<uint32_t>(s.frames.size());
@@ -5776,16 +5619,6 @@ namespace {
 					const uint8_t aride = sd.applied_ride ? 1 : 0;
 					W(out, ride);          // v14
 					W(out, aride);         // v14
-				}
-
-				if (s.is_snap) {   // v25: the snap-board block
-					const SnapData& sd = s.snap;
-					W(out, sd.tag); W(out, sd.strafes); W(out, sd.side0);
-					for (int i = 0; i < 3; ++i) W(out, sd.weights[i]);
-					W(out, sd.blend); W(out, sd.ticks_cur);
-					W(out, sd.have_contact); W(out, sd.on_face);
-					W(out, sd.carry_yaw); W(out, sd.ride_yaw);
-					W(out, sd.arrive_speed2d); W(out, sd.clip_loss);
 				}
 			}
 		}
@@ -5945,26 +5778,6 @@ namespace {
 		if (g.ps_crouch_lead > 200) g.ps_crouch_lead = 200;
 		g.ps_crouch_cached = -1;   // runtime-only
 	}
-	void SanitizeSnap(SnapData& sd) {
-		if (sd.tag < -1) sd.tag = -1;
-		if (sd.strafes < 2) sd.strafes = 2;
-		if (sd.strafes > 3) sd.strafes = 3;
-		sd.side0 = (sd.side0 < 0) ? -1 : 1;
-		for (int i = 0; i < 3; ++i) {
-			if (!(sd.weights[i] == sd.weights[i])) sd.weights[i] = 1.f;   // NaN guard
-			if (sd.weights[i] < 0.05f) sd.weights[i] = 0.05f;
-			if (sd.weights[i] > 4.f) sd.weights[i] = 4.f;
-		}
-		if (sd.blend < 1) sd.blend = 1;
-		if (sd.blend > 24) sd.blend = 24;
-		if (sd.ticks_cur < 6) sd.ticks_cur = 6;
-		if (sd.ticks_cur > 300) sd.ticks_cur = 300;
-		if (sd.have_contact > 1) sd.have_contact = 1;
-		if (sd.on_face > 1) sd.on_face = 1;
-		if (!(sd.carry_yaw == sd.carry_yaw)) sd.carry_yaw = 0.f;
-		if (!(sd.ride_yaw == sd.ride_yaw)) sd.ride_yaw = 0.f;
-	}
-
 	void SanitizeSolver(SolverData& sd) {
 		if (sd.strafes < 1) sd.strafes = 1;
 		if (sd.strafes > 4) sd.strafes = 4;
@@ -6168,13 +5981,17 @@ namespace {
 		if (!R(in, nsegs) || nsegs > 4096) { g_status = "Truncated project file."; return false; }
 
 		std::vector<EditSegment> segs;
+		int dropped_snap = 0;
 		for (uint32_t k = 0; k < nsegs; ++k) {
 			uint8_t type = 0;
 			if (!R(in, type)) return false;
 			EditSegment s;
 			s.raw = (type == 1);
 			s.is_solver = (type == 2);
-			s.is_snap = (type == 3);   // v25
+			// type 3 = the v25 snap-board segment, removed the same session
+			// (user verdict 46o): its bytes are consumed below and the segment
+			// dropped, so projects saved during that session still load.
+			const bool drop_snap = (type == 3);
 			if (s.raw) {
 				uint32_t n = 0;
 				if (!R(in, n) || n > static_cast<uint32_t>(Prediction::kMaxSimTicks)) return false;
@@ -6278,21 +6095,24 @@ namespace {
 					}
 					SanitizeSolver(sd);
 				}
-				if (s.is_snap && version >= 25) {
-					SnapData& sd = s.snap;
-					if (!R(in, sd.tag) || !R(in, sd.strafes) || !R(in, sd.side0))
+				if (drop_snap && version >= 25) {
+					// Consume the retired snap-board block: 5 ints (tag,
+					// strafes, side0, blend, ticks), 3 weight floats, 2 flag
+					// bytes, 4 result floats.
+					int di = 0; float df = 0.f; uint8_t db = 0;
+					if (!R(in, di) || !R(in, di) || !R(in, di))
 						return false;
 					for (int i = 0; i < 3; ++i)
-						if (!R(in, sd.weights[i])) return false;
-					if (!R(in, sd.blend) || !R(in, sd.ticks_cur)
-						|| !R(in, sd.have_contact) || !R(in, sd.on_face)
-						|| !R(in, sd.carry_yaw) || !R(in, sd.ride_yaw)
-						|| !R(in, sd.arrive_speed2d) || !R(in, sd.clip_loss))
+						if (!R(in, df)) return false;
+					if (!R(in, di) || !R(in, di) || !R(in, db) || !R(in, db)
+						|| !R(in, df) || !R(in, df) || !R(in, df) || !R(in, df))
 						return false;
-					SanitizeSnap(sd);
 				}
 			}
-			segs.push_back(std::move(s));
+			if (drop_snap)
+				dropped_snap++;
+			else
+				segs.push_back(std::move(s));
 		}
 
 		// v24: project-scoped geo (targets + tagged faces, keyed to the
@@ -6361,6 +6181,9 @@ namespace {
 		}
 
 		g_status = "Loaded " + filename + ".";
+		if (dropped_snap > 0)
+			g_status += " Dropped " + std::to_string(dropped_snap)
+				+ " snap-board segment(s) - that kind was removed.";
 		MarkDirty();
 		return true;
 	}
@@ -6732,25 +6555,8 @@ namespace {
 			}
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Teleport player to anchor") && g_anchor.valid && engine) {
-			char cmd[192];
-			// setpos_exact, full precision, no nudges: plain setpos ran the
-			// engine's unstick (1u forward); a +0.25z guess flipped it to 1u
-			// BEHIND. No more guessing - the deferred check below MEASURES the
-			// landing delta and prints it, so the next report is data.
-			// Freecam up: position only - setang would snap the observer's look.
-			if (g_freecam)
-				Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
-					g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z);
-			else
-				Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
-					g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
-					g_anchor.pitch, g_anchor.yaw);
-			engine->ClientCmd_Unrestricted(cmd);
-			g_tp_check = true;
-			g_tp_ms = GetTickCount64();
-			g_status = "Teleported (needs sv_cheats 1); measuring the landing...";
-		}
+		if (ImGui::Button("Teleport player to anchor"))
+			TasEditor::TeleportToAnchor();   // shared with the hotkey (46o)
 		ImGui::SameLine();
 		if (ImGui::Button("Test play from anchor"))
 			TestPlay();
@@ -6947,9 +6753,6 @@ namespace {
 			} else if (s.is_solver) {
 				Sfmt(kind, "%s ->#%d%s", s.solver.applied_ride ? "RIDE" : "SOLVER",
 					s.solver.target, s.solver.solved ? "" : " (unsolved)");
-			} else if (s.is_snap) {
-				Sfmt(kind, "SNAP ->tag#%d%s", s.snap.tag,
-					s.snap.have_contact ? "" : " (no contact)");
 			} else if (s.gen.prestrafe) {
 				strcpy_s(kind, "PRESTRAFE");
 			} else if (s.gen.yaw_mode == 2) {
@@ -7007,17 +6810,6 @@ namespace {
 				s.gen.yaw_mode = 2;                    // optimal strafe (ride)
 				s.gen.opt_dir = last_side;
 				s.gen.yaw_rate = 0.f;                  // pure max-gain line
-			} else if (g_sel >= 0 && g_sel < static_cast<int>(g_segs.size())
-				&& g_segs[g_sel].is_snap && g_segs[g_sel].snap.have_contact) {
-				// After a snap board: the RIDE half of "carry at impact, ride
-				// after" - continue as an optimal strafe holding the final
-				// phase's side, zero bias, from the boarded state.
-				const SnapData& psd = g_segs[g_sel].snap;
-				const int last_side = (psd.strafes >= 3) ? psd.side0 : -psd.side0;
-				s.gen.key_w = false;
-				s.gen.yaw_mode = 2;
-				s.gen.opt_dir = last_side;
-				s.gen.yaw_rate = 0.f;
 			}
 			InsertSegment(s);
 		}
@@ -7058,18 +6850,6 @@ namespace {
 			EditSegment s;
 			s.is_solver = true;
 			s.gen.jump_mode = JM_None;
-			InsertSegment(s);
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("+ Snap board")) {
-			// Snap-contact-board (session 46n): ratio-steered ballistic flight
-			// that ends itself at the tick it contacts the landing face.
-			EditSegment s;
-			s.is_snap = true;
-			s.gen.jump_mode = JM_None;
-			s.gen.key_w = false;
-			if (g_sel_tag >= 0 && g_sel_tag < BspWorld::TagCount())
-				s.snap.tag = g_sel_tag;   // default to the selected tagged face
 			InsertSegment(s);
 		}
 		ImGui::SameLine();
@@ -7522,70 +7302,6 @@ namespace {
 				}
 				if (ch)
 					MarkDirty();
-
-			} else if (g_segs[g_sel].is_snap) {
-				EditSegment& s = g_segs[g_sel];
-				SnapData& sd = s.snap;
-				bool ch = false;
-				ImGui::TextDisabled("Snap contact board");
-				Theme::Help("Between solver and manual: 2-3 alternating MAX-GAIN "
-					"strafes with NO search anywhere. The phase ratios are the "
-					"one steering control - re-weighting them bends the flight "
-					"left/right, walking the contact point along the landing "
-					"face (watch the hitmarker). The segment's length snaps "
-					"itself to the measured contact tick, and the view blends "
-					"onto the zero-loss CARRY heading over the last ticks "
-					"before impact; '+ Segment' afterwards continues as the "
-					"optimal RIDE.");
-				ImGui::PushItemWidth(260);
-				int tag = sd.tag;
-				if (ImGui::Combo("Landing face (tagged)", &tag, TagItemGetter,
-					nullptr, BspWorld::TagCount())) {
-					sd.tag = tag;
-					ch = true;
-				}
-				int strafes = sd.strafes;
-				if (ImGui::SliderInt("Strafes", &strafes, 2, 3)) {
-					sd.strafes = strafes;
-					ch = true;
-				}
-				int sideidx = (sd.side0 > 0) ? 0 : 1;
-				static const char* kSnapSides[] = { "A first (left)", "D first (right)" };
-				if (ImGui::Combo("First strafe", &sideidx, kSnapSides, 2)) {
-					sd.side0 = (sideidx == 0) ? 1 : -1;
-					ch = true;
-				}
-				ImGui::PopItemWidth();
-				ch |= FloatRow("Phase 1 ratio", &sd.weights[0], 0.05f, 4.f, "%.2f", 0.05f, 0.2f);
-				ch |= FloatRow("Phase 2 ratio", &sd.weights[1], 0.05f, 4.f, "%.2f", 0.05f, 0.2f);
-				if (sd.strafes >= 3)
-					ch |= FloatRow("Phase 3 ratio", &sd.weights[2], 0.05f, 4.f, "%.2f", 0.05f, 0.2f);
-				Theme::Help("Ratios are relative to each other (normalized): 2 : 1 "
-					"means phase 1 flies twice as long as phase 2.");
-				ImGui::PushItemWidth(200);
-				if (ImGui::SliderInt("Carry blend window", &sd.blend, 1, 24))
-					ch = true;
-				ImGui::PopItemWidth();
-				Theme::Help("Ticks before contact over which the view blends onto "
-					"the carry heading (the zero-loss arrival direction).");
-				if (sd.have_contact) {
-					ImGui::TextColored(sd.on_face ? Theme::Success : Theme::Warning,
-						sd.on_face ? "contacts the chosen face at %d ticks"
-						           : "contacts a DIFFERENT surface at %d ticks",
-						sd.ticks_cur);
-					ImGui::Text("arrive %.0f u/s 2D   clip loss %.1f u/s",
-						sd.arrive_speed2d, sd.clip_loss);
-					ImGui::Text("carry yaw %.2f   ride yaw %.2f",
-						sd.carry_yaw, sd.ride_yaw);
-				} else {
-					ImGui::TextColored(Theme::Warning,
-						"no contact within %d ticks yet - the window grows by "
-						"itself; steer with the ratios", sd.ticks_cur);
-				}
-				if (ch) {
-					s.ovr.clear();   // same rule as generated-segment edits
-					MarkDirty();
-				}
 
 			} else if (!g_segs[g_sel].raw) {
 				const GenParams before = g_segs[g_sel].gen;
@@ -10703,6 +10419,37 @@ bool TasEditor::GetDrawData(DrawData& out) {
 			out.seg_gain_pct = 100.f;
 	}
 	return true;
+}
+
+bool TasEditor::AnchorValid() {
+	return g_anchor.valid;
+}
+
+// The Run tab's teleport button and the "Editor: Teleport To Anchor" hotkey
+// both land here. setpos_exact, full precision, no nudges: plain setpos ran
+// the engine's unstick (1u forward); a +0.25z guess flipped it to 1u BEHIND.
+// No more guessing - the deferred check MEASURES the landing delta and
+// prints it, so any future report is data. Freecam up: position only -
+// setang would snap the observer's look.
+void TasEditor::TeleportToAnchor() {
+	if (!g_anchor.valid) {
+		g_status = "No anchor captured - can't teleport.";
+		return;
+	}
+	if (!engine)
+		return;
+	char cmd[192];
+	if (g_freecam)
+		Sfmt(cmd, "setpos_exact %.6f %.6f %.6f",
+			g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z);
+	else
+		Sfmt(cmd, "setpos_exact %.6f %.6f %.6f; setang %.2f %.2f 0",
+			g_anchor.origin.X, g_anchor.origin.Y, g_anchor.origin.Z,
+			g_anchor.pitch, g_anchor.yaw);
+	engine->ClientCmd_Unrestricted(cmd);
+	g_tp_check = true;
+	g_tp_ms = GetTickCount64();
+	g_status = "Teleported (needs sv_cheats 1); measuring the landing...";
 }
 
 void TasEditor::ContactTuning(float* gravity, float* max_add) {
