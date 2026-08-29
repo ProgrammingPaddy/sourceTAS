@@ -201,6 +201,28 @@ implementation start — no rows are named here that don't exist yet.
   `py -m http.server 8123 --directory C:\Users\Connor\Documents\SourceTAS\reports`
 
 **Findings log** (what the instrument caught, newest first):
+5. THE SOLVE IS ONLINE (Step 4 v1). Single-level KKT Newton
+   (Levenberg-Marquardt on z = [phi_1..phi_T absolute wish angles, lam, nu],
+   FD Jacobian, scaled rows) PLUS an active-set outer loop: the interior
+   solve walks leading ticks onto the c = 30 boundary when T is generous -
+   those are REAL optimal structure (coast arcs: a no-accel tick sheds
+   distance at zero energy cost, beating quadratic-loss wiggle). Pinned
+   ticks become exact engine no-ops (cosa = -1 replays as add = 0
+   identically); pins only grow; re-solve warm until no new pins.
+   Reference scenario (v0 = 600 along +x, T = 71, target (520,260),
+   arrive 45deg): residuals [1.4e-10 u, 7.3e-11 u], heading 3.1e-15,
+   tangency 2.3e-12; 17 coast ticks (13 leading + 4 chatter at the
+   transition); KKT-checked (freeing any pinned tick into the gaining
+   region never improves the Lagrangian); float32 REPLAY through the
+   corpus-verified mirror: pass miss 0.000 u, heading err 0.0000 deg,
+   vT 623.91 = the double solve exactly. Bilevel (inner ascent + outer
+   multiplier Newton) was structurally fragile and is dead. Failure modes
+   are honest: infeasible-by-bound cases are refused BEFORE the solve (the
+   B22 bound is a proof); a feasible hook arrival (arrive 120 deg off a
+   26 deg displacement) still fails from the cold start - basin/init
+   limitation, flagged in-UI, falsifier + basin study pending. Chatter
+   coasts (alternating live/dead) are the discrete shadow of a singular
+   arc; the dwell layer (step 5) will regularize them.
 -1. DRIFT CORRECTION (user ruling): candidate scans with tolerance scoring
    had crept in as if they were the product. Removed from the instrument's
    results entirely; the attachment-points ruling and the route equations
