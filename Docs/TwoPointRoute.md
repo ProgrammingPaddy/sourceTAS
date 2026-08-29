@@ -35,6 +35,54 @@ parity engine confirms every claim (binding semantics #9, verify-then-accept).
   board; collision-freedom of the corridor is a separate check against the
   BSP machinery). Boards/ramp contact belong to the entrance-field track.
 
+## RULING (user, session 47): attachments, not scores
+
+The start (point + velocity) and the end (point + movement direction) are
+ATTACHMENT POINTS - boundary conditions the equations satisfy identically.
+There are no candidates, no tolerances, no near-misses, no scoring: the
+solve drives the attachment residuals to float-zero or reports the input
+infeasible. Scans/estimates may exist ONLY as falsifiers that check a
+finished solve from the outside - never as the solver, never in the UI as
+results. "Estimations, guesses, and close-enough thinking are poison."
+
+## The route equations (exact, from the measured kernel)
+
+Gaining regime (full A/D input; the budget clamp sits at c < 30 - 562.5*sf,
+unreachable for efficient routes). Per tick, control = wish direction w_k
+(unit; the free view makes it free, the A/D side only signs it for dwell):
+
+    (1) cap attachment   v_{k+1} . w_k = 30            (exactly - the engine
+                                                        sets the component)
+    (2) update           v_{k+1} = v_k + (30 - c_k) w_k,   c_k = v_k . w_k
+    (3) energy identity  E_{k+1} = E_k + 900 - c_k^2
+                         => E_T = E_0 + 900T - SUM c_k^2 ; loss == SUM c_k^2
+    (4) position         p_T - p_0 = dt * SUM_{k=1..T} v_k     (linear)
+    (5) sensitivity      dv_{k+1}/dv_k = I - w_k w_k^T         (projector)
+
+Problem: minimize SUM c_k^2 subject to (2), p_T = p1 identically, and
+v_T parallel to theta1 identically. (Identical to maximizing E_T by (3);
+a final-tick view snap is just a huge c_T^2 - punished by the same term as
+every other tick, no special handling, exactly the user's requirement.)
+
+Stationarity (multipliers: lambda in R^2 for position, nu for heading):
+
+    adjoint     pi_k = (I - w_k w_k^T) pi_{k+1} + dt*lambda
+    terminal    pi_T = 2 v_T + dt*lambda + nu * rot90(theta1_hat)
+    control     (30 - c_k)(pi_{k+1} . w_perp) - (v_k . w_perp)(pi_{k+1} . w) = 0
+                (per-tick closed-form tangency for the wish angle)
+
+Three unknown scalars (lambda_x, lambda_y, nu); three residuals (2 position
+components, v_T x theta1_hat = 0); Newton drives them to float-zero with
+O(T) forward/backward sweeps per iteration. Root-finding on closed-form
+equations is not a search: the equations define the answer, the iteration
+extracts the root to machine precision.
+
+The ZERO-LOSS FAMILY (c == 0 every tick): per-tick turn magnitude is then
+FIXED (only its sign is free), so zero-loss paths form the exact skeleton
+of the reachable set - the "constant-time formula for the optimal shape".
+Exact position attachment generically needs c != 0 somewhere; the solve
+finds the minimum-loss bending. Feasibility = existence of the root.
+
 ## The two structural cancellations
 
 1. **Vertical decouples exactly.** A/D wishes are horizontal, so `vz` evolves
@@ -153,6 +201,11 @@ implementation start — no rows are named here that don't exist yet.
   `py -m http.server 8123 --directory C:\Users\Connor\Documents\SourceTAS\reports`
 
 **Findings log** (what the instrument caught, newest first):
+-1. DRIFT CORRECTION (user ruling): candidate scans with tolerance scoring
+   had crept in as if they were the product. Removed from the instrument's
+   results entirely; the attachment-points ruling and the route equations
+   above are the binding restatement. Scans survive only as external
+   falsifiers of a finished solve.
 0. The speed-ratio efficiency metric hid coasting (96% shown for a path that
    captured 15.5% of the available energy gain) and no candidate was being
    held to the arrival-heading constraint. Both corrected: energy-fraction
