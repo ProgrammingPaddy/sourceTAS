@@ -200,7 +200,80 @@ implementation start — no rows are named here that don't exist yet.
 - Serve the reports dir to view (file:// blocks the corpus include):
   `py -m http.server 8123 --directory C:\Users\Connor\Documents\SourceTAS\reports`
 
+## THE MIXING LAW (user redefinition, session 47 - the working model)
+
+The controls are ONLY the two locally speed-optimal strafes: optimal left
+(c = 0, wish perpendicular-left) and optimal right. Everything follows:
+
+1. **Speed decouples.** Any mix of the two optimal controls gains exactly
+   900/tick: `s_k = sqrt(s0^2 + 900k)` - closed form, independent of the
+   path. All feasible mixes tie at the ceiling `sqrt(s0^2 + 900T)`.
+2. **One state remains.** Averaged dynamics: `dh/dk = m * delta_k` with mix
+   `m = 2*lambda - 1 in [-1,1]` and authority `delta_k = atan(30/s_k)`.
+3. **Position costate is constant** (position dynamics are trivial), so
+   Pontryagin with the minimal-effort selection (min integral m^2 - the
+   unique tie-break) gives the closed-form feedback law
+       m(k) = sat( -delta(k)/2 * [ nu + cross(Lam, R(k)) ] ),
+   R(k) = target - P(k) the remaining displacement. Three scalars
+   (Lam_x, Lam_y, nu) against three attachments (position x2, arrival
+   heading). Solved by a damped 3x3 Newton with homotopy on the position
+   target (heading-only first - its endpoint is the free endpoint - then
+   walk the target in). `sat` is implemented as tanh (same slope at 0) so
+   root tracking survives deep bang arcs; bang arcs are EMERGENT.
+4. **Realization is quantization**: 1-bit sigma-delta of m into A/D signs
+   (every realized tick c = 0, full 900/tick preserved), then the exact
+   per-tick Newton (solveRoute) closes the quantization gap to float-zero
+   inside the law's basin, and the float32 mirror replay measures it.
+5. **The loss branch (tight regime)** - when the law saturates, the optimum
+   leaves the two-control hull: overturn `c < 0` buys turn rate
+   `psi(c,s) = atan((30-c)sqrt(s^2-c^2)/(s^2+(30-c)c))` at quadratic cost
+   c^2 and lowers speed (raising future authority). Same constant position
+   costate; one energy costate w (terminal w_T = 0); per-tick condition
+       2(1 - w) c* = |p| dpsi/dc,   sigma = -sign(p).
+   UNIFIED SMOOTH LAW: `omega = -tanh(delta p / 2) * psi(c*, s)` - its
+   small-p limit IS the mixing law (c* -> 0), so slack and tight are one
+   law. Four scalars (Lam, nu, w0). Realization: dither the side on the
+   tanh fraction; demanded-side ticks overturn at c*. The law rollout is a
+   BASIN GENERATOR for the exact Newton, which owns final attachment (in
+   the tight regime the KKT system is non-degenerate - exactly where it is
+   strong; measured: 4-5 iterations from law basins).
+
+**Measured coverage** (2026-08-29, T=71 -> (520,260) arrive 45deg unless
+noted; all OK rows replay 0.000 u through the corpus-verified mirror):
+
+| scenario | branch | vT / ceiling | result |
+|---|---|---|---|
+| v600 ref | mixing | 651.0/651.1 (100.0%) | OK, Sc2=35, ~60 ms |
+| bend90 | mixing | 651.1/651.1 (100.0%) | OK |
+| short T=30 | mixing | 622.0/622.1 (100.0%) | OK, 11 ms |
+| headingOnly | mixing | 651.1/651.1 (100.0%) | OK, Sc2=6 |
+| slow300 near | mixing | 392.2/392.3 (100.0%) | OK |
+| v700 | loss | 740.9/744.2 (99.6%) | OK, Sc2=4914, 2 flips, dwell-legal |
+| v800 | loss | 819.0/839.0 (97.6%) | OK, Sc2=33180 |
+| startHeading200 | loss | 648.3/651.1 (99.6%) | OK |
+| v1000 | loss | - | OPEN: exact Newton stalls 23 u out |
+| v1500, hook120 | loss | - | OPEN: needs budget-clamp brake branch |
+| nearBound (straight shed) | mixing | - | OPEN: fold at the straight root (arch seed derived, unbuilt) |
+
+**Open increments** (derived, not yet built): (a) budget-clamp brake branch
+(add = B, c < 30 - B: psi_B = atan(B sqrt(s^2-c^2)/(s^2+Bc)), loss
+900 - B(2c+B) - joins the same per-tick root); (b) the fold seed for
+straight-line shed (arch amplitude A = sqrt(2*shed/path), P0 = 8A/(T
+delta^2)); (c) dwell-6 as coarser sigma-delta granularity; (d) independent
+falsifier for law-FAIL verdicts (saturation of the tracked branch is not
+an infeasibility certificate).
+
 **Findings log** (what the instrument caught, newest first):
+7. THE MIXING LAW IS ONLINE and the old finding-5 scenario closes at
+   99.99-100.00% of the energy ceiling in ~60 ms (law 2 ms + polish),
+   replay 0.000 u. The loss branch composition attaches v700/v800/
+   startHeading200 at 97.6-99.6% of ceiling with the exact Newton
+   converging in 4-5 iterations from law basins (it owns the tight regime,
+   where KKT is non-degenerate). Structural lessons measured this session:
+   hard clamps and bang signs kill FD Newton (tanh-smooth the selection,
+   keep exactness in the polish); forward-shot adjoints and target
+   homotopy are fragile beyond ~40% saturation - the composition
+   (law basin -> exact Newton) is what actually closes.
 6. FINDING 5 FALSIFIED (user caught it; measured same day). The coast
    solution was a WRONG-BASIN local stationary point, not the optimum. A
    zero-loss falsifier path (all c = 0: dip right ~10 ticks, arc left,
