@@ -22,6 +22,15 @@ parity engine confirms every claim (binding semantics #9, verify-then-accept).
   View snaps cost speed through the SAME per-tick physics as every other
   tick, so a last-tick snap is suboptimal *by the objective itself* — no
   blending, no safeguards, exactly as specified.
+- **The metric** (user correction, session 47): work in v² space. The
+  per-tick gain budget is a CONSTANT 900 there, so available gain over T
+  ticks is exactly 900T and `efficiency = (vT² − v0²) / 900T`. A speed-ratio
+  metric has a ~92%-for-doing-nothing floor at high v0 and HID a coasting
+  path as "96%" (it was 15.5% by energy). Bonus cancellation: the objective
+  is LINEAR in the per-tick gains — Step 4's Hamiltonian gets simpler.
+- **Feasibility is binary**: a candidate that misses the pass tolerance OR
+  the arrival heading is a MISS, whatever its other numbers. Instruments
+  must say "nothing feasible found" rather than decorate a near-miss.
 - **Scope pin**: pure airborne flight between the two points (no mid-flight
   board; collision-freedom of the corridor is a separate check against the
   BSP machinery). Boards/ramp contact belong to the entrance-field track.
@@ -144,6 +153,13 @@ implementation start — no rows are named here that don't exist yet.
   `py -m http.server 8123 --directory C:\Users\Connor\Documents\SourceTAS\reports`
 
 **Findings log** (what the instrument caught, newest first):
+0. The speed-ratio efficiency metric hid coasting (96% shown for a path that
+   captured 15.5% of the available energy gain) and no candidate was being
+   held to the arrival-heading constraint. Both corrected: energy-fraction
+   metric + binary HIT/miss vs position AND heading tolerances, with an
+   explicit "nothing feasible" verdict. The coarse 2-phase scan frequently
+   CANNOT satisfy both constraints - that gap is exactly what the Step-4
+   exact solve exists to close.
 1. Constant single-side actions reach only a thin family of endpoint arcs -
    coverage sweeps need at least two phases (near-black heatmap otherwise).
 2. The `cosa` action convention is against the REVERSED velocity (wish at
