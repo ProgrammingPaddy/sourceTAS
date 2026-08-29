@@ -1,4 +1,4 @@
-// SolverLab: console harness for the solver core. Runs the engine-independent
+﻿// SolverLab: console harness for the solver core. Runs the engine-independent
 // world + movement model without the game so search/physics work iterates at
 // full speed. Commands:
 //
@@ -61,6 +61,7 @@ namespace {
 
 	void PrintUsage() {
 		printf("SolverLab commands:\n");
+		printf("  pgcorpus             two-point-route playground ground truth (JSON to stdout)\n");
 		printf("  mapinfo <map.bsp>\n");
 		printf("  tapeinfo [pattern]   recordings inventory: map/frames/anchor\n");
 		printf("          per tape (provenance check - which map is it FOR?)\n");
@@ -27227,6 +27228,109 @@ namespace {
 
 } // namespace
 
+// ---- TWO-POINT ROUTE PLAYGROUND corpus (session 47) -----------------------
+// Emits engine-exact ground truth as JSON for the HTML playground's Verify
+// tab: single KernelTick cases across the domain, plus authoritative
+// MoveTick rollouts (CategorizePosition's surface-friction law included) so
+// the playground's float32 JS mirror is MEASURED against the certified
+// engine, never trusted. Deterministic seed; %.9g round-trips float32.
+static unsigned pg_rng_state = 0x12345u;
+static float PgRand01() {
+	pg_rng_state = pg_rng_state * 1664525u + 1013904223u;
+	return static_cast<float>((pg_rng_state >> 8) & 0xFFFFFF)
+		/ 16777216.f;
+}
+static int CmdPgCorpus(const ReplayOpts& o) {
+	const MoveParams& p = o.params;
+	World w;
+	if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+		fprintf(stderr, "pgcorpus: clean-air world build failed\n");
+		return 1;
+	}
+	printf("{\n\"engine_model\":\"%s\",\n", kEngineModelVersion);
+	printf("\"params\":{\"dt\":%.9g,\"gravity\":%.9g,\"airaccelerate\":%.9g,"
+		"\"maxspeed\":%.9g,\"maxvelocity\":%.9g,\"air_speed_cap\":%.9g,"
+		"\"air_friction_up\":%.9g,\"non_jump_velocity\":%.9g,"
+		"\"strafe_rate_max\":%.9g},\n",
+		p.dt, p.gravity, p.airaccelerate, p.maxspeed, p.maxvelocity,
+		p.air_speed_cap, p.air_friction_up, p.non_jump_velocity,
+		p.strafe_rate_max);
+
+	// Singles: KernelTick across the whole input domain.
+	pg_rng_state = 0x12345u;
+	printf("\"singles\":[\n");
+	CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+	const int kNumSingles = 600;
+	for (int i = 0; i < kNumSingles; ++i) {
+		const float sp = 1.5f * powf(2200.f, PgRand01());   // 1.5..3300 log
+		const float hd = (PgRand01() * 2.f - 1.f) * 3.14159265f;
+		const float vx = sp * cosf(hd), vy = sp * sinf(hd);
+		const float vz = (PgRand01() * 2.f - 1.f) * 2500.f;
+		const int sidesel = i % 3;
+		const signed char side = sidesel == 0 ? (signed char)-1
+			: (sidesel == 1 ? (signed char)0 : (signed char)1);
+		const float cosa = PgRand01() * 2.f - 1.f;
+		const float sf = (i % 5 == 0) ? p.air_friction_up : 1.f;
+		k.surface_friction = sf;
+		float npx, npy, npz, nvx, nvy, nvz;
+		CapAir::KernelTick(k, 0.f, 0.f, 8000.f, vx, vy, vz, side, cosa,
+			&npx, &npy, &npz, &nvx, &nvy, &nvz);
+		printf("%s[%.9g,%.9g,%.9g,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]",
+			i ? ",\n" : "", vx, vy, vz, static_cast<int>(side), cosa, sf,
+			nvx, nvy, nvz, npx, npy, npz - 8000.f);
+	}
+	printf("],\n");
+
+	// Rollouts: the authoritative MoveTick path (AirTick), sf law live.
+	struct Script { const char* name; float v0, vz0; int mode; float cosa; int per; };
+	static const Script kScripts[] = {
+		{ "coast",            600.f,     0.f, 0, 1.f,   0 },
+		{ "L_hold_c1",        600.f,     0.f, 1, 1.f,   0 },
+		{ "L_hold_c0999",     600.f,     0.f, 1, 0.999f, 0 },
+		{ "L_hold_c096",      600.f,     0.f, 1, 0.96f, 0 },
+		{ "L_hold_c08",       600.f,     0.f, 1, 0.8f,  0 },
+		{ "L_hold_c045",      600.f,     0.f, 1, 0.45f, 0 },
+		{ "L_hold_c0",        600.f,     0.f, 1, 0.f,   0 },
+		{ "L_hold_cneg05",    600.f,     0.f, 1, -0.5f, 0 },
+		{ "alt6_c096",        600.f,     0.f, 2, 0.96f, 6 },
+		{ "alt20_c096",       600.f,     0.f, 2, 0.96f, 20 },
+		{ "rise300_L_c096",   600.f,   300.f, 1, 0.96f, 0 },
+		{ "rise120_L_c096",   600.f,   120.f, 1, 0.96f, 0 },
+		{ "fast2500_L_c0999", 2500.f,    0.f, 1, 0.999f, 0 },
+		{ "slow5_L_c06",      5.f,       0.f, 1, 0.6f,  0 },
+		{ "sub1_L_c06",       0.5f,      0.f, 1, 0.6f,  0 },
+		{ "fall800_L_c096",   600.f,  -800.f, 1, 0.96f, 0 },
+	};
+	const int nsc = static_cast<int>(sizeof(kScripts) / sizeof(kScripts[0]));
+	const int kT = 120;
+	printf("\"rollouts\":[\n");
+	for (int si = 0; si < nsc; ++si) {
+		const Script& sc = kScripts[si];
+		PlayerState s;
+		s.pos = Vec3(0.f, 0.f, 8000.f);
+		s.vel = Vec3(sc.v0, 0.f, sc.vz0);
+		printf("%s{\"name\":\"%s\",\"v0\":%.9g,\"vz0\":%.9g,\"ticks\":[\n",
+			si ? ",\n" : "", sc.name, sc.v0, sc.vz0);
+		for (int t = 0; t < kT; ++t) {
+			signed char side = 0;
+			if (sc.mode == 1)
+				side = 1;
+			else if (sc.mode == 2)
+				side = ((t / sc.per) % 2 == 0) ? (signed char)1
+					: (signed char)-1;
+			const float sf_pre = s.surface_friction;
+			CapAir::AirTick(&s, w, p, side, sc.cosa);
+			printf("%s[%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]",
+				t ? ",\n" : "", static_cast<int>(side), sc.cosa,
+				s.pos.X, s.pos.Y, s.pos.Z - 8000.f,
+				s.vel.X, s.vel.Y, s.vel.Z, sf_pre);
+		}
+		printf("]}");
+	}
+	printf("]\n}\n");
+	return 0;
+}
+
 int main(int argc, char** argv) {
 	if (argc < 2) {
 		PrintUsage();
@@ -27337,6 +27441,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapKern(o);
+	}
+	if (cmd == "pgcorpus") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdPgCorpus(o);
 	}
 	if (cmd == "capboard") {
 		ReplayOpts o;

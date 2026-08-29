@@ -62,13 +62,22 @@ extraction/formalization of what the solver already does, landed as its own
 registry row with its own falsifier.
 
 **Step 2 — The exact per-tick map, analytic (the foundation).**
-Closed form for one tick: given speed `s` and wish angle `alpha`:
-`c = s*cos(alpha)`, `add = clamp(L - c, 0, a)`, new speed and heading turn
-from the vector sum. Deliverables: forward map `(s, alpha) -> (s', dtheta)`,
-its **inverse** (`(s, dtheta) -> alpha, s'`), and its derivatives (Newton
-needs them). This is B22's measured joint frontier made analytic. Gate:
-byte-level differential vs the engine tick over a `(s, alpha)` sweep
-(FUNCPROBE-style); the B22 table becomes the cross-check, not the primary.
+Closed form for one tick — with the MEASURED action convention (playground
+finding #2, 2026-08-29): the input mapping realizes its wish at `wh + pi`
+(SolverAir::WishInputs, repfit-measured), so the lab's `cosa` is against the
+REVERSED velocity:
+
+    cur  = -v * cosa           (cosa +1 = full-budget brake, 0 = max gain,
+                                negative = forward/no-op at speed)
+    add  = clamp(30 - cur, 0, budget),  budget = aa*wishspeed*dt*sf = 562.5*sf
+    v'^2 = v^2 + add*(2*cur + add)
+
+Verified against the corpus-checked mirror: worst |dv| 2.6e-4 u/s over a
+3280-case sweep. NOTE the budget DOES bind - in the braking region (an
+early draft claimed cap-regime-only; the playground falsified that). Max
+gain is +900 u^2/tick at cosa = 0, independent of sf at full A/D input.
+Remaining deliverables: the heading-turn half of the map, the inverse, and
+derivatives - same falsifier pattern.
 
 **Step 3 — Feasibility (two units, portfolio-composed).**
 - **3a. Certified upper bound (cheap gate):** max horizontal distance
@@ -119,6 +128,32 @@ recorded (goal: full solve < 50 microseconds — vs milliseconds+ of search).
 4's derivation can be written against 2's interface before 2's gates close.
 5 strictly after 4. Registry IDs are assigned against the live checklist at
 implementation start — no rows are named here that don't exist yet.
+
+## Instruments (live since 2026-08-29)
+
+- **The playground**: `..\reports\playground.html` (+ `playground_corpus.js`
+  beside it; regenerate with `SolverLab pgcorpus` and re-wrap). Tabs:
+  Scenario (arbitrary start/target/heading, ballistic T, feasibility bound,
+  path candidates rendered with efficiency stats and dwell legality),
+  Stress (Law A per-tick gain sweep, Law B ballistic closed form, reach
+  sweep heatmap), Verify (the float32 JS mirror measured against the C++
+  corpus - singles worst ~5e-6, 120-tick rollouts ~5e-4 u, sf law exact).
+- **`SolverLab pgcorpus`**: 600 KernelTick singles + 16 authoritative
+  120-tick MoveTick rollouts as JSON - the ground truth the page embeds.
+- Serve the reports dir to view (file:// blocks the corpus include):
+  `py -m http.server 8123 --directory C:\Users\Connor\Documents\SourceTAS\reports`
+
+**Findings log** (what the instrument caught, newest first):
+1. Constant single-side actions reach only a thin family of endpoint arcs -
+   coverage sweeps need at least two phases (near-black heatmap otherwise).
+2. The `cosa` action convention is against the REVERSED velocity (wish at
+   `wh + pi`); the Step-2 law's sign and the budget-binds claim were wrong
+   until measured. See Step 2.
+3. CategorizePosition (and so the sf law) runs BEFORE the FinishGravity
+   half - a post-tick-vz sf rule disagrees one tick per rise; mid-tick vz
+   is correct. Caught by the rollout corpus (119/120 on both rise scripts).
+4. The ballistic closed form is exact until |vz| hits the 3500/component
+   clamp (annotated in Law B); Step 1 must report the clamp tick.
 
 ## Standing rules that bind this work
 
