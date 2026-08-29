@@ -201,7 +201,27 @@ implementation start — no rows are named here that don't exist yet.
   `py -m http.server 8123 --directory C:\Users\Connor\Documents\SourceTAS\reports`
 
 **Findings log** (what the instrument caught, newest first):
-5. THE SOLVE IS ONLINE (Step 4 v1). Single-level KKT Newton
+6. FINDING 5 FALSIFIED (user caught it; measured same day). The coast
+   solution was a WRONG-BASIN local stationary point, not the optimum. A
+   zero-loss falsifier path (all c = 0: dip right ~10 ticks, arc left,
+   hold 45 deg - sign structure only) reaches 24 u from the target with NO
+   loss; warm-starting the same Newton from it attaches at float-zero in
+   4 iterations, 0 coasts, vT 649.52 vs the coast answer's 623.91
+   (replay miss 0.0001 u). Root cause is DEGENERACY, not a bug: the loss
+   is sum c^2, and at the true optimum nearly all c = 0, where the cost
+   gradient vanishes - so the KKT stationarity system reads 0 = 0 along
+   the real decision dimension (the SIGN/turn schedule) and multipliers
+   collapse toward zero. A stationarity solver cannot pick the basin; the
+   optimum is characterized by FEASIBILITY (geometry), not stationarity,
+   except when turn authority saturates. Corollaries, all measured:
+   coast NEVER beats zero-loss wiggle while curvature authority remains
+   (wiggle sheds chord length AND keeps the 900/tick); every v0 > 600
+   trial failed (wrong basin + the in-regime guard forbids the
+   budget-clamp braking branch, so speed-tanking routes are
+   unrepresentable); turn/hold/turn with the hold glued to the arc end is
+   too thin a family - arc PLACEMENT is the third scalar. The corrected
+   architecture is the heading-space term solve (below); the T+3 Newton
+   survives only as the final polish inside a falsifier-chosen basin.
    (Levenberg-Marquardt on z = [phi_1..phi_T absolute wish angles, lam, nu],
    FD Jacobian, scaled rows) PLUS an active-set outer loop: the interior
    solve walks leading ticks onto the c = 30 boundary when T is generous -
