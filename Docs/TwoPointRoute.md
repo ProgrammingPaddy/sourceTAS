@@ -281,6 +281,37 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+10. THE PERIODIC FAILURE PATTERN DIAGNOSED AND CLOSED (2026-08-30, user
+   observation: fail-notch walking toward 0 deg as speed rises, near-total
+   miss bands at two 50-steps, repeating). Measured causes, in order of
+   effect: (a) the exit-speed window after braking can be ~60 u/s wide
+   while the lite ladder sampled 4 fixed ratios of sLo - the sliding
+   window fell between grid points periodically in v0 (the walking notch),
+   and n->n+1 brake-tick transitions moved sLo discontinuously (the miss
+   bands). Fix: reach-guided refinement - the remainder law's reach
+   profile points at the window; bisect toward its peak (formula-guided,
+   no fixed grid dependence). (b) The LM acceptance rejected candidates
+   that crossed a regime boundary transiently even while merit fell 45->6
+   - but the forward map is the full truthful function, so those states
+   are valid; now accepted on strong merit decrease (rows self-correct on
+   re-entry). This also recovered hook120 as a distributed-overturn basin
+   (96.4 percent of ceiling). (c) brake+arc composition (dump then hook)
+   attaches the reversed-arrival family at speed (v2000 arrive -90:
+   35.9 percent of ceiling, replay exact). Suite (dwell-6 enforced):
+   1164 pass (was 862) / 996 no-attach (was 1298) / 462 violations (was
+   578) / 4 isolated; 289 s (up from 151 - the acceptance change lets
+   formerly instant-fail cells run: elim 33 percent, jtj 31, evalF 17,
+   law.mix 15). Audit now two-tier: orange = fail above a pass in-column
+   (the monotone law); yellow = isolated fail with >= 3 passing
+   neighbors. VERDICT on the brake prefix (user hunch): the dump itself
+   is formula-derived (energy identity + closed-form dE inversion); the
+   hack was its fixed sampling grid, now replaced by reach-guided
+   refinement. REMAINING red mass: deep-backward arrivals (-180..-135)
+   where covering the chord and looping back are mutually exclusive at
+   this T - likely GENUINELY infeasible but uncertified: the turn-cost
+   debit on the distance bound (step 3a, still pending) is the missing
+   certificate that would recolor them gray with proof.
+
 9. PROFILER + DWELL LAYER + EFFICIENCY (2026-08-30, user directives).
    Stage profiler (exclusive buckets, percentages of wall) in the Route
    panel and suite summary. MEASURED single-solve battery: newton.elim
