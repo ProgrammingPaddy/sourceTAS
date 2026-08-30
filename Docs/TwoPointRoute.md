@@ -241,27 +241,44 @@ The controls are ONLY the two locally speed-optimal strafes: optimal left
 **Measured coverage** (2026-08-29, T=71 -> (520,260) arrive 45deg unless
 noted; all OK rows replay 0.000 u through the corpus-verified mirror):
 
-| scenario | branch | vT / ceiling | result |
+| scenario | branch | vT / ceiling | result (all replay 0.000 u) |
 |---|---|---|---|
-| v600 ref | mixing | 651.0/651.1 (100.0%) | OK, Sc2=35, ~60 ms |
-| bend90 | mixing | 651.1/651.1 (100.0%) | OK |
-| short T=30 | mixing | 622.0/622.1 (100.0%) | OK, 11 ms |
-| headingOnly | mixing | 651.1/651.1 (100.0%) | OK, Sc2=6 |
-| slow300 near | mixing | 392.2/392.3 (100.0%) | OK |
-| v700 | loss | 740.9/744.2 (99.6%) | OK, Sc2=4914, 2 flips, dwell-legal |
-| v800 | loss | 819.0/839.0 (97.6%) | OK, Sc2=33180 |
-| startHeading200 | loss | 648.3/651.1 (99.6%) | OK |
-| v1000 | loss | - | OPEN: exact Newton stalls 23 u out |
-| v1500, hook120 | loss | - | OPEN: needs budget-clamp brake branch |
-| nearBound (straight shed) | mixing | - | OPEN: fold at the straight root (arch seed derived, unbuilt) |
+| v600 ref | zero-loss | 651.0/651.1 (100.00%) | 20 ms |
+| bend90 | zero-loss | 651.1/651.1 (100.00%) | 43 ms |
+| short T=30 | zero-loss | 622.0/622.1 (99.99%) | 6 ms |
+| headingOnly | zero-loss | 651.1/651.1 (100.00%) | 47 ms |
+| slow300 near | zero-loss | 392.2/392.3 (100.0%) | ~70 ms |
+| nearBound (straight shed) | zero-loss | 651.0/651.1 (99.99%) | 70 ms (fold seeds) |
+| v700 | loss | 740.8/744.2 (99.5%) | 331 ms |
+| v800 | loss | 818.5/839.0 (97.6%) | 317 ms |
+| startHeading200 | loss | 646.5/651.1 (99.3%) | 354 ms |
+| hook120 | loss, target continuation | 633.1/651.1 (97.2%) | 1.9 s |
+| v1000 | loss, speed continuation | 957.9/1031.5 (92.9%) | 9.9 s |
+| v1500 | loss, speed continuation | 1272.0/1521.2 (83.6%) | 25 s |
 
-**Open increments** (derived, not yet built): (a) budget-clamp brake branch
-(add = B, c < 30 - B: psi_B = atan(B sqrt(s^2-c^2)/(s^2+Bc)), loss
-900 - B(2c+B) - joins the same per-tick root); (b) the fold seed for
-straight-line shed (arch amplitude A = sqrt(2*shed/path), P0 = 8A/(T
-delta^2)); (c) dwell-6 as coarser sigma-delta granularity; (d) independent
-falsifier for law-FAIL verdicts (saturation of the tracked branch is not
-an infeasibility certificate).
+**2026-08-30 rev (user directives applied)**: (a) the per-tick control map
+is now ONE function over the full range c in [-s, 30] - `tickFull`:
+add = clamp(30-c, 0, B), dE = add(2c+add), psi = atan2(add rt, s^2+add c);
+loss L(c) = 900 - dE is zero at c = 0 and nonzero exactly where the physics
+charges. The per-tick optimum is the argmin of (1-w)L - |p| psi over that
+one function (theta-grid + golden refine; the function is multi-modal:
+shallow overturn, deep overturn, pure brake are its shapes, not solver
+branches). Deep-brake controls carry into the exact Newton as locked rows
+(dv'/dv = I on the clamp branch). (b) Winding classes: the arrival heading
+attaches as h_T = hreq + 2 pi n with UNWRAPPED residuals, n in {-1,0,1}
+solved as ordinary members - wrap-around routes included. (c) Fold seeds
+(arch amplitude A = sqrt(2 shed/arc), P0 = 8A/(T delta^2), both signs) are
+extra deterministic homotopy starts. (d) Continuation completes coverage:
+exactWalk (position-target continuation of the exact Newton) and speedWalk
+(start-speed continuation from an attachable base, locking budget-clamp
+controls as they appear). (e) Playground: sliders (speed 0..3500,
+headings -180..180, vz +-3500) with instant re-solve on input.
+
+**Open work**: extreme-regime solve time (v1000+ at ~10-25 s - candidate
+lever: analytic Jacobian for the exact Newton instead of FD); locked
+clamp controls are held at law values, not re-optimized (bounded
+suboptimality, measured in replay); independent falsifier for
+no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
 7. THE MIXING LAW IS ONLINE and the old finding-5 scenario closes at
