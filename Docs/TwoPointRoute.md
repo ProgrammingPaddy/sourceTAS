@@ -281,6 +281,30 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+9. PROFILER + DWELL LAYER + EFFICIENCY (2026-08-30, user directives).
+   Stage profiler (exclusive buckets, percentages of wall) in the Route
+   panel and suite summary. MEASURED single-solve battery: newton.elim
+   40.1% / newton.jtj 33.1% / newton.evalF 20.8% / laws 3.2% - 94% of all
+   time is the exact Newton's linear algebra, mostly FAILING iterations.
+   Fixes from the data: LM inner attempts 10->4; stall bail (merit <0.1%
+   over 25 iters); dwell patterns pre-ranked by conform-roll miss (best 2
+   polished). Worst battery case 10.5 s -> 0.42 s (25x); all under 0.5 s.
+   DWELL RULE now enforced end-to-end: free attach first, then pattern
+   legalization (window rebuild / neighbor merge / periodic phases) with
+   side barriers in the exact Newton (KKT: at an active side constraint
+   the stationarity IS the constraint - locked ticks excluded from the
+   tangency gate). Battery 6/8 dwell-legal at 97.9-99.7% of ceiling
+   (hook120, v1500 still illegal - flagged). Correctness hole exposed and
+   fixed: the cross-product heading residual also vanished ANTI-PARALLEL
+   (a locked polish attached arriving backward); replaced by the wrapped
+   angle difference with matching analytic terminal adjoint. Flip/dwell
+   accounting: brake and no-op ticks (|cosa| > 0.85) are side-neutral.
+   Suite rerun WITH dwell-6: 862 pass / 1298 no-attach / 396 bound / 578
+   violations in 150.6 s (was 258.6 s at the easier no-dwell bar). Suite
+   profile: law.mix 27.7% (ladder scans), elim 27.0%, jtj 24.9%, evalF
+   14.7%. Next levers by data: coverage of the no-attach family (failing
+   cells ARE the cost), analytic Jacobian, ladder-scan reuse.
+
 8. COVERAGE SUITE ONLINE (2026-08-30, user directive): 71 speeds
    (0..3500 step 50) x 36 arrival headings (step 10 deg) against the
    scenario target, every cell = the lite pipeline, pass requires an
