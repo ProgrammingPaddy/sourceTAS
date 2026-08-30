@@ -281,6 +281,27 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+8. COVERAGE SUITE ONLINE (2026-08-30, user directive): 71 speeds
+   (0..3500 step 50) x 36 arrival headings (step 10 deg) against the
+   scenario target, every cell = the lite pipeline, pass requires an
+   exact-Newton attach; monotonicity audited per column (a fail above a
+   pass is outlined - solver defect by the monotone law, not physics);
+   click-through loads any cell into the Scenario tab for the full solve
+   with float32 replay. Pipeline rebuilt search-free the same day:
+   continuation walks deleted; brake prefix parameterized by target exit
+   speed with the closed-form dE inversion (dump feasibility is an
+   INTERVAL - too little turns short, too much fails the distance bound -
+   bound-pruned arithmetically); the small-overturn root has the closed
+   linear form c* = -|p|/(2(1-w)s); background-tab-safe scheduling.
+   MEASURED first run: 865 pass / 1295 no-attach (bound-feasible) / 396
+   bound-infeasible / 692 monotonicity violations, 258.6 s. Honest reads:
+   (a) 4x over the <60 s budget - dominant per-cell cost is the exact
+   Newton's FD Jacobian + J^T J build (analytic Jacobian is the named
+   lever); (b) the no-attach mass is the deep-backward-arrival family
+   (arrive -180..-90 relative to travel) at nearly all speeds - the law
+   basins do not cover hooks past the target yet; the violations quantify
+   exactly where the solver falls short of the monotone law. UI-click
+   solves now cap at ~2 s worst case (was 25 s).
 7. THE MIXING LAW IS ONLINE and the old finding-5 scenario closes at
    99.99-100.00% of the energy ceiling in ~60 ms (law 2 ms + polish),
    replay 0.000 u. The loss branch composition attaches v700/v800/
