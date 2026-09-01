@@ -281,6 +281,25 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+13. THE EDGES (2026-09-01, user: "fix the edge cases now (literally)").
+   The +-180-adjacent columns are the reversed-arrival family; they were
+   red because the suffix construction's sub-solve was a full pipeline
+   call (seconds), unaffordable in the sweep. Fixed by composition, every
+   part cheap: brake prefix (closed-form dump) + segment-extremal middle
+   (the 2x2 Markov-Dubins Newton, ~2 ms) + spin suffix (closed-form
+   inversion; entry speed = the ceiling of the braked middle, so
+   consistency stays exact). The composition is enumerated over a small
+   member set sorted by predicted arrival speed, sub-solved by solveSeg
+   only, and stitched into ONE full-horizon exact polish; it runs in the
+   lite sweep and is hoisted ahead of the ladders when the arrival points
+   backward (u . D_hat < -0.1). Measured: the -180 column attaches
+   700-1200 (brake 1-2 + seg + spin), +170 attaches 800-1100 - both
+   previously solid red; forward cells unregressed (ref600 355 ms lite).
+   Failing edge cells still cost ~1.5 s in the sweep (they run the whole
+   stage list); passing ones are sub-second. Low-speed edge rows just
+   above the distance bound remain red-uncertified: the turn-debit
+   certificate (step 3a) is still the missing classifier there.
+
 12. CENTER CLUSTERS DIAGNOSED TO THE ROOT + THE SEGMENT REFORMULATION
    (2026-09-01, user: patterned violations entrenched in green; "hook/arc/
    whip are meaning-based terminology"; braking should spread). Measured
