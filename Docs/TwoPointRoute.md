@@ -299,6 +299,16 @@ no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
    stage list); passing ones are sub-second. Low-speed edge rows just
    above the distance bound remain red-uncertified: the turn-debit
    certificate (step 3a) is still the missing classifier there.
+   SUITE RESULT with the composition in the sweep: 2085 pass / 75
+   no-attach / 74 violations at sweep end; 2092 / 68 / 67 / 1 isolated
+   after the repair budget - from 862 / 1298 / 578 when the pattern was
+   first flagged and 1478 / 682 / 273 the round before. The board is
+   near-solid green including both heading edges; residual: ~68 scattered
+   cells (high-speed band boundaries + a few low-speed edge rows).
+   Efficiency watch: sweep+repair 46 min; newton buckets 76 percent
+   (jtj 31, elim 30, evalF 15; 40.7M evalF calls) - the analytic
+   Jacobian remains the standing lever; per-cell cost is the only thing
+   between the repair cascade and full closure of the residual 68.
 
 12. CENTER CLUSTERS DIAGNOSED TO THE ROOT + THE SEGMENT REFORMULATION
    (2026-09-01, user: patterned violations entrenched in green; "hook/arc/
