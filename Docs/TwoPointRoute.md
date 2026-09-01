@@ -281,6 +281,51 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+12. CENTER CLUSTERS DIAGNOSED TO THE ROOT + THE SEGMENT REFORMULATION
+   (2026-09-01, user: patterned violations entrenched in green; "hook/arc/
+   whip are meaning-based terminology"; braking should spread). Measured
+   causes, each closed:
+   (a) The repair pass fed the passing row's SPEED as the brake anchor
+   instead of its stored EXIT speed (~600 vs ~1250) - explains the 6
+   percent repair yield. Cells now persist their exit anchor.
+   (b) The hint stage's reach gate (0.25) skipped the exact polish where
+   weak basins measurably attach ("(basin)" passes directly below the
+   failing cells; a 13-19 percent reach basin polished to res 0.00 in 12
+   iterations). The stage now walks ALL offset candidates by reach with
+   capped attempts - a model-attached-but-badly-polishing candidate can no
+   longer hijack the single fallback.
+   (c) The 850-1100 stripe (and analogs at each brake-count transition,
+   spacing ~B = 562.5): pure front-loaded braking has an EMPTY exit
+   window there - every exit fast enough to reach is too fast to make the
+   turn, every exit slow enough to turn cannot cover the distance. The
+   attaching solutions distribute the loss (suffix spin / distributed
+   overturn) - the lite sweep gated those off and the repair disabled the
+   suffix for anchored cells. Repair now escalates anchored failures to
+   the full machinery (850@-120 attaches: replay exact, dwell 13/3f).
+   THE REFORMULATION (the user's terminology critique taken as directive):
+   the zero-loss stage IS the Markov-Dubins problem - curvature-bounded
+   steering with the path length fixed by the closed-form speed ladder
+   (turn bound delta_k = atan(30/s_k) tightens as speed grows; the
+   reversal family is Reeds-Shepp-like with braking as the reverse
+   gear; the drift-steering view is Zermelo's problem). Pontryagin gives
+   bang-singular-bang extremals: arc / constant-rate singular segment /
+   arc. The heading attachment ELIMINATES the singular rate in closed
+   form, rho = (hcl - h0 - s1 Phi1 - s2 Phi2)/PhiS with Phi the
+   cumulative authority - heading is satisfied identically and the solve
+   is a well-posed 2x2 Newton on the two switch times (the naive 3x3 was
+   measured ill-conditioned: parallel m1/m2 columns, 1e5-magnitude steps).
+   Four sign types x winding classes, deterministic inits, no homotopy.
+   solveSeg now runs FIRST in lawSolve; hooks, arcs, and wander are
+   members of this single family, not named constructions.
+   BRAKING SMOOTHNESS (user preference): where geometry admits it the
+   distributed-overturn law and the polish spread the loss (v700 at 99.5
+   percent of ceiling is the exemplar); hard front dumps remain only where
+   the energy identity demands mass disposal (deep-brake dE per tick =
+   B(B-2s) is most effective at high speed - the user's own observation);
+   the transition gaps that previously FORCED an artificial (n+1)-th
+   instant brake tick are now bridged by distributed members instead.
+   Suite after this round: sweep 1478 pass / 682 no-attach / 273 violations (from 1357/803/394 pre-round and 1164/996/462 before that); after the 600 s repair budget 1484/676/267. The repair's per-cell cost with whip escalation (~30-40 s on stragglers, 40 percent yield - up from 6 percent after the anchor-bug fix) makes full closure impractical until the exact Newton drops the FD tax: newton buckets held 66 percent of the 29-minute run (24M evalF calls). Residual red: the deep-backward wedge (awaiting the turn-debit certificate to classify) and band-edge oranges (chippable via Repair more, each pass anchors its column).
+
 11. "FIX ALL OF IT" ROUND (2026-08-31): three structural additions, honest
    status: NOT all fixed. (a) Constructive monotonicity - every pass
    stores its speed as the column anchor; higher cells brake to (near) it
