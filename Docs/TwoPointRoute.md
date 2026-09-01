@@ -281,6 +281,28 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+11. "FIX ALL OF IT" ROUND (2026-08-31): three structural additions, honest
+   status: NOT all fixed. (a) Constructive monotonicity - every pass
+   stores its speed as the column anchor; higher cells brake to (near) it
+   with an offset family. Sweep passes rose 1164 -> 1357. (b) TERMINAL
+   WHIP: reversed arrivals attach via a locked brake(b)+spin(w) suffix
+   (deep overturn turns 60-110 deg/tick; entry speed is closed-form
+   consistent because a zero-loss sub arrives exactly at
+   sqrt(v0^2+900(T-n))); members ranked by predicted arrival speed with a
+   forward-achievability filter. arrive -135/-170/180 at 600 now attach
+   with exact replay, dwell-legal (e.g. -135: vT 209, 6/10f). (c) Repair
+   cascade with persisted suite state and a Repair-more button.
+   MEASURED LIMIT: the post-sweep survivors are a hard class - repair
+   yield ~6 percent at 5-8 s/cell (non-lite, whip gated to seeds), so
+   budget does not close them. Final board: 1362 pass / 798 no-attach /
+   389 violations / 12 isolated (from 862/1298/578 two rounds back).
+   The evidence points at two levers, in order: the analytic Jacobian
+   (evalF was 19.2M calls per sweep - FD is the tax that makes thorough
+   polish unaffordable at scale) and richer law basins for mid-speed
+   backward angles (mix reach 30-60 percent plateau). The turn-debit
+   certificate (step 3a) stays pending to classify the truly-infeasible
+   remainder of the deep-backward wedge.
+
 10. THE PERIODIC FAILURE PATTERN DIAGNOSED AND CLOSED (2026-08-30, user
    observation: fail-notch walking toward 0 deg as speed rises, near-total
    miss bands at two 50-steps, repeating). Measured causes, in order of
