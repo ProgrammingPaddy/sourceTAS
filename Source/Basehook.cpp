@@ -1,5 +1,6 @@
 #include "Hooks/Hooks.h"
 #include "Menu/Interface.h"
+#include "Menu/Breadcrumb.h"
 #include "World/Prediction.h"
 #include "../shareddefs.h"
 
@@ -102,7 +103,18 @@ DWORD WINAPI basehook_init(LPVOID dll_instance) {
 	g_tas.LoadFromDisk();
 
 	// Initialize the renderer on the game window (it finds the device itself).
-	renderer.Initialize(GetGameWindow());
+	// The window here is only the EnumWindows GUESS (null when the game is
+	// alt-tabbed in fullscreen - the hidden-window case that killed input on
+	// in-server injections); RenderFrame re-targets to the device's own
+	// focus window on the first EndScene. Journal both so a dead-input
+	// session names its cause immediately.
+	HWND guess = GetGameWindow();
+	Breadcrumb::Note(Breadcrumb::SlotCommand, "init: window guess=%p",
+		reinterpret_cast<void*>(guess));
+	const bool rend_ok = renderer.Initialize(guess);
+	Breadcrumb::Note(Breadcrumb::SlotCommand,
+		"init: renderer=%d input src=%d (0=DEAD until EndScene retarget)",
+		rend_ok ? 1 : 0, renderer.window_source);
 
 	return 0;
 }

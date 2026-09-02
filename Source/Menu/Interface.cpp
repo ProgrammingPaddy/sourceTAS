@@ -53,6 +53,7 @@ namespace {
 		{ "Editor: Prev Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(-1); } },
 		{ "Editor: Next Segment", 0, [] { return true; }, [] { TasEditor::StepSegment(1); } },
 		{ "Editor: Pick At Crosshair", 0, [] { return true; }, [] { TasEditor::PickAtCrosshair(); } },
+		{ "Editor: Teleport To Anchor", 0, [] { return TasEditor::AnchorValid(); }, [] { TasEditor::TeleportToAnchor(); } },
 		{ "Freecam Toggle", 0, [] { return true; }, [] { TasEditor::ToggleFreecam(); } },
 		{ "Toggle Autohop", 0, [] { return true; }, [] { g_autohop = !g_autohop; } },
 		{ "Toggle Coast Line", 0, [] { return true; }, [] { TasEditor::ToggleCoastLine(); } },
@@ -170,20 +171,19 @@ namespace {
 			return false;
 		}
 	}
-	bool GuardedWorldDrawRender(int* code) {
-		__try {
-			WorldDraw::Render();
-			return true;
-		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			*code = static_cast<int>(GetExceptionCode());
-			return false;
-		}
-	}
 }
 
 // Load Segoe UI at 16px and apply the graphite/pink theme once, right after
 // ImGui has its device but before the first frame builds the font atlas.
 void BasehookInterface::OnInitialize() {
+	// Final input-window verdict (session 46b): by now RenderFrame has had
+	// its chance to re-target the WndProc hook onto the device's own focus
+	// window. src 1 = enum guess, 2 = device re-target, 0 = INPUT DEAD.
+	Breadcrumb::Note(Breadcrumb::SlotCommand,
+		"rend: input window=%p src=%d %s",
+		reinterpret_cast<void*>(InputWindow()), window_source,
+		window_source ? "(hooked)" : "(DEAD - F8 will not work)");
+
 	ImGuiIO& io = ImGui::GetIO();
 	io.Fonts->Clear();
 	if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f))
@@ -201,6 +201,38 @@ bool& RecordPanel::HotkeysArmed() {
 
 bool& RecordPanel::AutohopEnabled() {
 	return g_autohop;
+}
+
+namespace {
+	// One styled command button, shared by the Record tab's action grid and
+	// the Keybinds tab's bind grid: accent for the two headline actions,
+	// danger for the E-stop, dimmed no-op when unavailable. Returns true
+	// when clicked while available.
+	bool CommandButton(TasCommand& command) {
+		const bool available = command.available();
+		const bool primary = available
+			&& (std::strcmp(command.name, "Start Recording") == 0
+				|| std::strcmp(command.name, "Play Selected Recording") == 0);
+		const bool danger = available
+			&& std::strcmp(command.name, "Emergency Stop") == 0;
+		bool clicked = false;
+		if (!available) {
+			const ImVec4 dim(0.16f, 0.16f, 0.18f, 1.0f);
+			ImGui::PushStyleColor(ImGuiCol_Button, dim);
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
+			clicked = ImGui::Button(command.name, ImVec2(230, 0));
+			ImGui::PopStyleColor(4);
+		} else if (primary) {
+			clicked = Theme::Accent(command.name, ImVec2(230, 0));
+		} else if (danger) {
+			clicked = Theme::Danger(command.name, ImVec2(230, 0));
+		} else {
+			clicked = ImGui::Button(command.name, ImVec2(230, 0));
+		}
+		return clicked && available;
+	}
 }
 
 // The recording / run controls, drawn as a tab inside the editor window.
@@ -291,6 +323,30 @@ void RecordPanel::Draw() {
 			"and rewrites its file on disk.");
 	}
 
+	// Recording & playback ACTIONS live here (user rule 46p); their key
+	// binds live on the Keybinds tab. Indices 0..7 = the Recording and
+	// Playback & control groups of the command table.
+	Theme::Heading("Actions");
+	int col = 0;
+	for (int i = 0; i <= 7 && i < kCommandCount; ++i) {
+		if (i == 5) {
+			ImGui::Spacing();
+			col = 0;   // playback group starts its own 2-up block
+		}
+		// Natural spacing (46r): without bind buttons beside them, the wide
+		// fixed column offset read as a hole - pairs now sit snugly.
+		if (col % 2 == 1)
+			ImGui::SameLine();
+		col++;
+		if (CommandButton(g_commands[i]))
+			g_commands[i].execute();
+	}
+}
+
+// The keybinds tab (session 46m, user request): every hotkey command with
+// its bind button, plus the arm switch and autohop toggle that gate them -
+// split out of the Record panel so the run library stays uncluttered.
+void RecordPanel::DrawBinds() {
 	Theme::Heading("Actions & hotkeys");
 	ImGui::Checkbox("Arm hotkeys", &g_hotkeys_armed);
 	Theme::Help("Master switch for every bound hotkey. Disarm before typing in "
@@ -329,7 +385,7 @@ void RecordPanel::Draw() {
 	auto GroupOf = [](int i) -> const char* {
 		if (i <= 4)  return "Recording";
 		if (i <= 7)  return "Playback & control";
-		if (i <= 12) return "Editor navigation";
+		if (i <= 13) return "Editor navigation";
 		return "Toggles";
 	};
 
@@ -347,30 +403,7 @@ void RecordPanel::Draw() {
 		if (col % 2 == 1)
 			ImGui::SameLine(392.f);
 		col++;
-		const bool available = command.available();
-		// Accent (pink) for the two headline actions; neutral otherwise.
-		const bool primary = available
-			&& (std::strcmp(command.name, "Start Recording") == 0
-				|| std::strcmp(command.name, "Play Selected Recording") == 0);
-		const bool danger = available && std::strcmp(command.name, "Emergency Stop") == 0;
-
-		bool clicked = false;
-		if (!available) {
-			const ImVec4 dim(0.16f, 0.16f, 0.18f, 1.0f);
-			ImGui::PushStyleColor(ImGuiCol_Button, dim);
-			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dim);
-			ImGui::PushStyleColor(ImGuiCol_ButtonActive, dim);
-			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.55f, 1.0f));
-			clicked = ImGui::Button(command.name, ImVec2(230, 0));
-			ImGui::PopStyleColor(4);
-		} else if (primary) {
-			clicked = Theme::Accent(command.name, ImVec2(230, 0));
-		} else if (danger) {
-			clicked = Theme::Danger(command.name, ImVec2(230, 0));
-		} else {
-			clicked = ImGui::Button(command.name, ImVec2(230, 0));
-		}
-		if (clicked && available)
+		if (CommandButton(command))
 			command.execute();
 
 		ImGui::SameLine();
@@ -383,30 +416,29 @@ void RecordPanel::Draw() {
 	ImGui::TextDisabled("binds: click the key button, press a key (Esc clears)");
 	Theme::Help("Hotkeys work with the menu closed; F8 toggles the menu. Binds save "
 		"to binds.cfg the moment you set them and load again on every restart.");
-	// (The old dev-diagnostics section lived here - retired 2026-08-12: the
-	// overlay indices have been pinned since Phase 1a and the readouts were
-	// duplicated by the crash journal + solver gates probe.)
+	// (Dev diagnostics - engine-anchor health, overlay queue, the test box -
+	// live in the editor's Debug tab since session 46i, to keep this panel
+	// uncluttered.)
 }
 
 void BasehookInterface::OnEndScene() {
 
-	// Editor sim orchestration + in-world overlays run every frame, independent
-	// of the menu. Both self-guard when out of game - and both run under
-	// hook-level SEH so a fault becomes a logged report, not a dead game
-	// (transient: the next frame tries again; the log has the evidence).
+	// Editor sim orchestration runs every frame, independent of the menu; it
+	// self-guards when out of game and runs under hook-level SEH so a fault
+	// becomes a logged report, not a dead game (transient: the next frame
+	// tries again; the log has the evidence). The in-world draw pass no
+	// longer lives here (session 46k): it runs on the GAME thread from the
+	// OverrideView hook, frame-aligned; this hook only releases its
+	// once-per-present latch.
 	{
-		static int upd_reported = 0, wd_reported = 0;
+		static int upd_reported = 0;
 		int code = 0;
 		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: editor update");
 		if (!GuardedEditorUpdate(&code) && upd_reported < 3) {
 			upd_reported++;
 			TasEditor::NoteExternalFault("TasEditor::Update", code);
 		}
-		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: worlddraw");
-		if (!GuardedWorldDrawRender(&code) && wd_reported < 3) {
-			wd_reported++;
-			TasEditor::NoteExternalFault("WorldDraw::Render", code);
-		}
+		WorldDraw::OnPresent();
 		Breadcrumb::Note(Breadcrumb::SlotFrame, "endscene: hud + menu");
 	}
 

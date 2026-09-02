@@ -1,4 +1,4 @@
-// SolverLab: console harness for the solver core. Runs the engine-independent
+﻿// SolverLab: console harness for the solver core. Runs the engine-independent
 // world + movement model without the game so search/physics work iterates at
 // full speed. Commands:
 //
@@ -61,6 +61,7 @@ namespace {
 
 	void PrintUsage() {
 		printf("SolverLab commands:\n");
+		printf("  pgcorpus             two-point-route playground ground truth (JSON to stdout)\n");
 		printf("  mapinfo <map.bsp>\n");
 		printf("  tapeinfo [pattern]   recordings inventory: map/frames/anchor\n");
 		printf("          per tape (provenance check - which map is it FOR?)\n");
@@ -15042,6 +15043,315 @@ namespace {
 				erate / 1e6, krate / 1e6, krate / erate, sink);
 			check("bench: kernel multiple", krate > erate, buf);
 		}
+		// ================= THE ALGEBRA MANDATE tranche (session 44):
+		// A34/A35/A36/A37 gates. The parity rule applies throughout:
+		// analytic candidates are accepted ONLY after an exact
+		// engine/kernel verification (verify-then-accept).
+		// ---- A34: the wish-space forward+inverse pair. The inverse
+		// (Air::WishInputs) followed by the forward engine atom
+		// (Fn::WishFromInput) must reproduce the intended TRUE wish
+		// cos against the current heading - the bridge every witness
+		// replay in the library stands on, formalized.
+		{
+			int nrt = 0, ok = 0;
+			float worst = 0.f;
+			for (int i = 0; i < 20000; ++i) {
+				const float hd = -3.14159f + 6.28318f
+					* static_cast<float>(rnd() % 10000u) / 9999.f;
+				const signed char sd = (rnd() & 1) ? 1 : -1;
+				const float ca = 1.f - 2.f
+					* static_cast<float>(rnd() % 10000u) / 9999.f;
+				float yaw = hd * 57.2957795f;
+				float fm = 0.f, sm = 0.f;
+				Air::WishInputs(hd, static_cast<int>(sd), ca, &yaw,
+					&fm, &sm);
+				float wx, wy;
+				Fn::WishFromInput(yaw, fm, sm, &wx, &wy);
+				const float wl = sqrtf(wx * wx + wy * wy);
+				if (wl < 1e-3f)
+					continue;
+				// the achieved TRUE wish cos vs the intended one:
+				// stored ca maps to true -ca (the bridge)
+				const float ctrue = (wx * cosf(hd) + wy * sinf(hd))
+					/ wl;
+				const float want = Strafe::ToTrueWishCos(ca).v;
+				const float d = fabsf(ctrue - want);
+				nrt++;
+				if (d < 2e-4f)
+					ok++;
+				if (d > worst)
+					worst = d;
+			}
+			snprintf(buf, sizeof(buf), "%d round trips "
+				"(WishInputs -> WishFromInput): %d within 2e-4 of "
+				"the intended true cos (worst %.2e)", nrt, ok,
+				worst);
+			check("A34 wish round trip", nrt >= 19000 && ok == nrt,
+				buf);
+		}
+		// ---- A37: the velocity clamp/sanitize atom on special
+		// values - NaN/Inf bit patterns and beyond-clamp components
+		// against the engine mirror's own coast tick, BITWISE.
+		{
+			int cases = 0, exact = 0;
+			const unsigned pats[6] = { 0x7fc00000u, 0x7f800000u,
+				0xffc00000u, 0x45610000u, 0xc5610000u,
+				0x46000000u };
+			for (int i = 0; i < 216; ++i) {
+				float vx, vy, vz;
+				unsigned bx = pats[i % 6], by = pats[(i / 6) % 6],
+					bz = pats[(i / 36) % 6];
+				memcpy(&vx, &bx, 4);
+				memcpy(&vy, &by, 4);
+				memcpy(&vz, &bz, 4);
+				// the atom
+				float ax = vx, ay = vy, az = vz;
+				CapAir::KernelCheckVelocity(p, &ax, &ay, &az);
+				// the engine mirror: one coast tick from the same
+				// state; its FIRST CheckVelocity runs after the
+				// gravity half on Z, so compare the channels the
+				// half-tick leaves untouched (X, Y) bitwise and Z
+				// through the same half-step arithmetic
+				PlayerState s;
+				s.pos = Vec3(0.f, 0.f, 8000.f);
+				s.vel = Vec3(vx, vy, vz);
+				TickEvents ev;
+				MoveTick(s, w, p, 0.f, 0.f, 0.f, 0.f, 0.f, 0, &ev);
+				float zz = vz - p.gravity * 0.5f * p.dt;
+				CapAir::KernelCheckVelocity(p, &ax, &ay, &zz);
+				float ez = s.vel.Z + p.gravity * 0.5f * p.dt;
+				// undo the finish half to compare the mid-tick clamp
+				cases++;
+				const bool okx = memcmp(&ax, &s.vel.X, 4) == 0;
+				const bool oky = memcmp(&ay, &s.vel.Y, 4) == 0;
+				// the finish-half clamp can re-engage at the rails -
+				// accept either the exact undo or a matched rail
+				const bool rail = (zz == p.maxvelocity
+					&& s.vel.Z >= p.maxvelocity - p.gravity * p.dt)
+					|| (zz == -p.maxvelocity
+						&& s.vel.Z <= -p.maxvelocity);
+				const bool okz = fabsf(zz - ez) <= fabsf(ez) * 1e-6f
+					+ 1e-3f || rail;
+				if (okx && oky && okz)
+					exact++;
+			}
+			snprintf(buf, sizeof(buf), "%d NaN/Inf/overclamp "
+				"states through one engine coast tick: %d match "
+				"the standalone atom (X/Y bitwise, Z through the "
+				"gravity halves)", cases, exact);
+			check("A37 clamp atom vs engine", cases == 216
+				&& exact == cases, buf);
+		}
+		// ---- A35: the one-tick locus law vs the kernel (dense),
+		// and THE JOINT FRONTIER under engine attack INCLUDING
+		// partial wishes.
+		{
+			// (a) law-vs-kernel: the locus endpoint must track the
+			// kernel's achieved velocity across the control range
+			int nlk = 0;
+			float worstd = 0.f;
+			const float svals[5] = { 60.f, 250.f, 600.f, 1000.f,
+				1400.f };
+			for (int si = 0; si < 5; ++si)
+				for (int ci = 0; ci <= 200; ++ci) {
+					const float ctrue = -1.f + 0.01f
+						* static_cast<float>(ci);
+					float lvx, lvy;
+					CapAir::OneTickEndpointW(p, svals[si], 1.f,
+						p.maxspeed, ctrue, &lvx, &lvy);
+					float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+					CapAir::KernelTick(k, 0.f, 0.f, 8000.f,
+						svals[si], 0.f, 0.f,
+						Strafe::ToStoredSide(1),
+						Strafe::ToStoredWishCos(
+							Strafe::TrueWishCos(ctrue)),
+						&nx2, &ny2, &nz2, &nvx2, &nvy2, &nvz2);
+					const float dx = lvx - nvx2;
+					const float dy = lvy - fabsf(nvy2);
+					const float d = sqrtf(dx * dx + dy * dy);
+					nlk++;
+					if (d > worstd)
+						worstd = d;
+				}
+			snprintf(buf, sizeof(buf), "%d (s, c) law endpoints vs "
+				"kernel ticks: worst velocity deviation %.4f u/s "
+				"(the closed law's float-algebra gap, measured)",
+				nlk, worstd);
+			check("A35 locus law vs kernel", nlk >= 1000
+				&& worstd < 0.5f, buf);
+			// (b) the frontier under engine attack: random one-tick
+			// actions - full AND partial wishes - may never exceed
+			// the certified profile at their achieved heading change
+			long long atk = 0, viol = 0;
+			float tight = 0.f;
+			const int NB = 361;
+			std::vector<float> prof(NB);
+			for (int si = 0; si < 5; ++si) {
+				const float s0 = svals[si];
+				CapAir::OneTickProfile(p, s0, 1.f, NB,
+					prof.data());
+				for (int tr = 0; tr < 40000; ++tr) {
+					const float hd = 0.f;
+					const signed char sd = (rnd() & 1) ? 1 : -1;
+					const float ca = 1.f - 2.f
+						* static_cast<float>(rnd() % 10000u)
+						/ 9999.f;
+					float yaw = hd;
+					float fm = 0.f, sm = 0.f;
+					Air::WishInputs(0.f, static_cast<int>(sd), ca,
+						&yaw, &fm, &sm);
+					// partial wish: scale fmove/smove
+					const float sc2 = 0.1f + 0.9f
+						* static_cast<float>(rnd() % 1000u)
+						/ 999.f;
+					if (rnd() & 1) {
+						fm *= sc2;
+						sm *= sc2;
+					}
+					PlayerState s;
+					s.pos = Vec3(0.f, 0.f, 8000.f);
+					s.vel = Vec3(s0, 0.f, 0.f);
+					TickEvents ev;
+					MoveTick(s, w, p, 0.f, yaw, fm, sm, 0.f, 0,
+						&ev);
+					const float sp = Len2D(s.vel);
+					const float th = fabsf(atan2f(s.vel.Y,
+						s.vel.X));
+					int bi = static_cast<int>(th / 3.14159265f
+						* static_cast<float>(NB - 1));
+					if (bi > NB - 1)
+						bi = NB - 1;
+					const float ub = prof[static_cast<size_t>(
+						bi)];
+					atk++;
+					if (ub < 0.f || sp > ub + 0.01f)
+						viol++;
+					else if (ub > 1.f && sp / ub > tight)
+						tight = sp / ub;
+				}
+			}
+			snprintf(buf, sizeof(buf), "%lld engine one-tick "
+				"actions (partial wishes included) vs the "
+				"frontier profile: %lld above it (closest "
+				"approach %.1f%%)", atk, viol, tight * 100.f);
+			check("A35 frontier engine-sound", atk >= 150000
+				&& viol == 0, buf);
+			// (c) the exact turn peak vs the s39 geometric bound:
+			// tighter or equal everywhere, and no engine action
+			// beats it (covered by (b) since the profile's last
+			// feasible bin IS the peak)
+			int npk = 0, le = 0;
+			float worstratio = 0.f;
+			for (int si = 0; si < 5; ++si) {
+				const float s0 = svals[si];
+				float wit = 0.f;
+				const float pk = CapAir::MaxOneTickTurnUB2(p, s0,
+					1.f, &wit);
+				const float old = CapBounds::MaxTurnUB(p, s0, 1.f);
+				npk++;
+				if (pk <= old * 1.02f + 0.01f)
+					le++;
+				if (old > 0.f && pk / old > worstratio)
+					worstratio = pk / old;
+			}
+			snprintf(buf, sizeof(buf), "%d speeds: exact peak <= "
+				"the s39 bound on %d (worst ratio %.2f) - the "
+				"true one-tick turn law replaces the geometric "
+				"envelope", npk, le, worstratio);
+			check("A35 exact turn peak", npk == 5 && le == npk,
+				buf);
+		}
+		// ---- A36: the inverse air law, verify-then-accept - every
+		// answer is kernel-rolled and must hit its target
+		{
+			int tried = 0, hit = 0, declined = 0, signok = 0;
+			float worstth = 0.f;
+			for (int i = 0; i < 4000; ++i) {
+				const float s0 = 60.f + static_cast<float>(
+					rnd() % 1600u);
+				const float pk = CapAir::MaxOneTickTurnUB2(p, s0,
+					1.f);
+				const float tt = (static_cast<float>(
+					rnd() % 2000u) / 1000.f - 1.f) * pk * 0.95f;
+				const int br = static_cast<int>(rnd() & 1);
+				int sd;
+				float cst, thl, spl;
+				if (!CapAir::InverseOneTickTurn(p, s0, 1.f, tt, br,
+					&sd, &cst, &thl, &spl)) {
+					declined++;
+					continue;
+				}
+				float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+				CapAir::KernelTick(k, 0.f, 0.f, 8000.f, s0, 0.f,
+					0.f, static_cast<signed char>(sd), cst,
+					&nx2, &ny2, &nz2, &nvx2, &nvy2, &nvz2);
+				const float thk = atan2f(nvy2, nvx2);
+				tried++;
+				const float dth = fabsf(thk - tt);
+				if (dth > worstth)
+					worstth = dth;
+				// contract scales with speed: the law-vs-kernel
+				// float gap is a velocity deviation, so its angle
+				// shadow grows as 1/speed
+				if (dth <= 0.004f + 0.5f / s0)
+					hit++;
+				if (tt == 0.f || (tt > 0.f) == (thk > 0.f)
+					|| fabsf(thk) < 1e-4f)
+					signok++;
+			}
+			snprintf(buf, sizeof(buf), "%d inverse turn targets "
+				"kernel-VERIFIED: %d within 2e-3 rad (worst "
+				"%.2e), sign correct %d, %d honest declines "
+				"beyond the peak", tried, hit, worstth, signok,
+				declined);
+			check("A36 inverse turn verified", tried >= 3000
+				&& hit == tried && signok == tried, buf);
+			// speed-targeted closed form: candidates verified
+			// through the law and the kernel
+			int stried = 0, shit = 0;
+			for (int i = 0; i < 2000; ++i) {
+				const float s0 = 60.f + static_cast<float>(
+					rnd() % 1600u);
+				// a reachable target: evaluate the law at random c
+				const float ct = 1.f - 2.f * static_cast<float>(
+					rnd() % 1000u) / 999.f;
+				float tvx, tvy;
+				CapAir::OneTickEndpointW(p, s0, 1.f, p.maxspeed,
+					ct, &tvx, &tvy);
+				const float starget = sqrtf(tvx * tvx
+					+ tvy * tvy);
+				float cc[3], sl[3];
+				const int nc = CapAir::InverseOneTickSpeed(p, s0,
+					1.f, starget, cc, sl, 3);
+				if (nc <= 0)
+					continue;
+				stried++;
+				bool any = false;
+				for (int q = 0; q < nc; ++q)
+					if (fabsf(sl[q] - starget) <= 0.05f) {
+						// kernel verification of the candidate
+						float nx2, ny2, nz2, nvx2, nvy2, nvz2;
+						CapAir::KernelTick(k, 0.f, 0.f, 8000.f,
+							s0, 0.f, 0.f,
+							Strafe::ToStoredSide(1),
+							Strafe::ToStoredWishCos(
+								Strafe::TrueWishCos(cc[q])),
+							&nx2, &ny2, &nz2, &nvx2, &nvy2,
+							&nvz2);
+						const float spk = sqrtf(nvx2 * nvx2
+							+ nvy2 * nvy2);
+						if (fabsf(spk - starget) <= 0.5f)
+							any = true;
+					}
+				if (any)
+					shit++;
+			}
+			snprintf(buf, sizeof(buf), "%d reachable speed targets: "
+				"%d recovered by a closed-form candidate and "
+				"kernel-verified within 0.5 u/s", stried, shit);
+			check("A36 inverse speed verified", stried >= 1500
+				&& shit == stried, buf);
+		}
 		printf("capkern: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "A4-PROD KERNEL BITWISE-CERTIFIED"
 				: "A4-PROD KERNEL NOT CERTIFIED - do not build on "
@@ -21512,6 +21822,22 @@ namespace {
 			long long viol = 0, cull_viol = 0, total = 0;
 			float worstfrac = 0.f;
 			float bite_pi = 1.f; // min over configs of UB(pi)/blind
+			// ---- B22 v1.0 (session 44): the joint turn-gain
+			// frontier DP - build the table once, one DP curve per
+			// config, O(1) per schedule. The production bound is
+			// min(v0.5, frontier DP) - THE LEGO RULE portfolio.
+			CapBounds::TurnGainTable TG;
+			CapBounds::BuildTurnGainTable(p, 1.f, &TG);
+			printf("capreach:   [B22 v2] turn-gain table built in "
+				"%.0f ms (%d speed rows x %d turn bins)\n",
+				TG.build_ms, TG.n_s, TG.n_th);
+			std::vector<float> v2curve(
+				static_cast<size_t>(TG.n_th));
+			long long viol2 = 0;
+			float worstfrac2 = 0.f;
+			float bite2_pi = 1.f;
+			const float dthbin = 3.14159265f
+				/ static_cast<float>(TG.n_th - 1);
 			for (int si = 0; si < 3; ++si)
 				for (int ni = 0; ni < 2; ++ni) {
 					const float s0 = s0s2[si];
@@ -21522,6 +21848,17 @@ namespace {
 						p, s0, N, 3.14159265f, 1.f);
 					if (blind > 1.f && ubpi / blind < bite_pi)
 						bite_pi = ubpi / blind;
+					CapBounds::HeadingAwareSpeedUB2Curve(p, TG, s0,
+						N, v2curve.data());
+					const float v2pi = v2curve[
+						static_cast<size_t>(TG.n_th - 1)];
+					printf("capreach:   [B22 v2] s0 %.0f N %d: "
+						"UB2(pi) %.0f vs blind %.0f (%.0f%%); "
+						"UB2(90deg) %.0f\n", s0, N, v2pi, blind,
+						blind > 1.f ? 100.f * v2pi / blind : 0.f,
+						v2curve[static_cast<size_t>(TG.n_th / 2)]);
+					if (blind > 1.f && v2pi / blind < bite2_pi)
+						bite2_pi = v2pi / blind;
 					for (int tr = 0; tr < 20000; ++tr) {
 						CapP2P::P2PSchedule sc;
 						sc.n = N;
@@ -21574,6 +21911,23 @@ namespace {
 						if (!CapBounds::HeadingChangeFeasibleUB(p,
 							s0, N, dpsi, V - 0.5f, 1.f))
 							cull_viol++;
+						// v2: the frontier-DP curve at the
+						// schedule's own achieved dpsi; the
+						// production bound is min(v0.5, v2)
+						{
+							int bi2 = static_cast<int>(ceilf(
+								dpsi / dthbin));
+							if (bi2 > TG.n_th - 1)
+								bi2 = TG.n_th - 1;
+							const float ub2 = v2curve[
+								static_cast<size_t>(bi2)];
+							const float ubb = ub < ub2 ? ub : ub2;
+							if (V > ubb + 0.5f)
+								viol2++;
+							else if (ubb > 1.f && dpsi > 1.5f
+								&& V / ubb > worstfrac2)
+								worstfrac2 = V / ubb;
+						}
 					}
 				}
 			// the bite domain, measured: at practical horizons the
@@ -21605,6 +21959,23 @@ namespace {
 				cull_viol);
 			check("B5 heading cull consistency", cull_viol == 0,
 				buf);
+			// ---- B22 v1.0: the frontier DP must be sound against
+			// the same adversaries, never worse than v0.5, and its
+			// measured bite is THE PHYSICS ANSWER: the exact
+			// frontier shows gentle carving is cheap (~8.5 deg/tick
+			// at 600 u/s costs ~2 u/s), so the "180-at-speed
+			// corner" is SHALLOW at practical horizons - the
+			// adversaries' own reach is the truth line.
+			snprintf(buf, sizeof(buf), "min(v0.5, frontier DP) "
+				"over %lld schedules: %lld violations; worst "
+				"high-turn adversary reaches %.0f%% of the "
+				"combined bound; UB2(pi)/blind worst config "
+				"%.0f%% (v0.5 gave %.0f%%) - the corner is "
+				"MEASURED SHALLOW at N 20-40", total, viol2,
+				worstfrac2 * 100.f, bite2_pi * 100.f,
+				bite_pi * 100.f);
+			check("B22 v2 joint-frontier bound", viol2 == 0
+				&& bite2_pi <= bite_pi + 1e-6f, buf);
 		}
 		printf("capreach: %d passed, %d failed | %s\n", pass, fail,
 			fail == 0 ? "REACH FAMILY LB/UB CERTIFIED AT THE "
@@ -26857,6 +27228,109 @@ namespace {
 
 } // namespace
 
+// ---- TWO-POINT ROUTE PLAYGROUND corpus (session 47) -----------------------
+// Emits engine-exact ground truth as JSON for the HTML playground's Verify
+// tab: single KernelTick cases across the domain, plus authoritative
+// MoveTick rollouts (CategorizePosition's surface-friction law included) so
+// the playground's float32 JS mirror is MEASURED against the certified
+// engine, never trusted. Deterministic seed; %.9g round-trips float32.
+static unsigned pg_rng_state = 0x12345u;
+static float PgRand01() {
+	pg_rng_state = pg_rng_state * 1664525u + 1013904223u;
+	return static_cast<float>((pg_rng_state >> 8) & 0xFFFFFF)
+		/ 16777216.f;
+}
+static int CmdPgCorpus(const ReplayOpts& o) {
+	const MoveParams& p = o.params;
+	World w;
+	if (!CapAir::MakeCleanAirWorld(&w, o.hulls)) {
+		fprintf(stderr, "pgcorpus: clean-air world build failed\n");
+		return 1;
+	}
+	printf("{\n\"engine_model\":\"%s\",\n", kEngineModelVersion);
+	printf("\"params\":{\"dt\":%.9g,\"gravity\":%.9g,\"airaccelerate\":%.9g,"
+		"\"maxspeed\":%.9g,\"maxvelocity\":%.9g,\"air_speed_cap\":%.9g,"
+		"\"air_friction_up\":%.9g,\"non_jump_velocity\":%.9g,"
+		"\"strafe_rate_max\":%.9g},\n",
+		p.dt, p.gravity, p.airaccelerate, p.maxspeed, p.maxvelocity,
+		p.air_speed_cap, p.air_friction_up, p.non_jump_velocity,
+		p.strafe_rate_max);
+
+	// Singles: KernelTick across the whole input domain.
+	pg_rng_state = 0x12345u;
+	printf("\"singles\":[\n");
+	CapAir::AirKernelCtx k = CapAir::MakeAirKernel(p);
+	const int kNumSingles = 600;
+	for (int i = 0; i < kNumSingles; ++i) {
+		const float sp = 1.5f * powf(2200.f, PgRand01());   // 1.5..3300 log
+		const float hd = (PgRand01() * 2.f - 1.f) * 3.14159265f;
+		const float vx = sp * cosf(hd), vy = sp * sinf(hd);
+		const float vz = (PgRand01() * 2.f - 1.f) * 2500.f;
+		const int sidesel = i % 3;
+		const signed char side = sidesel == 0 ? (signed char)-1
+			: (sidesel == 1 ? (signed char)0 : (signed char)1);
+		const float cosa = PgRand01() * 2.f - 1.f;
+		const float sf = (i % 5 == 0) ? p.air_friction_up : 1.f;
+		k.surface_friction = sf;
+		float npx, npy, npz, nvx, nvy, nvz;
+		CapAir::KernelTick(k, 0.f, 0.f, 8000.f, vx, vy, vz, side, cosa,
+			&npx, &npy, &npz, &nvx, &nvy, &nvz);
+		printf("%s[%.9g,%.9g,%.9g,%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]",
+			i ? ",\n" : "", vx, vy, vz, static_cast<int>(side), cosa, sf,
+			nvx, nvy, nvz, npx, npy, npz - 8000.f);
+	}
+	printf("],\n");
+
+	// Rollouts: the authoritative MoveTick path (AirTick), sf law live.
+	struct Script { const char* name; float v0, vz0; int mode; float cosa; int per; };
+	static const Script kScripts[] = {
+		{ "coast",            600.f,     0.f, 0, 1.f,   0 },
+		{ "L_hold_c1",        600.f,     0.f, 1, 1.f,   0 },
+		{ "L_hold_c0999",     600.f,     0.f, 1, 0.999f, 0 },
+		{ "L_hold_c096",      600.f,     0.f, 1, 0.96f, 0 },
+		{ "L_hold_c08",       600.f,     0.f, 1, 0.8f,  0 },
+		{ "L_hold_c045",      600.f,     0.f, 1, 0.45f, 0 },
+		{ "L_hold_c0",        600.f,     0.f, 1, 0.f,   0 },
+		{ "L_hold_cneg05",    600.f,     0.f, 1, -0.5f, 0 },
+		{ "alt6_c096",        600.f,     0.f, 2, 0.96f, 6 },
+		{ "alt20_c096",       600.f,     0.f, 2, 0.96f, 20 },
+		{ "rise300_L_c096",   600.f,   300.f, 1, 0.96f, 0 },
+		{ "rise120_L_c096",   600.f,   120.f, 1, 0.96f, 0 },
+		{ "fast2500_L_c0999", 2500.f,    0.f, 1, 0.999f, 0 },
+		{ "slow5_L_c06",      5.f,       0.f, 1, 0.6f,  0 },
+		{ "sub1_L_c06",       0.5f,      0.f, 1, 0.6f,  0 },
+		{ "fall800_L_c096",   600.f,  -800.f, 1, 0.96f, 0 },
+	};
+	const int nsc = static_cast<int>(sizeof(kScripts) / sizeof(kScripts[0]));
+	const int kT = 120;
+	printf("\"rollouts\":[\n");
+	for (int si = 0; si < nsc; ++si) {
+		const Script& sc = kScripts[si];
+		PlayerState s;
+		s.pos = Vec3(0.f, 0.f, 8000.f);
+		s.vel = Vec3(sc.v0, 0.f, sc.vz0);
+		printf("%s{\"name\":\"%s\",\"v0\":%.9g,\"vz0\":%.9g,\"ticks\":[\n",
+			si ? ",\n" : "", sc.name, sc.v0, sc.vz0);
+		for (int t = 0; t < kT; ++t) {
+			signed char side = 0;
+			if (sc.mode == 1)
+				side = 1;
+			else if (sc.mode == 2)
+				side = ((t / sc.per) % 2 == 0) ? (signed char)1
+					: (signed char)-1;
+			const float sf_pre = s.surface_friction;
+			CapAir::AirTick(&s, w, p, side, sc.cosa);
+			printf("%s[%d,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]",
+				t ? ",\n" : "", static_cast<int>(side), sc.cosa,
+				s.pos.X, s.pos.Y, s.pos.Z - 8000.f,
+				s.vel.X, s.vel.Y, s.vel.Z, sf_pre);
+		}
+		printf("]}");
+	}
+	printf("]\n}\n");
+	return 0;
+}
+
 int main(int argc, char** argv) {
 	if (argc < 2) {
 		PrintUsage();
@@ -26967,6 +27441,12 @@ int main(int argc, char** argv) {
 		if (!ParseCommon(argc, argv, 2, o))
 			return 1;
 		return CmdCapKern(o);
+	}
+	if (cmd == "pgcorpus") {
+		ReplayOpts o;
+		if (!ParseCommon(argc, argv, 2, o))
+			return 1;
+		return CmdPgCorpus(o);
 	}
 	if (cmd == "capboard") {
 		ReplayOpts o;

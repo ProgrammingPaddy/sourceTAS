@@ -23,6 +23,43 @@ logs in `Docs/CapabilityLibrary.md`.
 remains is named) · `[d]` designed, not built · `[ ]` not started ·
 `[-]` excluded by stated domain (listed so no gap hides).
 
+## THE ALGEBRA MANDATE (advisor + user, 2026-08-25)
+
+The mission widened: from a surf-solver capability library to **a
+complete movement-engine algebra** — every small engine law exposed
+in every direction: *forward transform + inverse/preimage + min/max
+envelope + sensitivity + certified interval form*, for air, contact,
+ride, ground, stance, volumes, and triggers. Consequences:
+
+- **"THE A CATEGORY IS COMPLETE" is retired as an absolute claim.**
+  It remains true relative to the ORIGINAL surf-solver scope
+  (sessions 33–39); under the algebra mandate the A/B tables extend
+  with the advisor's gap rows (A33–A58, B23–B45 below), worked
+  BEFORE further scoring/composition.
+- **Every row now carries a LEVEL**: `term → atom → capability →
+  reducer → composite`. An atom answers one engine question in
+  ns–low-µs; a capability min/maxes or inverts atoms; a composite
+  may call many capabilities. Several long-standing rows are
+  composites (A9–A13, A19–A24, A26, A28) — legitimately done under
+  their contracts, but NOT foundational atoms, and the level field
+  now says so at a glance.
+- **The parity rule, restated by the user (verbatim intent)**:
+  perfect 1-to-1 engine parity is the minimum guarantee for
+  anything abstracted from engine code; slower-and-always-right
+  beats faster-with-1%-error. Simplified searches are admissible
+  ONLY as candidate generators whose every answer is verified
+  against the exact engine law before acceptance
+  (**verify-then-accept**, now binding semantics #9 in
+  `Docs/CapabilityLibrary.md`).
+- The dashboard carries the level as a filterable chip and an
+  algebra-coverage line (forward/inverse/min/max/Jacobian/interval
+  + completeness) per row.
+
+**The priority tranche (advisor order):** 1 A33 · 2 A35/A36 (the
+joint turn-gain frontier — completes B22) · 3 A40 · 4 A46 ·
+5 A41–A43 · 6 A47/A48 · 7 the min-speed/braking family · 8 A50/A51 ·
+9 A57/A58 · 10 B23–B29.
+
 **Efficiency column:** measured numbers where they exist (this
 week's machine), targets marked "target". The reference costs:
 one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
@@ -64,7 +101,44 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | A29 | duck capability | duck flag/hull/timer, 8.5u shift, 0.34 speed crop | duck-required routes, A3 hulls | the vtable-pinned `Fn::` duck family IS the package (Duck/CanUnduck/FinishDuck/FinishUnDuck/HandleDuckingSpeedCrop/ReduceTimers) + the A3 hull switch; the LAWS gated independently | — | ~ns/tick law | `[x]` s37 (capdebt 7/0): air press/unduck shift = EXACTLY ±8.5000u, one constant across events, instant with hull 1 / transient hull 2; timer drains exactly dt·1000 on steady ticks (162/162); grounded crop terminal speed exactly 85.00 (0.34·250); AND the mixed roller at hull 1 predicts ducked-flight contacts 15/15 vs engine — the roller generalizes across hulls |
 | A30 | jump capability | jump impulse (double const), stamina scale, autobhop gate, three gravity half-steps | spawn runs, bhop segments, launches | `CapGround::JumpKernelTick` (jump head + the A4 air chain) | — | **50k jump ticks, 0 bitwise mismatches on all channels + stamina; vz law: stamina 0→283.993, 1315.8→210.839; release gate + autobhop bypass verified** | `[x]` capground (s27); SET path (ducked) = A29 debt |
 | A31 | trigger interactions | basevel, gravity_scale, teleport | maps with push/teleport/gravity | `CapTrigger::ApplyHit` — the mirror's post-move application transcribed as ONE pure transform (gravity overwrites the scale; pushes accumulate onto basevel with the unground + 1u nudge; teleports set origin and zero velocity) | — | ~ns/event | `[x]` s37 (capdebt 7/0): all three types bitwise on touch ticks (23/23), AND the carried state flows through the certified kernel as a FULL COMPOSITION — per-tick kernel + re-touch + ApplyHit (pushes accumulate inside the volume) matches the engine bitwise for 15 post-touch ticks, 23/23 flights |
-| A32 | water / ladders (exclusion) | — | — | — | — | — | `[-]` excluded: surf maps in scope have neither; revisit only if a target map does |
+| A32 | water / ladders (exclusion) | — | — | — | — | — | `[-]` was "excluded"; under the algebra mandate reclassified DEFERRED (water/ladder branches are visible in the engine mirror; reopens when universality demands — advisor §12) |
+
+## A — the algebra extension (advisor 2026-08-25; A33–A58)
+
+New atoms and capabilities under the algebra mandate. Level and the
+expected fast form come from the advisor review; rows close only
+with the library's usual falsifier discipline. Rows marked
+"(promotion)" already exist as decoded engine code inside another
+function and need packaging + gates, not research.
+
+| ID | Capability | Level | Expected form / dependencies / notes | Status |
+|----|-----------|-------|--------------------------------------|--------|
+| A33 | exact command preprocessing (CheckParameters) | atom | raw yaw/fmove/smove/umove/buttons → the command movement actually sees; the engine's scaling float arithmetic is KNOWN ENGINE-SEMANTIC DEBT (the mirror uses an equivalent saturated-input cap) — needs a LIVE FUNCPROBE session against the engine, not offline work | `[ ]` blocked on live engine access |
+| A34 | wish-space forward + inverse transform | atom (promotion) | `Fn::WishFromInput` (forward) + `Air::WishInputs` (inverse) — the round-trip law every witness replay stands on | `[x]` s44 (capkern 12/0): 20,000 round trips reproduce the intended true wish cos to worst 9.48e-7 |
+| A35 | one-tick reachable-velocity locus | capability | `CapAir::OneTickEndpointW` (the exact accel-law endpoint over the FULL control set: true cos × wishspeed — the engine budgets on UNCAPPED wishspeed, both covered) + `OneTickProfile` (THE JOINT TURN-GAIN FRONTIER max \|v′\| s.t. \|Δψ\| ≥ θ, a certified over-approximation with outward Lipschitz margins) + `MaxOneTickTurnUB2` (the exact turn peak) | `[x]` s44 (capkern 12/0): law tracks the kernel to WORST 0.0006 u/s; the frontier survives 200,000 engine one-tick attacks INCLUDING partial wishes (0 above, closest 99.7% — certified AND tight); the peak ≤ the s39 geometric bound everywhere. **THE PHYSICS FINDING: gentle carving is cheap (~8.6°/tick at 600 u/s costs ~2 u/s) — heading corners are shallow at practical horizons** |
+| A36 | one-tick inverse air law | capability | `CapAir::InverseOneTickTurn` (shape-agnostic bracket scan — θ(α) jumps to π at the full-backward wish below the budget, so no monotonicity is assumed; branch 0/1 = max/min-speed solution) + `InverseOneTickSpeed` (exact closed-form candidates from the two accel branches); VERIFY-THEN-ACCEPT by contract | `[x]` s44 (capkern 12/0): 3,991/3,991 turn targets kernel-verified within 2e-3 rad (worst 3.7e-3, sign 100%, 9 honest declines beyond the peak); 2,000/2,000 speed targets recovered and kernel-verified within 0.5 u/s — the first fully verify-then-accept capability under binding semantics #9 |
+| A37 | velocity clamp/sanitize atom | atom (promotion) | `CapAir::KernelCheckVelocity` (NaN/Inf → 0, componentwise ±maxvelocity) as the universal atom every movement mode runs | `[x]` s44 (capkern 12/0): 216 NaN/Inf/overclamp states through a real engine coast tick — 216/216 match the standalone atom (X/Y bitwise, Z through the gravity halves, rail double-clamps handled) |
+| A38 | gravity/basevel phase transform | atom (promotion) | StartGravity half, basevel-Z integrate-and-clear, FinishGravity half at arbitrary gravity_scale — decoded inside the kernels; package standalone | `[ ]` |
+| A39 | timer/button-state transition | atom (promotion) | stamina + duck-timer drains (`Fn::ReduceTimers`), old-buttons/release state | `[ ]` |
+| A40 | ground categorization | atom | exact `CategorizePosition`: the 2u probe, walkable_z, the four quadrant fallback probes, stale sf, grounding vz=0, hull realignment — currently buried as a dependency (`Move::CategorizePosition` is embedded in the browser); promote with isolated gates | `[ ]` tranche #3 |
+| A41 | general ground-plane tick | atom | A25 generalized from the flat floor to arbitrary walkable planes | `[ ]` tranche #5 |
+| A42 | StayOnGround / ground snap | atom | the isolated exact ground-following operation | `[ ]` tranche #5 |
+| A43 | step/stair traversal | capability | general grounded obstacle traversal (absent from the flat-floor domain) | `[ ]` tranche #5 |
+| A44 | ground friction transform | atom (promotion) | the exact one-tick friction inside `CapGround::KFriction`; already isolated — needs its own row gates | `[ ]` |
+| A45 | ground acceleration transform | atom (promotion) | exact accel without friction/collision (inside WalkKernelTick) | `[ ]` |
+| A46 | full hull↔face contact region | capability | interior + edges + corners/bevels — the extension A3 has always named open | `[ ]` tranche #4 |
+| A47 | generic hull-volume overlap/enter/exit | atom | ONE primitive for END, triggers, zones, checkpoints | `[ ]` tranche #6 |
+| A48 | generic event-volume crossing | capability | earliest exact crossing tick/fraction for arbitrary convex/AABB volumes (A27 generalized off END) | `[ ]` tranche #6 |
+| A49 | surface-property transform | atom | material friction/jump factor instead of assumed defaults | `[ ]` deferred with A32-class rows |
+| A50 | one-tick ride reachable locus | capability | ride analogue of A35 | `[ ]` tranche #8 |
+| A51 | one-tick ride inverse | capability | desired tangent v′/turn/gain → controls | `[ ]` tranche #8 |
+| A52 | generic contact-mode classifier | atom | interior face / edge / corner / crease / ground / leave | `[ ]` |
+| A53 | trigger encounter | capability | WHEN the hull touches the volume (A47/A48) + the A31 transform | `[ ]` |
+| A54 | constant-control segment response | capability (promotion) | the all-plus segment tables (`BuildSegTables`/`EvalSegs`) are this for spiral prefixes; generalize + promote | `[ ]` |
+| A55 | schedule-prefix response | capability | preprocess a schedule once, O(1) state queries at any tick | `[ ]` |
+| A56 | reflection/canonical symmetry | atom | left/right mirror beside A0's translation/yaw | `[ ]` |
+| A57 | physical Jacobian package | capability | derivatives of air/ride/clip/gravity/contact-fraction wrt state+control | `[ ]` tranche #9 |
+| A58 | segment Jacobian/adjoint | capability | endpoint derivatives wrt segment controls, O(N) build O(1) query | `[ ]` tranche #9 |
 
 ## B — certified reducers (prune only with proof)
 
@@ -92,7 +166,35 @@ one exact engine tick (MoveTick) = 559 ns; one exact kernel tick
 | B19 | exact duplicate dominance | state identity | dedup | hash compare | — | ~ns; measured near-zero yield on real geometry | `[x]` kept, expectations recorded |
 | B20 | competitive horizon | incumbent T* | global search | T*−g cutoff | — | O(1) | `[x]` mechanism ready, unengaged |
 | B21 | minimum remaining ticks to END | compose B2/B11 | admissible h | `CapBounds::RouteTicksLB` — the sum of certified per-leg minima (`MinAirTicks` air, `MinRideTicks` ride); each term lower-bounds its leg alone, so the sum lower-bounds any route through the legs in order (concatenation only ADDS transition ticks) | — | O(legs × N) ~µs | `[x]` v1 s42 (capmin 11/0): 16 air+ride scenarios from EXACT leg answers (A12 + A21, each at its own certified contract) — 0 violations, mean slack 3.1 ticks. **h_cert is no longer zero** |
-| B22 | heading-aware speed ceiling | V*(N, Δψ) UB, the heading laws | B5 culls, B17 | `CapBounds::MaxTotalTurnUB` + `HeadingAwareSpeedUB` — the two certified s39 lemmas composed: per tick the speed has two certified floors (shed floor s0 − i·B; gain floor √(V² − 900(N−i))), the tick's turn ≤ MaxTurnUB there, the total must reach the net \|Δψ\|; certified-monotone bisection over V (the B13 pattern) | **THE NAMED TIGHTENING: the joint turn-gain frontier** (a tick that turns θ at speed s forfeits gain — the braking-time theorem, still the recorded step) | O(N) per eval × 48 bisection | `[~]` SOUND v0.5 s42 (capreach 10/0): 120k adversarial schedules (random + bang-bang) × 6 configs — 0 ceiling violations, worst adversary 75% of the bound. The measured bite is two-sided and honest: at short horizons the ceiling collapses to 0 (net-π at 1400 u/s within 8 ticks certified IMPOSSIBLE, and no adversary achieved it); at N 20–40 the composition does not bite (each lemma alone lets a fast tick also turn fast — only the joint frontier charges turning against gaining). That theorem is the row's completion criterion |
+| B22 | heading-aware speed ceiling | V*(N, Δψ) UB, the heading laws | B5 culls, B17 | **v1.0 (s44): the A35 joint frontier composed over N ticks** — `CapBounds::TurnGainTable` (241 speed rows × 361 turn bins, ~1 s build; "any s ≤ S" folded with s-Lipschitz margins) + `HeadingAwareSpeedUB2Curve` (ONE DP answers every Δψ at a config; transitions credit each real tick MORE turn than achieved and charge the frontier one grid step LESS — every real schedule dominated transition by transition) + `HeadingAwareSpeedUBBest` = min(v0.5, frontier DP) — THE LEGO RULE portfolio, v0.5 intact | sub-2 u/s certified margins (finer table — the named refinement for the last few %) | table ~1 s once; DP ~ms per (s0, N), O(1) per Δψ after | `[x]` v1.0 s44 (capreach 11/0): 0 violations across 120k adversarial schedules; never worse than v0.5; short-horizon impossibilities inherited (net-π at 1400 u/s in ≤8 ticks IMPOSSIBLE). **THE HONEST HEADLINE IS A PHYSICS FINDING: the exact frontier proves the '180°-at-speed corner' is SHALLOW at N 20–40 — adversaries reach 75% of the blind ceiling at high Δψ, so the near-blind bound is close to TRUTH, not loose** |
+
+## B — the algebra extension (advisor 2026-08-25; B23–B45)
+
+| ID | Reducer | Level | Expected form / dependencies | Status |
+|----|---------|-------|------------------------------|--------|
+| B23 | exact inverse vertical solver | reducer | tick(s) at height, apex, clamp tick from piecewise-quadratic arithmetic + verification; makes vertical windows O(1) (advisor: low-hanging) | `[ ]` |
+| B24 | minimum ticks for speed gain | reducer | closed form from the A6 ceiling | `[ ]` |
+| B25 | minimum ticks for braking | reducer | from the min-speed family (the shed law packaged) | `[ ]` |
+| B26 | minimum ticks for heading change | reducer | from A35's frontier (TurnGateTicks generalized to the exact peak) | `[ ]` |
+| B27 | joint speed-heading reachable set | reducer | from A35 — strictly stronger than independent B5+B6 | `[ ]` |
+| B28 | conditional travel bound | reducer | displacement with terminal speed/heading requirement (A8 + A35) | `[ ]` |
+| B29 | closest-reachable-point bound | reducer | directional support vs point/segment/polygon | `[ ]` |
+| B30 | hull-expanded region distance | reducer | O(1) from the geometry atoms (A46 kit) | `[ ]` |
+| B31 | contact-mode feasibility | reducer | prove interior/edge/corner contact impossible (A46/A52) | `[ ]` |
+| B32 | ground/slope reachability | reducer | ground analogue of B7 (A41–A43) | `[ ]` |
+| B33 | minimum run-up distance/time | reducer | ground gain + A26 launch | `[ ]` |
+| B34 | trigger/zone touch window | reducer | earliest/latest possible touch (A47/A48) | `[ ]` |
+| B35 | trigger avoidable/unavoidable certificate | reducer | reach envelopes × volume geometry, certified | `[ ]` |
+| B36 | board preimage | reducer | incoming-velocity region yielding a desired post-board state (A15–A17 inverted) | `[ ]` |
+| B37 | generic successor preimage | reducer | B13/B14 generalized to arbitrary requirement sets | `[ ]` |
+| B38 | one-tick state interval propagator | reducer | certified box/set transform through the atoms | `[ ]` |
+| B39 | N-tick sensitivity/Lipschitz bound | reducer | from A57/A58 | `[ ]` |
+| B40 | state-equivalence theorem by domain | reducer | prove which state fields can be dropped where (the field-compression rule's rigorous form) | `[ ]` |
+| B41 | reflection/symmetry reducer | reducer | halve equivalent domains via A56 | `[ ]` |
+| B42 | first-possible-event bound | reducer | min tick among contact/ground/trigger/END (B3/B4/B15/B34) | `[ ]` |
+| B43 | inevitable-first-event certificate | reducer | prove one event precedes all alternatives | `[ ]` |
+| B44 | ride edge feasibility interval | reducer | whole reachable edge segments, not per-sample (A20/A23 + ride bounds) | `[ ]` |
+| B45 | generalized route-resource backward bound | reducer | backward-propagated necessary resource (B13/B14/B36) | `[ ]` |
 
 ## C — composition / selection (consume proofs, never invent physics)
 
@@ -190,6 +292,10 @@ function browser, generated by `Tools/gen_capability_code.py`.
 | A29 | `Fn::Duck` · `Fn::CanUnduck` · `Fn::FinishDuck` · `Fn::FinishUnDuck` · `Fn::HandleDuckingSpeedCrop` · `Fn::ReduceTimers` · `CapHull::PlaneOffsetHull` |
 | A30 | `CapGround::JumpKernelTick` · `Fn::CheckJumpButton` |
 | A31 | `CapTrigger::ApplyHit` |
+| A34 | `Fn::WishFromInput` · `Air::WishInputs` |
+| A35 | `CapAir::OneTickEndpointW` · `CapAir::OneTickProfile` · `CapAir::MaxOneTickTurnUB2` · `CapAir::FrontierSpeedUB1` |
+| A36 | `CapAir::InverseOneTickTurn` · `CapAir::InverseOneTickSpeed` |
+| A37 | `CapAir::KernelCheckVelocity` |
 | B0 | `CapWindow::ZWindow` · `CapWindow::VTick` |
 | B1 | (the λ-interval existence test lives inline in `CapFaceSolve::SolveToFace`) |
 | B2 | `CapWindow::TravelPrefix` · `CapBounds::TravelN` |
@@ -211,7 +317,7 @@ function browser, generated by `Tools/gen_capability_code.py`.
 | B19 | (hash compare inside the legacy route-search path) |
 | B20 | (the groute incumbent-cutoff mechanism — legacy path) |
 | B21 | `CapBounds::RouteTicksLB` · `CapBounds::MinAirTicks` |
-| B22 | `CapBounds::MaxTotalTurnUB` · `CapBounds::HeadingAwareSpeedUB` · `CapBounds::HeadingChangeFeasibleUB` |
+| B22 | `CapBounds::MaxTotalTurnUB` · `CapBounds::HeadingAwareSpeedUB` · `CapBounds::HeadingChangeFeasibleUB` · `CapBounds::BuildTurnGainTable` · `CapBounds::HeadingAwareSpeedUB2Curve` · `CapBounds::HeadingAwareSpeedUB2` · `CapBounds::HeadingAwareSpeedUBBest` |
 | C0 | `CapLabel::Transition` (struct) · (emitters: the C7 chain in `CmdCapXfer`, the C6 loop in `CmdCapMat`) |
 | C1 | `CapLabel::SameCell` · `CapLabel::Dominates` |
 | C6 | (the capmat production loop in `CmdCapMat` over `CapRideReach::BuildRideReach` + `QueryTargetFast` + `CapLabel` emission) |
@@ -247,6 +353,34 @@ column; keyed by the dashboard chip ids):
 | hlaw | `CapBounds::AccelBudget` · `CapBounds::MaxTurnUB` · `CapBounds::TurnGateTicks` · `CapBounds::TurnGatedTravelUB` · `CapBounds::MaxTotalTurnUB` · `CapBounds::HeadingAwareSpeedUB` |
 
 ## Change log
+- 2026-08-25c (session 44): **THE ALGEBRA MANDATE lands — the
+  registry restructures, and the first tranche closes with the
+  joint turn-gain frontier.** The advisor review (2026-08-25)
+  widened the mission to a complete movement-engine algebra; the
+  user restated the parity rule (perfect 1-to-1 engine parity as
+  the minimum guarantee; simplified searches admissible only WITH
+  VERIFIERS — binding semantics #9, verify-then-accept). Registry:
+  "THE A CATEGORY IS COMPLETE" retired as an absolute claim
+  (scope-relative now); 49 new rows added (A33–A58, B23–B45) with
+  the advisor's expected forms; every row carries a LEVEL
+  (atom/capability/reducer/composite, filterable in the dashboard)
+  and an ALGEBRA COVERAGE line (forward/inverse/envelope/Jacobian/
+  interval + completeness). First tranche DONE: A34 (promotion,
+  round trips to 9.5e-7), A35 (THE JOINT TURN-GAIN FRONTIER —
+  certified over the FULL control set incl. partial wishes, 200k
+  engine attacks, 0 violations, 99.7% tight; law-vs-kernel 0.0006
+  u/s), A36 (inverse air law, 3,991/3,991 + 2,000/2,000
+  kernel-verified — the first verify-then-accept capability), A37
+  (promotion, 216/216 bitwise incl. NaN rails), and **B22 v1.0
+  done**: min(v0.5, frontier DP), 0/120k violations, short-N
+  impossibilities inherited — and THE PHYSICS FINDING: gentle
+  carving is cheap (~8.6°/tick at 600 u/s for ~2 u/s), so the
+  180°-at-speed corner is MEASURED SHALLOW (adversaries reach 75%
+  of blind; the near-blind ceiling is near-truth). A33 recorded as
+  blocked on live engine access; A32 reclassified deferred.
+  capkern 12/0, capreach 11/0; full battery green. NEXT (tranche):
+  A40 CategorizePosition, A46 contact regions, A41–A43 ground,
+  A47/A48 volumes, the braking family, A50/A51, A57/A58, B23–B29.
 - 2026-08-25a (session 43): **THE FUNCTION BROWSER — the dashboard
   embeds the real code.** User directive: the checklist shows every
   capability function, nested functions, and every function

@@ -1,4 +1,5 @@
-#include "BspWorld.h"
+﻿#include "BspWorld.h"
+#include "../Menu/Breadcrumb.h"
 #include "WorldDraw.h"
 
 #include <algorithm>
@@ -118,6 +119,25 @@ namespace {
 	// Tags + board targets for the loaded map (persisted to a per-map .geo file).
 	std::set<std::pair<int, int>> g_tags;             // (brush, plane)
 	std::vector<BspWorld::BoardTarget> g_targets;
+
+	// Geo undo (session 45): every destructive edit (remove, clear-all,
+	// project import) snapshots the whole tag+target set first; UndoGeo
+	// restores the newest snapshot. Session-scoped, depth-capped - the
+	// same shape as the recordings tab's "Undo delete".
+	struct GeoSnapshot {
+		std::set<std::pair<int, int>> tags;
+		std::vector<BspWorld::BoardTarget> targets;
+	};
+	std::vector<GeoSnapshot> g_geo_undo;   // newest last
+
+	void PushGeoUndo() {
+		GeoSnapshot snap;
+		snap.tags = g_tags;
+		snap.targets = g_targets;
+		g_geo_undo.push_back(std::move(snap));
+		if (g_geo_undo.size() > 8)
+			g_geo_undo.erase(g_geo_undo.begin());
+	}
 
 	// --- triggers (parsed from the entity lump) ------------------------------
 	struct TriggerVol {
@@ -1005,10 +1025,14 @@ bool BspWorld::LoadCurrentMap() {
 
 	char last_error[256] = "no candidates tried";
 	for (const std::string& path : candidates) {
+		Breadcrumb::Note(Breadcrumb::SlotWorld, "bsp: parse %.100s",
+			path.c_str());
 		if (LoadFromFile(path)) {
+			Breadcrumb::Note(Breadcrumb::SlotWorld, "bsp: parse ok, geo");
 			g_level = level;
 			strncpy_s(g_status.map, level.c_str(), _TRUNCATE);
 			LoadGeo();   // restore this map's tags + board targets
+			Breadcrumb::Note(Breadcrumb::SlotWorld, "bsp: load complete");
 			return true;
 		}
 		strncpy_s(last_error, g_status.error, _TRUNCATE);
@@ -1195,14 +1219,35 @@ void BspWorld::Render(const Vector& center, bool have_center, float duration) {
 
 	// Auto-(re)load when the level changes. Markers alone only trigger a parse
 	// when this map has saved geometry, so uninvolved maps never pay for it.
+	// DEBOUNCED (session 46): the level name must hold steady for 30
+	// consecutive rendered frames before the parse runs - the whole file
+	// read + parse executes on the RENDER thread, and running it inside
+	// injection/join transients is implicated in the frozen-game family
+	// (the same reasoning as WorldDraw's injection warm-up).
 	std::string level;
 	if (SafeLevelName(level) && level != g_level) {
-		bool has_geo = false;
-		const std::string geo = GeoFilePathFor(level);
-		if (!geo.empty())
-			has_geo = GetFileAttributesA(geo.c_str()) != INVALID_FILE_ATTRIBUTES;
-		if (draw_wireframe || has_geo)
-			LoadCurrentMap();
+		static std::string s_cand;
+		static int s_stable = 0;
+		if (level == s_cand) {
+			++s_stable;
+		} else {
+			s_cand = level;
+			s_stable = 1;
+		}
+		if (s_stable >= 30) {
+			bool has_geo = false;
+			const std::string geo = GeoFilePathFor(level);
+			if (!geo.empty())
+				has_geo = GetFileAttributesA(geo.c_str()) != INVALID_FILE_ATTRIBUTES;
+			if (draw_wireframe || has_geo) {
+				Breadcrumb::Note(Breadcrumb::SlotWorld,
+					"bsp: autoload begin (%s)", level.c_str());
+				LoadCurrentMap();
+				Breadcrumb::Note(Breadcrumb::SlotWorld,
+					"bsp: autoload end (%s)",
+					g_status.loaded ? "loaded" : g_status.error);
+			}
+		}
 	}
 	if (g_brushes.empty())
 		return;
@@ -1388,8 +1433,65 @@ int BspWorld::TagCount() {
 }
 
 void BspWorld::ClearTags() {
+	PushGeoUndo();
 	g_tags.clear();
 	SaveGeoImpl();
+}
+
+void BspWorld::ClearTargets() {
+	PushGeoUndo();
+	g_targets.clear();
+	SaveGeoImpl();
+}
+
+bool BspWorld::CanUndoGeo() {
+	return !g_geo_undo.empty();
+}
+
+bool BspWorld::UndoGeo() {
+	if (g_geo_undo.empty())
+		return false;
+	g_tags = g_geo_undo.back().tags;
+	g_targets = g_geo_undo.back().targets;
+	g_geo_undo.pop_back();
+	SaveGeoImpl();
+	return true;
+}
+
+void BspWorld::ExportGeo(std::vector<std::pair<int, int>>* tags,
+                         std::vector<BoardTarget>* targets) {
+	if (tags)
+		tags->assign(g_tags.begin(), g_tags.end());
+	if (targets)
+		*targets = g_targets;
+}
+
+int BspWorld::ImportGeo(const std::vector<std::pair<int, int>>& tags,
+                        const std::vector<BoardTarget>& targets) {
+	// Project geo REPLACES the map's working set (undoable like any other
+	// destructive edit). Entries whose brush/plane indices fall outside the
+	// loaded map are dropped and counted honestly - a project from a
+	// different map version can never index out of bounds.
+	PushGeoUndo();
+	g_tags.clear();
+	g_targets.clear();
+	int dropped = 0;
+	const int nb = static_cast<int>(g_brushes.size());
+	const int np = static_cast<int>(g_planes.size());
+	for (const auto& t : tags) {
+		if (t.first >= 0 && t.first < nb && t.second >= 0 && t.second < np)
+			g_tags.insert(t);
+		else
+			dropped++;
+	}
+	for (const BoardTarget& t : targets) {
+		if (t.brush >= 0 && t.brush < nb && t.plane >= 0 && t.plane < np)
+			g_targets.push_back(t);
+		else
+			dropped++;
+	}
+	SaveGeoImpl();
+	return dropped;
 }
 
 int BspWorld::AddTargetFromHit(const RayHit& hit, float yaw, float pitch, bool ducked) {
@@ -1421,6 +1523,7 @@ BspWorld::BoardTarget* BspWorld::GetTarget(int index) {
 void BspWorld::RemoveTarget(int index) {
 	if (index < 0 || index >= static_cast<int>(g_targets.size()))
 		return;
+	PushGeoUndo();
 	g_targets.erase(g_targets.begin() + index);
 	SaveGeoImpl();
 }
@@ -1456,6 +1559,7 @@ bool BspWorld::GetTag(int index, int* brush, int* plane) {
 void BspWorld::RemoveTag(int index) {
 	if (index < 0 || index >= static_cast<int>(g_tags.size()))
 		return;
+	PushGeoUndo();
 	auto it = g_tags.begin();
 	std::advance(it, index);
 	g_tags.erase(it);

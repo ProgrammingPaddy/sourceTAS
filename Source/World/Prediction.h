@@ -88,6 +88,9 @@ namespace Prediction {
 
 	// Live look-ahead path (per-tick feet origins) for drawing.
 	void GetPath(std::vector<Vector>& out);
+	// Same look-ahead as full per-tick states (origin/velocity/flags), for
+	// contact detection on the live prediction line. Returns ticks copied.
+	int GetPathStates(SimState* out, int cap);
 
 	// --- editor simulation (async request -> next prediction pass) ----------
 	bool RequestSim(const StartState& anchor, int ticks, SimFrameFn provider);
@@ -149,6 +152,15 @@ namespace Prediction {
 		int                fault_count = 0;
 		unsigned long long last_fault_rva = 0;
 		unsigned long long last_fault_access = 0;
+		// Self-healing anchor resolution (session 45): how each anchor was
+		// found after the 2026-08-25 game update killed the pinned RVAs.
+		// helper: 0 unresolved / 1 pinned / 2 RTTI walk.
+		// gpg:    0 unresolved / 1 pinned seed / 2 value-shape scan.
+		int  helper_method = 0;
+		int  helper_candidates = 0;
+		int  gpg_method = 0;
+		int  gpg_candidates = 0;
+		bool gpg_confirmed = false;
 	};
 	Diag LastDiag();
 

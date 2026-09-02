@@ -95,6 +95,7 @@
     <ClCompile Include="Source\Menu\Interface.cpp" />
     <ClCompile Include="Source\Recording\RecordingStore.cpp" />
     <ClCompile Include="Source\World\BspWorld.cpp" />
+    <ClCompile Include="Source\World\Contact.cpp" />
     <ClCompile Include="Source\World\Cvars.cpp" />
     <ClCompile Include="Source\World\NetVars.cpp" />
     <ClCompile Include="Source\World\Prediction.cpp" />

@@ -2,6 +2,9 @@
 
 #include <cstrike/Structures/Vector.h>
 
+#include <utility>
+#include <vector>
+
 // 1.1 world geometry: the map's brush collision data, parsed from the BSP file
 // (the same bytes the engine loaded - planes/brushes/brushsides are static, and
 // the file format is documented and version-stable, so this is the reliable
@@ -45,6 +48,7 @@ namespace BspWorld {
 	bool GetTag(int index, int* brush, int* plane);   // enumerate (stable order)
 	void RemoveTag(int index);
 	extern int highlight_tag;                   // tag index drawn emphasized (-1 = none)
+
 
 	// --- geometry queries (for the solvers) ----------------------------------
 	bool GetPlane(int plane, Vector* normal, float* dist);
@@ -97,6 +101,21 @@ namespace BspWorld {
 	void RemoveTarget(int index);
 	void RestTargetOnFace(int index);           // re-seat after a duck change
 	void SaveGeo();                             // call after editing a target
+
+	// --- geo undo + project scoping (session 45) ------------------------------
+	// Destructive edits (remove, clear-all, project import) snapshot the whole
+	// tag+target set; UndoGeo restores the newest snapshot (session-scoped,
+	// depth 8). Projects carry their own targets + tagged faces per map:
+	// ExportGeo captures the live set for a project save, ImportGeo REPLACES
+	// the map's working set from a loaded project (undoable; returns how many
+	// entries were dropped for indexing outside the loaded map).
+	void ClearTargets();
+	bool CanUndoGeo();
+	bool UndoGeo();
+	void ExportGeo(std::vector<std::pair<int, int>>* tags,
+	               std::vector<BoardTarget>* targets);
+	int  ImportGeo(const std::vector<std::pair<int, int>>& tags,
+	               const std::vector<BoardTarget>& targets);
 
 	// --- TRIGGERS (teleport + gravity) ---------------------------------------
 	// Parsed from the BSP's entity lump (the same keyvalues the server spawns

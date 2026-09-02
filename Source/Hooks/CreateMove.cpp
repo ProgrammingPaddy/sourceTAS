@@ -5,8 +5,10 @@
 #include "../Menu/Breadcrumb.h"
 #include "../Menu/RecordPanel.h"
 #include "../World/BspWorld.h"
+#include "../World/WorldDraw.h"
 #include <cstrike/Definitions/Buttons.h>
 #include <cstrike/Definitions/Const.h>
+#include <cstrike/Interfaces/IVDebugOverlay.h>
 
 // Raw + leaked on purpose: the atexit destructor restored the vtable into
 // game memory that is already gone at process exit (crash.log 2026-07-25,
@@ -28,6 +30,14 @@ bool Hooks::CreateMove(ClientModeShared* thisptr, float frametime, CUserCmd* com
 	// Engine-command marshal drain: THIS is the game thread, the only safe
 	// place for connection transitions pushed by UI/render-thread code.
 	TasEditor::DrainEngineCmds();
+
+	// Fallback overlay drain. The main in-world pass drains itself
+	// (WorldDraw::SubmitFrame, the OverrideView hook); this catches overlays
+	// pushed from the render thread between passes - the Debug tab's test
+	// box - so they still land on the game thread, the only thread the
+	// 2026-08-25 update lets make engine overlay calls. Empty queue = one
+	// lock peek + swap.
+	OverlayQueue::Drain();
 
 	// Autohop (server-style autobhop for HUMAN input), the sim JM_AutoBhop's
 	// exact button transform: while jump is HELD, the button is stripped by
@@ -118,6 +128,13 @@ namespace {
 	void* ViewThunk(void* thisptr, void* a, void* b, void* c) {
 		void* const r = reinterpret_cast<GenFn>(g_view_original)(thisptr, a, b, c);
 		TasEditor::ViewSlotSample(kViewSlot, a);
+		// The in-world draw pass lives HERE (session 46k): game thread, once
+		// per rendered frame, before the engine draws that frame - so what we
+		// sample is exactly what this frame shows, and one-frame overlay
+		// lifetimes replace all the cadence/lifetime guessing (the 46i-46j
+		// strobe/flash saga). After the freecam sample, so a freecam view
+		// override is already applied.
+		WorldDraw::SubmitFrame();
 		return r;
 	}
 }

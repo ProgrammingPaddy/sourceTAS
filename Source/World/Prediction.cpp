@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 #include <windows.h>
+#include <psapi.h>
 
 #include <cstrike/sdk.h>
 #include <cstrike/Interfaces/IClientEntityList.h>
@@ -33,9 +34,16 @@ namespace WorldDraw {
 // we disturb.
 // ---------------------------------------------------------------------------
 namespace {
-	constexpr uintptr_t kMoveHelperRva       = 0x5B4FF0;  // CMoveHelperClient singleton
-	constexpr uintptr_t kMoveHelperVtableRva = 0x450EF0;  // its vtable (sanity check)
-	constexpr uintptr_t kGpGlobalsPtrRva     = 0x5AE280;  // holds gpGlobals pointer
+	// Pinned RVAs are SEEDS/FALLBACKS only since the 2026-08-25 CS:S update
+	// (which shifted client.dll ~0x1000 and left prediction dead behind its
+	// own sanity checks, freezing CurTime() and with it every in-world
+	// overlay). Both anchors now resolve THEMSELVES at runtime - see the
+	// SELF-HEALING RESOLUTION block below. Constants re-derived offline from
+	// the updated binary by Tools/derive_client_rvas.py (RTTI walk:
+	// one COL, one vtable, one singleton - unambiguous).
+	constexpr uintptr_t kMoveHelperRva       = 0x5B3FF0;  // CMoveHelperClient singleton (2026-08-25 build)
+	constexpr uintptr_t kMoveHelperVtableRva = 0x44F780;  // its vtable (sanity check)
+	constexpr uintptr_t kGpGlobalsPtrRva     = 0x5AD280;  // holds gpGlobals pointer (scan seed; 2026-07 was 0x5AE280)
 
 	constexpr int kSetupMoveIdx            = 18;  // IPrediction
 	constexpr int kFinishMoveIdx           = 19;  // IPrediction (hooked)
@@ -67,6 +75,9 @@ namespace {
 
 	// Live look-ahead output.
 	Vector g_path[257];
+	// Full per-tick states for the look-ahead (session 46n): origin alone
+	// can't feed contact detection - the analyzer needs velocity + flags.
+	Prediction::SimState g_path_states[257];
 	int    g_path_count = 0;
 
 	// Origin of the newest REAL command's movedata (basis diagnostic: lets the
@@ -173,6 +184,212 @@ namespace {
 		g_last_fault_access = (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2)
 			? r->ExceptionInformation[1] : 0;
 		return EXCEPTION_EXECUTE_HANDLER;
+	}
+
+	// -----------------------------------------------------------------------
+	// SELF-HEALING RESOLUTION (session 45; the 2026-08-25 CS:S update).
+	// The update shifted client.dll: the move-helper vtable check failed
+	// SAFELY ("pred: exit early" in the breadcrumbs) but left the sim dead,
+	// and the stale gpGlobals holder froze CurTime() - which the overlay
+	// throttle keys on, so ALL in-world drawing stopped with it. Both
+	// anchors now resolve themselves at runtime; a future update costs
+	// nothing.
+	// -----------------------------------------------------------------------
+	int  g_helper_method = 0;      // 0 none, 1 pinned, 2 RTTI
+	int  g_helper_cands = 0;
+	int  g_gpg_method = 0;         // 0 none, 1 pinned-seed, 2 scan
+	int  g_gpg_cands = 0;
+	bool g_gpg_confirmed = false;
+
+	struct ModRange { uintptr_t base = 0; size_t size = 0; };
+
+	ModRange ClientRange() {
+		ModRange m;
+		HMODULE h = GetModuleHandleA("client.dll");
+		if (!h)
+			return m;
+		MODULEINFO mi = {};
+		if (!K32GetModuleInformation(GetCurrentProcess(), h, &mi, sizeof(mi)))
+			return m;
+		m.base = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll);
+		m.size = mi.SizeOfImage;
+		return m;
+	}
+
+	// SEH-guarded reads of addresses whose validity is the question.
+	bool SafeReadQ(uintptr_t at, uintptr_t* out) {
+		__try {
+			*out = *reinterpret_cast<const uintptr_t*>(at);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+	bool SafeReadF(uintptr_t at, float* out) {
+		__try {
+			*out = *reinterpret_cast<const float*>(at);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	// CMoveHelperClient via the MSVC RTTI chain: ".?AVCMoveHelperClient@@"
+	// -> TypeDescriptor (string - 0x10) -> CompleteObjectLocator (u32
+	// pTypeDescriptor at +0x0C, signature 1, pSelf at +0x14 = its own RVA)
+	// -> vtable (the slot after the qword holding &COL) -> the singleton
+	// (the .data qword holding the vtable address). The class name survives
+	// every update; Tools/derive_client_rvas.py is this walk's offline twin
+	// and validated it against the updated binary (each step unambiguous).
+	// POD-only + SEH so an unmapped stretch in the image can never crash us.
+	void* ResolveMoveHelperRtti(uintptr_t base, size_t size, int* cands) {
+		*cands = 0;
+		__try {
+			static const char kName[] = ".?AVCMoveHelperClient@@";
+			const size_t nlen = sizeof(kName);   // incl. NUL
+			const uint8_t* p = reinterpret_cast<const uint8_t*>(base);
+			uintptr_t td = 0;
+			for (size_t i = 0; i + nlen < size; ++i)
+				if (p[i] == '.' && memcmp(p + i, kName, nlen) == 0) {
+					td = base + i - 0x10;
+					break;
+				}
+			if (!td)
+				return nullptr;
+			const uint32_t td_rva = static_cast<uint32_t>(td - base);
+			uintptr_t col = 0;
+			for (size_t i = 0x0C; i + 0x18 <= size; i += 4) {
+				if (*reinterpret_cast<const uint32_t*>(base + i) != td_rva)
+					continue;
+				const uintptr_t c = base + i - 0x0C;
+				if (*reinterpret_cast<const uint32_t*>(c) != 1)
+					continue;
+				if (*reinterpret_cast<const uint32_t*>(c + 0x14)
+					!= static_cast<uint32_t>(c - base))
+					continue;
+				col = c;
+				break;
+			}
+			if (!col)
+				return nullptr;
+			uintptr_t vt = 0;
+			for (size_t i = 0; i + 8 <= size; i += 8)
+				if (*reinterpret_cast<const uintptr_t*>(base + i) == col) {
+					vt = base + i + 8;
+					break;
+				}
+			if (!vt)
+				return nullptr;
+			void* found = nullptr;
+			int n = 0;
+			for (size_t i = 0; i + 8 <= size; i += 8)
+				if (*reinterpret_cast<const uintptr_t*>(base + i) == vt) {
+					++n;
+					if (!found)
+						found = reinterpret_cast<void*>(base + i);
+				}
+			*cands = n;
+			return found;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return nullptr;
+		}
+	}
+
+	// gpGlobals holder: the VALUE-SHAPE scan. A holder is a client qword
+	// pointing at a struct whose {curtime, frametime, interval} floats look
+	// like the live clock; the winner is then CONFIRMED by watching curtime
+	// ADVANCE across frames (garbage does not tick like a clock). Runs
+	// lazily inside the hook because at inject time (menu) the clock fields
+	// are not reliably live.
+	uintptr_t g_gpg_cand[8];
+	float     g_gpg_cand_ct[8];
+	int       g_gpg_cand_n = -1;   // -1 = scan not run yet
+
+	bool GpgPlausible(uintptr_t holder) {
+		uintptr_t target = 0;
+		if (!SafeReadQ(holder, &target))
+			return false;
+		if (target < 0x10000 || target > 0x00007FFFFFFFFFFFull)
+			return false;
+		MEMORY_BASIC_INFORMATION mbi = {};
+		if (!VirtualQuery(reinterpret_cast<void*>(target), &mbi, sizeof(mbi)))
+			return false;
+		if (mbi.State != MEM_COMMIT
+			|| (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+			return false;
+		float ct = 0.f, ft = 0.f, iv = 0.f;
+		if (!SafeReadF(target + kCurtimeOff, &ct)
+			|| !SafeReadF(target + kFrametimeOff, &ft)
+			|| !SafeReadF(target + kIntervalOff, &iv))
+			return false;
+		if (!(iv > 0.0005f && iv <= 0.2f))
+			return false;
+		if (!(ct >= 0.f && ct < 1e7f) || ct != ct)
+			return false;
+		if (!(ft >= 0.f && ft <= 1.f))
+			return false;
+		return true;
+	}
+
+	float GpgCurTimeOf(uintptr_t holder) {
+		uintptr_t target = 0;
+		float ct = -1.f;
+		if (SafeReadQ(holder, &target) && target)
+			SafeReadF(target + kCurtimeOff, &ct);
+		return ct;
+	}
+
+	void GpgScan() {
+		g_gpg_cand_n = 0;
+		const ModRange m = ClientRange();
+		if (!m.base)
+			return;
+		auto offer = [&](uintptr_t slot) {
+			if (g_gpg_cand_n >= 8)
+				return;
+			for (int i = 0; i < g_gpg_cand_n; ++i)
+				if (g_gpg_cand[i] == slot)
+					return;
+			if (GpgPlausible(slot)) {
+				g_gpg_cand[g_gpg_cand_n] = slot;
+				g_gpg_cand_ct[g_gpg_cand_n] = GpgCurTimeOf(slot);
+				g_gpg_cand_n++;
+			}
+		};
+		// seeds first: the pinned RVA and its unshifted predecessor
+		offer(m.base + kGpGlobalsPtrRva);
+		offer(m.base + 0x5AE280);
+		// full sweep of the module's qwords (the pointer-range filter in
+		// GpgPlausible rejects almost everything before any syscall)
+		for (size_t i = 0; i + 8 <= m.size && g_gpg_cand_n < 8; i += 8)
+			offer(m.base + i);
+		g_gpg_cands = g_gpg_cand_n;
+	}
+
+	// One confirmation step per frame: promote the first candidate whose
+	// curtime ADVANCED (sanely) since the last look.
+	void GpgConfirmStep() {
+		if (g_gpg_confirmed)
+			return;
+		if (g_gpg_cand_n < 0)
+			GpgScan();
+		for (int i = 0; i < g_gpg_cand_n; ++i) {
+			const float ct = GpgCurTimeOf(g_gpg_cand[i]);
+			const float last = g_gpg_cand_ct[i];
+			if (ct > last && ct - last < 10.f && last >= 0.f) {
+				g_gpg_holder = reinterpret_cast<void**>(g_gpg_cand[i]);
+				g_gpg_confirmed = true;
+				const ModRange m = ClientRange();
+				g_gpg_method = (m.base
+					&& g_gpg_cand[i] == m.base + kGpGlobalsPtrRva) ? 1 : 2;
+				Breadcrumb::Note(Breadcrumb::SlotPred,
+					"pred: gpGlobals confirmed (holder rva=0x%llX)",
+					static_cast<unsigned long long>(
+						g_gpg_cand[i] - (m.base ? m.base : 0)));
+				return;
+			}
+			g_gpg_cand_ct[i] = ct;
+		}
 	}
 
 	template <int Idx, typename... Args>
@@ -285,6 +502,19 @@ namespace {
 							*reinterpret_cast<Vector*>(pb2 + g_off.velocity) = Vector(0.f, 0.f, 0.f);
 						}
 					}
+				}
+
+				// Full state capture for contact detection (after the trigger
+				// block, so a teleport's zeroed velocity is what gets stored).
+				{
+					Prediction::SimState ss;
+					ss.origin = g_path[i];
+					char* pb3 = reinterpret_cast<char*>(player);
+					if (g_off.velocity)
+						ss.velocity = *reinterpret_cast<Vector*>(pb3 + g_off.velocity);
+					if (g_off.flags)
+						ss.flags = *reinterpret_cast<int*>(pb3 + g_off.flags);
+					g_path_states[i] = ss;
 				}
 			}
 
@@ -829,8 +1059,34 @@ namespace {
 		g_orig_finishmove(thisptr, player, ucmd, movedata);   // real movement, unchanged
 		Breadcrumb::Note(Breadcrumb::SlotPred, "pred: orig done");
 
+		// Self-healing anchors: the gpGlobals holder resolves and confirms
+		// HERE (the clock is only reliably live in game; the scan runs once,
+		// then confirmation is one cheap read per frame until curtime is
+		// seen advancing).
+		if (!g_gpg_confirmed)
+			GpgConfirmStep();
+		// The helper resolves at Install; retry rarely in case client.dll
+		// was still initializing at inject time.
+		if (!g_helper) {
+			static unsigned s_retry = 0;
+			if ((++s_retry & 255) == 0) {
+				const ModRange m = ClientRange();
+				if (m.base) {
+					void* rtti = ResolveMoveHelperRtti(m.base, m.size,
+						&g_helper_cands);
+					if (rtti) {
+						g_helper = rtti;
+						g_helper_method = 2;
+					}
+				}
+			}
+		}
+
 		if (g_in_hook_work || !g_pred || !g_gm || !g_helper || !g_gpg_holder) {
-			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit early");
+			Breadcrumb::Note(Breadcrumb::SlotPred, "pred: exit early (%s%s%s)",
+				!g_helper ? "helper " : "",
+				!g_gpg_holder ? "gpGlobals " : "",
+				(g_helper && g_gpg_holder) ? "busy/iface" : "");
 			return;
 		}
 		// Only the newest command (skip re-predicted history) -> once per frame.
@@ -1022,13 +1278,40 @@ void Prediction::Install() {
 	g_client_base = reinterpret_cast<uintptr_t>(client);
 	g_gm   = GetInterface<void>("client.dll", "GameMovement001");
 	g_pred = GetInterface<void>("client.dll", "VClientPrediction001");
-	g_gpg_holder = reinterpret_cast<void**>(g_client_base + kGpGlobalsPtrRva);
 
-	// Only trust the move-helper singleton if its vtable pointer matches the one
-	// we RE'd; a stale RVA (game update) fails here instead of crashing later.
+	// gpGlobals: NEVER trusted from the pinned RVA alone anymore - the
+	// holder is resolved by the value-shape scan and confirmed by watching
+	// curtime advance, lazily inside the hook (the clock is only reliably
+	// live in game). Until confirmed, the hook exits early and CurTime()
+	// returns the unavailable sentinel (WorldDraw degrades to a bounded
+	// throttle instead of a blackout).
+	g_gpg_holder = nullptr;
+
+	// Move helper: the pinned singleton if its vtable still matches, else
+	// the RTTI walk re-derives both from the live module (a game update
+	// costs nothing).
 	void* helper = reinterpret_cast<void*>(g_client_base + kMoveHelperRva);
-	if (*reinterpret_cast<uintptr_t*>(helper) == g_client_base + kMoveHelperVtableRva)
+	uintptr_t vt0 = 0;
+	if (SafeReadQ(reinterpret_cast<uintptr_t>(helper), &vt0)
+		&& vt0 == g_client_base + kMoveHelperVtableRva) {
 		g_helper = helper;
+		g_helper_method = 1;
+	} else {
+		const ModRange m = ClientRange();
+		if (m.base) {
+			void* rtti = ResolveMoveHelperRtti(m.base, m.size,
+				&g_helper_cands);
+			if (rtti) {
+				g_helper = rtti;
+				g_helper_method = 2;
+				Breadcrumb::Note(Breadcrumb::SlotPred,
+					"pred: helper via RTTI rva=0x%llX (%d cand)",
+					static_cast<unsigned long long>(
+						reinterpret_cast<uintptr_t>(rtti) - m.base),
+					g_helper_cands);
+			}
+		}
+	}
 
 	Diag d;
 	if (g_pred) {
@@ -1042,6 +1325,14 @@ void Prediction::Install() {
 
 void Prediction::GetPath(std::vector<Vector>& out) {
 	out.assign(g_path, g_path + g_path_count);
+}
+
+int Prediction::GetPathStates(SimState* out, int cap) {
+	int n = g_path_count;
+	if (n > cap) n = cap;
+	for (int i = 0; i < n; ++i)
+		out[i] = g_path_states[i];
+	return n;
 }
 
 // FUNCTION-LEVEL DIFFERENTIAL FUZZ: read arbitrary probe states, run each
@@ -1332,4 +1623,14 @@ bool Prediction::LastRealMoveOrigin(Vector& out) {
 	return true;
 }
 
-Prediction::Diag Prediction::LastDiag() { return g_diag; }
+Prediction::Diag Prediction::LastDiag() {
+	// Overlay the live anchor-resolution state so every construction site
+	// of g_diag stays untouched and the menu always sees the truth.
+	Diag d = g_diag;
+	d.helper_method     = g_helper_method;
+	d.helper_candidates = g_helper_cands;
+	d.gpg_method        = g_gpg_method;
+	d.gpg_candidates    = g_gpg_cands;
+	d.gpg_confirmed     = g_gpg_confirmed;
+	return d;
+}

@@ -5,6 +5,9 @@
 // bind state live; drawn as a tab inside the TAS editor window.
 namespace RecordPanel {
 	void Draw();
+	// The hotkey command grid + bind buttons + arm/autohop toggles, drawn as
+	// the editor's own Keybinds tab (split out of Draw, session 46m).
+	void DrawBinds();
 
 	// Master hotkey arm switch (persisted with the UI prefs). Disarmed =
 	// bound keys dispatch nothing, so typing in console/chat is safe.

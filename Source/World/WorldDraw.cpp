@@ -1,9 +1,12 @@
-#include "WorldDraw.h"
+﻿#include "WorldDraw.h"
 #include "NetVars.h"
 #include "Prediction.h"
 #include "BspWorld.h"
+#include "Contact.h"
 #include "../Editor/TasEditor.h"
+#include "../Menu/Breadcrumb.h"
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include <windows.h>
@@ -12,16 +15,172 @@
 #include <cstrike/Interfaces/IClientEntityList.h>
 #include <cstrike/Interfaces/IVDebugOverlay.h>
 
+// ============================================================================
+// OVERLAY QUEUE (session 46e, retargeted 46k). All debugoverlay->Add* calls
+// enqueue here; Drain makes the real engine vtable calls, each under per-call
+// SEH with fault counting. Since 46k the whole draw pass runs on the GAME
+// thread (SubmitFrame from the OverrideView hook), so producer and consumer
+// are usually the same thread and Drain follows Render immediately - the
+// queue survives as the fault-isolation layer and as the thread-safe path
+// for the few render-thread producers left (the Debug tab's test box). The
+// CRITICAL_SECTION guards only the brief append/swap; engine calls run
+// outside it. Render-thread engine calls stay banned - the 2026-08-25 game
+// update made them freeze the game.
+// ============================================================================
+namespace {
+	struct OvlCmd {
+		int    type;   // 0 = box, 1 = line (no-alpha), 2 = line (alpha)
+		Vector a, b, c;
+		QAngle ang;
+		int    r, g, bb, aa;
+		bool   noDepth;
+		float  dur;
+	};
+	CRITICAL_SECTION* OvlCS() {
+		static CRITICAL_SECTION cs;
+		static bool once = [] { InitializeCriticalSection(&cs); return true; }();
+		(void)once;
+		return &cs;
+	}
+	std::vector<OvlCmd> g_ovl_back;    // producer (render thread) appends
+	std::vector<OvlCmd> g_ovl_front;   // consumer (game thread) private after swap
+	const size_t kOvlCap = 20000;      // safety bound if the game thread stalls
+	// Diagnostics (session 46f): lifetime totals + last-drain size, so the
+	// menu/journal can say WHERE "no draw" breaks - enqueue, drain, or the
+	// engine call. volatile long; increments are cheap and racy-tolerant
+	// (these are counters, not control).
+	volatile long g_ovl_pushed = 0;
+	volatile long g_ovl_drained = 0;
+	volatile long g_ovl_last_drain = 0;
+	volatile long g_ovl_backlog = 0;
+	// Did the engine vtable call itself FAULT (session 46g)? If drained
+	// climbs but faults climb WITH it, the calls are being made but the
+	// engine rejects them (wrong index/signature after the update) - which
+	// looks identical to "no draw" because the fault is SEH-swallowed. The
+	// RVA localizes it inside engine.dll.
+	volatile long g_ovl_faults = 0;
+	volatile unsigned long long g_ovl_fault_rva = 0;
+
+	long OvlFaultFilter(EXCEPTION_POINTERS* ep) {
+		g_ovl_faults++;
+		static uintptr_t base = reinterpret_cast<uintptr_t>(
+			GetModuleHandleA("engine.dll"));
+		const uintptr_t rip = reinterpret_cast<uintptr_t>(
+			ep->ExceptionRecord->ExceptionAddress);
+		g_ovl_fault_rva = (base && rip >= base) ? (rip - base) : rip;
+		return EXCEPTION_EXECUTE_HANDLER;
+	}
+
+	// One engine call, PER-CALL SEH (session 46g): a bad overlay is isolated
+	// (the rest of the drain still renders) and its fault is counted, not
+	// hidden. POD-only inside the __try (no C++ unwinding).
+	void OvlCallOne(const OvlCmd& c) {
+		__try {
+			if (c.type == 0) {
+				GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+					const Vector&, const QAngle&, int, int, int, int, float)>(
+					debugoverlay, g_overlay_box_index)(
+					debugoverlay, c.a, c.b, c.c, c.ang, c.r, c.g, c.bb, c.aa, c.dur);
+			} else if (c.type == 2) {
+				GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+					int, int, int, int, bool, float)>(
+					debugoverlay, g_overlay_line_index)(
+					debugoverlay, c.a, c.b, c.r, c.g, c.bb, 255, c.noDepth, c.dur);
+			} else {
+				GetVirtualFunction<void(*)(IVDebugOverlay*, const Vector&, const Vector&,
+					int, int, int, bool, float)>(
+					debugoverlay, g_overlay_line_index)(
+					debugoverlay, c.a, c.b, c.r, c.g, c.bb, c.noDepth, c.dur);
+			}
+		} __except (OvlFaultFilter(GetExceptionInformation())) {
+		}
+	}
+
+	void OvlDrainSEH(const OvlCmd* cmds, size_t n) {
+		if (!debugoverlay)
+			return;
+		for (size_t i = 0; i < n; ++i)
+			OvlCallOne(cmds[i]);
+	}
+}
+
+void OverlayQueue::PushBox(const Vector& o, const Vector& mn, const Vector& mx,
+                           const QAngle& ang, int r, int g, int b, int a, float dur) {
+	CRITICAL_SECTION* cs = OvlCS();
+	EnterCriticalSection(cs);
+	if (g_ovl_back.size() < kOvlCap) {
+		OvlCmd c;
+		c.type = 0; c.a = o; c.b = mn; c.c = mx; c.ang = ang;
+		c.r = r; c.g = g; c.bb = b; c.aa = a; c.noDepth = false; c.dur = dur;
+		g_ovl_back.push_back(c);
+		g_ovl_pushed++;
+	}
+	LeaveCriticalSection(cs);
+}
+
+void OverlayQueue::PushLine(const Vector& o, const Vector& d,
+                            int r, int g, int b, bool noDepth, float dur, bool alpha) {
+	CRITICAL_SECTION* cs = OvlCS();
+	EnterCriticalSection(cs);
+	if (g_ovl_back.size() < kOvlCap) {
+		OvlCmd c;
+		c.type = alpha ? 2 : 1; c.a = o; c.b = d; c.c = Vector(); c.ang = QAngle();
+		c.r = r; c.g = g; c.bb = b; c.aa = 255; c.noDepth = noDepth; c.dur = dur;
+		g_ovl_back.push_back(c);
+		g_ovl_pushed++;
+	}
+	LeaveCriticalSection(cs);
+}
+
+void OverlayQueue::Drain() {
+	CRITICAL_SECTION* cs = OvlCS();
+	EnterCriticalSection(cs);
+	g_ovl_front.swap(g_ovl_back);
+	g_ovl_back.clear();
+	LeaveCriticalSection(cs);
+	const long n = static_cast<long>(g_ovl_front.size());
+	if (n > 0)
+		OvlDrainSEH(g_ovl_front.data(), g_ovl_front.size());
+	g_ovl_front.clear();
+	g_ovl_last_drain = n;
+	g_ovl_drained += n;
+	g_ovl_backlog = static_cast<long>(g_ovl_back.size());
+}
+
+void OverlayQueue::Stats(long* pushed, long* drained, long* last_drain,
+                         bool* overlay_ready, long* faults,
+                         unsigned long long* fault_rva) {
+	if (pushed)        *pushed = g_ovl_pushed;
+	if (drained)       *drained = g_ovl_drained;
+	if (last_drain)    *last_drain = g_ovl_last_drain;
+	if (overlay_ready) *overlay_ready = (debugoverlay != nullptr);
+	if (faults)        *faults = g_ovl_faults;
+	if (fault_rva)     *fault_rva = g_ovl_fault_rva;
+}
+
 namespace WorldDraw {
+	// Session 46j: default ON + persisted ("draw_master" in STAS_UI_PREFS).
+	// It began life as the 46c freeze-bisect kill switch; the game-thread
+	// overlay marshal (46e) fixed that freeze, so now it's just the normal
+	// user toggle. Warm-up + budget ramp still gate the first frames.
+	bool draw_master        = true;
 	bool draw_test_marker   = false;
 	bool draw_player_box    = true;
 	bool draw_player_marker = true;
 	bool draw_prediction    = false;
+	bool show_hitmarkers_pred = true;   // session 46n: board-contact crosses
+	bool show_hitmarkers_run  = true;
+	bool show_demo_line       = true;   // session 46w: demo-trace reference line
 
 	int   player_box_alpha   = 30;    // low: mostly wireframe, never reads as solid
-	float overlay_life_scale = 1.5f;  // ~one frame of lifetime (see FrameDuration)
+	bool  overlay_zero_life  = false; // Debug tab: duration-0 engine idiom (see header)
 	bool  show_replay_hud    = true;
-	bool  pause_draw_busy    = true;  // crash isolation: no overlays while solving
+	bool  pause_draw_busy    = true;  // perf valve: no overlays while solving
+
+	// Once-per-present latch: SubmitFrame takes it, OnPresent (EndScene)
+	// releases it, so reflection/portal extra view passes within one frame
+	// don't double-submit.
+	volatile long g_frame_submitted = 0;
 
 	int   pred_ticks       = 66;      // ~1s at 66-tick
 	bool  pred_live_input  = true;    // reflect what you're actually pressing
@@ -204,59 +363,79 @@ namespace {
 		       v.Z > -kMax && v.Z < kMax;
 	}
 
-	// PLAYER-ATTACHED overlays (hull, origin dot, live prediction) use the
-	// RAW per-frame interval: they track a moving entity, and any lifetime
-	// stretching leaves visible trails on it ("ghosting on the active player
-	// hitbox"). Refreshed by FrameDuration each frame.
-	float g_dur_live = 0.03f;
-
-	// Adaptive overlay lifetime. A fixed duration leaves a moving "ghost trail":
-	// stale copies from previous positions stay alive while the player moves, and
-	// stacked translucent copies read as a solid box. A static overlay hides this
-	// because its copies overlap exactly - which is why the world-origin marker
-	// looked clean. Measuring the render interval and keeping each overlay alive
-	// ~one frame means exactly one instance renders per frame at any framerate:
-	// crisp tracking, no ghosting, no flicker.
-	float FrameDuration() {
-		static LARGE_INTEGER freq = {};
-		static LARGE_INTEGER last = {};
-		if (freq.QuadPart == 0)
-			QueryPerformanceFrequency(&freq);
-
-		LARGE_INTEGER now;
-		QueryPerformanceCounter(&now);
-
-		float dt = 0.f;
-		if (last.QuadPart != 0 && freq.QuadPart != 0)
-			dt = static_cast<float>(now.QuadPart - last.QuadPart) / static_cast<float>(freq.QuadPart);
-		last = now;
-
-		float scale = WorldDraw::overlay_life_scale;
-		if (scale < 0.5f) scale = 0.5f;
-		if (scale > 6.0f) scale = 6.0f;
-
-		// Player-attached lifetime: raw interval only.
-		g_dur_live = (dt > 0.f) ? dt * scale : 0.03f;
-		if (g_dur_live < 0.01f) g_dur_live = 0.01f;
-		if (g_dur_live > 0.20f) g_dur_live = 0.20f;
-
-		// Static-drawing lifetime: the MAX of the last few intervals, so a
-		// spiky frame (solver work slices, sims landing unevenly) doesn't
-		// strand the editor line - flicker-resistant without trailing, since
-		// those drawings don't move between frames.
-		static float hist[8] = {};
-		static int hi = 0;
-		hist[hi] = dt;
-		hi = (hi + 1) & 7;
-		float base = dt;
-		for (int i = 0; i < 8; ++i)
-			if (hist[i] > base) base = hist[i];
-
-		float duration = (base > 0.f) ? base * scale : 0.03f;
-		if (duration < 0.01f) duration = 0.01f;   // survive to the next frame's draw
-		if (duration > 0.30f) duration = 0.30f;   // cap ghosting if frames hitch hard
-		return duration;
+	// Hitmarker (session 46n): an X drawn IN the contact plane plus a short
+	// normal spike, colored by the fraction of arrival speed the clip ate -
+	// green = clean board, amber = scrubbed, red = hard hit. Caller pays the
+	// overlay budget (3 lines).
+	void DrawHitmarker(const Contact::BoardEvent& e, float dur) {
+		if (!FiniteWorldPoint(e.pos))
+			return;
+		const float frac = (e.arrive_speed > 1.f) ? e.clip_loss / e.arrive_speed : 0.f;
+		int r, g, b;
+		if (frac < 0.02f)      { r = 70;  g = 255; b = 120; }
+		else if (frac < 0.08f) { r = 255; g = 200; b = 60;  }
+		else                   { r = 255; g = 70;  b = 70;  }
+		// Two tangents spanning the contact plane.
+		const Vector n = e.normal;
+		const Vector up = (n.Z > -0.9f && n.Z < 0.9f) ? Vector(0.f, 0.f, 1.f)
+		                                              : Vector(1.f, 0.f, 0.f);
+		Vector t1(n.Y * up.Z - n.Z * up.Y,
+		          n.Z * up.X - n.X * up.Z,
+		          n.X * up.Y - n.Y * up.X);
+		const float l1 = sqrtf(t1.X * t1.X + t1.Y * t1.Y + t1.Z * t1.Z);
+		if (l1 < 1e-4f)
+			return;
+		t1 = Vector(t1.X / l1, t1.Y / l1, t1.Z / l1);
+		const Vector t2(n.Y * t1.Z - n.Z * t1.Y,
+		                n.Z * t1.X - n.X * t1.Z,
+		                n.X * t1.Y - n.Y * t1.X);
+		const float h = 9.f;
+		const Vector p = e.pos;
+		debugoverlay->AddLineOverlay(
+			Vector(p.X - (t1.X + t2.X) * h, p.Y - (t1.Y + t2.Y) * h, p.Z - (t1.Z + t2.Z) * h),
+			Vector(p.X + (t1.X + t2.X) * h, p.Y + (t1.Y + t2.Y) * h, p.Z + (t1.Z + t2.Z) * h),
+			r, g, b, false, dur);
+		debugoverlay->AddLineOverlay(
+			Vector(p.X - (t1.X - t2.X) * h, p.Y - (t1.Y - t2.Y) * h, p.Z - (t1.Z - t2.Z) * h),
+			Vector(p.X + (t1.X - t2.X) * h, p.Y + (t1.Y - t2.Y) * h, p.Z + (t1.Z - t2.Z) * h),
+			r, g, b, false, dur);
+		debugoverlay->AddLineOverlay(p,
+			Vector(p.X + n.X * 7.f, p.Y + n.Y * 7.f, p.Z + n.Z * 7.f),
+			r, g, b, false, dur);
 	}
+
+	// Player-attached overlays share the same one-frame lifetime as
+	// everything else now; kept as a separate variable only because the
+	// emitters read it by name.
+	float g_dur_live = 0.f;
+
+	// Overlay lifetime, FRAME-ALIGNED (session 46k). Submission happens
+	// once per rendered frame (SubmitFrame via the OverrideView hook),
+	// added BEFORE the engine draws that frame's overlays - so the only
+	// correct lifetime is "this frame, then gone": drawn exactly once,
+	// purged before the next frame's fresh batch. Anything longer overlaps
+	// the next batch (double-drawn translucent hulls = the black flashes;
+	// offset copies = misplaced elements); anything keyed to a clock we
+	// guess at gaps or stacks (the whole 46i-46j strobe saga). Two ways to
+	// say "one frame" to the engine, switchable in-game from the Debug tab:
+	//   epsilon (default) - end time = now + 2 ms: alive for this frame's
+	//     draw (curtime is constant within a frame), expired by the next
+	//     frame's clock advance whenever the frame time exceeds 2 ms
+	//     (i.e. anything under ~500 fps).
+	//   duration 0 - the Source "one frame overlay" idiom (drawn once,
+	//     purged after the pass), if this engine build still honors it.
+	float FrameDuration() {
+		const float d = WorldDraw::overlay_zero_life ? 0.f : 0.002f;
+		g_dur_live = d;
+		return d;
+	}
+}
+
+void WorldDraw::OverlayStats(long* pushed, long* drained, long* last_drain,
+                             bool* overlay_ready, long* faults,
+                             unsigned long long* fault_rva) {
+	OverlayQueue::Stats(pushed, drained, last_drain, overlay_ready, faults,
+		fault_rva);
 }
 
 bool WorldDraw::OverlayTake(int count) {
@@ -266,9 +445,48 @@ bool WorldDraw::OverlayTake(int count) {
 	return true;
 }
 
+namespace {
+	// SEH shell for the whole in-world pass (POD frame only). A fault in
+	// sampling/enqueue/drain becomes a logged report, not a dead game.
+	bool GuardedSubmit(int* code) {
+		__try {
+			WorldDraw::Render();
+			OverlayQueue::Drain();
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			*code = static_cast<int>(GetExceptionCode());
+			return false;
+		}
+	}
+}
+
+// Called from the OverrideView hook: game thread, once per rendered frame,
+// before the engine draws it (see the header for why that alignment is the
+// whole design). The latch collapses extra view passes within one frame.
+void WorldDraw::SubmitFrame() {
+	if (InterlockedExchange(&g_frame_submitted, 1))
+		return;
+	static int s_reported = 0;
+	int code = 0;
+	if (!GuardedSubmit(&code) && s_reported < 3) {
+		s_reported++;
+		TasEditor::NoteExternalFault("WorldDraw::SubmitFrame", code);
+	}
+}
+
+// Called from the EndScene hook (render thread) once per present.
+void WorldDraw::OnPresent() {
+	InterlockedExchange(&g_frame_submitted, 0);
+}
+
 void WorldDraw::Render() {
 	Diagnostics d;
 	g_ovl_left = 2000;   // this frame's shared overlay budget
+
+	// Frames since injection (this counter IS the warm-up clock below).
+	static int s_frames_since_inject = 0;
+	if (s_frames_since_inject < (1 << 30))
+		s_frames_since_inject++;
 
 	d.interfaces_ready = (engine && debugoverlay && entitylist && clientdll);
 	if (!d.interfaces_ready) { g_diag = d; return; }
@@ -276,33 +494,50 @@ void WorldDraw::Render() {
 	d.in_game = engine->IsInGame();
 	if (!d.in_game) { g_diag = d; return; }
 
-	// PAUSED GAME (ESC on a listen server) freezes curtime - and debug
-	// overlays EXPIRE against curtime, so a frozen clock means nothing ever
-	// expires while we submit thousands per frame. The engine's overlay list
-	// then grows until its hard overflow terminates the process (2026-08-06:
-	// death inside the worlddraw section ~10 s after ESC; the earlier
-	// on-screen overflow warning + hitch were the same mechanism during
-	// brief pauses). Submit ONLY when curtime advances: exactly one
-	// submission per expiry cycle - what is already drawn stays visible
-	// between ticks precisely because nothing expires, and high-fps overlay
-	// churn drops several-fold for free.
-	{
-		static float s_last_ct = -1e9f;
-		const float ct = Prediction::CurTime();
-		if (ct == s_last_ct) { g_diag = d; return; }
-		s_last_ct = ct;
-	}
+	// MASTER GATE (session 46c): no overlay submission at all until the
+	// user arms it from the menu. Guarantees injection cannot freeze on
+	// the overlay path - the tool (menu/editor/recording) is fully usable
+	// with drawing off.
+	if (!draw_master) { g_diag = d; return; }
 
-	// Crash isolation: while the solver's HEAVY phases churn (search /
-	// verify / batch), submit NOTHING. The engine expires its overlay list
-	// on the game thread while we add from the render hook; if the silent
-	// heap-corruption crashes stop with this pause active, that race is
-	// confirmed (then the real fix is game-thread submission). Brief
-	// corrections don't pause - a stalled one used to blank the world.
+	// INJECTION WARM-UP (session 46). Injecting while ALREADY IN A SERVER
+	// froze the whole game inside this pass's first frames (breadcrumb
+	// 2026-08-25: "endscene: worlddraw" never returned; with queued
+	// rendering the game thread then blocks behind the render thread -
+	// task-manager kill, no crash record, the known "frozen game" family
+	// the thread-marshal lesson in TasEditor.h documents). That first
+	// in-game pass used to do EVERYTHING cold at once ON THE RENDER
+	// THREAD: the first netvar-tree walk, the whole BSP file read+parse,
+	// and the first mass overlay submission into an engine that expires
+	// the list on the game thread. Hold ALL in-world work for the first
+	// ~90 hooked frames after injection - by then injection transients
+	// are over and the engine is in a steady frame loop. Menu injections
+	// spend the warm-up at the menu (not in game) and feel nothing.
+	if (s_frames_since_inject < 90) { g_diag = d; return; }
+	// ...and ramp the overlay budget for the first drawing seconds so the
+	// initial submission burst into the game-thread-expired list stays
+	// small (steady state returns to the full budget).
+	if (s_frames_since_inject < 300)
+		g_ovl_left = 300;
+
+	// (No cadence throttle: this runs once per rendered frame by
+	// construction - SubmitFrame's once-per-present latch - and every
+	// overlay lives ~one frame, so the paused-game overflow the old
+	// per-tick throttle guarded against can't accumulate either.)
+
+	// Perf valve: while the solver's HEAVY phases churn (search / verify /
+	// batch), submit nothing - the frame budget belongs to the search.
+	// Brief corrections don't pause; a stalled one used to blank the world.
 	if (pause_draw_busy && TasEditor::SearchHeavy()) {
 		g_diag = d;
 		return;
 	}
+
+	// Fine-grained stage breadcrumbs through the whole pass (session 46):
+	// this function froze the game once with only the coarse "endscene:
+	// worlddraw" note to go on - after any future freeze the SlotFrame
+	// line names the exact stage that never returned.
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: live overlays");
 
 	const float   duration = FrameDuration();
 	const QAngle  kNoRotation(0.f, 0.f, 0.f);
@@ -337,6 +572,11 @@ void WorldDraw::Render() {
 			if (a < 0)   a = 0;
 			if (a > 255) a = 255;
 			const Vector maxs(kHullWidth, kHullWidth, height);
+			// First overlay of the frame. Since session 46e this only
+			// ENQUEUES (the real engine call happens on the game thread in
+			// OverlayQueue::Drain), so it can no longer hang here - the
+			// breadcrumb just marks the draw code reached the first submit.
+			Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: box0 (enqueue)");
 			debugoverlay->AddBoxOverlay(d.origin, kHullMins, maxs, kNoRotation,
 			                            255, 64, 64, a, g_dur_live);
 		}
@@ -372,8 +612,31 @@ void WorldDraw::Render() {
 						                             120, 170, 200, false, g_dur_live);
 				prev = p;
 			}
+
+			// Hitmarkers on the prediction line (session 46n): where the
+			// predicted path makes contact after being airborne - the
+			// ramp-board dial-in aid. Face-matched contacts and ground
+			// landings only (a face-unknown residual here could be a booster
+			// impulse - the look-ahead doesn't record trigger events).
+			if (show_hitmarkers_pred) {
+				static Prediction::SimState st[257];
+				const int nst = Prediction::GetPathStates(st, 257);
+				if (nst >= 2) {
+					float grav = 800.f, madd = 70.f;
+					TasEditor::ContactTuning(&grav, &madd);
+					Contact::BoardEvent hv[16];
+					const int ne = Contact::Analyze(st, nst,
+						Prediction::LastDiag().interval_per_tick, grav, madd,
+						hv, 16);
+					for (int i = 0; i < ne; ++i)
+						if ((hv[i].face_known || hv[i].grounded) && OverlayTake(3))
+							DrawHitmarker(hv[i], g_dur_live);
+				}
+			}
 		}
 	}
+
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: editor line");
 
 	// (4) TAS editor run line (Phase 2): the simulated run drawn as an absolute
 	// polyline. The playhead is the edit boundary: ticks before it draw gray
@@ -381,11 +644,62 @@ void WorldDraw::Render() {
 	// (green = at/above the min-eff threshold, orange = below); other future
 	// segments blue; boundary markers white; ghost hull at the cursor tick.
 	// Decimated so long runs stay within the overlay system's budget.
+	// DEMO TRACE LINE (46w): a captured expert run drawn as a violet
+	// reference polyline - loaded from the Map Solve tab, independent of the
+	// run's own line (it draws with no sim at all).
+	if (show_demo_line) {
+		// The anchor picker's selected demo point: a gold mark on the line.
+		Vector mk;
+		if (TasEditor::GetDemoMark(&mk) && FiniteWorldPoint(mk) && OverlayTake(2)) {
+			debugoverlay->AddBoxOverlay(mk, Vector(-2.f, -2.f, 0.f),
+				Vector(2.f, 2.f, 6.f), kNoRotation, 255, 210, 60, 220, duration);
+			debugoverlay->AddLineOverlay(mk,
+				Vector(mk.X, mk.Y, mk.Z + 48.f), 255, 210, 60, false, duration);
+		}
+		const Vector* dl = nullptr;
+		int dn = 0;
+		if (TasEditor::GetDemoLine(&dl, &dn) && dn > 1) {
+			const int dstride = dn > 400 ? dn / 400 : 1;
+			Vector dprev = dl[0];
+			bool dprev_ok = FiniteWorldPoint(dprev);
+			for (int i = 1; i < dn; ++i) {
+				if (i != dn - 1 && (i % dstride) != 0)
+					continue;
+				const Vector dp = dl[i];
+				if (!FiniteWorldPoint(dp))
+					break;
+				if (!OverlayTake(1))
+					break;
+				// GAP SPLIT (46z): teleports, demo seeks, and interp snaps
+				// produce giant chords (spawn -> run start etc.) - break the
+				// polyline instead of drawing them.
+				const float gx = dp.X - dprev.X, gy = dp.Y - dprev.Y,
+					gz = dp.Z - dprev.Z;
+				const bool gap = gx * gx + gy * gy + gz * gz > 300.f * 300.f;
+				if (dprev_ok && !gap)
+					debugoverlay->AddLineOverlay(dprev, dp, 190, 140, 255,
+						false, duration);
+				dprev = dp;
+				dprev_ok = true;
+			}
+		}
+	}
+
 	TasEditor::DrawData ed;
 	if (TasEditor::GetDrawData(ed)) {
 		if (ed.anchor.valid && FiniteWorldPoint(ed.anchor.origin))
 			debugoverlay->AddBoxOverlay(ed.anchor.origin, Vector(-3.f, -3.f, 0.f), Vector(3.f, 3.f, 8.f),
 			                            kNoRotation, 60, 255, 60, 140, duration);
+
+		// Hitmarkers on the run line (session 46n): the editor's board events,
+		// already filtered of trigger impulses by the contact stage.
+		if (show_hitmarkers_run && ed.board_events) {
+			for (int i = 0; i < ed.board_event_count; ++i) {
+				const Contact::BoardEvent& e = ed.board_events[i];
+				if ((e.face_known || e.grounded) && OverlayTake(3))
+					DrawHitmarker(e, duration);
+			}
+		}
 
 		// Ceiling division: count 401..799 used to floor to stride 1 (no
 		// decimation), exhausting the overlay budget at ~400 points - the
@@ -616,7 +930,9 @@ void WorldDraw::Render() {
 
 	// (5) World geometry (1.1): brush wireframes from the map's BSP collision
 	// data, centered on the player. Self-guards and auto-loads on level change.
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: bsp render");
 	BspWorld::Render(d.origin, d.have_player, duration);
+	Breadcrumb::Note(Breadcrumb::SlotWorld, "wd: done");
 
 	g_diag = d;
 }

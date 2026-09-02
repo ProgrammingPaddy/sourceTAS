@@ -36,6 +36,16 @@ class DX9RenderMgr {
 		// The original WndProc function from the specified window handle.
 		WNDPROC WndProc = nullptr;
 
+		// How the input window was found (session 46b diagnostics):
+		// 0 = never hooked (input DEAD - F8/menu unreachable),
+		// 1 = the injection-time EnumWindows guess,
+		// 2 = re-targeted to the device's own focus window at first
+		//     EndScene (the authoritative handle - the enum guess returns
+		//     null when the game is alt-tabbed in fullscreen, which is
+		//     exactly how injection happens).
+		int window_source = 0;
+		HWND InputWindow() const { return window; }
+
 		// The original Reset and EndScene functions.
 		Reset_t Reset = nullptr;
 		EndScene_t EndScene = nullptr;
@@ -49,6 +59,11 @@ class DX9RenderMgr {
 
 		// Lazily initialises ImGui with the game's device, then draws a frame.
 		void RenderFrame(IDirect3DDevice9*);
+
+		// Re-assert the WndProc subclass on the device's authoritative window
+		// every frame (self-healing input hook, session 46d). Undoes a game
+		// re-subclass that silently kills input.
+		void EnsureInputHook(IDirect3DDevice9*);
 
 		// Called after 'ImGui_ImplDX9_Init' succeeds.
 		virtual void OnInitialize() {};
