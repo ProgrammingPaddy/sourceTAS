@@ -281,6 +281,29 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+14. VERIFIABLY GREEN (2026-09-01). The deterministic coverage suite is
+   fully closed: 2160 pass / 0 no-attach / 0 monotonicity violations /
+   0 isolated (396 gray = infeasible by the distance bound). Every cell
+   the bound admits attaches with the exact Newton (double) - from
+   862 pass / 1298 no-attach / 578 violations when the periodic pattern
+   was first flagged. The closing moves, all structural: (a) BROYDEN
+   quasi-Newton in the exact solver - FD Jacobian only when stale (>= 20
+   iterations, forced on active-set/pattern changes, refreshed instead of
+   jamming on rejects) with rank-1 updates between, plus flat-Float64Array
+   J / JtJ / elimination. Measured on the repair workload: ~5-8x per cell
+   (34 s/cell -> ~5 s hard cells, most sub-second; repair yield 44 -> 75
+   percent). (b) The last 22 red cells sat at speeds spaced exactly
+   B ~ 550 apart in the deep-backward family - the composition's own
+   prefix n-transition windows; closed by a denser non-lite prefix grid
+   plus seg-residual-guided bisection of the prefix exit (the same
+   reach-refinement cure as the original transition disease, applied one
+   level up). (c) Repair rounds are now re-runnable on persisted state;
+   three rounds closed 81 -> 22 -> 0.
+   The suite gained a RANDOMIZE mode (user direction): per-cell speed
+   jitter U(0,50) keeps columns ascending, per-COLUMN angle jitter
+   U(-5,5) keeps the monotone audit exactly valid; seeded LCG, seed shown
+   for reproducibility.
+
 13. THE EDGES (2026-09-01, user: "fix the edge cases now (literally)").
    The +-180-adjacent columns are the reversed-arrival family; they were
    red because the suffix construction's sub-solve was a full pipeline
