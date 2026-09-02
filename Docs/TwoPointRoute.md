@@ -281,6 +281,27 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+16. SCENARIO TAB REPAIRED + SUITE SELF-DRIVING (2026-09-02, user report).
+   Two defects: (a) the Scenario tab died silently on every
+   segment-solver success - lawSolve's seg return carries no mix object
+   and the handler dereferenced mix.roll/mix.wind/mix.q; now guarded,
+   branch labels honest (zero-loss (segments)/(mixing)/distributed
+   overturn), and pipeline exceptions render in the panel instead of
+   killing the tab. (b) The user's suite reds were the PRE-REPAIR board:
+   a fresh sweep lands ~1900-2100 pass and the rest belongs to the repair
+   phase, which needed manual Repair-more clicks; repair cycles now
+   auto-continue to the fixed point (another cycle whenever progress was
+   made and fails remain, up to 6). Repair hint ladder generalized from
+   measured working anchors: inherited exit, hint-free, v x
+   {0.35, 0.45, 0.55, 0.935, 0.945, 0.955}. Deterministic fixed point:
+   2159 pass / 1 no-attach / 0 monotonicity violations / 0 isolated in
+   one click. The single open cell is 550 @ -160: the lowest
+   bound-feasible speed row with a near-total reversal - 58 u of drift
+   slack against ~187 deg of net turn; it resists every construction,
+   every hint, and dwell-off, and is suspected genuinely infeasible.
+   The turn-debit certificate (step 3a) remains the missing instrument to
+   recolor it gray with proof rather than red without.
+
 15. RANDOMIZED SUITE FULLY GREEN (2026-09-01, seed 30395): 2196 pass /
    0 no-attach / 0 monotonicity violations / 0 isolated over non-round
    speeds (per-cell jitter U(0,50)) and angles (per-column jitter
