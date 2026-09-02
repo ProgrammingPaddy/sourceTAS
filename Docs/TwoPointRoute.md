@@ -281,6 +281,31 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+17. NON-DETERMINISM ROOT-CAUSED; SUITE GAINS STOP/EXPORT/VERIFY
+   (2026-09-02, user: repeated runs differ, many failures on their run).
+   The solver stack is deterministic; the REPAIR phase was not: cycles
+   were bounded by wall-clock (600 s) and driven by setTimeout, which
+   browsers throttle in hidden tabs - so how many cells got attempted
+   depended on machine load and tab visibility. The user's heavy-failure
+   run was the same sweep with the repair starved. Fixed: repair cycles
+   are bounded by ATTEMPT COUNT (every red cell once per cycle, cycles
+   while progress, cap 8) and yield via MessageChannel like the sweep -
+   the fixed point is now identical regardless of visibility or load.
+   New controls: STOP (halts sweep/repair/verify between cells, saves
+   state), EXPORT (JSON with grid/seed/meta, audit summary, failure list,
+   full cells - clipboard + textarea + download), and VERIFY FAILS + 10
+   PERCENT (focused partial run: every non-passing cell plus a
+   deterministic tenth of the passing cells re-checked at FULL strength -
+   a lite re-check of full-strength passes oscillates, measured - then
+   the auto-repair cycles). RETRACTION: 550@-160 is NOT suspected
+   infeasible - the user is right that it attached in the 2160/0/0 run
+   (and its neighbors bound the physics); the current configuration
+   misses it (a regression-class cell, likely tied to the suffix-unlock
+   change that fixed the two randomized knife edges). It stays red until
+   its recipe is re-found; the export now captures exact boards so such
+   configurations can be pinned. Current deterministic fixed point:
+   2159 pass / 1 no-attach / 0 monotonicity violations / 1 isolated.
+
 16. SCENARIO TAB REPAIRED + SUITE SELF-DRIVING (2026-09-02, user report).
    Two defects: (a) the Scenario tab died silently on every
    segment-solver success - lawSolve's seg return carries no mix object
