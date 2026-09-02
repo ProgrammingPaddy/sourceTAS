@@ -281,6 +281,22 @@ suboptimality, measured in replay); independent falsifier for
 no-attachment verdicts; dwell-6 realization (coarser sigma-delta).
 
 **Findings log** (what the instrument caught, newest first):
+15. RANDOMIZED SUITE FULLY GREEN (2026-09-01, seed 30395): 2196 pass /
+   0 no-attach / 0 monotonicity violations / 0 isolated over non-round
+   speeds (per-cell jitter U(0,50)) and angles (per-column jitter
+   U(-5,5)). The randomization immediately earned its keep: it exposed
+   two knife-edge cells (2428.157 @ -80.038, 775.102 @ 151.313) that the
+   round grid stepped over - a 0.05-degree perturbation flipped them.
+   Root cause: the stitched suffix locked EVERY spin tick, including
+   interior ones (add < B) that are valid unknowns for the exact Newton's
+   interior adjoint - so the composition's attachment window was
+   needlessly thin. Locking only budget-clamped ticks widened the window
+   structurally and both cells attach at full precision. Repair-attempt
+   isolation (one try/catch per escalation step) and hint diversity
+   (inherited anchor, +suffix, hint-free, mid-dump) round out the repair.
+   The randomized sweep+repair ran in ~10 minutes end to end with the
+   Broyden solver.
+
 14. VERIFIABLY GREEN (2026-09-01). The deterministic coverage suite is
    fully closed: 2160 pass / 0 no-attach / 0 monotonicity violations /
    0 isolated (396 gray = infeasible by the distance bound). Every cell
